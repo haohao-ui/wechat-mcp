@@ -23,7 +23,43 @@
      - `recipient` (string)：接收人昵称、备注名或群聊名称（如：`文件传输助手`、`张三`、`技术交流群`）。
      - `message` (string)：要发送的文本内容。
 2. **`focus_wechat`**
-   - **描述**：激活并置顶显示微信窗口。
+   - **描述**：激活并置顶显示微信窗口（自动校准归位至主屏标准坐标并切回聊天会话 Tab）。
+3. **`get_recent_sessions`**
+   - **描述**：扫描微信左侧会话列表，获取当前所有最近活跃会话（联系人/群名、最后发信时间、最新一条消息摘要）。
+4. **`read_chat_messages`**
+   - **描述**：读取指定联系人/群聊（或当前打开窗口）的最近真实聊天记录气泡（基于 macOS 原生离线 Vision OCR，毫秒级响应，零封号风险）。
+   - **参数**：
+     - `recipient` (string, 可选)：目标联系人或群名称。留空则读取当前正处于前台激活的会话。
+5. **`wait_for_new_message`**
+   - **描述**：长轮询监听微信新消息，用于驱动 Agent 自动思考并回复闭环：
+     - **全局收件箱模式（推荐）**：留空 `recipient`，自动监听所有好友/群聊。任何好友发来新消息时，自动捕获、打开其窗口并提取最新完整聊天内容返回。
+     - **单目标模式**：传入 `recipient`，专门监听该好友/群聊的新增气泡。
+   - **参数**：
+     - `recipient` (string, 可选)：要监听的接收人昵称或群名称（留空即为全局监听）。
+     - `timeout_seconds` (number, 可选)：最长等待秒数（默认 60 秒）。
+
+---
+
+### Agent 自动回复工作流
+
+在支持循环/任务模式的 AI Agent 中，可通过以下链路实现全自动对话：
+
+```mermaid
+sequenceDiagram
+    participant Agent as AI Agent
+    participant MCP as WeChat MCP
+    participant WeChat as 微信桌面端
+
+    loop 自动交互循环（全局收件箱监听）
+        Agent->>MCP: 调用 wait_for_new_message(timeout_seconds=60)
+        Note over MCP,WeChat: 监听微信新消息到达...
+        WeChat-->>MCP: 好友发来新消息
+        MCP-->>Agent: 返回 { sender: "午夜咖啡", message: "你好" }
+        Note over Agent: Agent 思考并生成回复内容
+        Agent->>MCP: 调用 send_wechat_message(recipient="午夜咖啡", message="你好，有什么可以帮您？")
+        MCP->>WeChat: 自动安全输入并发送
+    end
+```
 
 ---
 

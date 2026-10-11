@@ -108,10 +108,48 @@ async fn handle_request(req: JsonRpcRequest) -> Result<serde_json::Value> {
                 },
                 {
                     "name": "focus_wechat",
-                    "description": "激活并置顶显示微信窗口",
+                    "description": "激活并置顶显示微信窗口（自动校准归位至主屏标准坐标）",
                     "inputSchema": {
                         "type": "object",
                         "properties": {}
+                    }
+                },
+                {
+                    "name": "get_recent_sessions",
+                    "description": "获取微信左侧最近会话列表及各联系人/群聊的最新一条消息摘要与时间",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                },
+                {
+                    "name": "read_chat_messages",
+                    "description": "读取指定联系人/群聊（或当前打开窗口）的最近聊天记录文本（基于 macOS 原生离线 Vision OCR）",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "recipient": {
+                                "type": "string",
+                                "description": "接收人昵称、备注名或群名称（例如：文件传输助手、午夜咖啡）。若留空则读取当前激活的会话"
+                            }
+                        }
+                    }
+                },
+                {
+                    "name": "wait_for_new_message",
+                    "description": "长轮询监听微信新消息。若提供 recipient，则只监听该指定好友/群聊；若留空（不提供 recipient），则开启全局收件箱监听模式，自动感知任意好友/群聊发来的新消息，并自动提取最新聊天内容，用于驱动 Agent 自动回复闭环",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "recipient": {
+                                "type": "string",
+                                "description": "要监听的接收人昵称或群名称（可选。留空则开启全局收件箱监听）"
+                            },
+                            "timeout_seconds": {
+                                "type": "integer",
+                                "description": "最长等待秒数（默认 60 秒）"
+                            }
+                        }
                     }
                 }
             ]
@@ -139,8 +177,57 @@ async fn handle_request(req: JsonRpcRequest) -> Result<serde_json::Value> {
 
                 "focus_wechat" => {
                     match wechat::focus_wechat().await {
-                        Ok(()) => Ok(make_tool_result("已激活微信窗口", false)),
+                        Ok(_) => Ok(make_tool_result("已激活微信窗口", false)),
                         Err(e) => Ok(make_tool_result(&format!("激活微信窗口失败: {:#}", e), true)),
+                    }
+                }
+
+                "read_chat_messages" => {
+                    let recipient = arguments.get("recipient").and_then(|v| v.as_str());
+                    match wechat::read_chat_messages(recipient).await {
+                        Ok(lines) => {
+                            if lines.is_empty() {
+                                Ok(make_tool_result("未读取到任何聊天记录或聊天区域为空", false))
+                            } else {
+                                let content = lines.join("\n");
+                                Ok(make_tool_result(&format!("成功读取聊天记录:\n{}", content), false))
+                            }
+                        }
+                        Err(e) => Ok(make_tool_result(&format!("读取聊天记录失败: {:#}", e), true)),
+                    }
+                }
+
+                "get_recent_sessions" => {
+                    match wechat::get_recent_sessions().await {
+                        Ok(sessions) => {
+                            if sessions.is_empty() {
+                                Ok(make_tool_result("未读取到任何会话列表项", false))
+                            } else {
+                                let mut lines = Vec::new();
+                                for (idx, s) in sessions.iter().enumerate() {
+                                    lines.push(format!("{}. [{}] ({}): {}", idx + 1, s.name, s.time, s.preview));
+                                }
+                                Ok(make_tool_result(&format!("当前最近会话列表:\n{}", lines.join("\n")), false))
+                            }
+                        }
+                        Err(e) => Ok(make_tool_result(&format!("获取会话列表失败: {:#}", e), true)),
+                    }
+                }
+
+                "wait_for_new_message" => {
+                    let recipient = arguments.get("recipient").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty());
+                    let timeout = arguments.get("timeout_seconds").and_then(|v| v.as_u64()).unwrap_or(60);
+
+                    match wechat::wait_for_new_message(recipient, timeout).await {
+                        Ok(Some(msg)) => {
+                            let label = recipient.unwrap_or("任意好友/群聊");
+                            Ok(make_tool_result(&format!("监听到来自 [{}] 的新消息:\n{}", label, msg), false))
+                        }
+                        Ok(None) => {
+                            let label = recipient.unwrap_or("任意好友/群聊");
+                            Ok(make_tool_result(&format!("在 {} 秒内未检测到 [{}] 的新消息", timeout, label), false))
+                        }
+                        Err(e) => Ok(make_tool_result(&format!("监听新消息出错: {:#}", e), true)),
                     }
                 }
 
