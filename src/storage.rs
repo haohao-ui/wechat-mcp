@@ -301,19 +301,17 @@ pub(crate) fn parse_and_normalize_sessions(snapshot: &Value) -> Result<Vec<Norma
 ///
 /// 【启发式规则说明】
 /// 1. 微信桌面端 OCR 观察仅覆盖当前可见区域（visible_only）。
-/// 2. 当会话数量达到“满屏”阈值时，用户在界面滚动会导致旧会话滚出视口；当反向滚动时，
-///    滚回可见区的历史会话在上一轮快照中缺失，但并非新消息（属于滚动重现）。
-/// 3. 当真实新消息到来时，微信会自动将该会话置顶至列表第一项（即当前可见列表索引 0）。
-/// 4. 启发式判定规则：
-///    - 仅当旧快照会话数量达到“满屏”（>= full_screen_threshold），且该未曾见过的会话出现在当前列表顶部（index == 0）时，
-///      才视为新消息到来的新会话入队；
-///    - 否则（非顶部位置，或旧快照尚未满屏不可能由于滚动溢出），均视为滚动带出的历史会话，不入队。
+/// 2. 旧快照未满屏时（old_count < threshold），不可能有会话被滚出，因此任何新出现的会话都应入队。
+/// 3. 满屏时（old_count >= threshold），用户滚动可能导致历史会话滚出或滚回视口；
+///    当新消息到来时，微信会将该会话置顶至列表第一项（即索引 0）。
+///    因此满屏时只有索引 0 的新会话入队，非顶部位置视为滚动带出的历史会话不入队。
+/// 4. 已知限制：满屏时向上滚动露出的会话位于索引 0，与真实新消息无法区分。
 pub fn is_unseen_conversation_new_incoming(
     index: usize,
     old_count: usize,
     threshold: usize,
 ) -> bool {
-    index == 0 && old_count >= threshold
+    index == 0 || old_count < threshold
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -348,9 +346,12 @@ pub(crate) fn compute_session_diffs(
             }
             None => {
                 // 旧快照中不存在的会话：
-                // 只有当旧快照“满屏”且该会话出现在当前列表顶部（索引 0）时才视为新消息入队；
-                // 否则视为滚动出现，不入队。
-                if is_unseen_conversation_new_incoming(index, old_sessions.len(), full_screen_threshold) {
+                // 旧快照未满屏时任何新出现的会话均入队；满屏时仅顶部（索引 0）的新会话入队。
+                if is_unseen_conversation_new_incoming(
+                    index,
+                    old_sessions.len(),
+                    full_screen_threshold,
+                ) {
                     let mut payload = json!({
                         "conversation": current.raw,
                         "incoming_verified": false,
@@ -469,18 +470,34 @@ mod tests {
     fn parse_and_normalize_sessions_rejects_malformed_formats() {
         assert!(parse_and_normalize_sessions(&json!("not an array")).is_err());
         assert!(parse_and_normalize_sessions(&json!([123])).is_err());
-        assert!(parse_and_normalize_sessions(&json!([{"display_name": "Alice", "preview": 123, "time_text": "t"}])).is_err());
-        assert!(parse_and_normalize_sessions(&json!([{"display_name": "Alice", "preview": "p", "time_text": false}])).is_err());
+        assert!(
+            parse_and_normalize_sessions(
+                &json!([{"display_name": "Alice", "preview": 123, "time_text": "t"}])
+            )
+            .is_err()
+        );
+        assert!(
+            parse_and_normalize_sessions(
+                &json!([{"display_name": "Alice", "preview": "p", "time_text": false}])
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn unseen_conversation_heuristic_boundary_check() {
+        // 满屏（old_count >= threshold）：仅顶部索引 0 入队，非顶部不入队
         assert!(is_unseen_conversation_new_incoming(0, 5, 5));
         assert!(is_unseen_conversation_new_incoming(0, 10, 5));
-        assert!(!is_unseen_conversation_new_incoming(0, 4, 5));
         assert!(!is_unseen_conversation_new_incoming(1, 5, 5));
         assert!(!is_unseen_conversation_new_incoming(2, 8, 5));
-        assert!(!is_unseen_conversation_new_incoming(0, 0, 5));
+
+        // 未满屏（old_count < threshold）：任何新出现的会话均入队（不可能由于滚动被滚出）
+        assert!(is_unseen_conversation_new_incoming(0, 4, 5));
+        assert!(is_unseen_conversation_new_incoming(1, 4, 5));
+        assert!(is_unseen_conversation_new_incoming(3, 2, 5));
+        assert!(is_unseen_conversation_new_incoming(0, 0, 5));
+        assert!(is_unseen_conversation_new_incoming(1, 0, 5));
     }
 
     #[test]
@@ -491,7 +508,8 @@ mod tests {
             {"display_name": "Cathy", "preview": "c", "time_text": "10:02"},
             {"display_name": "David", "preview": "d", "time_text": "10:03"},
             {"display_name": "Eva", "preview": "e", "time_text": "10:04"}
-        ])).unwrap();
+        ]))
+        .unwrap();
 
         // 1. 仅 time_text 变化：不入队
         let cur_time_only = parse_and_normalize_sessions(&json!([
@@ -500,7 +518,8 @@ mod tests {
             {"display_name": "Cathy", "preview": "c", "time_text": "昨天"},
             {"display_name": "David", "preview": "d", "time_text": "昨天"},
             {"display_name": "Eva", "preview": "e", "time_text": "昨天"}
-        ])).unwrap();
+        ]))
+        .unwrap();
         let diffs = compute_session_diffs(&old, &cur_time_only, 5);
         assert_eq!(diffs.len(), 0);
 
@@ -511,7 +530,8 @@ mod tests {
             {"display_name": "Cathy", "preview": "c", "time_text": "昨天"},
             {"display_name": "David", "preview": "d", "time_text": "昨天"},
             {"display_name": "Eva", "preview": "e", "time_text": "昨天"}
-        ])).unwrap();
+        ]))
+        .unwrap();
         let diffs = compute_session_diffs(&old, &cur_preview, 5);
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].payload["changed"], json!(["preview"]));
@@ -524,7 +544,8 @@ mod tests {
             {"display_name": "David", "preview": "d", "time_text": "10:03"},
             {"display_name": "Eva", "preview": "e", "time_text": "10:04"},
             {"display_name": "Frank", "preview": "f", "time_text": "10:05"}
-        ])).unwrap();
+        ]))
+        .unwrap();
         let diffs = compute_session_diffs(&old, &cur_scrolled, 5);
         assert_eq!(diffs.len(), 0);
 
@@ -535,10 +556,28 @@ mod tests {
             {"display_name": "Bob", "preview": "stay", "time_text": "10:01"},
             {"display_name": "Cathy", "preview": "c", "time_text": "10:02"},
             {"display_name": "David", "preview": "d", "time_text": "10:03"}
-        ])).unwrap();
+        ]))
+        .unwrap();
         let diffs = compute_session_diffs(&old, &cur_top_new, 5);
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].payload["new_conversation"], json!(true));
         assert_eq!(diffs[0].payload["conversation"]["display_name"], "Zoe");
+
+        // 5. 旧快照未满屏时新会话：无论位置均入队
+        let old_not_full = parse_and_normalize_sessions(&json!([
+            {"display_name": "Alice", "preview": "hello", "time_text": "10:00"},
+            {"display_name": "Bob", "preview": "stay", "time_text": "10:01"}
+        ]))
+        .unwrap();
+        let cur_not_full = parse_and_normalize_sessions(&json!([
+            {"display_name": "Alice", "preview": "hello", "time_text": "10:00"},
+            {"display_name": "Bob", "preview": "stay", "time_text": "10:01"},
+            {"display_name": "Charlie", "preview": "c", "time_text": "10:02"}
+        ]))
+        .unwrap();
+        let diffs = compute_session_diffs(&old_not_full, &cur_not_full, 5);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].payload["new_conversation"], json!(true));
+        assert_eq!(diffs[0].payload["conversation"]["display_name"], "Charlie");
     }
 }
