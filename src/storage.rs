@@ -187,38 +187,186 @@ impl Store {
         self.run(move |conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let previous: Option<String> = tx.query_row("SELECT snapshot FROM listener_snapshots WHERE platform=?1 AND account_id=?2",params![key.platform,key.account_id],|r|r.get(0)).optional()?;
-            let current = snapshot.as_array().context("适配器会话结果必须是数组")?;
-            let mut names = std::collections::HashSet::new();
-            for conversation in current {
-                let name = conversation.get("display_name").and_then(Value::as_str)
-                    .filter(|name| !name.trim().is_empty()).context("会话缺少有效 display_name")?;
-                if !names.insert(name) { bail!("可见会话存在同名项，无法可靠建立观察基线"); }
-                if !conversation["preview"].is_string() || !conversation["time_text"].is_string() {
-                    bail!("会话预览或时间字段格式错误");
-                }
-            }
+
+            let current_sessions = parse_and_normalize_sessions(&snapshot)?;
 
             let old: Option<Value> = previous.as_deref().map(serde_json::from_str).transpose()?;
+            let old_sessions = match old {
+                Some(old_val) => Some(parse_and_normalize_sessions(&old_val).context("持久会话快照格式错误")?),
+                None => None,
+            };
+
             let mut count = 0;
-            if let Some(old) = old {
-                let old = old.as_array().context("持久会话快照格式错误")?;
-                for conversation in current {
-                    let name = conversation.get("display_name").and_then(Value::as_str).context("会话缺少 display_name")?;
-                    let matched = old.iter().find(|item| item["display_name"] == name);
-                    if matched != Some(conversation) {
-                        let payload = json!({"conversation":conversation,"incoming_verified":false,"coverage":"visible_only"});
-                        tx.execute("INSERT INTO events(event_id,platform,account_id,kind,source,verified,occurred_at,observed_at,payload,state) VALUES(?1,?2,?3,'interface_change','desktop_ocr',0,?4,?4,?5,'pending')",params![new_id(),key.platform,key.account_id,now(),payload.to_string()])?;
-                        count += 1;
-                    }
+            if let Some(old_sessions) = old_sessions {
+                let pending_events = compute_session_diffs(&old_sessions, &current_sessions, FULL_SCREEN_THRESHOLD);
+                for event in pending_events {
+                    tx.execute(
+                        "INSERT INTO events(event_id,platform,account_id,kind,source,verified,occurred_at,observed_at,payload,state) VALUES(?1,?2,?3,'interface_change','desktop_ocr',0,?4,?4,?5,'pending')",
+                        params![new_id(), key.platform, key.account_id, now(), event.payload.to_string()],
+                    )?;
+                    count += 1;
                 }
             }
-            // Snapshot and inbox writes commit together so a restart cannot drop
-            // a detected change between advancing the baseline and queuing it.
+            // 快照与事件在同一事务提交，保证重启或崩溃不会在推进基线与入队事件之间丢失差异。
             tx.execute("INSERT INTO listener_snapshots(platform,account_id,snapshot,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(platform,account_id) DO UPDATE SET snapshot=excluded.snapshot,updated_at=excluded.updated_at",params![key.platform,key.account_id,snapshot.to_string(),now()])?;
             tx.commit()?;
             Ok(count)
         }).await
     }
+}
+
+/// 满屏会话数量阈值（启发式）。
+/// 微信桌面端标准分辨率下会话列表一屏通常可见 8~10 个会话项。
+/// 考虑到窗口高度缩放与截取区域差异，当旧快照数量达到该阈值时认为列表已满屏，可能存在滚动行为。
+pub const FULL_SCREEN_THRESHOLD: usize = 5;
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct NormalizedSession {
+    pub key: String,
+    pub is_ambiguous: bool,
+    pub display_name: String,
+    pub preview: String,
+    pub time_text: String,
+    pub raw: Value,
+}
+
+/// 解析会话列表并进行规范化处理：
+/// 1. 严格检查顶层是否为数组及每项是否为对象；
+/// 2. 跳过缺少有效 display_name 的项（容错 OCR 截断或碎片），而非整体失败；
+/// 3. 对有效会话项严格校验 preview 和 time_text 为字符串；
+/// 4. 对同名组按出现顺序生成比较键（如 name#1、name#2），并标记 is_ambiguous 为 true。
+pub(crate) fn parse_and_normalize_sessions(snapshot: &Value) -> Result<Vec<NormalizedSession>> {
+    let items = snapshot.as_array().context("适配器会话结果必须是数组")?;
+
+    let mut valid_items = Vec::new();
+    for conversation in items {
+        if !conversation.is_object() {
+            bail!("会话项必须是对象");
+        }
+        let display_name_opt = conversation
+            .get("display_name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty());
+
+        let Some(name) = display_name_opt else {
+            // 会话缺少 display_name 的项跳过而非整体失败
+            continue;
+        };
+
+        let preview = conversation.get("preview").and_then(Value::as_str);
+        let time_text = conversation.get("time_text").and_then(Value::as_str);
+        if preview.is_none() || time_text.is_none() {
+            bail!("会话预览或时间字段格式错误");
+        }
+
+        valid_items.push((
+            name.to_string(),
+            preview.unwrap().to_string(),
+            time_text.unwrap().to_string(),
+            conversation.clone(),
+        ));
+    }
+
+    let mut name_counts = std::collections::HashMap::new();
+    for (name, _, _, _) in &valid_items {
+        *name_counts.entry(name.clone()).or_insert(0usize) += 1;
+    }
+
+    let mut seen_counts = std::collections::HashMap::new();
+    let mut normalized = Vec::with_capacity(valid_items.len());
+    for (name, preview, time_text, raw) in valid_items {
+        let total = name_counts.get(&name).copied().unwrap_or(0);
+        let (key, is_ambiguous) = if total > 1 {
+            let count = seen_counts.entry(name.clone()).or_insert(0usize);
+            *count += 1;
+            (format!("{name}#{count}"), true)
+        } else {
+            (name.clone(), false)
+        };
+        normalized.push(NormalizedSession {
+            key,
+            is_ambiguous,
+            display_name: name,
+            preview,
+            time_text,
+            raw,
+        });
+    }
+
+    Ok(normalized)
+}
+
+/// 判定在旧快照中不存在的会话是否作为新消息入队。
+///
+/// 【启发式规则说明】
+/// 1. 微信桌面端 OCR 观察仅覆盖当前可见区域（visible_only）。
+/// 2. 旧快照未满屏时（old_count < threshold），不可能有会话被滚出，因此任何新出现的会话都应入队。
+/// 3. 满屏时（old_count >= threshold），用户滚动可能导致历史会话滚出或滚回视口；
+///    当新消息到来时，微信会将该会话置顶至列表第一项（即索引 0）。
+///    因此满屏时只有索引 0 的新会话入队，非顶部位置视为滚动带出的历史会话不入队。
+/// 4. 已知限制：满屏时向上滚动露出的会话位于索引 0，与真实新消息无法区分。
+pub fn is_unseen_conversation_new_incoming(
+    index: usize,
+    old_count: usize,
+    threshold: usize,
+) -> bool {
+    index == 0 || old_count < threshold
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PendingEvent {
+    pub payload: Value,
+}
+
+/// 对比新旧规范化快照并生成待入队事件列表（纯函数）。
+pub(crate) fn compute_session_diffs(
+    old_sessions: &[NormalizedSession],
+    current_sessions: &[NormalizedSession],
+    full_screen_threshold: usize,
+) -> Vec<PendingEvent> {
+    let mut events = Vec::new();
+    for (index, current) in current_sessions.iter().enumerate() {
+        let matched = old_sessions.iter().find(|old| old.key == current.key);
+        match matched {
+            Some(old) => {
+                // 只有 preview 发生变化时才入队；仅 time_text 变化不入队（但快照照常推进）。preview 不变且 time 变化，不入队。
+                if old.preview != current.preview {
+                    let mut payload = json!({
+                        "conversation": current.raw,
+                        "incoming_verified": false,
+                        "coverage": "visible_only",
+                        "changed": ["preview"],
+                    });
+                    if current.is_ambiguous {
+                        payload["ambiguous_name"] = json!(true);
+                    }
+                    events.push(PendingEvent { payload });
+                }
+            }
+            None => {
+                // 旧快照中不存在的会话：
+                // 旧快照未满屏时任何新出现的会话均入队；满屏时仅顶部（索引 0）的新会话入队。
+                if is_unseen_conversation_new_incoming(
+                    index,
+                    old_sessions.len(),
+                    full_screen_threshold,
+                ) {
+                    let mut payload = json!({
+                        "conversation": current.raw,
+                        "incoming_verified": false,
+                        "coverage": "visible_only",
+                        "new_conversation": true,
+                    });
+                    if current.is_ambiguous {
+                        payload["ambiguous_name"] = json!(true);
+                    }
+                    events.push(PendingEvent { payload });
+                }
+            }
+        }
+    }
+    events
 }
 
 impl Store {
@@ -287,5 +435,149 @@ impl Store {
             conn.execute("INSERT INTO listener_settings(platform,account_id,enabled,interval_seconds,updated_at) VALUES(?1,?2,0,5,?3) ON CONFLICT(platform,account_id) DO UPDATE SET enabled=0,updated_at=excluded.updated_at",params![key.platform,key.account_id,now()])?;
             Ok(())
         }).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_and_normalize_sessions_handles_duplicates_and_missing_names() {
+        let input = json!([
+            {"display_name": "Alice", "preview": "p1", "time_text": "t1"},
+            {"display_name": "Bob", "preview": "p2", "time_text": "t2"},
+            {"display_name": "", "preview": "ignored", "time_text": "t_ignored"},
+            {"preview": "no_name", "time_text": "t_no_name"},
+            {"display_name": "Alice", "preview": "p3", "time_text": "t3"}
+        ]);
+        let normalized = parse_and_normalize_sessions(&input).unwrap();
+        assert_eq!(normalized.len(), 3);
+
+        assert_eq!(normalized[0].key, "Alice#1");
+        assert!(normalized[0].is_ambiguous);
+        assert_eq!(normalized[0].preview, "p1");
+
+        assert_eq!(normalized[1].key, "Bob");
+        assert!(!normalized[1].is_ambiguous);
+
+        assert_eq!(normalized[2].key, "Alice#2");
+        assert!(normalized[2].is_ambiguous);
+        assert_eq!(normalized[2].preview, "p3");
+    }
+
+    #[test]
+    fn parse_and_normalize_sessions_rejects_malformed_formats() {
+        assert!(parse_and_normalize_sessions(&json!("not an array")).is_err());
+        assert!(parse_and_normalize_sessions(&json!([123])).is_err());
+        assert!(
+            parse_and_normalize_sessions(
+                &json!([{"display_name": "Alice", "preview": 123, "time_text": "t"}])
+            )
+            .is_err()
+        );
+        assert!(
+            parse_and_normalize_sessions(
+                &json!([{"display_name": "Alice", "preview": "p", "time_text": false}])
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn unseen_conversation_heuristic_boundary_check() {
+        // 满屏（old_count >= threshold）：仅顶部索引 0 入队，非顶部不入队
+        assert!(is_unseen_conversation_new_incoming(0, 5, 5));
+        assert!(is_unseen_conversation_new_incoming(0, 10, 5));
+        assert!(!is_unseen_conversation_new_incoming(1, 5, 5));
+        assert!(!is_unseen_conversation_new_incoming(2, 8, 5));
+
+        // 未满屏（old_count < threshold）：任何新出现的会话均入队（不可能由于滚动被滚出）
+        assert!(is_unseen_conversation_new_incoming(0, 4, 5));
+        assert!(is_unseen_conversation_new_incoming(1, 4, 5));
+        assert!(is_unseen_conversation_new_incoming(3, 2, 5));
+        assert!(is_unseen_conversation_new_incoming(0, 0, 5));
+        assert!(is_unseen_conversation_new_incoming(1, 0, 5));
+    }
+
+    #[test]
+    fn diff_computation_enqueues_only_on_preview_change_or_top_unseen() {
+        let old = parse_and_normalize_sessions(&json!([
+            {"display_name": "Alice", "preview": "hello", "time_text": "10:00"},
+            {"display_name": "Bob", "preview": "stay", "time_text": "10:01"},
+            {"display_name": "Cathy", "preview": "c", "time_text": "10:02"},
+            {"display_name": "David", "preview": "d", "time_text": "10:03"},
+            {"display_name": "Eva", "preview": "e", "time_text": "10:04"}
+        ]))
+        .unwrap();
+
+        // 1. 仅 time_text 变化：不入队
+        let cur_time_only = parse_and_normalize_sessions(&json!([
+            {"display_name": "Alice", "preview": "hello", "time_text": "昨天"},
+            {"display_name": "Bob", "preview": "stay", "time_text": "昨天"},
+            {"display_name": "Cathy", "preview": "c", "time_text": "昨天"},
+            {"display_name": "David", "preview": "d", "time_text": "昨天"},
+            {"display_name": "Eva", "preview": "e", "time_text": "昨天"}
+        ]))
+        .unwrap();
+        let diffs = compute_session_diffs(&old, &cur_time_only, 5);
+        assert_eq!(diffs.len(), 0);
+
+        // 2. preview 变化：入队且 changed 为 ["preview"]
+        let cur_preview = parse_and_normalize_sessions(&json!([
+            {"display_name": "Alice", "preview": "hello world", "time_text": "昨天"},
+            {"display_name": "Bob", "preview": "stay", "time_text": "昨天"},
+            {"display_name": "Cathy", "preview": "c", "time_text": "昨天"},
+            {"display_name": "David", "preview": "d", "time_text": "昨天"},
+            {"display_name": "Eva", "preview": "e", "time_text": "昨天"}
+        ]))
+        .unwrap();
+        let diffs = compute_session_diffs(&old, &cur_preview, 5);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].payload["changed"], json!(["preview"]));
+        assert_eq!(diffs[0].payload["conversation"]["preview"], "hello world");
+
+        // 3. 滚动出现的会话（非顶部索引 0）：不入队
+        let cur_scrolled = parse_and_normalize_sessions(&json!([
+            {"display_name": "Bob", "preview": "stay", "time_text": "10:01"},
+            {"display_name": "Cathy", "preview": "c", "time_text": "10:02"},
+            {"display_name": "David", "preview": "d", "time_text": "10:03"},
+            {"display_name": "Eva", "preview": "e", "time_text": "10:04"},
+            {"display_name": "Frank", "preview": "f", "time_text": "10:05"}
+        ]))
+        .unwrap();
+        let diffs = compute_session_diffs(&old, &cur_scrolled, 5);
+        assert_eq!(diffs.len(), 0);
+
+        // 4. 满屏时顶部新会话（索引 0）：入队且 new_conversation 为 true
+        let cur_top_new = parse_and_normalize_sessions(&json!([
+            {"display_name": "Zoe", "preview": "new message", "time_text": "刚刚"},
+            {"display_name": "Alice", "preview": "hello", "time_text": "10:00"},
+            {"display_name": "Bob", "preview": "stay", "time_text": "10:01"},
+            {"display_name": "Cathy", "preview": "c", "time_text": "10:02"},
+            {"display_name": "David", "preview": "d", "time_text": "10:03"}
+        ]))
+        .unwrap();
+        let diffs = compute_session_diffs(&old, &cur_top_new, 5);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].payload["new_conversation"], json!(true));
+        assert_eq!(diffs[0].payload["conversation"]["display_name"], "Zoe");
+
+        // 5. 旧快照未满屏时新会话：无论位置均入队
+        let old_not_full = parse_and_normalize_sessions(&json!([
+            {"display_name": "Alice", "preview": "hello", "time_text": "10:00"},
+            {"display_name": "Bob", "preview": "stay", "time_text": "10:01"}
+        ]))
+        .unwrap();
+        let cur_not_full = parse_and_normalize_sessions(&json!([
+            {"display_name": "Alice", "preview": "hello", "time_text": "10:00"},
+            {"display_name": "Bob", "preview": "stay", "time_text": "10:01"},
+            {"display_name": "Charlie", "preview": "c", "time_text": "10:02"}
+        ]))
+        .unwrap();
+        let diffs = compute_session_diffs(&old_not_full, &cur_not_full, 5);
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].payload["new_conversation"], json!(true));
+        assert_eq!(diffs[0].payload["conversation"]["display_name"], "Charlie");
     }
 }
