@@ -108,9 +108,13 @@ async fn main() -> Result<()> {
                     continue;
                 }
                 if request.method == "initialize" {
-                    structured_content = request.params.as_ref()
+                    let client_version = request
+                        .params
+                        .as_ref()
                         .and_then(|params| params.get("protocolVersion"))
-                        .and_then(Value::as_str) == Some("2025-06-18");
+                        .and_then(Value::as_str);
+                    let (_, enabled) = negotiate_protocol_version(client_version);
+                    structured_content = enabled;
                 }
                 let can_cancel = is_cancellable(&request);
                 let gateway = gateway.clone();
@@ -125,6 +129,43 @@ async fn main() -> Result<()> {
     }
     gateway.listeners.shutdown().await;
     Ok(())
+}
+
+pub const SUPPORTED_PROTOCOL_VERSION: &str = "2025-06-18";
+pub const FALLBACK_PROTOCOL_VERSION: &str = "2024-11-05";
+
+pub fn is_valid_date(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() != 10 {
+        return false;
+    }
+    if bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    let digits_valid = bytes[0..4].iter().all(|b| b.is_ascii_digit())
+        && bytes[5..7].iter().all(|b| b.is_ascii_digit())
+        && bytes[8..10].iter().all(|b| b.is_ascii_digit());
+    if !digits_valid {
+        return false;
+    }
+    let month: u32 = match s[5..7].parse() {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    let day: u32 = match s[8..10].parse() {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+    (1..=12).contains(&month) && (1..=31).contains(&day)
+}
+
+pub fn negotiate_protocol_version(client_version: Option<&str>) -> (&'static str, bool) {
+    match client_version {
+        Some(v) if is_valid_date(v) && v >= SUPPORTED_PROTOCOL_VERSION => {
+            (SUPPORTED_PROTOCOL_VERSION, true)
+        }
+        _ => (FALLBACK_PROTOCOL_VERSION, false),
+    }
 }
 
 fn is_cancellable(request: &JsonRpcRequest) -> bool {
@@ -174,10 +215,19 @@ async fn handle_request(
 ) -> JsonRpcResponse {
     let id = request.id;
     let result = match request.method.as_str() {
-        "initialize" => json!({
-            "protocolVersion":if structured_content { "2025-06-18" } else { "2024-11-05" }, "capabilities":{"tools":{}},
-            "serverInfo":{"name":"wechat-mcp","version":env!("CARGO_PKG_VERSION")},
-        }),
+        "initialize" => {
+            let client_version = request
+                .params
+                .as_ref()
+                .and_then(|params| params.get("protocolVersion"))
+                .and_then(Value::as_str);
+            let (protocol_version, _) = negotiate_protocol_version(client_version);
+            json!({
+                "protocolVersion": protocol_version,
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "wechat-mcp", "version": env!("CARGO_PKG_VERSION")},
+            })
+        }
         "ping" => json!({}),
         "tools/list" => tools::list_tools(),
         "tools/call" => {
@@ -226,4 +276,53 @@ mod tests {
             assert_eq!(is_cancellable(&request), cancellable, "{name}");
         }
     }
+
+    #[test]
+    fn protocol_version_negotiation_handles_versions_and_invalid_strings() {
+        // >= "2025-06-18" 返回 ("2025-06-18", true)
+        assert_eq!(
+            negotiate_protocol_version(Some("2025-11-25")),
+            ("2025-06-18", true)
+        );
+        assert_eq!(
+            negotiate_protocol_version(Some("2025-06-18")),
+            ("2025-06-18", true)
+        );
+
+        // < "2025-06-18" 返回 ("2024-11-05", false)
+        assert_eq!(
+            negotiate_protocol_version(Some("2024-11-05")),
+            ("2024-11-05", false)
+        );
+        assert_eq!(
+            negotiate_protocol_version(Some("2025-01-01")),
+            ("2024-11-05", false)
+        );
+
+        // 非法字符串校验
+        for invalid in [
+            "",
+            "invalid",
+            "2025-6-18",
+            "2025-13-01",
+            "2025-00-10",
+            "2025-06-00",
+            "2025-06-32",
+            "2025/06/18",
+            "latest",
+            "2026-99-99",
+            "2025-06-18-extra",
+            "prefix-2025-06-18",
+        ] {
+            assert_eq!(
+                negotiate_protocol_version(Some(invalid)),
+                ("2024-11-05", false),
+                "testing invalid: {invalid}"
+            );
+        }
+
+        // None
+        assert_eq!(negotiate_protocol_version(None), ("2024-11-05", false));
+    }
 }
+
