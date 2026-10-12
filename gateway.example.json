@@ -1,0 +1,9 @@
+{
+  "accounts": [
+    {
+      "platform": "wechat",
+      "account_id": "local",
+      "adapter": "wechat_desktop"
+    }
+  ]
+}
