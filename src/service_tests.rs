@@ -566,7 +566,15 @@ async fn cancelled_followups_cannot_be_completed_and_bad_snapshots_do_not_advanc
     // 最小修改说明：原测试依赖同名导致整体失败以验证坏快照不推进基线。
     // 依据新要求，同名项容错不再整体失败；此处最小修改为真正的格式错误（preview 字段类型错误），
     // 确保继续验证“坏快照不推进基线”的不变量。
-    assert!(g.store.observe(key.clone(),json!([{"display_name":"Client","preview":123,"time_text":"now"}])).await.is_err());
+    assert!(
+        g.store
+            .observe(
+                key.clone(),
+                json!([{"display_name":"Client","preview":123,"time_text":"now"}])
+            )
+            .await
+            .is_err()
+    );
     assert_eq!(
         g.store
             .observe(
@@ -803,7 +811,7 @@ async fn observe_preview_change_enqueues_event() {
     assert_eq!(events.len(), 1);
     let payload = &events[0]["payload"];
     assert_eq!(payload["changed"], json!(["preview"]));
-    assert_eq!(payload["new_conversation"].is_null(), true);
+    assert!(payload["new_conversation"].is_null());
     assert_eq!(payload["incoming_verified"], false);
     assert_eq!(payload["coverage"], "visible_only");
     assert_eq!(payload["conversation"]["preview"], "new preview");
@@ -837,21 +845,27 @@ async fn observe_scrolled_conversation_does_not_enqueue() {
     ]);
     assert_eq!(g.store.observe(key.clone(), scrolled).await.unwrap(), 0);
 
-    // 场景 2：旧快照不满屏时，未在旧快照中出现的会话不被视为满屏滚动，也不作为新会话入队
+    // 场景 2：旧快照未满屏时（old_count < threshold），不可能有会话被滚出，任何新出现的会话都应入队
     let not_full_old = json!([
         {"display_name": "N1", "preview": "p1", "time_text": "t1"},
         {"display_name": "N2", "preview": "p2", "time_text": "t2"}
     ]);
-    let key_b = AccountKey { platform: "wechat".into(), account_id: "b".into() };
-    assert_eq!(g.store.observe(key_b.clone(), not_full_old).await.unwrap(), 0);
+    let key_b = AccountKey {
+        platform: "wechat".into(),
+        account_id: "b".into(),
+    };
+    assert_eq!(
+        g.store.observe(key_b.clone(), not_full_old).await.unwrap(),
+        0
+    );
 
     let not_full_new_top = json!([
         {"display_name": "N0", "preview": "p0", "time_text": "t0"},
         {"display_name": "N1", "preview": "p1", "time_text": "t1"},
         {"display_name": "N2", "preview": "p2", "time_text": "t2"}
     ]);
-    // 旧快照长度为 2 < FULL_SCREEN_THRESHOLD(5)，不满足满屏前置条件，不入队
-    assert_eq!(g.store.observe(key_b, not_full_new_top).await.unwrap(), 0);
+    // 旧快照长度为 2 < FULL_SCREEN_THRESHOLD(5)，未满屏时新出现的会话正常入队
+    assert_eq!(g.store.observe(key_b, not_full_new_top).await.unwrap(), 1);
 }
 
 #[tokio::test]
@@ -887,7 +901,7 @@ async fn observe_top_new_conversation_with_full_screen_enqueues() {
     assert_eq!(events.len(), 1);
     let payload = &events[0]["payload"];
     assert_eq!(payload["new_conversation"], true);
-    assert_eq!(payload["changed"].is_null(), true);
+    assert!(payload["changed"].is_null());
     assert_eq!(payload["incoming_verified"], false);
     assert_eq!(payload["coverage"], "visible_only");
     assert_eq!(payload["conversation"]["display_name"], "U0");
