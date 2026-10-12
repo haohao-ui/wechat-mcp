@@ -26,6 +26,10 @@ jobs:
           fetch-depth: 0
       - name: 本机路径 / 个人信息 / 禁止文件检查
         run: scripts/check_sensitive.sh
+      - name: Shell 脚本检查
+        run: |
+          for f in scripts/*.sh scripts/hooks/*; do bash -n "$f"; done
+          shellcheck -S warning scripts/*.sh scripts/hooks/*
       - name: gitleaks 密钥扫描（含历史）
         uses: gitleaks/gitleaks-action@v2
         env:
