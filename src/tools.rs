@@ -184,7 +184,14 @@ mod tests {
                 "value {disabled:?} should disable legacy tools"
             );
         }
-        for enabled in [None, Some("1"), Some("true"), Some("on"), Some(""), Some("other")] {
+        for enabled in [
+            None,
+            Some("1"),
+            Some("true"),
+            Some("on"),
+            Some(""),
+            Some("other"),
+        ] {
             assert!(
                 parse_legacy_tools_env(enabled),
                 "value {enabled:?} should enable legacy tools"
