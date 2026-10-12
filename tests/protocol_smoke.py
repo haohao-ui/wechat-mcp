@@ -11,9 +11,9 @@ import threading
 import time
 
 
-def check_peer_lock(binary, env, release):
+def check_peer_lock(binary, directory, env, release):
     peer = subprocess.Popen([str(binary)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL, text=True, env=env)
+                            stderr=subprocess.DEVNULL, text=True, env=env, cwd=directory)
     output = queue.Queue()
     def read():
         for line in peer.stdout:
@@ -52,7 +52,7 @@ def run(binary, directory, version):
     env["MESSAGE_GATEWAY_CONFIG"] = str(directory / "accounts.json")
     process = subprocess.Popen(
         [str(binary)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL, text=True, env=env,
+        stderr=subprocess.DEVNULL, text=True, env=env, cwd=directory,
     )
     output = queue.Queue()
 
@@ -103,13 +103,15 @@ def run(binary, directory, version):
         send("ping", 4)
         assert receive(4)["result"] == {}
         assert time.monotonic() - start < 1, "ping blocked by UI polling"
-        check_peer_lock(binary,env,lambda:send("notifications/cancelled", params={"requestId": 3}))
+        check_peer_lock(binary,directory,env,lambda:send("notifications/cancelled", params={"requestId": 3}))
         send("tools/call", 5, {
             "name": "list_conversations", "arguments": {"platform": "wechat", "account_id": "local"},
         })
         # The simulated screenshot fails. Reaching this result proves cancellation
         # released the UI lock without mistaking a failed capture for success.
-        assert receive(5)["result"]["isError"] is True
+        result = receive(5)["result"]
+        assert result["isError"] is True, result
+        assert "截图微信窗口失败" in result["content"][0]["text"], result
         send("unknown_method", 6)
         assert receive(6)["error"]["code"] == -32601
         process.stdin.write('{"jsonrpc":"9.9","id":7,"method":"ping"}\n')
@@ -137,9 +139,23 @@ def main():
     binary = Path(sys.argv[1] if len(sys.argv) > 1 else "target/debug/wechat-mcp").resolve()
     with tempfile.TemporaryDirectory(prefix="message-gateway-test-") as temp:
         directory = Path(temp)
+        # Background observation queries the native window helper without activation.
+        # Resolve its fallback from this isolated cwd, including in the lock peer.
+        (directory / "bin").mkdir()
         for name, script in {
-            "osascript": '#!/bin/sh\nscript=$(/bin/cat)\ncase "$script" in *"set frontmost"*) if [ ! -f "$MESSAGE_TEST_HOLD" ]; then : > "$MESSAGE_TEST_HOLD"; exec /bin/sleep 60; fi;; esac\nprintf "true\\n"\n',
+            "osascript": '#!/bin/sh\n/bin/cat >/dev/null\nprintf "true\\n"\n',
             "screencapture": "#!/bin/sh\nexit 1\n",
+            "bin/wechat_window": '''#!/bin/sh
+if [ ! -f "$MESSAGE_TEST_HOLD" ]; then
+    : > "$MESSAGE_TEST_HOLD"
+    exec /bin/sleep 60
+fi
+if [ "$1" = "--screens" ]; then
+    printf '%s\\n' '[{"x":0,"y":0,"width":1920,"height":1080}]'
+else
+    printf '%s\\n' '{"window_id":1,"x":0,"y":0,"width":950,"height":680,"on_screen":true}'
+fi
+''',
         }.items():
             path = directory / name
             path.write_text(script)
