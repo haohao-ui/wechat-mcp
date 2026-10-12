@@ -131,10 +131,10 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-pub const SUPPORTED_PROTOCOL_VERSION: &str = "2025-06-18";
-pub const FALLBACK_PROTOCOL_VERSION: &str = "2024-11-05";
+const SUPPORTED_PROTOCOL_VERSION: &str = "2025-06-18";
+const FALLBACK_PROTOCOL_VERSION: &str = "2024-11-05";
 
-pub fn is_valid_date(s: &str) -> bool {
+fn is_valid_date(s: &str) -> bool {
     let bytes = s.as_bytes();
     if bytes.len() != 10 {
         return false;
@@ -159,7 +159,7 @@ pub fn is_valid_date(s: &str) -> bool {
     (1..=12).contains(&month) && (1..=31).contains(&day)
 }
 
-pub fn negotiate_protocol_version(client_version: Option<&str>) -> (&'static str, bool) {
+fn negotiate_protocol_version(client_version: Option<&str>) -> (&'static str, bool) {
     match client_version {
         Some(v) if is_valid_date(v) && v >= SUPPORTED_PROTOCOL_VERSION => {
             (SUPPORTED_PROTOCOL_VERSION, true)
@@ -229,7 +229,7 @@ async fn handle_request(
             })
         }
         "ping" => json!({}),
-        "tools/list" => tools::list_tools(),
+        "tools/list" => tools::list_tools_with_legacy(gateway.legacy_tools),
         "tools/call" => {
             let Some(params) = request.params.as_ref().and_then(Value::as_object) else {
                 return JsonRpcResponse::error(id, -32602, "tools/call params 必须是对象");
@@ -325,4 +325,3 @@ mod tests {
         assert_eq!(negotiate_protocol_version(None), ("2024-11-05", false));
     }
 }
-
