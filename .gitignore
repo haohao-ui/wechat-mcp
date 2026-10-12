@@ -5,3 +5,22 @@
 *.sqlite3-wal
 *.sqlite3-shm
 __pycache__/
+
+# Local build outputs and native tool binaries
+/bin/
+
+# Local runtime config, credentials and data (only *.example.* is committed)
+gateway.json
+gateway.local.json
+*.local.json
+.env
+.env.*
+*.db
+*.db-wal
+*.db-shm
+*.pem
+*.key
+*.p12
+*.mobileprovision
+*.log
+.DS_Store

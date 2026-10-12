@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  security:
+    name: 敏感信息扫描
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 本机路径 / 个人信息 / 禁止文件检查
+        run: scripts/check_sensitive.sh
+      - name: gitleaks 密钥扫描（含历史）
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    name: 构建与测试 (macOS)
+    needs: security
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: cargo test
+        run: cargo test --locked
+      - name: 编译原生工具
+        run: |
+          mkdir -p target/native
+          for t in wechat_ocr wechat_click wechat_window; do
+            swiftc native/$t.swift -o target/native/$t
+          done
+      - name: 协议冒烟测试（隔离环境，不触碰微信）
+        run: |
+          cargo build --locked
+          python3 tests/protocol_smoke.py target/debug/wechat-mcp
+      - name: 服务冒烟测试
+        run: |
+          cargo build --release --locked
+          python3 tests/service_smoke.py target/release/wechat-mcp
