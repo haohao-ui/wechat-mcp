@@ -3,7 +3,6 @@ use serde_json::Value;
 
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
-    #[allow(dead_code)]
     pub jsonrpc: String,
     pub id: Option<Value>,
     pub method: String,
@@ -14,7 +13,6 @@ pub struct JsonRpcRequest {
 #[derive(Debug, Serialize)]
 pub struct JsonRpcResponse {
     pub jsonrpc: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
