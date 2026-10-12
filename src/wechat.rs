@@ -42,7 +42,7 @@ fn get_click_binary_path() -> std::path::PathBuf {
 }
 
 /// 调用原生工具或 macOS 原生 CoreGraphics 发送鼠标单击事件
-pub fn mouse_click(x: f64, y: f64) {
+pub async fn mouse_click(x: f64, y: f64) -> Result<()> {
     let click_bin = get_click_binary_path();
     info!(
         "执行鼠标点击: ({}, {}) [工具: {:?}, 是否存在: {}]",
@@ -52,28 +52,44 @@ pub fn mouse_click(x: f64, y: f64) {
         click_bin.exists()
     );
     if click_bin.exists() {
-        let status = std::process::Command::new(&click_bin)
+        let status = Command::new(&click_bin)
+            .kill_on_drop(true)
             .args([&x.to_string(), &y.to_string()])
-            .status();
+            .status()
+            .await
+            .context("执行 wechat_click 失败")?;
         info!("wechat_click 执行结果: {:?}", status);
-        return;
+        if !status.success() {
+            bail!("wechat_click 退出状态异常: {:?}", status.code());
+        }
+        return Ok(());
     }
 
-    unsafe {
-        let pt = CGPoint { x, y };
-        // 1 = kCGEventLeftMouseDown, 2 = kCGEventLeftMouseUp, 0 = kCGMouseButtonLeft
-        let down = CGEventCreateMouseEvent(std::ptr::null(), 1, pt, 0);
-        let up = CGEventCreateMouseEvent(std::ptr::null(), 2, pt, 0);
-        CGEventPost(0, down); // 0 = kCGHIDEventTap
-        std::thread::sleep(std::time::Duration::from_millis(60));
-        CGEventPost(0, up);
-        if !down.is_null() {
-            CFRelease(down);
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        unsafe {
+            let pt = CGPoint { x, y };
+            // 1 = kCGEventLeftMouseDown, 2 = kCGEventLeftMouseUp, 0 = kCGMouseButtonLeft
+            let down = CGEventCreateMouseEvent(std::ptr::null(), 1, pt, 0);
+            let up = CGEventCreateMouseEvent(std::ptr::null(), 2, pt, 0);
+            if !down.is_null() && !up.is_null() {
+                CGEventPost(0, down); // 0 = kCGHIDEventTap
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                CGEventPost(0, up);
+            }
+            if !down.is_null() {
+                CFRelease(down);
+            }
+            if !up.is_null() {
+                CFRelease(up);
+            }
+            if down.is_null() || up.is_null() {
+                bail!("创建鼠标点击事件失败");
+            }
+            Ok(())
         }
-        if !up.is_null() {
-            CFRelease(up);
-        }
-    }
+    })
+    .await
+    .context("鼠标点击任务失败")?
 }
 
 /// 执行一段 AppleScript 代码，通过 stdin 输入以避免 shell 转义与参数长度问题
@@ -192,6 +208,9 @@ pub async fn open_chat_conversation(recipient: &str) -> Result<()> {
         bail!("接收人不能为空");
     }
 
+    if normalize_chat_name(recipient).is_empty() {
+        bail!("接收人规范化后不能为空");
+    }
     let (win_x, win_y, _win_w, win_h) = focus_wechat().await?;
     info!("正在定位联系人/群聊 [{}]...", recipient);
 
@@ -231,8 +250,8 @@ pub async fn open_chat_conversation(recipient: &str) -> Result<()> {
             if ocr_out.status.success() {
                 let json_str = String::from_utf8_lossy(&ocr_out.stdout);
                 let items: Vec<OcrItem> = serde_json::from_str(json_str.trim()).unwrap_or_default();
-                for item in items {
-                    if item.text.contains(recipient) || recipient.contains(&item.text) {
+                match match_name_column(&items, recipient) {
+                    NameColumnMatch::Unique(item) => {
                         // 计算该项在屏幕上的物理 Y 坐标并点击 (稍微向下微调 4px 命中中心)
                         let target_y = list_crop_y as f64 + (item.y * list_crop_h as f64) + 4.0;
                         let target_x = win_x + 150.0;
@@ -240,26 +259,30 @@ pub async fn open_chat_conversation(recipient: &str) -> Result<()> {
                             "在会话列表中找到 [{}]，直接点击坐标: ({}, {})",
                             recipient, target_x, target_y
                         );
-                        mouse_click(target_x, target_y);
+                        mouse_click(target_x, target_y).await?;
                         found_in_list = true;
-                        break;
                     }
+                    NameColumnMatch::Ambiguous => {
+                        warn!("会话名称 [{}] 存在歧义，转入搜索", recipient)
+                    }
+                    NameColumnMatch::Missing => {}
                 }
             }
         }
     }
+    let _ = std::fs::remove_file(&tmp_list_img);
 
     if found_in_list {
         tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
-        return Ok(());
+        return verify_chat_title(recipient).await;
     }
 
     // 方案二：如果左侧列表未直接包含，通过顶部搜索栏输入
     info!("[{}] 不在最近会话前排，启动全局搜索定位...", recipient);
-    let saved_clipboard = clipboard::get_clipboard().await.ok().flatten();
-    clipboard::set_clipboard(recipient).await?;
-
-    let search_script = r#"
+    let search_result = async {
+        let mut clipboard_guard = clipboard::ClipboardGuard::replace(recipient).await?;
+        let operation_result = async {
+            let search_script = r#"
         tell application "System Events"
             tell process "WeChat"
                 set frontmost to true
@@ -274,24 +297,43 @@ pub async fn open_chat_conversation(recipient: &str) -> Result<()> {
             end tell
         end tell
     "#;
-    run_applescript(search_script).await?;
+            run_applescript(search_script).await?;
 
-    // 等待搜索结果弹窗（0.7s）
-    tokio::time::sleep(tokio::time::Duration::from_millis(700)).await;
+            // 等待搜索结果弹窗（0.7s）
+            tokio::time::sleep(tokio::time::Duration::from_millis(700)).await;
 
-    // 模拟点击搜索结果第一条联系人（避开网络搜一搜）
-    let click_x = win_x + 230.0;
-    let click_y = win_y + 150.0;
-    info!("点击搜索结果第一项联系人: ({}, {})", click_x, click_y);
-    mouse_click(click_x, click_y);
+            // 搜索结果坐标仅用于尝试打开；标题核验成功前不能发送正文。
+            let click_x = win_x + 230.0;
+            let click_y = win_y + 150.0;
+            info!("尝试点击搜索结果: ({}, {})", click_x, click_y);
+            mouse_click(click_x, click_y).await?;
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-    if let Some(old_content) = saved_clipboard {
-        let _ = clipboard::set_clipboard(&old_content).await;
+            verify_chat_title(recipient).await
+        }
+        .await;
+        let restore_result = clipboard_guard.restore().await;
+        if let Err(error) = &restore_result {
+            warn!("搜索后恢复剪贴板失败，将同步兜底: {error:#}");
+        }
+        operation_result.and(restore_result)
     }
-
-    Ok(())
+    .await;
+    if search_result.is_err() {
+        let close_result = run_applescript(
+            r#"
+            tell application "System Events"
+                tell process "WeChat" to key code 53
+            end tell
+        "#,
+        )
+        .await;
+        if let Err(error) = close_result {
+            warn!("关闭微信搜索框失败: {error:#}");
+        }
+    }
+    search_result
 }
 
 /// 发送微信消息给指定联系人或群组
@@ -318,12 +360,14 @@ pub async fn send_message(recipient: &str, message: &str) -> Result<()> {
     let input_x = win_x + 450.0;
     let input_y = win_y + win_h - 80.0;
     info!("点击聊天输入框激活光标焦点: ({}, {})", input_x, input_y);
-    mouse_click(input_x, input_y);
+    mouse_click(input_x, input_y).await?;
     tokio::time::sleep(tokio::time::Duration::from_millis(350)).await;
 
+    // 输入框点击可能改变焦点；在正文进入剪贴板之前再次核验标题。
+    verify_chat_title(recipient).await?;
+
     // 3. 暂存剪贴板并将正文粘贴发送
-    let saved_clipboard = clipboard::get_clipboard().await.ok().flatten();
-    clipboard::set_clipboard(message).await?;
+    let mut clipboard_guard = clipboard::ClipboardGuard::replace(message).await?;
 
     let send_script = r#"
         tell application "System Events"
@@ -335,14 +379,15 @@ pub async fn send_message(recipient: &str, message: &str) -> Result<()> {
             end tell
         end tell
     "#;
-    run_applescript(send_script).await?;
+    let send_result = run_applescript(send_script).await;
 
     // 4. 恢复原剪贴板
-    if let Some(old_content) = saved_clipboard
-        && let Err(e) = clipboard::set_clipboard(&old_content).await
-    {
-        warn!("恢复原剪贴板内容失败: {:?}", e);
+    let restore_result = clipboard_guard.restore().await;
+    if let Err(error) = &restore_result {
+        warn!("发送后恢复剪贴板失败，将同步兜底: {error:#}");
     }
+    send_result?;
+    restore_result?;
 
     info!("已触发微信发送操作，送达状态未验证");
     Ok(())
@@ -353,6 +398,167 @@ pub struct OcrItem {
     pub text: String,
     pub x: f64,
     pub y: f64,
+}
+
+fn is_name_boundary(c: char) -> bool {
+    c.is_whitespace()
+        || c.is_ascii_punctuation()
+        || matches!(
+            c,
+            '，' | '。'
+                | '、'
+                | '；'
+                | '：'
+                | '！'
+                | '？'
+                | '“'
+                | '”'
+                | '‘'
+                | '’'
+                | '（'
+                | '）'
+                | '【'
+                | '】'
+                | '《'
+                | '》'
+                | '…'
+                | '—'
+                | '·'
+        )
+}
+
+fn normalize_chat_name(name: &str) -> String {
+    // 保留括号到人数后缀检查结束，避免先删掉右括号而留下数字。
+    let name = name.trim_matches(|c| is_name_boundary(c) && !matches!(c, '(' | ')' | '（' | '）'));
+    let mut without_count = name;
+    for (open, close) in [('(', ')'), ('（', '）')] {
+        if let Some(body) = name.strip_suffix(close)
+            && let Some((prefix, count)) = body.rsplit_once(open)
+            && !count.trim().is_empty()
+            && count.trim().chars().all(|c| c.is_ascii_digit())
+        {
+            without_count = prefix;
+            break;
+        }
+    }
+    without_count.trim_matches(is_name_boundary).to_string()
+}
+
+#[derive(Debug)]
+enum NameColumnMatch<'a> {
+    Missing,
+    Unique(&'a OcrItem),
+    Ambiguous,
+}
+
+fn match_name_column<'a>(items: &'a [OcrItem], recipient: &str) -> NameColumnMatch<'a> {
+    let recipient = normalize_chat_name(recipient);
+    if recipient.is_empty() {
+        return NameColumnMatch::Missing;
+    }
+    let mut ordered: Vec<_> = items
+        .iter()
+        .filter(|item| {
+            item.x.is_finite()
+                && item.y.is_finite()
+                && (0.0..=1.0).contains(&item.x)
+                && (0.0..=1.0).contains(&item.y)
+        })
+        .collect();
+    ordered.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
+
+    // 与最近会话列表使用相同的 y 分组阈值，但每组只保留最上/最左的名称项。
+    let mut groups: Vec<(f64, Option<&OcrItem>)> = Vec::new();
+    for item in ordered {
+        if let Some((_, name)) = groups
+            .iter_mut()
+            .find(|(base_y, _)| (item.y - base_y).abs() < 0.08)
+        {
+            if name.is_none() && item.x <= 0.55 {
+                *name = Some(item);
+            }
+        } else {
+            groups.push((item.y, (item.x <= 0.55).then_some(item)));
+        }
+    }
+    let mut matches = groups
+        .into_iter()
+        .filter_map(|(_, name)| name)
+        .filter(|item| normalize_chat_name(&item.text) == recipient);
+    match (matches.next(), matches.next()) {
+        (Some(_), Some(_)) => NameColumnMatch::Ambiguous,
+        (Some(item), None) => NameColumnMatch::Unique(item),
+        _ => NameColumnMatch::Missing,
+    }
+}
+
+fn title_matches_recipient(title: &str, recipient: &str) -> bool {
+    let recipient = normalize_chat_name(recipient);
+    !recipient.is_empty() && normalize_chat_name(title) == recipient
+}
+
+fn check_chat_title(title: &str, recipient: &str) -> Result<()> {
+    if !title_matches_recipient(title, recipient) {
+        bail!(
+            "聊天标题核验失败，接收人 [{}]，OCR 标题 [{}]，已停止操作",
+            recipient,
+            title
+        );
+    }
+    Ok(())
+}
+
+/// 核验聊天区顶部标题的显示名称；这不是微信 ID 级身份核验。
+pub async fn verify_chat_title(recipient: &str) -> Result<()> {
+    let (win_x, win_y, win_w, _) = get_wechat_window_rect().await?;
+    if win_w <= 325.0 {
+        bail!("微信窗口过窄，无法核验聊天标题");
+    }
+    let region = format!(
+        "{},{},{},60",
+        (win_x + 315.0).round() as i64,
+        win_y.round() as i64,
+        (win_w - 325.0).round() as i64
+    );
+    let tmp_file = std::env::temp_dir().join(format!("wechat_title_{}.png", uuid::Uuid::new_v4()));
+    let result = async {
+        let status = Command::new("screencapture")
+            .kill_on_drop(true)
+            .args(["-R", &region, "-x"])
+            .arg(&tmp_file)
+            .status()
+            .await
+            .context("截取聊天标题栏失败")?;
+        if !status.success() {
+            bail!("截取聊天标题栏失败，已停止操作");
+        }
+        let output = Command::new(get_ocr_binary_path())
+            .kill_on_drop(true)
+            .arg(&tmp_file)
+            .output()
+            .await
+            .context("执行聊天标题 OCR 失败")?;
+        if !output.status.success() {
+            bail!(
+                "聊天标题 OCR 失败: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        let mut items: Vec<OcrItem> =
+            serde_json::from_slice(&output.stdout).context("聊天标题 OCR 返回不是有效 JSON")?;
+        items.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
+        // 不在任意 OCR 碎片里找名字；整个标题文本必须相等，识别不全则拒绝。
+        let title = items
+            .iter()
+            .map(|item| item.text.trim())
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        check_chat_title(&title, recipient)
+    }
+    .await;
+    let _ = std::fs::remove_file(&tmp_file);
+    result
 }
 
 pub fn get_ocr_binary_path() -> std::path::PathBuf {
@@ -496,9 +702,8 @@ pub async fn read_chat_messages(recipient: Option<&str>) -> Result<Vec<String>> 
     }
 
     if let Some(target) = recipient {
-        if !target.trim().is_empty() {
-            open_chat_conversation(target).await?;
-        }
+        open_chat_conversation(target).await?;
+        verify_chat_title(target).await?;
     } else {
         focus_wechat().await?;
     }
@@ -651,7 +856,7 @@ pub async fn wait_for_new_message(
                 if is_changed {
                     info!("检测到会话列表变化，自动点击查看...");
                     // 点击该会话打开其聊天窗口
-                    mouse_click(s.click_x, s.click_y);
+                    mouse_click(s.click_x, s.click_y).await?;
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
                     // 读取该会话的右侧真实气泡记录
@@ -672,5 +877,152 @@ pub async fn wait_for_new_message(
         }
 
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod send_safety_tests {
+    use super::*;
+
+    fn item(text: &str, x: f64, y: f64) -> OcrItem {
+        OcrItem {
+            text: text.into(),
+            x,
+            y,
+        }
+    }
+
+    #[test]
+    fn names_trim_boundaries_and_numeric_member_suffixes() {
+        for (raw, expected) in [
+            ("  张三  ", "张三"),
+            ("【研发群 (12)】！", "研发群"),
+            ("“研发群（ 12 ）”", "研发群"),
+            ("研发(内部)群", "研发(内部)群"),
+            ("张 三", "张 三"),
+            ("张三123", "张三123"),
+            ("... （12） ...", ""),
+            ("！ ， ", ""),
+        ] {
+            assert_eq!(normalize_chat_name(raw), expected, "{raw}");
+        }
+    }
+
+    #[test]
+    fn preview_lines_do_not_select_a_conversation() {
+        for preview in ["张三: 好的", "张三"] {
+            let items = [item(preview, 0.25, 0.14), item("工作群", 0.25, 0.10)];
+            assert!(matches!(
+                match_name_column(&items, "张三"),
+                NameColumnMatch::Missing
+            ));
+        }
+    }
+
+    #[test]
+    fn fragments_and_prefixes_do_not_match() {
+        for (name, recipient) in [
+            ("文件", "文件传输助手"),
+            ("群", "研发群"),
+            ("张三丰", "张三"),
+            ("张三", "张三丰"),
+            ("", "张三"),
+        ] {
+            let items = [item(name, 0.2, 0.1)];
+            assert!(matches!(
+                match_name_column(&items, recipient),
+                NameColumnMatch::Missing
+            ));
+        }
+    }
+
+    #[test]
+    fn only_top_left_name_column_item_can_match() {
+        let items = [
+            item("张三", 0.8, 0.10),
+            item("李四", 0.2, 0.10),
+            item("张三", 0.4, 0.10),
+            item("张三", 0.2, 0.14),
+        ];
+        assert!(matches!(
+            match_name_column(&items, "张三"),
+            NameColumnMatch::Missing
+        ));
+        match match_name_column(&items, "李四") {
+            NameColumnMatch::Unique(name) => assert_eq!(name.text, "李四"),
+            other => panic!("名称列应命中李四: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unique_name_matches_after_normalization() {
+        let items = [
+            item("09:00", 0.85, 0.10),
+            item("研发群 (12)", 0.55, 0.11),
+            item("张三: 好的", 0.2, 0.15),
+            item("其他群", 0.2, 0.25),
+        ];
+        match match_name_column(&items, "【研发群】") {
+            NameColumnMatch::Unique(name) => assert_eq!(name.y, 0.11),
+            other => panic!("唯一名称应命中: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_normalized_names_are_ambiguous() {
+        let items = [item("研发群(12)", 0.2, 0.1), item("研发群（24）", 0.2, 0.3)];
+        assert!(matches!(
+            match_name_column(&items, "研发群"),
+            NameColumnMatch::Ambiguous
+        ));
+    }
+
+    #[test]
+    fn invalid_coordinates_and_empty_targets_are_rejected() {
+        let items = [
+            item("张三", f64::NAN, 0.1),
+            item("张三", 0.2, f64::INFINITY),
+            item("张三", -0.1, 0.1),
+            item("张三", 0.2, 1.1),
+        ];
+        assert!(matches!(
+            match_name_column(&items, "张三"),
+            NameColumnMatch::Missing
+        ));
+        assert!(matches!(
+            match_name_column(&[item("...", 0.2, 0.1)], "..."),
+            NameColumnMatch::Missing
+        ));
+    }
+
+    #[test]
+    fn titles_require_complete_normalized_equality() {
+        assert!(title_matches_recipient("“研发群（12）”", "研发群"));
+        assert!(title_matches_recipient("张三", " 张三 "));
+        for (title, recipient) in [
+            ("张三丰", "张三"),
+            ("张", "张三"),
+            ("工作群 张三", "张三"),
+            ("张三 聊天记录", "张三"),
+            ("", "张三"),
+            ("...", "..."),
+            ("alice", "Alice"),
+            ("张 三", "张三"),
+        ] {
+            assert!(
+                !title_matches_recipient(title, recipient),
+                "{title} / {recipient}"
+            );
+        }
+    }
+
+    #[test]
+    fn title_mismatch_error_includes_observed_title() {
+        let error = check_chat_title("张三丰 (12)", "张三")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("张三丰 (12)"));
+        assert!(error.contains("已停止操作"));
+        assert!(check_chat_title("张三", "张三").is_ok());
     }
 }
