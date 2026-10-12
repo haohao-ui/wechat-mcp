@@ -17,6 +17,7 @@ pub struct Gateway {
     pub accounts: AccountRegistry,
     pub store: Arc<Store>,
     pub listeners: Listeners,
+    pub legacy_tools: bool,
 }
 
 impl Gateway {
@@ -41,6 +42,7 @@ impl Gateway {
             accounts,
             store,
             listeners: Listeners::default(),
+            legacy_tools: true,
         })
     }
 
@@ -60,7 +62,9 @@ impl Gateway {
             )
             .join("Library/Application Support/message-gateway/service.sqlite3"),
         };
-        Self::from_config(config, Store::open(&path)?)
+        let mut gateway = Self::from_config(config, Store::open(&path)?)?;
+        gateway.legacy_tools = crate::tools::legacy_tools_enabled();
+        Ok(gateway)
     }
 
     pub async fn call(&self, name: &str, args: Value) -> Value {
@@ -124,14 +128,14 @@ impl Gateway {
                 .execute(adapter, self.store.clone(), name, args)
                 .await;
         }
-        let legacy = matches!(
-            name,
-            "send_wechat_message"
-                | "focus_wechat"
-                | "get_recent_sessions"
-                | "read_chat_messages"
-                | "wait_for_new_message"
-        );
+        let legacy = crate::tools::is_legacy_tool(name);
+        if legacy && !self.legacy_tools {
+            if let Some(unified) = crate::tools::legacy_tool_replacement(name) {
+                bail!("旧工具 {name} 已禁用，请改用统一工具 {unified}");
+            } else {
+                bail!("旧工具 {name} 已禁用，无统一替代工具");
+            }
+        }
         let (kind, allowed): (&str, &[&str]) = match name {
             "send_message" | "send_wechat_message" => (
                 "send",
@@ -354,6 +358,7 @@ mod tests {
             accounts,
             store: Store::memory(),
             listeners: Listeners::default(),
+            legacy_tools: true,
         };
         let response = gateway.call("send_message", json!({"platform":"whatsapp","account_id":"personal","recipient":"r","message":"hello","idempotency_key":"routing-test"})).await;
         assert_eq!(response["isError"], false);
@@ -426,6 +431,7 @@ mod tests {
             accounts,
             store: Store::memory(),
             listeners: Listeners::default(),
+            legacy_tools: true,
         };
         let result = gateway
             .call(
@@ -455,6 +461,7 @@ mod tests {
             accounts,
             store: Store::memory(),
             listeners: Listeners::default(),
+            legacy_tools: true,
         };
         for args in [
             json!({"platform":"wechat","recipient":"r","message":"m"}),
@@ -501,5 +508,44 @@ mod tests {
         assert_eq!(account["capabilities"]["full_history"], false);
         assert_eq!(account["capabilities"]["delivery_receipts"], false);
         assert_eq!(account["capabilities"]["background_events"], false);
+    }
+
+    #[tokio::test]
+    async fn legacy_tools_disabled_returns_error_with_hint() {
+        let adapter = RecordingAdapter::new("wechat", "local", "local");
+        let mut accounts = AccountRegistry::default();
+        accounts.register(adapter.clone()).unwrap();
+        let gateway = Gateway {
+            accounts,
+            store: Store::memory(),
+            listeners: Listeners::default(),
+            legacy_tools: false,
+        };
+
+        for (tool, expected_unified) in [
+            ("send_wechat_message", Some("send_message")),
+            ("get_recent_sessions", Some("list_conversations")),
+            ("read_chat_messages", Some("get_messages")),
+            ("wait_for_new_message", Some("wait_for_message")),
+            ("focus_wechat", None),
+        ] {
+            let res = gateway.call(tool, json!({})).await;
+            assert_eq!(
+                res["isError"], true,
+                "tool {tool} should return isError: true when legacy disabled"
+            );
+            let text = res["content"][0]["text"].as_str().unwrap();
+            if let Some(unified) = expected_unified {
+                assert!(
+                    text.contains(unified),
+                    "error message for {tool} should mention {unified}, got: {text}"
+                );
+            } else {
+                assert!(
+                    text.contains("无统一替代工具"),
+                    "error message for {tool} should state no unified replacement, got: {text}"
+                );
+            }
+        }
     }
 }
