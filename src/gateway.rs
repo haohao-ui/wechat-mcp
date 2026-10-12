@@ -17,6 +17,7 @@ pub struct Gateway {
     pub accounts: AccountRegistry,
     pub store: Arc<Store>,
     pub listeners: Listeners,
+    pub legacy_tools: bool,
 }
 
 impl Gateway {
@@ -41,6 +42,7 @@ impl Gateway {
             accounts,
             store,
             listeners: Listeners::default(),
+            legacy_tools: true,
         })
     }
 
@@ -60,7 +62,9 @@ impl Gateway {
             )
             .join("Library/Application Support/message-gateway/service.sqlite3"),
         };
-        Self::from_config(config, Store::open(&path)?)
+        let mut gateway = Self::from_config(config, Store::open(&path)?)?;
+        gateway.legacy_tools = crate::tools::legacy_tools_enabled();
+        Ok(gateway)
     }
 
     pub async fn call(&self, name: &str, args: Value) -> Value {
@@ -125,7 +129,7 @@ impl Gateway {
                 .await;
         }
         let legacy = crate::tools::is_legacy_tool(name);
-        if legacy && !crate::tools::legacy_tools_enabled() {
+        if legacy && !self.legacy_tools {
             if let Some(unified) = crate::tools::legacy_tool_replacement(name) {
                 bail!("旧工具 {name} 已禁用，请改用统一工具 {unified}");
             } else {
@@ -354,6 +358,7 @@ mod tests {
             accounts,
             store: Store::memory(),
             listeners: Listeners::default(),
+            legacy_tools: true,
         };
         let response = gateway.call("send_message", json!({"platform":"whatsapp","account_id":"personal","recipient":"r","message":"hello","idempotency_key":"routing-test"})).await;
         assert_eq!(response["isError"], false);
@@ -415,11 +420,8 @@ mod tests {
         );
     }
 
-    static ENV_LOCK: Mutex<()> = Mutex::const_new(());
-
     #[tokio::test]
     async fn ambiguous_legacy_account_does_not_execute() {
-        let _guard = ENV_LOCK.lock().await;
         let first = RecordingAdapter::new("wechat", "a", "a");
         let second = RecordingAdapter::new("wechat", "b", "b");
         let mut accounts = AccountRegistry::default();
@@ -429,6 +431,7 @@ mod tests {
             accounts,
             store: Store::memory(),
             listeners: Listeners::default(),
+            legacy_tools: true,
         };
         let result = gateway
             .call(
@@ -458,6 +461,7 @@ mod tests {
             accounts,
             store: Store::memory(),
             listeners: Listeners::default(),
+            legacy_tools: true,
         };
         for args in [
             json!({"platform":"wechat","recipient":"r","message":"m"}),
@@ -508,21 +512,6 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_tools_disabled_returns_error_with_hint() {
-        struct EnvVarGuard<'a>(&'a str);
-        impl<'a> Drop for EnvVarGuard<'a> {
-            fn drop(&mut self) {
-                unsafe {
-                    std::env::remove_var(self.0);
-                }
-            }
-        }
-
-        let _guard = ENV_LOCK.lock().await;
-        unsafe {
-            std::env::set_var("MESSAGE_GATEWAY_LEGACY_TOOLS", "0");
-        }
-        let _env_guard = EnvVarGuard("MESSAGE_GATEWAY_LEGACY_TOOLS");
-
         let adapter = RecordingAdapter::new("wechat", "local", "local");
         let mut accounts = AccountRegistry::default();
         accounts.register(adapter.clone()).unwrap();
@@ -530,6 +519,7 @@ mod tests {
             accounts,
             store: Store::memory(),
             listeners: Listeners::default(),
+            legacy_tools: false,
         };
 
         for (tool, expected_unified) in [

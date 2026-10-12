@@ -119,10 +119,6 @@ fn legacy_tools() -> Vec<Value> {
     tools.clone()
 }
 
-pub fn list_tools() -> Value {
-    list_tools_with_legacy(legacy_tools_enabled())
-}
-
 pub fn list_tools_with_legacy(legacy_enabled: bool) -> Value {
     let mut tools = Vec::new();
     if legacy_enabled {
