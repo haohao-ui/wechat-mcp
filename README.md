@@ -101,7 +101,7 @@ MCP 客户端配置示例（按实际安装位置修改）：
 
 客服工具另提供客户创建/更新/查询、交互记录、上下文快照、事件领取/续租/确认、跟进任务、带证据分析和统计。后台观察通过 `start_listener` / `stop_listener` / `get_listener_status` 管理，启用状态及间隔持久保存、重启恢复；同一数据库的账号监听只允许一个负责人，事件通过 `wait_for_events` / `claim_events` 消费。详见工作流文档。
 
-原有 `send_wechat_message`、`focus_wechat`、`get_recent_sessions`、`read_chat_messages`、`wait_for_new_message` 工具名称保留，可传入可选的 `account_id`。返回内容改为统一 JSON，调用方应按结果字段判断状态，不能依赖旧自然语言文案。
+原有 `send_wechat_message`、`focus_wechat`、`get_recent_sessions`、`read_chat_messages`、`wait_for_new_message` 工具名称保留，可传入可选的 `account_id`。返回内容改为统一 JSON，调用方应按结果字段判断状态，不能依赖旧自然语言文案。支持通过环境变量 `MESSAGE_GATEWAY_LEGACY_TOOLS=0`（或 `false`/`off`）关闭旧工具：关闭后 `tools/list` 不列出它们，`tools/call` 调用将返回错误并提示改用对应统一工具（`focus_wechat` 无统一替代，一并禁用）。
 
 结果包含账号归属及 `data`，以文本 JSON 返回；协商 MCP 2025-06-18 时还提供 `structuredContent`（同时兼容 2024-11-05）。微信适配器明确报告：
 

@@ -90,6 +90,7 @@ fn gateway(store: Arc<Store>) -> (Gateway, Arc<TestAdapter>, Arc<TestAdapter>) {
             accounts,
             store,
             listeners: Listeners::default(),
+            legacy_tools: true,
         },
         a,
         b,
