@@ -115,37 +115,8 @@ pub async fn is_wechat_running() -> Result<bool> {
 
 /// 获取微信当前主窗口屏幕位置与尺寸 (x, y, width, height)
 pub async fn get_wechat_window_rect() -> Result<(f64, f64, f64, f64)> {
-    let script = r#"
-        tell application "System Events"
-            tell process "WeChat"
-                set targetWin to missing value
-                repeat with w in (every window)
-                    set sz to size of w
-                    if (item 1 of sz > 400) and (item 2 of sz > 300) then
-                        set targetWin to w
-                        exit repeat
-                    end if
-                end repeat
-                if targetWin is missing value then
-                    set targetWin to window 1
-                end if
-                set pos to position of targetWin
-                set sz to size of targetWin
-                return (item 1 of pos as string) & "," & (item 2 of pos as string) & "," & (item 1 of sz as string) & "," & (item 2 of sz as string)
-            end tell
-        end tell
-    "#;
-    let res = run_applescript(script).await?;
-    let parts: Vec<&str> = res.split(',').map(|s| s.trim()).collect();
-    if parts.len() >= 4 {
-        let x: f64 = parts[0].parse().unwrap_or(100.0);
-        let y: f64 = parts[1].parse().unwrap_or(100.0);
-        let w: f64 = parts[2].parse().unwrap_or(950.0);
-        let h: f64 = parts[3].parse().unwrap_or(680.0);
-        Ok((x, y, w, h))
-    } else {
-        bail!("无法解析微信窗口坐标与大小: {}", res);
-    }
+    let rect = query_wechat_window().await?.rect;
+    Ok((rect.x, rect.y, rect.width, rect.height))
 }
 
 /// 获取微信当前窗口屏幕坐标原点 (x, y)
@@ -155,7 +126,7 @@ pub async fn get_wechat_window_pos() -> Result<(f64, f64)> {
     Ok((x, y))
 }
 
-/// 唤起微信窗口并确保处于安全的标准主屏坐标与尺寸 (避免多屏负坐标导致点击失效)
+/// 前台激活微信；仅在窗口过小或超出所有屏幕范围时调整窗口
 pub async fn focus_wechat() -> Result<(f64, f64, f64, f64)> {
     if !is_wechat_running().await? {
         bail!("微信客户端未运行，请先启动并登录微信");
@@ -169,21 +140,177 @@ pub async fn focus_wechat() -> Result<(f64, f64, f64, f64)> {
                 set frontmost to true
                 keystroke "1" using {command down}
                 delay 0.1
-                repeat with w in (every window)
-                    set sz to size of w
-                    if (item 1 of sz > 400) and (item 2 of sz > 300) then
-                        set position of w to {100, 100}
-                        set size of w to {950, 680}
-                        exit repeat
-                    end if
-                end repeat
             end tell
         end tell
     "#;
 
     run_applescript(script).await?;
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-    Ok((100.0, 100.0, 950.0, 680.0))
+    let window = query_wechat_window().await?;
+    let screens: Vec<WindowRect> = serde_json::from_str(&run_window_tool(&["--screens"]).await?)
+        .context("无法解析屏幕范围 JSON")?;
+    if let Some(target) = adjusted_window_rect(window.rect, &screens)? {
+        // AX 窗口排序与 CGWindow 不同，以面积最大的窗口与查询工具保持一致。
+        let script = format!(
+            r#"
+            tell application "System Events"
+                tell process "WeChat"
+                    set targetWin to missing value
+                    set largestArea to 0
+                    repeat with w in (every window)
+                        set sz to size of w
+                        set area to (item 1 of sz) * (item 2 of sz)
+                        if area > largestArea then
+                            set largestArea to area
+                            set targetWin to w
+                        end if
+                    end repeat
+                    if targetWin is missing value then error "未找到微信主窗口"
+                    set size of targetWin to {{{}, {}}}
+                    set position of targetWin to {{{}, {}}}
+                end tell
+            end tell
+            "#,
+            target.width.round(),
+            target.height.round(),
+            target.x.round(),
+            target.y.round()
+        );
+        run_applescript(&script).await?;
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
+    get_wechat_window_rect().await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+struct WindowRect {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+impl WindowRect {
+    fn is_valid(self) -> bool {
+        [
+            self.x,
+            self.y,
+            self.width,
+            self.height,
+            self.x + self.width,
+            self.y + self.height,
+        ]
+        .iter()
+        .all(|value| value.is_finite())
+            && self.width > 0.0
+            && self.height > 0.0
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct WechatWindow {
+    window_id: u32,
+    #[serde(flatten)]
+    rect: WindowRect,
+    on_screen: bool,
+}
+
+fn parse_wechat_window(json: &str) -> Result<WechatWindow> {
+    let window: WechatWindow = serde_json::from_str(json).context("无法解析微信窗口 JSON")?;
+    if window.window_id == 0 || !window.rect.is_valid() {
+        bail!("微信窗口 JSON 包含无效的窗口 ID 或矩形");
+    }
+    Ok(window)
+}
+
+fn get_window_binary_path() -> std::path::PathBuf {
+    if let Ok(exe_path) = std::env::current_exe()
+        && let Some(parent) = exe_path.parent()
+    {
+        let candidate = parent.join("wechat_window");
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    std::path::PathBuf::from("bin/wechat_window")
+}
+
+async fn run_window_tool(args: &[&str]) -> Result<String> {
+    let output = Command::new(get_window_binary_path())
+        .kill_on_drop(true)
+        .args(args)
+        .output()
+        .await
+        .context("执行 wechat_window 失败，请先运行 scripts/build.sh 编译原生工具")?;
+    if !output.status.success() {
+        bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+async fn query_wechat_window() -> Result<WechatWindow> {
+    parse_wechat_window(&run_window_tool(&[]).await?)
+}
+
+/// 检查屏幕矩形的并集，允许窗口跨相邻屏幕及位于负坐标屏幕。
+fn window_inside_screens(window: WindowRect, screens: &[WindowRect]) -> bool {
+    let mut xs = vec![window.x, window.x + window.width];
+    let mut ys = vec![window.y, window.y + window.height];
+    for screen in screens {
+        xs.extend(
+            [screen.x, screen.x + screen.width]
+                .into_iter()
+                .filter(|x| *x > window.x && *x < window.x + window.width),
+        );
+        ys.extend(
+            [screen.y, screen.y + screen.height]
+                .into_iter()
+                .filter(|y| *y > window.y && *y < window.y + window.height),
+        );
+    }
+    xs.sort_by(f64::total_cmp);
+    ys.sort_by(f64::total_cmp);
+    xs.dedup();
+    ys.dedup();
+    xs.windows(2).all(|x_pair| {
+        ys.windows(2).all(|y_pair| {
+            let x = (x_pair[0] + x_pair[1]) / 2.0;
+            let y = (y_pair[0] + y_pair[1]) / 2.0;
+            screens.iter().any(|screen| {
+                x >= screen.x
+                    && x <= screen.x + screen.width
+                    && y >= screen.y
+                    && y <= screen.y + screen.height
+            })
+        })
+    })
+}
+
+fn adjusted_window_rect(window: WindowRect, screens: &[WindowRect]) -> Result<Option<WindowRect>> {
+    if !window.is_valid() || screens.is_empty() || screens.iter().any(|screen| !screen.is_valid()) {
+        bail!("微信窗口或屏幕范围无效，无法安全调整窗口");
+    }
+    if window.width >= 800.0 && window.height >= 600.0 && window_inside_screens(window, screens) {
+        return Ok(None);
+    }
+    let center_x = window.x + window.width / 2.0;
+    let center_y = window.y + window.height / 2.0;
+    let distance = |screen: &WindowRect| {
+        (center_x - center_x.clamp(screen.x, screen.x + screen.width)).powi(2)
+            + (center_y - center_y.clamp(screen.y, screen.y + screen.height)).powi(2)
+    };
+    let screen = screens
+        .iter()
+        .min_by(|a, b| distance(a).total_cmp(&distance(b)))
+        .unwrap();
+    let width = window.width.max(800.0).min(screen.width);
+    let height = window.height.max(600.0).min(screen.height);
+    Ok(Some(WindowRect {
+        x: window.x.clamp(screen.x, screen.x + screen.width - width),
+        y: window.y.clamp(screen.y, screen.y + screen.height - height),
+        width,
+        height,
+    }))
 }
 
 /// 切换并打开指定联系人/群聊的会话窗口 (优先左侧最近会话列表 OCR 直达，fallback 到搜索栏)
@@ -382,42 +509,48 @@ pub async fn get_recent_sessions() -> Result<Vec<ChatSession>> {
         bail!("微信客户端未运行，请先启动并登录微信");
     }
 
-    let (win_x, win_y, _win_w, win_h) = focus_wechat().await?;
-
-    let list_crop_x = (win_x + 65.0).round() as i64;
-    let list_crop_y = (win_y + 60.0).round() as i64;
-    let list_crop_w = 250i64;
-    let list_crop_h = (win_h - 60.0).round() as i64;
-
-    let tmp_file = format!("/tmp/wechat_sessions_{}.png", std::process::id());
-    let cap_status = Command::new("screencapture")
+    let window = query_wechat_window().await?;
+    ensure_window_observable(&window)?;
+    let crop = session_list_rect(window.rect)?;
+    let tmp_file = SessionScreenshot(
+        std::env::temp_dir().join(format!("wechat_sessions_{}.png", uuid::Uuid::new_v4())),
+    );
+    // 去掉窗口阴影，使图片边界与 CGWindow 的窗口点尺寸对应。
+    let capture = Command::new("screencapture")
         .kill_on_drop(true)
-        .args([
-            "-R",
-            &format!(
-                "{},{},{},{}",
-                list_crop_x, list_crop_y, list_crop_w, list_crop_h
-            ),
-            "-x",
-            &tmp_file,
-        ])
-        .status()
+        .args(["-l", &window.window_id.to_string(), "-x", "-o", "-t", "png"])
+        .arg(&tmp_file.0)
+        .output()
         .await
-        .context("截图会话列表失败")?;
+        .context("截图微信窗口失败，请在系统设置中授予屏幕录制权限")?;
 
-    if !cap_status.success() {
-        bail!("截图左侧会话列表失败");
+    if !capture.status.success() {
+        // 截图期间最小化时，优先报告暂停原因。
+        if let Ok(current) = query_wechat_window().await {
+            ensure_window_observable(&current)?;
+        }
+        bail!(
+            "截图微信窗口失败，请在系统设置中授予屏幕录制权限: {}",
+            String::from_utf8_lossy(&capture.stderr).trim()
+        );
     }
 
+    let (image_width, image_height) = screenshot_pixel_size(&tmp_file.0)?;
+    let pixels = crop_pixel_rect(crop, window.rect, image_width, image_height)?;
     let ocr_bin = get_ocr_binary_path();
     let ocr_output = Command::new(&ocr_bin)
         .kill_on_drop(true)
-        .arg(&tmp_file)
+        .arg(&tmp_file.0)
+        .args([
+            "--crop",
+            &pixels.x.to_string(),
+            &pixels.y.to_string(),
+            &pixels.width.to_string(),
+            &pixels.height.to_string(),
+        ])
         .output()
         .await
         .context("执行 OCR 解析会话列表失败")?;
-
-    let _ = std::fs::remove_file(&tmp_file);
 
     if !ocr_output.status.success() {
         let err = String::from_utf8_lossy(&ocr_output.stderr);
@@ -425,8 +558,127 @@ pub async fn get_recent_sessions() -> Result<Vec<ChatSession>> {
     }
 
     let raw_json = String::from_utf8_lossy(&ocr_output.stdout);
-    let mut items: Vec<OcrItem> =
+    let items: Vec<OcrItem> =
         serde_json::from_str(raw_json.trim()).context("OCR 返回不是有效 JSON")?;
+
+    let current = query_wechat_window().await?;
+    ensure_window_observable(&current)?;
+    if current.window_id != window.window_id || current.rect != window.rect {
+        bail!("微信窗口位置或尺寸已变化，本轮后台观察跳过");
+    }
+    // 像素裁剪的边界经过取整，反算点坐标避免 Retina 下点击偏移。
+    let scale_x = image_width as f64 / window.rect.width;
+    let scale_y = image_height as f64 / window.rect.height;
+    let list_crop_y = window.rect.y + pixels.y as f64 / scale_y;
+    let list_crop_h = pixels.height as f64 / scale_y;
+    let list_left = window.rect.x + pixels.x as f64 / scale_x;
+    let list_width = pixels.width as f64 / scale_x;
+    let click_x = (window.rect.x + 150.0).clamp(list_left, list_left + list_width / 2.0);
+    Ok(group_recent_sessions(
+        items,
+        click_x,
+        list_crop_y,
+        list_crop_h,
+    ))
+}
+
+struct SessionScreenshot(std::path::PathBuf);
+
+impl Drop for SessionScreenshot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn ensure_window_observable(window: &WechatWindow) -> Result<()> {
+    if !window.on_screen {
+        bail!("微信窗口已最小化，后台观察暂停");
+    }
+    Ok(())
+}
+
+fn session_list_rect(window: WindowRect) -> Result<WindowRect> {
+    let rect = WindowRect {
+        x: 65.0,
+        y: 60.0,
+        width: (window.width - 65.0).min(250.0),
+        height: window.height - 60.0,
+    };
+    if !window.is_valid() || !rect.is_valid() {
+        bail!("微信窗口过小，无法截取会话列表，后台观察暂停");
+    }
+    Ok(rect)
+}
+
+#[derive(Debug, PartialEq)]
+struct PixelRect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+fn crop_pixel_rect(
+    crop: WindowRect,
+    window: WindowRect,
+    image_width: u32,
+    image_height: u32,
+) -> Result<PixelRect> {
+    if !window.is_valid()
+        || !crop.is_valid()
+        || image_width == 0
+        || image_height == 0
+        || crop.x < 0.0
+        || crop.y < 0.0
+        || crop.x + crop.width > window.width
+        || crop.y + crop.height > window.height
+    {
+        bail!("会话列表裁剪范围或截图像素尺寸无效");
+    }
+    let scale_x = image_width as f64 / window.width;
+    let scale_y = image_height as f64 / window.height;
+    let x = (crop.x * scale_x).round() as u32;
+    let y = (crop.y * scale_y).round() as u32;
+    let right = ((crop.x + crop.width) * scale_x)
+        .round()
+        .min(image_width as f64) as u32;
+    let bottom = ((crop.y + crop.height) * scale_y)
+        .round()
+        .min(image_height as f64) as u32;
+    if right <= x || bottom <= y {
+        bail!("会话列表裁剪后的图片为空");
+    }
+    Ok(PixelRect {
+        x,
+        y,
+        width: right - x,
+        height: bottom - y,
+    })
+}
+
+fn screenshot_pixel_size(path: &std::path::Path) -> Result<(u32, u32)> {
+    use std::io::Read;
+    let mut header = [0u8; 24];
+    std::fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .context("无法读取微信窗口截图，请检查屏幕录制权限")?;
+    if &header[..8] != b"\x89PNG\r\n\x1a\n" || &header[12..16] != b"IHDR" {
+        bail!("微信窗口截图不是有效 PNG，请检查屏幕录制权限");
+    }
+    let width = u32::from_be_bytes(header[16..20].try_into().unwrap());
+    let height = u32::from_be_bytes(header[20..24].try_into().unwrap());
+    if width == 0 || height == 0 {
+        bail!("微信窗口截图为空，请检查屏幕录制权限");
+    }
+    Ok((width, height))
+}
+
+fn group_recent_sessions(
+    mut items: Vec<OcrItem>,
+    click_x: f64,
+    list_crop_y: f64,
+    list_crop_h: f64,
+) -> Vec<ChatSession> {
     items.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
 
     struct RawSessionGroup {
@@ -475,18 +727,17 @@ pub async fn get_recent_sessions() -> Result<Vec<ChatSession>> {
         if g.name.trim().is_empty() {
             continue;
         }
-        let target_y = list_crop_y as f64 + (g.base_y * list_crop_h as f64) + 6.0;
-        let target_x = win_x + 150.0;
+        let target_y = list_crop_y + (g.base_y * list_crop_h) + 6.0;
         result.push(ChatSession {
             name: g.name.trim().to_string(),
             time: g.time.trim().to_string(),
             preview: g.preview_parts.join(" ").trim().to_string(),
-            click_x: target_x,
+            click_x,
             click_y: target_y,
         });
     }
 
-    Ok(result)
+    result
 }
 
 /// 读取指定联系人/群聊（或当前打开窗口）的聊天记录文字（纯净右侧气泡区域）
@@ -672,5 +923,263 @@ pub async fn wait_for_new_message(
         }
 
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(x: f64, y: f64, width: f64, height: f64) -> WindowRect {
+        WindowRect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    fn item(text: &str, x: f64, y: f64) -> OcrItem {
+        OcrItem {
+            text: text.into(),
+            x,
+            y,
+        }
+    }
+
+    #[test]
+    fn window_json_preserves_actual_geometry_and_visibility() {
+        for on_screen in [true, false] {
+            let json = format!(
+                r#"{{"window_id":42,"x":-1200.5,"y":80,"width":950,"height":680,"on_screen":{on_screen}}}"#
+            );
+            let window = parse_wechat_window(&json).unwrap();
+            assert_eq!(window.window_id, 42);
+            assert_eq!(window.rect, rect(-1200.5, 80.0, 950.0, 680.0));
+            assert_eq!(window.on_screen, on_screen);
+            let result = ensure_window_observable(&window);
+            if on_screen {
+                result.unwrap();
+            } else {
+                assert_eq!(
+                    result.unwrap_err().to_string(),
+                    "微信窗口已最小化，后台观察暂停"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn window_json_rejects_missing_malformed_or_invalid_fields() {
+        for json in [
+            "not json",
+            r#"{"window_id":42,"x":0,"y":0,"width":950,"height":680}"#,
+            r#"{"window_id":0,"x":0,"y":0,"width":950,"height":680,"on_screen":true}"#,
+            r#"{"window_id":42,"x":0,"y":0,"width":0,"height":680,"on_screen":true}"#,
+            r#"{"window_id":42,"x":0,"y":0,"width":950,"height":-680,"on_screen":true}"#,
+            r#"{"window_id":"42","x":0,"y":0,"width":950,"height":680,"on_screen":true}"#,
+        ] {
+            assert!(parse_wechat_window(json).is_err(), "{json}");
+        }
+    }
+
+    #[test]
+    fn valid_windows_on_negative_screens_and_across_screens_are_unchanged() {
+        let screens = [
+            rect(-1440.0, 0.0, 1440.0, 900.0),
+            rect(0.0, 0.0, 1440.0, 900.0),
+        ];
+        for window in [
+            rect(-1300.0, 80.0, 950.0, 680.0),
+            rect(-400.0, 0.0, 950.0, 900.0),
+        ] {
+            assert_eq!(adjusted_window_rect(window, &screens).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn screen_gaps_are_not_treated_as_visible_window_area() {
+        let screens = [
+            rect(-1440.0, 0.0, 1440.0, 900.0),
+            rect(100.0, 0.0, 1440.0, 900.0),
+        ];
+        let window = rect(-400.0, 80.0, 950.0, 680.0);
+        assert!(!window_inside_screens(window, &screens));
+        let adjusted = adjusted_window_rect(window, &screens).unwrap().unwrap();
+        assert!(window_inside_screens(adjusted, &screens));
+    }
+
+    #[test]
+    fn offscreen_and_small_windows_are_adjusted_only_as_needed() {
+        let screens = [
+            rect(-1440.0, 0.0, 1440.0, 900.0),
+            rect(0.0, 0.0, 1440.0, 900.0),
+        ];
+        assert_eq!(
+            adjusted_window_rect(rect(-1500.0, 80.0, 950.0, 680.0), &screens).unwrap(),
+            Some(rect(-1440.0, 80.0, 950.0, 680.0))
+        );
+        assert_eq!(
+            adjusted_window_rect(rect(-1300.0, 80.0, 700.0, 500.0), &screens).unwrap(),
+            Some(rect(-1300.0, 80.0, 800.0, 600.0))
+        );
+        assert_eq!(
+            adjusted_window_rect(rect(100.0, 100.0, 950.0, 680.0), &screens).unwrap(),
+            None
+        );
+        assert_eq!(
+            adjusted_window_rect(rect(100.0, 100.0, 800.0, 600.0), &screens).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn window_adjustment_handles_small_screens_and_rejects_invalid_bounds() {
+        let screen = rect(0.0, 0.0, 640.0, 480.0);
+        assert_eq!(
+            adjusted_window_rect(rect(100.0, 100.0, 700.0, 500.0), &[screen]).unwrap(),
+            Some(screen)
+        );
+        assert!(adjusted_window_rect(screen, &[]).is_err());
+        assert!(adjusted_window_rect(screen, &[rect(0.0, 0.0, 0.0, 480.0)]).is_err());
+        assert!(adjusted_window_rect(rect(f64::NAN, 0.0, 800.0, 600.0), &[screen]).is_err());
+    }
+
+    #[test]
+    fn session_crop_uses_actual_image_scale_for_retina_and_standard_displays() {
+        let window = rect(-1300.0, 80.0, 950.0, 680.0);
+        let crop = session_list_rect(window).unwrap();
+        assert_eq!(crop, rect(65.0, 60.0, 250.0, 620.0));
+        for scale in [1, 2] {
+            assert_eq!(
+                crop_pixel_rect(crop, window, 950 * scale, 680 * scale).unwrap(),
+                PixelRect {
+                    x: 65 * scale,
+                    y: 60 * scale,
+                    width: 250 * scale,
+                    height: 620 * scale
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn pixel_crop_rounds_edges_and_uses_independent_image_axes() {
+        let window = rect(0.0, 0.0, 950.0, 680.0);
+        let crop = session_list_rect(window).unwrap();
+        assert_eq!(
+            crop_pixel_rect(crop, window, 1425, 1360).unwrap(),
+            PixelRect {
+                x: 98,
+                y: 120,
+                width: 375,
+                height: 1240
+            }
+        );
+    }
+
+    #[test]
+    fn small_window_crop_is_clipped_without_resizing_the_window() {
+        let window = rect(20.0, 30.0, 300.0, 400.0);
+        let crop = session_list_rect(window).unwrap();
+        assert_eq!(crop, rect(65.0, 60.0, 235.0, 340.0));
+        assert_eq!(
+            crop_pixel_rect(crop, window, 600, 800).unwrap(),
+            PixelRect {
+                x: 130,
+                y: 120,
+                width: 470,
+                height: 680
+            }
+        );
+        assert!(session_list_rect(rect(0.0, 0.0, 65.0, 680.0)).is_err());
+        assert!(session_list_rect(rect(0.0, 0.0, 950.0, 60.0)).is_err());
+    }
+
+    #[test]
+    fn pixel_crop_rejects_empty_or_out_of_bounds_images() {
+        let window = rect(0.0, 0.0, 950.0, 680.0);
+        let crop = session_list_rect(window).unwrap();
+        assert!(crop_pixel_rect(crop, window, 0, 1360).is_err());
+        assert!(crop_pixel_rect(crop, window, 1, 1).is_err());
+        assert!(crop_pixel_rect(rect(-1.0, 0.0, 250.0, 620.0), window, 1900, 1360).is_err());
+        assert!(crop_pixel_rect(rect(65.0, 60.0, 950.0, 620.0), window, 1900, 1360).is_err());
+    }
+
+    #[test]
+    fn session_grouping_preserves_sorting_names_times_previews_and_screen_coordinates() {
+        let groups = group_recent_sessions(
+            vec![
+                item(" 后一条 ", 0.1, 0.3),
+                item(" 第二段 ", 0.1, 0.15),
+                item(" 09:00 ", 0.8, 0.1),
+                item(" 第一条 ", 0.1, 0.1),
+                item(" 第一段 ", 0.1, 0.13),
+                item(" 10:00 ", 0.8, 0.3),
+            ],
+            -1150.0,
+            140.0,
+            620.0,
+        );
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].name, "第一条");
+        assert_eq!(groups[0].time, "09:00");
+        assert_eq!(groups[0].preview, "第一段   第二段");
+        assert_eq!(groups[0].click_x, -1150.0);
+        assert_eq!(groups[0].click_y, 208.0);
+        assert_eq!(groups[1].name, "后一条");
+        assert_eq!(groups[1].time, "10:00");
+        assert_eq!(groups[1].click_y, 332.0);
+    }
+
+    #[test]
+    fn session_grouping_keeps_threshold_and_discards_groups_without_names() {
+        let groups = group_recent_sessions(
+            vec![
+                item("仅时间", 0.8, 0.0),
+                item("   ", 0.1, 0.2),
+                item("第一条", 0.55, 0.4),
+                item("摘要", 0.1, 0.479),
+                item("第二条", 0.1, 0.481),
+                item("第二条时间", 0.56, 0.481),
+            ],
+            350.0,
+            260.0,
+            620.0,
+        );
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].name, "第一条");
+        assert_eq!(groups[0].preview, "摘要");
+        assert_eq!(groups[1].name, "第二条");
+        assert_eq!(groups[1].time, "第二条时间");
+        assert!(group_recent_sessions(vec![], 350.0, 260.0, 620.0).is_empty());
+    }
+
+    #[test]
+    fn temporary_screenshot_is_removed_on_error_or_cancellation_drop() {
+        let path =
+            std::env::temp_dir().join(format!("wechat_cleanup_{}.png", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"partial screenshot").unwrap();
+        {
+            let _screenshot = SessionScreenshot(path.clone());
+        }
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn screenshot_dimensions_are_read_from_png_and_invalid_files_are_rejected() {
+        let screenshot = SessionScreenshot(
+            std::env::temp_dir().join(format!("wechat_header_{}.png", uuid::Uuid::new_v4())),
+        );
+        let mut header = Vec::from(&b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR"[..]);
+        header.extend(1900u32.to_be_bytes());
+        header.extend(1360u32.to_be_bytes());
+        std::fs::write(&screenshot.0, &header).unwrap();
+        assert_eq!(screenshot_pixel_size(&screenshot.0).unwrap(), (1900, 1360));
+        header[16..20].fill(0);
+        std::fs::write(&screenshot.0, &header).unwrap();
+        assert!(screenshot_pixel_size(&screenshot.0).is_err());
+        std::fs::write(&screenshot.0, b"not a png").unwrap();
+        assert!(screenshot_pixel_size(&screenshot.0).is_err());
     }
 }
