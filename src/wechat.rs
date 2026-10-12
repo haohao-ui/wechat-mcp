@@ -1105,10 +1105,14 @@ pub async fn wait_for_new_message(
                 };
 
                 if is_changed {
-                    info!("检测到会话列表变化，自动点击查看...");
-                    // 点击该会话打开其聊天窗口
-                    mouse_click(s.click_x, s.click_y).await?;
-                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    info!("检测到会话列表变化，尝试安全打开会话...");
+                    // 后台截图坐标可能被其他窗口遮挡，须激活微信并核验会话身份。
+                    if let Err(error) = open_chat_conversation(&s.name).await {
+                        return Ok(Some(format!(
+                            "检测到会话 [{}] 的列表变化：\n【时间】: {}\n【消息摘要】: {}\n未能安全打开会话，未读取聊天气泡\n【错误原因】: {error:#}",
+                            s.name, s.time, s.preview
+                        )));
+                    }
 
                     // 读取该会话的右侧真实气泡记录
                     let full_chat = read_chat_messages(None).await?;
