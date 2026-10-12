@@ -80,9 +80,9 @@ MCP 客户端配置示例（按实际安装位置修改）：
 {
   "mcpServers": {
     "wechat": {
-      "command": "/Users/example/tools/code/Rust/wechat-mcp/target/release/wechat-mcp",
+      "command": "/path/to/wechat-mcp/target/release/wechat-mcp",
       "env": {
-        "MESSAGE_GATEWAY_CONFIG": "/Users/example/tools/code/Rust/wechat-mcp/gateway.example.json"
+        "MESSAGE_GATEWAY_CONFIG": "/path/to/wechat-mcp/gateway.example.json"
       }
     }
   }

@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: 构建 macOS 通用二进制并发布
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 敏感信息检查
+        run: scripts/check_sensitive.sh
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: 测试
+        run: cargo test --locked
+      - name: 构建 Rust（arm64 + x86_64）
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+      - name: 打包通用二进制
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          OUT="wechat-mcp-${VERSION}-macos-universal"
+          mkdir -p "dist/$OUT"
+          lipo -create -output "dist/$OUT/wechat-mcp" \
+            target/aarch64-apple-darwin/release/wechat-mcp \
+            target/x86_64-apple-darwin/release/wechat-mcp
+          for t in wechat_ocr wechat_click wechat_window; do
+            swiftc -O -target arm64-apple-macos13 native/$t.swift -o "/tmp/$t-arm64"
+            swiftc -O -target x86_64-apple-macos13 native/$t.swift -o "/tmp/$t-x86_64"
+            lipo -create -output "dist/$OUT/$t" "/tmp/$t-arm64" "/tmp/$t-x86_64"
+          done
+          cp README.md gateway.example.json "dist/$OUT/"
+          tar -C dist -czf "dist/$OUT.tar.gz" "$OUT"
+          shasum -a 256 "dist/$OUT.tar.gz" > "dist/$OUT.tar.gz.sha256"
+      - name: 发布 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
+          generate_release_notes: true
