@@ -702,7 +702,7 @@ async fn listener_migration_preserves_existing_customer_data() {
         .run(|conn| Ok(conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?))
         .await
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
 }
 
 #[tokio::test]

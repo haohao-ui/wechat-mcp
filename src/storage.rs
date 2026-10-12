@@ -52,7 +52,7 @@ pub fn require_customer(conn: &Connection, key: &AccountKey, customer: &str) -> 
 }
 
 pub const EVENT_SELECT: &str = "SELECT json_object('event_id',event_id,'customer_id',customer_id,'kind',kind,'source',source,'verified',json(CASE verified WHEN 1 THEN 'true' ELSE 'false' END),'occurred_at',occurred_at,'observed_at',observed_at,'payload',json(payload),'state',state,'consumer',consumer,'lease_until',lease_until) FROM events WHERE platform=?1 AND account_id=?2";
-pub const OUTBOX_SELECT: &str = "SELECT json_object('send_id',send_id,'customer_id',customer_id,'idempotency_key',idempotency_key,'recipient',recipient,'message',message,'status',status,'result',CASE WHEN result IS NULL THEN NULL ELSE json(result) END,'created_at',created_at,'updated_at',updated_at,'delivery','unknown') FROM outbox WHERE platform=?1 AND account_id=?2";
+pub const OUTBOX_SELECT: &str = "SELECT json_object('send_id',send_id,'customer_id',customer_id,'idempotency_key',idempotency_key,'recipient',recipient,'message',message,'status',status,'result',CASE WHEN result IS NULL THEN NULL ELSE json(result) END,'created_at',created_at,'updated_at',updated_at,'delivery',CASE status WHEN 'rejected' THEN 'not_sent' ELSE 'unknown' END) FROM outbox WHERE platform=?1 AND account_id=?2";
 
 impl Store {
     pub fn open(path: &Path) -> Result<Arc<Self>> {
@@ -97,16 +97,17 @@ impl Store {
         )?;
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        match version {
-            0 => {
-                transaction.execute_batch(include_str!("../migrations/001_service_core.sql"))?;
-                transaction
-                    .execute_batch(include_str!("../migrations/002_listener_settings.sql"))?;
-            }
-            1 => transaction
-                .execute_batch(include_str!("../migrations/002_listener_settings.sql"))?,
-            2 => {}
-            _ => bail!("数据库版本 {version} 高于支持版本，拒绝打开"),
+        if !(0..=3).contains(&version) {
+            bail!("数据库版本 {version} 高于支持版本，拒绝打开");
+        }
+        if version < 1 {
+            transaction.execute_batch(include_str!("../migrations/001_service_core.sql"))?;
+        }
+        if version < 2 {
+            transaction.execute_batch(include_str!("../migrations/002_listener_settings.sql"))?;
+        }
+        if version < 3 {
+            transaction.execute_batch(include_str!("../migrations/003_provider_sync.sql"))?;
         }
         transaction.commit()?;
         let lock_prefix = match conn.path().filter(|path| !path.is_empty()) {
@@ -579,5 +580,48 @@ mod tests {
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].payload["new_conversation"], json!(true));
         assert_eq!(diffs[0].payload["conversation"]["display_name"], "Charlie");
+    }
+}
+
+impl Store {
+    pub async fn provider_cursor(self: &Arc<Self>, key: AccountKey) -> Result<Option<String>> {
+        self.run(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT cursor FROM provider_cursors WHERE platform=?1 AND account_id=?2",
+                    params![key.platform, key.account_id],
+                    |r| r.get(0),
+                )
+                .optional()?)
+        })
+        .await
+    }
+
+    pub async fn commit_provider_page(
+        self: &Arc<Self>,
+        key: AccountKey,
+        page: crate::wecom_kf::SyncPage,
+    ) -> Result<usize> {
+        self.run(move |conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let mut count = 0;
+            for event in page.messages {
+                if event.payload["msgid"] != event.msgid { bail!("平台消息 ID 与事件键不一致"); }
+                let pending = event.verified && event.payload["direction"] == "inbound";
+                count += tx.execute("INSERT OR IGNORE INTO events(event_id,platform,account_id,event_key,kind,source,verified,occurred_at,observed_at,payload,state) VALUES(?1,?2,?3,?4,'message','wecom_kf_api',?5,?6,?7,?8,?9)",params![new_id(),key.platform,key.account_id,event.msgid,event.verified,event.occurred_at,now(),event.payload.to_string(),if pending {"pending"} else {"recorded"}])?;
+            }
+            // 游标与全部消息一起提交；任何失败保持原游标，重拉依赖 msgid 去重。
+            tx.execute("INSERT INTO provider_cursors(platform,account_id,cursor,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(platform,account_id) DO UPDATE SET cursor=excluded.cursor,updated_at=excluded.updated_at",params![key.platform,key.account_id,page.next_cursor,now()])?;
+            tx.commit()?;
+            Ok(count)
+        }).await
+    }
+
+    pub async fn latest_provider_inbound(
+        self: &Arc<Self>,
+        key: AccountKey,
+        user: String,
+    ) -> Result<Option<i64>> {
+        self.run(move |conn| Ok(conn.query_row("SELECT MAX(occurred_at) FROM events WHERE platform=?1 AND account_id=?2 AND source='wecom_kf_api' AND kind='message' AND verified=1 AND json_extract(payload,'$.direction')='inbound' AND json_extract(payload,'$.external_userid')=?3",params![key.platform,key.account_id,user], |r| r.get(0))?)).await
     }
 }

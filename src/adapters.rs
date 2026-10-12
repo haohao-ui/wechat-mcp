@@ -12,6 +12,9 @@ use crate::{
 pub type AdapterFuture<'a> = Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>>;
 
 pub enum Operation {
+    SyncEvents {
+        cursor: Option<String>,
+    },
     Focus,
     ListConversations,
     ReadMessages {
@@ -20,6 +23,7 @@ pub enum Operation {
     SendMessage {
         recipient: String,
         message: String,
+        idempotency: Option<String>,
     },
     WaitForMessage {
         recipient: Option<String>,
@@ -71,10 +75,14 @@ impl MessageAdapter for WechatDesktop {
 
     fn execute(&self, operation: Operation) -> AdapterFuture<'_> {
         Box::pin(async move {
+            if matches!(operation, Operation::SyncEvents { .. }) {
+                bail!("桌面适配器不支持官方消息同步");
+            }
             // UI focus, clipboard and screenshot files are shared across all requests.
             let _guard = self.desktop.lock().await;
             let _process_guard = crate::resource_lock::ResourceLock::desktop().await?;
             let data = match operation {
+                Operation::SyncEvents { .. } => unreachable!("已拒绝官方同步操作"),
                 Operation::Focus => {
                     let (x, y, width, height) = wechat::focus_wechat().await?;
                     json!({"status":"executed", "window":{"x":x,"y":y,"width":width,"height":height}})
@@ -91,7 +99,9 @@ impl MessageAdapter for WechatDesktop {
                     json!({"recipient":recipient,"text_lines":lines,"coverage":"visible_only",
                         "source":"desktop_ocr","message_ids_available":false,"direction":"unknown"})
                 }
-                Operation::SendMessage { recipient, message } => {
+                Operation::SendMessage {
+                    recipient, message, ..
+                } => {
                     if recipient.trim().is_empty() || message.trim().is_empty() {
                         bail!("recipient/message 不能为空");
                     }

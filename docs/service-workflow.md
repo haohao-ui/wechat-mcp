@@ -58,10 +58,11 @@ flowchart TD
 | 状态 | 含义 |
 |---|---|
 | `attempting` | 尝试已登记，但尚无完成结果；进程中断时也可能停留在这里 |
-| `triggered` | 桌面发送操作已触发，送达仍为 `unknown` |
+| `triggered` | 桌面操作已触发或微信客服 API 已接受，送达仍为 `unknown` |
+| `rejected` | 本地前置校验失败或平台明确拒绝，确定本次未发出，`delivery=not_sent` |
 | `unknown` | 出错或适配器未提供可信完成结果，不能判断是否产生发送副作用 |
 
-同键重复调用不会重新执行，即使状态是 `attempting` 或 `unknown`。用 `get_send_status` 查询，并核验真实会话后决定下一步。幂等机制仅避免网关重复触发，不保证平台恰好一次发送、送达或已读。
+同键重复调用不会重新执行，包括 `rejected`、`attempting` 或 `unknown`。用 `get_send_status` 查询，并核验真实会话后决定下一步。桌面幂等仅避免网关重复触发；微信客服还使用平台 msgid 避免重复接受。这不保证送达或已读。
 
 旧 `send_wechat_message` 可省略幂等键以兼容原调用，但这样每次调用会生成新键，无法识别跨调用重试。客服 Agent 应显式传键或使用统一工具。
 
@@ -72,11 +73,11 @@ flowchart TD
 `get_service_metrics` 的活动窗口按本地 `observed_at` 统计，使用 `[from,to)` 区间，默认最近 7 天：
 
 - 界面变化观察次数、Agent 交互记录数、已验证入站事件数分别统计。
-- 发送尝试按 `attempting`、`triggered`、`unknown` 分开统计。
+- 发送尝试按 `attempting`、`triggered`、`unknown`、`rejected` 分开统计。
 - 客户总数、逾期跟进数放在独立的当前快照中，不冒充历史窗口值。
 - 缺少可信入站、送达回执及收件与回复关联时，送达率和响应时间为 `null`。
 
-当前未接入已验证 Provider 消息事件，因此“已验证入站为 0”不能解释为客户没有发消息。覆盖范围仅为本地记录，不能外推为账号全部活动，也没有收入、转化率或客户流失概率的真实业务依据。
+桌面 OCR 不提供已验证 Provider 消息事件；微信客服 API 只统计本地已经同步的入站消息。因此“已验证入站为 0”不能解释为客户没有发消息。覆盖范围仅为本地记录，不能外推为账号全部活动，也没有收入、转化率或客户流失概率的真实业务依据。
 
 ## 存储、备份与恢复
 
@@ -94,10 +95,56 @@ python3 scripts/backup_db.py \
 
 输出路径必须不存在，源数据库及其目录需要可写权限以初始化 WAL 辅助文件。脚本使用 `mode=rw`，不会创建缺失的源库，也不修改业务记录。脚本验证备份完整性，禁止覆盖已有文件；不要仅复制运行中的主数据库文件而遗漏 WAL。
 
-恢复时停止 MCP，保留原数据，将 `MESSAGE_GATEWAY_DB` 指向备份文件或其副本后再启动。数据库从 v1 自动迁移到 v2，保留现有客户和业务记录；旧版本未保存的监听启用状态不会被猜测恢复。恢复后保留收件箱租约；未过期的租约仍属于原消费者，过期后可重新领取。所有未完成/未知发送仍不会自动重发。
+恢复时停止 MCP，保留原数据，将 `MESSAGE_GATEWAY_DB` 指向备份文件或其副本后再启动。数据库从 v0/v1/v2 自动迁移到 v3，保留现有客户和业务记录；旧版本未保存的监听启用状态不会被猜测恢复。恢复后保留收件箱租约；未过期的租约仍属于原消费者，过期后可重新领取。所有未完成/未知发送仍不会自动重发。
 
 ## 验证边界
 
 单元测试和真实 MCP 进程工作流测试使用模拟账号、消息和系统命令，验证持久化与隔离；它们不证明真实微信读取准确、消息送达或账号安全。
 
 当前底座尚未提供官方平台 webhook 接入、真实多微信账号 worker、宿主 Agent 的主动唤醒回调或可靠全量历史。后台桌面观察依赖程序运行及可用权限；同一操作系统用户的 MCP 进程通过共享文件锁串行控制桌面，等待锁超过 30 秒会报错；锁在进程退出或崩溃后由操作系统释放。同一数据库的同一账号只有一个监听负责人，其他进程可请求停止；`stop_requested` 表示等待负责人下一轮检查，不能当作已停止。`get_listener_status` 会报告持久启用状态和其他进程占用状态。
+
+
+## 微信客服 API 账号
+
+`wechat_kf/wecom_kf` 是企业微信「微信客服」官方接口通道，与个人微信桌面账号独立。账号配置继续支持原来的桌面格式；新增账号使用嵌套的 `wecom_kf` 字段，所有配置层均拒绝未知字段：
+
+```json
+{
+  "accounts": [
+    {
+      "platform": "wechat_kf",
+      "account_id": "support",
+      "adapter": "wecom_kf",
+      "wecom_kf": {
+        "corp_id": "ww_your_corp_id",
+        "open_kfid": "wk_your_open_kfid",
+        "secret_env": "WECOM_KF_SECRET"
+      }
+    }
+  ]
+}
+```
+
+启动进程前在环境中设置 `WECOM_KF_SECRET`；凭据缺失或为空会使启动失败。配置文件只存环境变量名，不存 secret。`base_url` 可省略，默认 `https://qyapi.weixin.qq.com`；仅本地 mock 允许 HTTP。覆盖地址是受信任的凭据接收端；不要使用不受信任的代理。HTTP 不跟随重定向，错误不输出请求 URL、响应正文、secret 或 access_token；成功响应若回显当前凭据，也会拒绝返回或保存。token 只在内存缓存，正常有效期提前 300 秒刷新，失效码 40001/40014/42001 最多刷新重试一次，并发刷新由互斥锁合并。
+
+绑定为 `wecom_kf:{corp_id}:{open_kfid}`，重复绑定禁止注册。`identity_verified=true` 表示官方凭据绑定，不等于启动时已经完成远端凭据验证；启动不会调用企业微信。需在企业微信后台授权应用管理相应客服账号、启用 API，并确保应用可见范围覆盖接待人员。
+
+| 能力 | 微信客服 API | 微信桌面 |
+|---|---|---|
+| 文本发送 | 支持，目标为 `external_userid` | 支持，目标为搜索名称 |
+| 后台消息事件 | 官方 msgid 和 origin | 可见界面变化，未验证 |
+| 可见会话/消息读取 | 不支持 | 仅当前可见范围 |
+| 完整历史/送达回执 | 不支持 | 不支持 |
+| 后台桌面观察 | 不支持 | 支持，需桌面权限 |
+
+调用 `start_listener`（显式 `platform=wechat_kf`、`account_id=support`）后，worker 使用持久游标拉取，直到 `has_more=0` 再等待 `interval_seconds`（2–60 秒）。空消息页仍按 `has_more` 继续。每页消息和 `next_cursor` 在同一 SQLite 事务提交，按 `(platform,account_id,msgid)` 去重；重启恢复监听和游标。限流码 45009/45011 会指数退避，最长 60 秒，健康报告包含 `backoff_seconds` 和脱敏的 `last_error`，成功后复位。当前不接收 webhook 的回调 token，轮询受严格频率限制，需根据实际配额调整间隔。
+
+事件 `kind=message`、`source=wecom_kf_api`；origin 3 客户入站消息标记 `verified=true` 并进入 `pending`，origin 4 系统、5 接待人员消息也为真实官方记录，但保存为 `recorded`，方向分别为 `system`/`outbound`。未知 origin 保留为未验证的 `recorded`，不触发自动回复。系统 event 保留原始 event 对象，包含发送失败类型等；目前不会据此修改 outbox 或计算送达率。消费仍遵循 `wait_for_events → claim_events → ack_event/release_event` 的租约规则。可使用 `link_event_customer` 关联客户；`capture_customer_context` 是桌面 OCR 工具，不适用于此通道。
+
+发送前查询本账号该 `external_userid` 最近的官方、已验证入站消息；没有记录、时间在未来或已满 48 小时均拒绝，写入 `rejected`，不请求平台。正文最长 2048 UTF-8 字节，超长拒绝，避免平台截断。官方还限制每次客户发消息后最多回复 5 条，并要求会话处于允许 API 回复的状态；本地不猜测配额，由平台按 95001/95002/95018/95031 等明确错误拒绝。这些限制见[发送消息](https://developer.work.weixin.qq.com/document/path/94677)和[全局错误码](https://developer.work.weixin.qq.com/document/path/90313)。
+
+网关将 outbox 的 `send_id` 传给平台：合规的 ID 原样发送，其余用 SHA-256 前 128 位转换为 32 字节十六进制 msgid。平台成功时适配器返回 `status=accepted_by_platform`、`delivery=unknown`、`platform_msgid`；outbox 继续使用 `triggered`，与现有「已执行但送达未知」语义一致，原始平台结果保存在 `result.data`。重复 msgid 的 95033、平台繁忙 -1、网络超时、中断和无法解析的响应记为 `unknown`，因为无法确认先前发送是否已经发生。不会自动重试这些发送；token 失效重试始终使用相同 msgid。其他明确非零错误记为 `rejected`。同幂等键重放只读取已有记录，确定拒绝后若要再次尝试，应先纠正条件并明确使用新的业务幂等键。
+
+官方文档核对（2026-10-12）：[获取 token](https://developer.work.weixin.qq.com/document/path/91039)、[接收消息和事件](https://developer.work.weixin.qq.com/document/path/94670)、[发送消息](https://developer.work.weixin.qq.com/document/path/94677)、[错误码](https://developer.work.weixin.qq.com/document/path/90313)。首次无 cursor 只能获取最近 3 天内的消息；离线超过平台保留窗口不能保证恢复全部消息。发送接口返回成功也不代表最终发送成功。
+
+按文档假设，待联调核对：无回调 token 的实际轮询配额及限流码组合；token 错误响应在实际租户中可安全刷新重试；重复 msgid 的拒绝行为及去重保留期限；48 小时、5 条与会话状态在目标租户中的实际执行。接口字段、origin、32 字节 msgid 字符集和回复限制已阅读官方文档，但未做真实企业微信联调。离线 mock 通过不代表远端授权有效、消息送达或全量历史恢复。

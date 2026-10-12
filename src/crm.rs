@@ -683,12 +683,12 @@ fn apply(conn: &mut Connection, key: &AccountKey, command: Command) -> Result<Va
             let tx = conn.transaction()?;
             let counts = one(
                 &tx,
-                "SELECT json_object('interface_observations',COALESCE(SUM(CASE WHEN kind='interface_change' THEN 1 ELSE 0 END),0),'agent_records',COALESCE(SUM(CASE WHEN source='agent_record' THEN 1 ELSE 0 END),0),'verified_incoming',COALESCE(SUM(CASE WHEN verified=1 AND source='provider_event' AND json_extract(payload,'$.direction')='inbound' THEN 1 ELSE 0 END),0),'pending_events',COALESCE(SUM(CASE WHEN state IN ('pending','leased') THEN 1 ELSE 0 END),0)) FROM events WHERE platform=?1 AND account_id=?2 AND observed_at>=?3 AND observed_at<?4",
+                "SELECT json_object('interface_observations',COALESCE(SUM(CASE WHEN kind='interface_change' THEN 1 ELSE 0 END),0),'agent_records',COALESCE(SUM(CASE WHEN source='agent_record' THEN 1 ELSE 0 END),0),'verified_incoming',COALESCE(SUM(CASE WHEN verified=1 AND source IN ('provider_event','wecom_kf_api') AND json_extract(payload,'$.direction')='inbound' THEN 1 ELSE 0 END),0),'pending_events',COALESCE(SUM(CASE WHEN state IN ('pending','leased') THEN 1 ELSE 0 END),0)) FROM events WHERE platform=?1 AND account_id=?2 AND observed_at>=?3 AND observed_at<?4",
                 params![key.platform, key.account_id, from, to],
             )?;
             let sends = one(
                 &tx,
-                "SELECT json_object('attempting',COALESCE(SUM(CASE WHEN status='attempting' THEN 1 ELSE 0 END),0),'triggered',COALESCE(SUM(CASE WHEN status='triggered' THEN 1 ELSE 0 END),0),'unknown',COALESCE(SUM(CASE WHEN status='unknown' THEN 1 ELSE 0 END),0)) FROM outbox WHERE platform=?1 AND account_id=?2 AND created_at>=?3 AND created_at<?4",
+                "SELECT json_object('attempting',COALESCE(SUM(CASE WHEN status='attempting' THEN 1 ELSE 0 END),0),'triggered',COALESCE(SUM(CASE WHEN status='triggered' THEN 1 ELSE 0 END),0),'unknown',COALESCE(SUM(CASE WHEN status='unknown' THEN 1 ELSE 0 END),0),'rejected',COALESCE(SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END),0)) FROM outbox WHERE platform=?1 AND account_id=?2 AND created_at>=?3 AND created_at<?4",
                 params![key.platform, key.account_id, from, to],
             )?;
             let snapshot = one(

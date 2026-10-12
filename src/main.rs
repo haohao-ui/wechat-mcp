@@ -12,6 +12,7 @@ mod service_tools;
 mod storage;
 mod tools;
 mod wechat;
+mod wecom_kf;
 
 use std::{collections::HashMap, sync::Arc};
 

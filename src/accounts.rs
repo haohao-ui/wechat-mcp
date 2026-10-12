@@ -121,9 +121,19 @@ impl AccountRegistry {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountConfig {
+    pub wecom_kf: Option<WecomKfConfig>,
     pub platform: String,
     pub account_id: String,
     pub adapter: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WecomKfConfig {
+    pub corp_id: String,
+    pub open_kfid: String,
+    pub secret_env: String,
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -139,6 +149,7 @@ impl Default for GatewayConfig {
                 platform: "wechat".into(),
                 account_id: "local".into(),
                 adapter: "wechat_desktop".into(),
+                wecom_kf: None,
             }],
         }
     }

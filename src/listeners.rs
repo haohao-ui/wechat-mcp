@@ -24,10 +24,12 @@ struct Health {
     last_success_at: Option<i64>,
     last_error: Option<String>,
     queued_observations: u64,
+    backoff_seconds: u64,
 }
 struct Worker {
     task: JoinHandle<()>,
     health: Arc<Mutex<Health>>,
+    official_events: bool,
 }
 #[derive(Default)]
 pub struct Listeners {
@@ -46,8 +48,9 @@ impl Listeners {
         if !(2..=60).contains(&interval) {
             bail!("interval_seconds 必须为 2–60");
         }
-        if adapter.account().capabilities.source != "desktop_ocr"
-            || !adapter.account().capabilities.visible_conversations
+        if !adapter.account().capabilities.background_events
+            && (adapter.account().capabilities.source != "desktop_ocr"
+                || !adapter.account().capabilities.visible_conversations)
         {
             bail!("此适配器不支持桌面会话观察；API 适配器应通过已验证事件接入");
         }
@@ -68,22 +71,44 @@ impl Listeners {
             last_success_at: None,
             last_error: None,
             queued_observations: 0,
+            backoff_seconds: 0,
         }));
         let live = health.clone();
         let account = key.clone();
+        let official_events = adapter.account().capabilities.background_events;
+        let source = adapter.account().capabilities.source.clone();
         let task = tokio::spawn(async move {
             let _ownership = ownership;
+            let mut rate_failures = 0u32;
             loop {
+                let mut delay = interval;
                 let capture = async {
                     if !store.listener_enabled(account.clone()).await? {
                         return Ok(None);
                     }
-                    let output = adapter.execute(Operation::ListConversations).await?;
-                    if output["account"] != json!(account) {
-                        bail!("适配器返回了不同账号，拒绝入库");
+                    if official_events {
+                        let cursor = store.provider_cursor(account.clone()).await?;
+                        let output = adapter.execute(Operation::SyncEvents { cursor }).await?;
+                        if output["account"] != json!(account) {
+                            bail!("适配器返回了不同账号，拒绝入库");
+                        }
+                        let page: crate::wecom_kf::SyncPage =
+                            serde_json::from_value(output["data"].clone())
+                                .map_err(|_| anyhow::anyhow!("平台同步页格式无效"))?;
+                        let has_more = page.has_more;
+                        let count = store.commit_provider_page(account.clone(), page).await?;
+                        Ok(Some((count, has_more)))
+                    } else {
+                        let output = adapter.execute(Operation::ListConversations).await?;
+                        if output["account"] != json!(account) {
+                            bail!("适配器返回了不同账号，拒绝入库");
+                        }
+                        let snapshot = output["data"]["conversations"].clone();
+                        store
+                            .observe(account.clone(), snapshot)
+                            .await
+                            .map(|count| Some((count, false)))
                     }
-                    let snapshot = output["data"]["conversations"].clone();
-                    store.observe(account.clone(), snapshot).await.map(Some)
                 };
                 let outcome = tokio::time::timeout(Duration::from_secs(30), capture).await;
                 {
@@ -93,28 +118,52 @@ impl Listeners {
                             status.state = "stopped";
                             break;
                         }
-                        Ok(Ok(Some(count))) => {
+                        Ok(Ok(Some((count, has_more)))) => {
+                            rate_failures = 0;
+                            status.backoff_seconds = 0;
+                            if has_more {
+                                delay = 0;
+                            }
                             status.state = "running";
                             status.last_success_at = Some(now());
                             status.last_error = None;
                             status.queued_observations += count as u64;
                         }
                         Ok(Err(error)) => {
+                            if official_events
+                                && error
+                                    .downcast_ref::<crate::wecom_kf::ProviderError>()
+                                    .is_some_and(|e| e.rate_limited())
+                            {
+                                rate_failures = rate_failures.saturating_add(1);
+                                delay = sync_backoff(interval, rate_failures);
+                                status.backoff_seconds = delay;
+                            } else {
+                                rate_failures = 0;
+                                status.backoff_seconds = 0;
+                            }
                             status.state = "degraded";
                             status.last_error = Some(format!("{error:#}"));
                         }
                         Err(_) => {
                             status.state = "degraded";
-                            status.last_error = Some("会话观察超过 30 秒，已终止本轮".into());
+                            status.last_error = Some("监听操作超过 30 秒，已终止本轮".into());
                         }
                     }
                 }
-                tokio::time::sleep(Duration::from_secs(interval)).await;
+                tokio::time::sleep(Duration::from_secs(delay)).await;
             }
         });
-        workers.insert(key.clone(), Worker { task, health });
+        workers.insert(
+            key.clone(),
+            Worker {
+                task,
+                health,
+                official_events,
+            },
+        );
         Ok(
-            json!({"account":key,"data":{"state":"starting","source":"desktop_ocr","incoming_verified":false,"agent_wakeup":"consumer_must_wait_or_poll_inbox"}}),
+            json!({"account":key,"data":{"state":"starting","source":source,"incoming_verified":official_events,"agent_wakeup":"consumer_must_wait_or_poll_inbox"}}),
         )
     }
 
@@ -133,7 +182,10 @@ impl Listeners {
             }
             None => json!({"health":{"state":"stopped"}}),
         };
-        Ok(json!({"account":key,"data":data,"incoming_verified":false}))
+        let incoming_verified = workers
+            .get(key)
+            .is_some_and(|worker| worker.official_events);
+        Ok(json!({"account":key,"data":data,"incoming_verified":incoming_verified}))
     }
 
     pub async fn stop(&self, key: &AccountKey, store: Arc<Store>) -> Result<Value> {
@@ -280,8 +332,9 @@ impl Listeners {
         if !(2..=60).contains(&interval) {
             bail!("interval_seconds 必须为 2–60");
         }
-        if adapter.account().capabilities.source != "desktop_ocr"
-            || !adapter.account().capabilities.visible_conversations
+        if !adapter.account().capabilities.background_events
+            && (adapter.account().capabilities.source != "desktop_ocr"
+                || !adapter.account().capabilities.visible_conversations)
         {
             bail!("适配器不支持桌面观察");
         }
@@ -344,4 +397,9 @@ impl Listeners {
         }
         Ok(())
     }
+}
+
+/// 无回调 token 的轮询发生限流时逐级退避，每页成功后复位。
+pub(crate) fn sync_backoff(interval: u64, failures: u32) -> u64 {
+    interval.saturating_mul(1u64 << failures.min(6)).min(60)
 }

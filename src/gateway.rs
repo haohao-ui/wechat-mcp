@@ -30,10 +30,21 @@ impl Gateway {
         for account in config.accounts {
             match (account.platform.as_str(), account.adapter.as_str()) {
                 ("wechat", "wechat_desktop") => {
+                    if account.wecom_kf.is_some() {
+                        bail!("桌面账号不能配置微信客服凭据");
+                    }
                     accounts.register(Arc::new(WechatDesktop::new(
                         account.account_id,
                         desktop.clone(),
                     )))?;
+                }
+                ("wechat_kf", "wecom_kf") => {
+                    let options = account.wecom_kf.context("微信客服账号缺少 wecom_kf 配置")?;
+                    accounts.register(Arc::new(crate::wecom_kf::WecomKf::from_config(
+                        account.account_id,
+                        options,
+                        store.clone(),
+                    )?))?;
                 }
                 _ => bail!("尚未实现适配器: {}/{}", account.platform, account.adapter),
             }
@@ -175,7 +186,7 @@ impl Gateway {
         {
             bail!("后台监听已启用，请使用 wait_for_events / claim_events，避免长轮询占用桌面");
         }
-        let operation = match kind {
+        let mut operation = match kind {
             "focus" => Operation::Focus,
             "list" => Operation::ListConversations,
             "read" => Operation::ReadMessages {
@@ -184,6 +195,7 @@ impl Gateway {
             "send" => Operation::SendMessage {
                 recipient: required_string(&args, "recipient")?.to_owned(),
                 message: required_string(&args, "message")?.to_owned(),
+                idempotency: None,
             },
             "wait" => {
                 let timeout = match args.get("timeout_seconds") {
@@ -203,6 +215,7 @@ impl Gateway {
         if let Operation::SendMessage {
             ref recipient,
             ref message,
+            ..
         } = operation
         {
             let request_key = if legacy {
@@ -235,6 +248,13 @@ impl Gateway {
                 .as_str()
                 .context("发送记录缺少 send_id")?
                 .to_owned();
+            if let Operation::SendMessage {
+                ref mut idempotency,
+                ..
+            } = operation
+            {
+                *idempotency = Some(send_id.clone());
+            }
             match adapter.execute(operation).await {
                 Ok(output) => {
                     if output["account"] != json!(key) {
@@ -248,7 +268,9 @@ impl Gateway {
                             .await?;
                         bail!("适配器返回不同账号，已记录为未知发送结果");
                     }
-                    let status = if output["data"]["status"] == "triggered" {
+                    let status = if output["data"]["status"] == "triggered"
+                        || output["data"]["status"] == "accepted_by_platform"
+                    {
                         "triggered"
                     } else {
                         "unknown"
@@ -260,14 +282,21 @@ impl Gateway {
                     return Ok(json!({"account":key,"data":receipt}));
                 }
                 Err(error) => {
+                    let rejected = error
+                        .downcast_ref::<crate::wecom_kf::ProviderError>()
+                        .is_some_and(|e| e.definitely_unsent);
+                    let status = if rejected { "rejected" } else { "unknown" };
                     self.store
                         .finish_send(
                             key,
                             send_id.clone(),
-                            json!({"error":format!("{error:#}"),"delivery":"unknown"}),
-                            "unknown",
+                            json!({"error":format!("{error:#}"),"delivery":if rejected {"not_sent"} else {"unknown"}}),
+                            status,
                         )
                         .await?;
+                    if rejected {
+                        bail!("发送尝试 {send_id} 已拒绝，确定未发出：{error:#}");
+                    }
                     bail!(
                         "发送尝试 {send_id} 结果未知，已持久记录；请使用 get_send_status 核对。错误: {error:#}"
                     );

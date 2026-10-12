@@ -14,3 +14,9 @@ anyhow = "1.0"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 uuid = { version = "1.26.1", features = ["v4"] }
 fs2 = "0.4.3"
+
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+sha2 = "0.10"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["net", "test-util"] }

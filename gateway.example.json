@@ -4,6 +4,17 @@
       "platform": "wechat",
       "account_id": "local",
       "adapter": "wechat_desktop"
+    },
+    {
+      "platform": "wechat_kf",
+      "account_id": "support",
+      "adapter": "wecom_kf",
+      "wecom_kf": {
+        "corp_id": "ww_your_corp_id",
+        "open_kfid": "wk_your_open_kfid",
+        "secret_env": "WECOM_KF_SECRET",
+        "base_url": "https://qyapi.weixin.qq.com"
+      }
     }
   ]
 }
