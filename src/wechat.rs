@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -14,7 +14,6 @@ pub struct CGPoint {
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
-#[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     fn CGEventCreateMouseEvent(
         source: *const std::ffi::c_void,
@@ -23,29 +22,35 @@ unsafe extern "C" {
         mouse_button: u32,
     ) -> *mut std::ffi::c_void;
     fn CGEventPost(tap: u32, event: *mut std::ffi::c_void);
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
     fn CFRelease(cf: *mut std::ffi::c_void);
 }
 
 fn get_click_binary_path() -> std::path::PathBuf {
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(parent) = exe_path.parent() {
-            let candidate = parent.join("wechat_click");
-            if candidate.exists() {
-                return candidate;
-            }
+    if let Ok(exe_path) = std::env::current_exe()
+        && let Some(parent) = exe_path.parent()
+    {
+        let candidate = parent.join("wechat_click");
+        if candidate.exists() {
+            return candidate;
         }
     }
-    let local = std::path::PathBuf::from("bin/wechat_click");
-    if local.exists() {
-        return local;
-    }
-    std::path::PathBuf::from("/Users/example/tools/code/Rust/wechat-mcp/bin/wechat_click")
+    std::path::PathBuf::from("bin/wechat_click")
 }
 
 /// 调用原生工具或 macOS 原生 CoreGraphics 发送鼠标单击事件
 pub fn mouse_click(x: f64, y: f64) {
     let click_bin = get_click_binary_path();
-    info!("执行鼠标点击: ({}, {}) [工具: {:?}, 是否存在: {}]", x, y, click_bin, click_bin.exists());
+    info!(
+        "执行鼠标点击: ({}, {}) [工具: {:?}, 是否存在: {}]",
+        x,
+        y,
+        click_bin,
+        click_bin.exists()
+    );
     if click_bin.exists() {
         let status = std::process::Command::new(&click_bin)
             .args([&x.to_string(), &y.to_string()])
@@ -74,6 +79,7 @@ pub fn mouse_click(x: f64, y: f64) {
 /// 执行一段 AppleScript 代码，通过 stdin 输入以避免 shell 转义与参数长度问题
 async fn run_applescript(script: &str) -> Result<String> {
     let mut child = Command::new("osascript")
+        .kill_on_drop(true)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -88,7 +94,10 @@ async fn run_applescript(script: &str) -> Result<String> {
         drop(stdin);
     }
 
-    let output = child.wait_with_output().await.context("等待 osascript 执行失败")?;
+    let output = child
+        .wait_with_output()
+        .await
+        .context("等待 osascript 执行失败")?;
     if !output.status.success() {
         let err_msg = String::from_utf8_lossy(&output.stderr);
         bail!("AppleScript 执行错误: {}", err_msg.trim());
@@ -194,9 +203,13 @@ pub async fn open_chat_conversation(recipient: &str) -> Result<()> {
 
     let tmp_list_img = format!("/tmp/wechat_list_{}.png", std::process::id());
     let cap_res = Command::new("screencapture")
+        .kill_on_drop(true)
         .args([
             "-R",
-            &format!("{},{},{},{}", list_crop_x, list_crop_y, list_crop_w, list_crop_h),
+            &format!(
+                "{},{},{},{}",
+                list_crop_x, list_crop_y, list_crop_w, list_crop_h
+            ),
             "-x",
             &tmp_list_img,
         ])
@@ -204,24 +217,32 @@ pub async fn open_chat_conversation(recipient: &str) -> Result<()> {
         .await;
 
     let mut found_in_list = false;
-    if let Ok(st) = cap_res {
-        if st.success() {
-            let ocr_bin = get_ocr_binary_path();
-            if let Ok(ocr_out) = Command::new(&ocr_bin).arg(&tmp_list_img).output().await {
-                let _ = std::fs::remove_file(&tmp_list_img);
-                if ocr_out.status.success() {
-                    let json_str = String::from_utf8_lossy(&ocr_out.stdout);
-                    let items: Vec<OcrItem> = serde_json::from_str(json_str.trim()).unwrap_or_default();
-                    for item in items {
-                        if item.text.contains(recipient) || recipient.contains(&item.text) {
-                            // 计算该项在屏幕上的物理 Y 坐标并点击 (稍微向下微调 4px 命中中心)
-                            let target_y = list_crop_y as f64 + (item.y * list_crop_h as f64) + 4.0;
-                            let target_x = win_x + 150.0;
-                            info!("在会话列表中找到 [{}]，直接点击坐标: ({}, {})", recipient, target_x, target_y);
-                            mouse_click(target_x, target_y);
-                            found_in_list = true;
-                            break;
-                        }
+    if let Ok(st) = cap_res
+        && st.success()
+    {
+        let ocr_bin = get_ocr_binary_path();
+        if let Ok(ocr_out) = Command::new(&ocr_bin)
+            .kill_on_drop(true)
+            .arg(&tmp_list_img)
+            .output()
+            .await
+        {
+            let _ = std::fs::remove_file(&tmp_list_img);
+            if ocr_out.status.success() {
+                let json_str = String::from_utf8_lossy(&ocr_out.stdout);
+                let items: Vec<OcrItem> = serde_json::from_str(json_str.trim()).unwrap_or_default();
+                for item in items {
+                    if item.text.contains(recipient) || recipient.contains(&item.text) {
+                        // 计算该项在屏幕上的物理 Y 坐标并点击 (稍微向下微调 4px 命中中心)
+                        let target_y = list_crop_y as f64 + (item.y * list_crop_h as f64) + 4.0;
+                        let target_x = win_x + 150.0;
+                        info!(
+                            "在会话列表中找到 [{}]，直接点击坐标: ({}, {})",
+                            recipient, target_x, target_y
+                        );
+                        mouse_click(target_x, target_y);
+                        found_in_list = true;
+                        break;
                     }
                 }
             }
@@ -317,13 +338,13 @@ pub async fn send_message(recipient: &str, message: &str) -> Result<()> {
     run_applescript(send_script).await?;
 
     // 4. 恢复原剪贴板
-    if let Some(old_content) = saved_clipboard {
-        if let Err(e) = clipboard::set_clipboard(&old_content).await {
-            warn!("恢复原剪贴板内容失败: {:?}", e);
-        }
+    if let Some(old_content) = saved_clipboard
+        && let Err(e) = clipboard::set_clipboard(&old_content).await
+    {
+        warn!("恢复原剪贴板内容失败: {:?}", e);
     }
 
-    info!("已成功完成向 [{}] 发送消息", recipient);
+    info!("已触发微信发送操作，送达状态未验证");
     Ok(())
 }
 
@@ -335,19 +356,15 @@ pub struct OcrItem {
 }
 
 pub fn get_ocr_binary_path() -> std::path::PathBuf {
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(parent) = exe_path.parent() {
-            let candidate = parent.join("wechat_ocr");
-            if candidate.exists() {
-                return candidate;
-            }
+    if let Ok(exe_path) = std::env::current_exe()
+        && let Some(parent) = exe_path.parent()
+    {
+        let candidate = parent.join("wechat_ocr");
+        if candidate.exists() {
+            return candidate;
         }
     }
-    let local = std::path::PathBuf::from("bin/wechat_ocr");
-    if local.exists() {
-        return local;
-    }
-    std::path::PathBuf::from("/Users/example/tools/code/Rust/wechat-mcp/bin/wechat_ocr")
+    std::path::PathBuf::from("bin/wechat_ocr")
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -374,9 +391,13 @@ pub async fn get_recent_sessions() -> Result<Vec<ChatSession>> {
 
     let tmp_file = format!("/tmp/wechat_sessions_{}.png", std::process::id());
     let cap_status = Command::new("screencapture")
+        .kill_on_drop(true)
         .args([
             "-R",
-            &format!("{},{},{},{}", list_crop_x, list_crop_y, list_crop_w, list_crop_h),
+            &format!(
+                "{},{},{},{}",
+                list_crop_x, list_crop_y, list_crop_w, list_crop_h
+            ),
             "-x",
             &tmp_file,
         ])
@@ -390,6 +411,7 @@ pub async fn get_recent_sessions() -> Result<Vec<ChatSession>> {
 
     let ocr_bin = get_ocr_binary_path();
     let ocr_output = Command::new(&ocr_bin)
+        .kill_on_drop(true)
         .arg(&tmp_file)
         .output()
         .await
@@ -403,7 +425,8 @@ pub async fn get_recent_sessions() -> Result<Vec<ChatSession>> {
     }
 
     let raw_json = String::from_utf8_lossy(&ocr_output.stdout);
-    let mut items: Vec<OcrItem> = serde_json::from_str(raw_json.trim()).unwrap_or_default();
+    let mut items: Vec<OcrItem> =
+        serde_json::from_str(raw_json.trim()).context("OCR 返回不是有效 JSON")?;
     items.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
 
     struct RawSessionGroup {
@@ -490,12 +513,16 @@ pub async fn read_chat_messages(recipient: Option<&str>) -> Result<Vec<String>> 
     let chat_w = (win_w - 325.0).max(300.0).round() as i64;
     let chat_h = (win_h - 180.0).max(200.0).round() as i64;
 
-    info!("读取聊天区域几何坐标: ({}, {}, {}, {})", chat_x, chat_y, chat_w, chat_h);
+    info!(
+        "读取聊天区域几何坐标: ({}, {}, {}, {})",
+        chat_x, chat_y, chat_w, chat_h
+    );
 
     let tmp_file = format!("/tmp/wechat_chat_{}.png", std::process::id());
 
     // 调用系统 screencapture
     let cap_status = Command::new("screencapture")
+        .kill_on_drop(true)
         .args([
             "-R",
             &format!("{},{},{},{}", chat_x, chat_y, chat_w, chat_h),
@@ -512,6 +539,7 @@ pub async fn read_chat_messages(recipient: Option<&str>) -> Result<Vec<String>> 
 
     let ocr_bin = get_ocr_binary_path();
     let ocr_output = Command::new(&ocr_bin)
+        .kill_on_drop(true)
         .arg(&tmp_file)
         .output()
         .await
@@ -525,8 +553,9 @@ pub async fn read_chat_messages(recipient: Option<&str>) -> Result<Vec<String>> 
     }
 
     let raw_json = String::from_utf8_lossy(&ocr_output.stdout);
-    info!("OCR 识别原始返回: {}", raw_json.trim());
-    let items: Vec<OcrItem> = serde_json::from_str(raw_json.trim()).unwrap_or_default();
+    info!("OCR 识别输出长度: {} 字节", raw_json.len());
+    let items: Vec<OcrItem> =
+        serde_json::from_str(raw_json.trim()).context("OCR 返回不是有效 JSON")?;
 
     let text_lines: Vec<String> = items
         .into_iter()
@@ -540,7 +569,10 @@ pub async fn read_chat_messages(recipient: Option<&str>) -> Result<Vec<String>> 
 /// 长轮询等待新消息到达：
 /// - 若 recipient 填入指定好友/群聊：专门监听该会话的新增消息
 /// - 若 recipient 为空或 None：全局监听左侧会话列表，任何好友/群聊发来新消息时自动捕获，并点击打开该会话提取完整聊天内容
-pub async fn wait_for_new_message(recipient: Option<&str>, timeout_seconds: u64) -> Result<Option<String>> {
+pub async fn wait_for_new_message(
+    recipient: Option<&str>,
+    timeout_seconds: u64,
+) -> Result<Option<String>> {
     if !is_wechat_running().await? {
         bail!("微信客户端未运行，请先启动并登录微信");
     }
@@ -550,16 +582,20 @@ pub async fn wait_for_new_message(recipient: Option<&str>, timeout_seconds: u64)
 
     if let Some(target) = recipient.filter(|r| !r.trim().is_empty()) {
         // === 模式 A：单目标会话长轮询 ===
-        info!("开始长轮询监听目标 [{}] 的新消息，超时设定: {} 秒", target, timeout_seconds);
+        info!(
+            "开始长轮询监听目标 [{}] 的新消息，超时设定: {} 秒",
+            target, timeout_seconds
+        );
         open_chat_conversation(target).await?;
 
-        let initial_lines = read_chat_messages(None).await.unwrap_or_default();
-        let mut known_lines: std::collections::HashSet<String> = initial_lines.into_iter().collect();
+        let initial_lines = read_chat_messages(None).await?;
+        let mut known_lines: std::collections::HashSet<String> =
+            initial_lines.into_iter().collect();
 
         while start.elapsed() < timeout {
             tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
 
-            let current_lines = read_chat_messages(None).await.unwrap_or_default();
+            let current_lines = read_chat_messages(None).await?;
             let mut new_lines = Vec::new();
 
             for line in &current_lines {
@@ -573,7 +609,7 @@ pub async fn wait_for_new_message(recipient: Option<&str>, timeout_seconds: u64)
                     known_lines.insert(line.clone());
                 }
                 let combined = new_lines.join("\n");
-                info!("监听到 [{}] 的新消息:\n{}", target, combined);
+                info!("监听到会话文字变化，共 {} 行", new_lines.len());
                 return Ok(Some(combined));
             }
         }
@@ -581,12 +617,16 @@ pub async fn wait_for_new_message(recipient: Option<&str>, timeout_seconds: u64)
         Ok(None)
     } else {
         // === 模式 B：全局会话收件箱长轮询（支持任意好友/群聊新消息自动感知） ===
-        info!("开始全局长轮询监听微信新消息（收件箱模式），超时设定: {} 秒", timeout_seconds);
+        info!(
+            "开始全局长轮询监听微信新消息（收件箱模式），超时设定: {} 秒",
+            timeout_seconds
+        );
 
         // 获取初始会话列表基线
-        let initial_sessions = get_recent_sessions().await.unwrap_or_default();
+        let initial_sessions = get_recent_sessions().await?;
         // 保存 key: name -> (time, preview)
-        let mut session_baseline: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+        let mut session_baseline: std::collections::HashMap<String, (String, String)> =
+            std::collections::HashMap::new();
         for s in initial_sessions {
             session_baseline.insert(s.name, (s.time, s.preview));
         }
@@ -594,12 +634,13 @@ pub async fn wait_for_new_message(recipient: Option<&str>, timeout_seconds: u64)
         while start.elapsed() < timeout {
             tokio::time::sleep(tokio::time::Duration::from_millis(1800)).await;
 
-            let current_sessions = get_recent_sessions().await.unwrap_or_default();
+            let current_sessions = get_recent_sessions().await?;
             for s in current_sessions {
                 let is_changed = match session_baseline.get(&s.name) {
                     Some((old_time, old_preview)) => {
                         // 时间变动或最新消息预览变动且非空
-                        (!s.preview.is_empty() && s.preview != *old_preview) || (!s.time.is_empty() && s.time != *old_time)
+                        (!s.preview.is_empty() && s.preview != *old_preview)
+                            || (!s.time.is_empty() && s.time != *old_time)
                     }
                     None => {
                         // 新冒出的置顶会话且有消息
@@ -608,13 +649,13 @@ pub async fn wait_for_new_message(recipient: Option<&str>, timeout_seconds: u64)
                 };
 
                 if is_changed {
-                    info!("检测到联系人 [{}] 发来新消息 (时间: {}, 预览: {})，自动点击查看...", s.name, s.time, s.preview);
+                    info!("检测到会话列表变化，自动点击查看...");
                     // 点击该会话打开其聊天窗口
                     mouse_click(s.click_x, s.click_y);
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
                     // 读取该会话的右侧真实气泡记录
-                    let full_chat = read_chat_messages(None).await.unwrap_or_default();
+                    let full_chat = read_chat_messages(None).await?;
                     let recent_bubbles = if full_chat.len() > 5 {
                         full_chat[full_chat.len() - 5..].join("\n")
                     } else {
@@ -633,4 +674,3 @@ pub async fn wait_for_new_message(recipient: Option<&str>, timeout_seconds: u64)
         Ok(None)
     }
 }
-
