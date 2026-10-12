@@ -96,7 +96,9 @@ impl MessageAdapter for WechatDesktop {
                         bail!("recipient/message 不能为空");
                     }
                     wechat::send_message(&recipient, &message).await?;
-                    json!({"recipient":recipient,"status":"triggered","delivery":"unknown","recipient_verified":false})
+                    json!({"recipient":recipient,"status":"triggered","delivery":"unknown",
+                        "recipient_verified":true,"recipient_verification":"chat_title_ocr",
+                        "recipient_verification_note":"标题 OCR 已匹配显示名称，仍不是微信 ID 级核验"})
                 }
                 Operation::WaitForMessage {
                     recipient,
