@@ -564,7 +564,18 @@ async fn cancelled_followups_cannot_be_completed_and_bad_snapshots_do_not_advanc
         )
         .await
         .unwrap();
-    assert!(g.store.observe(key.clone(),json!([{"display_name":"Client","preview":"bad","time_text":"now"},{"display_name":"Client","preview":"duplicate","time_text":"now"}])).await.is_err());
+    // 最小修改说明：原测试依赖同名导致整体失败以验证坏快照不推进基线。
+    // 依据新要求，同名项容错不再整体失败；此处最小修改为真正的格式错误（preview 字段类型错误），
+    // 确保继续验证“坏快照不推进基线”的不变量。
+    assert!(
+        g.store
+            .observe(
+                key.clone(),
+                json!([{"display_name":"Client","preview":123,"time_text":"now"}])
+            )
+            .await
+            .is_err()
+    );
     assert_eq!(
         g.store
             .observe(
@@ -710,4 +721,213 @@ async fn persistent_observer_mode_does_not_allow_ui_long_poll_to_starve_it() {
             .contains("wait_for_events")
     );
     call(&g, "a", "stop_listener", json!({})).await;
+}
+
+#[tokio::test]
+async fn observe_duplicate_names_succeed_and_tag_ambiguous_name() {
+    let (g, _, _) = gateway(Store::memory());
+    let key = AccountKey {
+        platform: "wechat".into(),
+        account_id: "a".into(),
+    };
+
+    // 1. 同名项不再整体失败，可正常建立观察基准
+    let initial = json!([
+        {"display_name": "Client", "preview": "p1", "time_text": "10:00"},
+        {"display_name": "Client", "preview": "p2", "time_text": "10:01"}
+    ]);
+    assert_eq!(g.store.observe(key.clone(), initial).await.unwrap(), 0);
+
+    // 2. 第二轮比对：第一个 Client 的 preview 变化
+    let second = json!([
+        {"display_name": "Client", "preview": "p1_updated", "time_text": "10:00"},
+        {"display_name": "Client", "preview": "p2", "time_text": "10:01"}
+    ]);
+    assert_eq!(g.store.observe(key.clone(), second).await.unwrap(), 1);
+
+    // 3. 验证入队事件 payload：包含 ambiguous_name: true 和 changed: ["preview"]
+    let claimed = call(&g, "a", "claim_events", json!({"consumer": "agent-1"})).await;
+    let events = claimed["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    let payload = &events[0]["payload"];
+    assert_eq!(payload["ambiguous_name"], true);
+    assert_eq!(payload["changed"], json!(["preview"]));
+    assert_eq!(payload["incoming_verified"], false);
+    assert_eq!(payload["coverage"], "visible_only");
+    assert_eq!(payload["conversation"]["preview"], "p1_updated");
+}
+
+#[tokio::test]
+async fn observe_time_only_change_does_not_enqueue_and_advances_baseline() {
+    let (g, _, _) = gateway(Store::memory());
+    let key = AccountKey {
+        platform: "wechat".into(),
+        account_id: "a".into(),
+    };
+
+    let initial = json!([
+        {"display_name": "Alice", "preview": "hello", "time_text": "10:30"}
+    ]);
+    assert_eq!(g.store.observe(key.clone(), initial).await.unwrap(), 0);
+
+    // 跨天时 preview 未变，仅 time_text 变为 "昨天"：不应入队
+    let time_changed = json!([
+        {"display_name": "Alice", "preview": "hello", "time_text": "昨天"}
+    ]);
+    assert_eq!(g.store.observe(key.clone(), time_changed).await.unwrap(), 0);
+
+    // 验证快照基线已照常推进：此后再来相同的快照依然为 0
+    let same = json!([
+        {"display_name": "Alice", "preview": "hello", "time_text": "昨天"}
+    ]);
+    assert_eq!(g.store.observe(key.clone(), same).await.unwrap(), 0);
+
+    // 基于新基线，preview 产生变化：此时应当入队
+    let preview_changed = json!([
+        {"display_name": "Alice", "preview": "new msg", "time_text": "昨天"}
+    ]);
+    assert_eq!(g.store.observe(key, preview_changed).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn observe_preview_change_enqueues_event() {
+    let (g, _, _) = gateway(Store::memory());
+    let key = AccountKey {
+        platform: "wechat".into(),
+        account_id: "a".into(),
+    };
+
+    let initial = json!([
+        {"display_name": "Bob", "preview": "old preview", "time_text": "now"}
+    ]);
+    assert_eq!(g.store.observe(key.clone(), initial).await.unwrap(), 0);
+
+    let next = json!([
+        {"display_name": "Bob", "preview": "new preview", "time_text": "now"}
+    ]);
+    assert_eq!(g.store.observe(key, next).await.unwrap(), 1);
+
+    let claimed = call(&g, "a", "claim_events", json!({"consumer": "agent-1"})).await;
+    let events = claimed["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    let payload = &events[0]["payload"];
+    assert_eq!(payload["changed"], json!(["preview"]));
+    assert!(payload["new_conversation"].is_null());
+    assert_eq!(payload["incoming_verified"], false);
+    assert_eq!(payload["coverage"], "visible_only");
+    assert_eq!(payload["conversation"]["preview"], "new preview");
+}
+
+#[tokio::test]
+async fn observe_scrolled_conversation_does_not_enqueue() {
+    let (g, _, _) = gateway(Store::memory());
+    let key = AccountKey {
+        platform: "wechat".into(),
+        account_id: "a".into(),
+    };
+
+    // 满屏旧快照（5 项）
+    let old_full = json!([
+        {"display_name": "U1", "preview": "p1", "time_text": "t1"},
+        {"display_name": "U2", "preview": "p2", "time_text": "t2"},
+        {"display_name": "U3", "preview": "p3", "time_text": "t3"},
+        {"display_name": "U4", "preview": "p4", "time_text": "t4"},
+        {"display_name": "U5", "preview": "p5", "time_text": "t5"}
+    ]);
+    assert_eq!(g.store.observe(key.clone(), old_full).await.unwrap(), 0);
+
+    // 场景 1：滚动列表，顶部 U1 滚出，尾部露出未在旧快照中出现的 U6（非顶部索引 0）
+    let scrolled = json!([
+        {"display_name": "U2", "preview": "p2", "time_text": "t2"},
+        {"display_name": "U3", "preview": "p3", "time_text": "t3"},
+        {"display_name": "U4", "preview": "p4", "time_text": "t4"},
+        {"display_name": "U5", "preview": "p5", "time_text": "t5"},
+        {"display_name": "U6", "preview": "p6", "time_text": "t6"}
+    ]);
+    assert_eq!(g.store.observe(key.clone(), scrolled).await.unwrap(), 0);
+
+    // 场景 2：旧快照未满屏时（old_count < threshold），不可能有会话被滚出，任何新出现的会话都应入队
+    let not_full_old = json!([
+        {"display_name": "N1", "preview": "p1", "time_text": "t1"},
+        {"display_name": "N2", "preview": "p2", "time_text": "t2"}
+    ]);
+    let key_b = AccountKey {
+        platform: "wechat".into(),
+        account_id: "b".into(),
+    };
+    assert_eq!(
+        g.store.observe(key_b.clone(), not_full_old).await.unwrap(),
+        0
+    );
+
+    let not_full_new_top = json!([
+        {"display_name": "N0", "preview": "p0", "time_text": "t0"},
+        {"display_name": "N1", "preview": "p1", "time_text": "t1"},
+        {"display_name": "N2", "preview": "p2", "time_text": "t2"}
+    ]);
+    // 旧快照长度为 2 < FULL_SCREEN_THRESHOLD(5)，未满屏时新出现的会话正常入队
+    assert_eq!(g.store.observe(key_b, not_full_new_top).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn observe_top_new_conversation_with_full_screen_enqueues() {
+    let (g, _, _) = gateway(Store::memory());
+    let key = AccountKey {
+        platform: "wechat".into(),
+        account_id: "a".into(),
+    };
+
+    // 满屏旧快照（5 项）
+    let old_full = json!([
+        {"display_name": "U1", "preview": "p1", "time_text": "t1"},
+        {"display_name": "U2", "preview": "p2", "time_text": "t2"},
+        {"display_name": "U3", "preview": "p3", "time_text": "t3"},
+        {"display_name": "U4", "preview": "p4", "time_text": "t4"},
+        {"display_name": "U5", "preview": "p5", "time_text": "t5"}
+    ]);
+    assert_eq!(g.store.observe(key.clone(), old_full).await.unwrap(), 0);
+
+    // 满屏且当前列表顶部（索引 0）出现全新会话 U0（新消息到达置顶）
+    let new_top = json!([
+        {"display_name": "U0", "preview": "latest", "time_text": "now"},
+        {"display_name": "U1", "preview": "p1", "time_text": "t1"},
+        {"display_name": "U2", "preview": "p2", "time_text": "t2"},
+        {"display_name": "U3", "preview": "p3", "time_text": "t3"},
+        {"display_name": "U4", "preview": "p4", "time_text": "t4"}
+    ]);
+    assert_eq!(g.store.observe(key, new_top).await.unwrap(), 1);
+
+    let claimed = call(&g, "a", "claim_events", json!({"consumer": "agent-1"})).await;
+    let events = claimed["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    let payload = &events[0]["payload"];
+    assert_eq!(payload["new_conversation"], true);
+    assert!(payload["changed"].is_null());
+    assert_eq!(payload["incoming_verified"], false);
+    assert_eq!(payload["coverage"], "visible_only");
+    assert_eq!(payload["conversation"]["display_name"], "U0");
+}
+
+#[tokio::test]
+async fn observe_skips_missing_display_name_items_without_failure() {
+    let (g, _, _) = gateway(Store::memory());
+    let key = AccountKey {
+        platform: "wechat".into(),
+        account_id: "a".into(),
+    };
+
+    // 包含缺少 display_name、为空字符串或为 null 的残缺项，应优雅跳过而非整体失败
+    let initial = json!([
+        {"display_name": "", "preview": "ignored", "time_text": "now"},
+        {"preview": "no_name", "time_text": "now"},
+        {"display_name": null, "preview": "null_name", "time_text": "now"},
+        {"display_name": "ValidUser", "preview": "v1", "time_text": "now"}
+    ]);
+    assert_eq!(g.store.observe(key.clone(), initial).await.unwrap(), 0);
+
+    let next = json!([
+        {"preview": "still_no_name", "time_text": "now"},
+        {"display_name": "ValidUser", "preview": "v2", "time_text": "now"}
+    ]);
+    assert_eq!(g.store.observe(key, next).await.unwrap(), 1);
 }
