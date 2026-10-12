@@ -42,6 +42,29 @@ MCP stdio（并发请求、取消、单一响应写入）
 
 真正的微信多账号需要独立设备/操作系统会话以及独立 worker。未来 worker 协议应返回已验证的账号身份，网关按绑定路由，不通过切换同一窗口实现并行账号。WhatsApp、TikTok 和远程 worker 适配器尚未实现，配置它们会报错。
 
+## 一键安装
+
+仓库为私有，需要一个有 `repo`（或 Contents: Read）权限的 GitHub Token：
+
+```bash
+export GITHUB_TOKEN=ghp_xxx
+curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+  https://raw.githubusercontent.com/haohao-ui/wechat-mcp/main/scripts/install.sh | bash
+```
+
+脚本会：下载最新 Release 的 macOS 通用二进制并校验 SHA-256（无 Release 时自动从源码构建）→ 安装到 `~/.wechat-mcp/bin` → 生成 `~/.wechat-mcp/gateway.json`（已存在则保留）→ 检测到 Claude Code 时自动注册用户级 MCP 服务 `wechat`，并打印其他客户端的配置。
+
+可选变量：`WECHAT_MCP_VERSION=v0.1.0` 指定版本，`WECHAT_MCP_FROM_SOURCE=1` 强制源码构建，`WECHAT_MCP_NO_REGISTER=1` 不注册 Claude Code，`WECHAT_MCP_HOME` 修改安装目录。
+
+卸载（保留配置与数据库）：
+
+```bash
+curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+  https://raw.githubusercontent.com/haohao-ui/wechat-mcp/main/scripts/install.sh | bash -s -- --uninstall
+```
+
+发布新版本：`git tag v0.1.0 && git push origin v0.1.0`，Release 工作流自动构建并上传安装包。
+
 ## 构建
 
 需要 macOS、Rust 1.88+（Edition 2024）及可用的 Swift 编译器：
@@ -74,15 +97,15 @@ Swift 源码在 `native/`，构建不再依赖本机被忽略的 `bin/`。开发
 
 通过 `MESSAGE_GATEWAY_CONFIG` 指定 JSON 文件绝对路径。通过 `MESSAGE_GATEWAY_DB` 指定客服 SQLite 数据库的绝对路径；默认存于用户应用数据目录。配置错误、重复账号、重复绑定或未实现的适配器都会阻止启动。
 
-MCP 客户端配置示例（按实际安装位置修改）：
+MCP 客户端配置示例（一键安装的默认位置；`<HOME>` 替换为你的用户主目录绝对路径，MCP 配置不会展开 `~`）：
 
 ```json
 {
   "mcpServers": {
     "wechat": {
-      "command": "/path/to/wechat-mcp/target/release/wechat-mcp",
+      "command": "<HOME>/.wechat-mcp/bin/wechat-mcp",
       "env": {
-        "MESSAGE_GATEWAY_CONFIG": "/path/to/wechat-mcp/gateway.example.json"
+        "MESSAGE_GATEWAY_CONFIG": "<HOME>/.wechat-mcp/gateway.json"
       }
     }
   }
