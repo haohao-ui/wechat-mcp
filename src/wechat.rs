@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, bail};
+use std::hash::Hasher;
 use std::process::Stdio;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tracing::{info, warn};
@@ -341,6 +344,25 @@ pub async fn open_chat_conversation(recipient: &str) -> Result<()> {
     let (win_x, win_y, _win_w, win_h) = focus_wechat().await?;
     info!("正在定位联系人/群聊 [{}]...", recipient);
 
+    let window = query_wechat_window().await?;
+    ensure_window_observable(&window)?;
+    if let Some((cached_x, cached_y)) =
+        cached_chat_location(recipient, window.window_id, window.rect, Instant::now())
+    {
+        info!(
+            "复用会话位置缓存 [{}]：({}, {})",
+            recipient, cached_x, cached_y
+        );
+        mouse_click(cached_x, cached_y).await?;
+        tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
+        if verify_chat_title(recipient).await.is_ok() {
+            remember_chat_location(recipient, window.window_id, window.rect, cached_x, cached_y);
+            return Ok(());
+        }
+        warn!("会话位置缓存 [{}] 已失效，回退到 OCR 定位", recipient);
+        forget_chat_location();
+    }
+
     // 方案一：优先通过 Vision OCR 扫描左侧会话列表，实现无感精准直达
     let list_crop_x = (win_x + 65.0).round() as i64;
     let list_crop_y = (win_y + 60.0).round() as i64;
@@ -387,6 +409,13 @@ pub async fn open_chat_conversation(recipient: &str) -> Result<()> {
                             recipient, target_x, target_y
                         );
                         mouse_click(target_x, target_y).await?;
+                        remember_chat_location(
+                            recipient,
+                            window.window_id,
+                            window.rect,
+                            target_x,
+                            target_y,
+                        );
                         found_in_list = true;
                     }
                     NameColumnMatch::Ambiguous => {
@@ -709,8 +738,108 @@ pub struct ChatSession {
     pub click_y: f64,
 }
 
-/// 获取当前微信左侧最近会话列表及各会话的最新消息预览
-pub async fn get_recent_sessions() -> Result<Vec<ChatSession>> {
+/// 对截图文件做快速内容摘要，用于判断界面是否发生变化，避免每次轮询都执行 OCR。
+fn file_digest(path: &std::path::Path) -> Result<u64> {
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("无法读取截图 {}", path.display()))?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buffer)
+            .with_context(|| format!("读取截图 {} 失败", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.write(&buffer[..read]);
+    }
+    Ok(hasher.finish())
+}
+
+const CHAT_LOCATION_TTL: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CachedChatLocation {
+    window_id: u32,
+    rect: WindowRect,
+    click_x: f64,
+    click_y: f64,
+    captured_at: Instant,
+}
+
+impl CachedChatLocation {
+    fn is_reusable(self, window_id: u32, rect: WindowRect, now: Instant) -> bool {
+        self.window_id == window_id
+            && self.rect == rect
+            && now.duration_since(self.captured_at) <= CHAT_LOCATION_TTL
+    }
+}
+
+#[derive(Debug)]
+struct ChatLocationCache {
+    recipient: String,
+    location: CachedChatLocation,
+}
+
+fn chat_location_cache() -> &'static Mutex<Option<ChatLocationCache>> {
+    static CACHE: OnceLock<Mutex<Option<ChatLocationCache>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn cached_chat_location(
+    recipient: &str,
+    window_id: u32,
+    rect: WindowRect,
+    now: Instant,
+) -> Option<(f64, f64)> {
+    let key = normalize_chat_name(recipient);
+    let guard = chat_location_cache().lock().ok()?;
+    let cache = guard.as_ref()?;
+    if cache.recipient != key || !cache.location.is_reusable(window_id, rect, now) {
+        return None;
+    }
+    Some((cache.location.click_x, cache.location.click_y))
+}
+
+fn remember_chat_location(
+    recipient: &str,
+    window_id: u32,
+    rect: WindowRect,
+    click_x: f64,
+    click_y: f64,
+) {
+    let entry = ChatLocationCache {
+        recipient: normalize_chat_name(recipient),
+        location: CachedChatLocation {
+            window_id,
+            rect,
+            click_x,
+            click_y,
+            captured_at: Instant::now(),
+        },
+    };
+    if let Ok(mut guard) = chat_location_cache().lock() {
+        *guard = Some(entry);
+    }
+}
+
+fn forget_chat_location() {
+    if let Ok(mut guard) = chat_location_cache().lock() {
+        *guard = None;
+    }
+}
+
+/// 一帧会话列表截图；截图文件在 Drop 时删除。
+struct SessionFrame {
+    screenshot: SessionScreenshot,
+    window: WechatWindow,
+    pixels: PixelRect,
+    list_crop_y: f64,
+    list_crop_h: f64,
+    click_x: f64,
+    digest: u64,
+}
+
+async fn capture_session_frame() -> Result<SessionFrame> {
     if !is_wechat_running().await? {
         bail!("微信客户端未运行，请先启动并登录微信");
     }
@@ -743,16 +872,37 @@ pub async fn get_recent_sessions() -> Result<Vec<ChatSession>> {
 
     let (image_width, image_height) = screenshot_pixel_size(&tmp_file.0)?;
     let pixels = crop_pixel_rect(crop, window.rect, image_width, image_height)?;
+    let digest = file_digest(&tmp_file.0)?;
+    // 像素裁剪的边界经过取整，反算点坐标避免 Retina 下点击偏移。
+    let scale_x = image_width as f64 / window.rect.width;
+    let scale_y = image_height as f64 / window.rect.height;
+    let list_crop_y = window.rect.y + pixels.y as f64 / scale_y;
+    let list_crop_h = pixels.height as f64 / scale_y;
+    let list_left = window.rect.x + pixels.x as f64 / scale_x;
+    let list_width = pixels.width as f64 / scale_x;
+    let click_x = (window.rect.x + 150.0).clamp(list_left, list_left + list_width / 2.0);
+    Ok(SessionFrame {
+        screenshot: tmp_file,
+        window,
+        pixels,
+        list_crop_y,
+        list_crop_h,
+        click_x,
+        digest,
+    })
+}
+
+async fn parse_session_frame(frame: &SessionFrame) -> Result<Vec<ChatSession>> {
     let ocr_bin = get_ocr_binary_path();
     let ocr_output = Command::new(&ocr_bin)
         .kill_on_drop(true)
-        .arg(&tmp_file.0)
+        .arg(&frame.screenshot.0)
         .args([
             "--crop",
-            &pixels.x.to_string(),
-            &pixels.y.to_string(),
-            &pixels.width.to_string(),
-            &pixels.height.to_string(),
+            &frame.pixels.x.to_string(),
+            &frame.pixels.y.to_string(),
+            &frame.pixels.width.to_string(),
+            &frame.pixels.height.to_string(),
         ])
         .output()
         .await
@@ -769,23 +919,21 @@ pub async fn get_recent_sessions() -> Result<Vec<ChatSession>> {
 
     let current = query_wechat_window().await?;
     ensure_window_observable(&current)?;
-    if current.window_id != window.window_id || current.rect != window.rect {
+    if current.window_id != frame.window.window_id || current.rect != frame.window.rect {
         bail!("微信窗口位置或尺寸已变化，本轮后台观察跳过");
     }
-    // 像素裁剪的边界经过取整，反算点坐标避免 Retina 下点击偏移。
-    let scale_x = image_width as f64 / window.rect.width;
-    let scale_y = image_height as f64 / window.rect.height;
-    let list_crop_y = window.rect.y + pixels.y as f64 / scale_y;
-    let list_crop_h = pixels.height as f64 / scale_y;
-    let list_left = window.rect.x + pixels.x as f64 / scale_x;
-    let list_width = pixels.width as f64 / scale_x;
-    let click_x = (window.rect.x + 150.0).clamp(list_left, list_left + list_width / 2.0);
     Ok(group_recent_sessions(
         items,
-        click_x,
-        list_crop_y,
-        list_crop_h,
+        frame.click_x,
+        frame.list_crop_y,
+        frame.list_crop_h,
     ))
+}
+
+/// 获取当前微信左侧最近会话列表及各会话的最新消息预览
+pub async fn get_recent_sessions() -> Result<Vec<ChatSession>> {
+    let frame = capture_session_frame().await?;
+    parse_session_frame(&frame).await
 }
 
 struct SessionScreenshot(std::path::PathBuf);
@@ -946,19 +1094,21 @@ fn group_recent_sessions(
     result
 }
 
-/// 读取指定联系人/群聊（或当前打开窗口）的聊天记录文字（纯净右侧气泡区域）
-pub async fn read_chat_messages(recipient: Option<&str>) -> Result<Vec<String>> {
-    if !is_wechat_running().await? {
-        bail!("微信客户端未运行，请先启动并登录微信");
-    }
+/// 聊天区域截图；文件在 Drop 时删除。
+struct ChatFrame {
+    screenshot: ChatScreenshot,
+    digest: u64,
+}
 
-    if let Some(target) = recipient {
-        open_chat_conversation(target).await?;
-        verify_chat_title(target).await?;
-    } else {
-        focus_wechat().await?;
-    }
+struct ChatScreenshot(std::path::PathBuf);
 
+impl Drop for ChatScreenshot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+async fn capture_chat_frame() -> Result<ChatFrame> {
     let (win_x, win_y, win_w, win_h) = get_wechat_window_rect().await?;
 
     // 计算右侧真实聊天气泡区域：
@@ -974,7 +1124,9 @@ pub async fn read_chat_messages(recipient: Option<&str>) -> Result<Vec<String>> 
         chat_x, chat_y, chat_w, chat_h
     );
 
-    let tmp_file = format!("/tmp/wechat_chat_{}.png", std::process::id());
+    let tmp_file = ChatScreenshot(
+        std::env::temp_dir().join(format!("wechat_chat_{}.png", uuid::Uuid::new_v4())),
+    );
 
     // 调用系统 screencapture
     let cap_status = Command::new("screencapture")
@@ -983,8 +1135,8 @@ pub async fn read_chat_messages(recipient: Option<&str>) -> Result<Vec<String>> 
             "-R",
             &format!("{},{},{},{}", chat_x, chat_y, chat_w, chat_h),
             "-x",
-            &tmp_file,
         ])
+        .arg(&tmp_file.0)
         .status()
         .await
         .context("执行 screencapture 失败")?;
@@ -993,15 +1145,21 @@ pub async fn read_chat_messages(recipient: Option<&str>) -> Result<Vec<String>> 
         bail!("截取聊天区域失败");
     }
 
+    let digest = file_digest(&tmp_file.0)?;
+    Ok(ChatFrame {
+        screenshot: tmp_file,
+        digest,
+    })
+}
+
+async fn parse_chat_frame(frame: &ChatFrame) -> Result<Vec<String>> {
     let ocr_bin = get_ocr_binary_path();
     let ocr_output = Command::new(&ocr_bin)
         .kill_on_drop(true)
-        .arg(&tmp_file)
+        .arg(&frame.screenshot.0)
         .output()
         .await
         .context("执行 wechat_ocr 失败")?;
-
-    let _ = std::fs::remove_file(&tmp_file);
 
     if !ocr_output.status.success() {
         let err = String::from_utf8_lossy(&ocr_output.stderr);
@@ -1013,13 +1171,28 @@ pub async fn read_chat_messages(recipient: Option<&str>) -> Result<Vec<String>> 
     let items: Vec<OcrItem> =
         serde_json::from_str(raw_json.trim()).context("OCR 返回不是有效 JSON")?;
 
-    let text_lines: Vec<String> = items
+    Ok(items
         .into_iter()
         .map(|item| item.text.trim().to_string())
         .filter(|t| !t.is_empty())
-        .collect();
+        .collect())
+}
 
-    Ok(text_lines)
+/// 读取指定联系人/群聊（或当前打开窗口）的聊天记录文字（纯净右侧气泡区域）
+pub async fn read_chat_messages(recipient: Option<&str>) -> Result<Vec<String>> {
+    if !is_wechat_running().await? {
+        bail!("微信客户端未运行，请先启动并登录微信");
+    }
+
+    if let Some(target) = recipient {
+        open_chat_conversation(target).await?;
+        verify_chat_title(target).await?;
+    } else {
+        focus_wechat().await?;
+    }
+
+    let frame = capture_chat_frame().await?;
+    parse_chat_frame(&frame).await
 }
 
 /// 长轮询等待新消息到达：
@@ -1044,14 +1217,22 @@ pub async fn wait_for_new_message(
         );
         open_chat_conversation(target).await?;
 
-        let initial_lines = read_chat_messages(None).await?;
+        let initial_frame = capture_chat_frame().await?;
+        let mut last_digest = initial_frame.digest;
+        let initial_lines = parse_chat_frame(&initial_frame).await?;
         let mut known_lines: std::collections::HashSet<String> =
             initial_lines.into_iter().collect();
 
         while start.elapsed() < timeout {
             tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
 
-            let current_lines = read_chat_messages(None).await?;
+            // 先比较截图摘要；界面没变化就不跑 OCR。
+            let frame = capture_chat_frame().await?;
+            if frame.digest == last_digest {
+                continue;
+            }
+            last_digest = frame.digest;
+            let current_lines = parse_chat_frame(&frame).await?;
             let mut new_lines = Vec::new();
 
             for line in &current_lines {
@@ -1078,8 +1259,10 @@ pub async fn wait_for_new_message(
             timeout_seconds
         );
 
-        // 获取初始会话列表基线
-        let initial_sessions = get_recent_sessions().await?;
+        // 获取初始会话列表基线和截图摘要
+        let initial_frame = capture_session_frame().await?;
+        let mut last_digest = initial_frame.digest;
+        let initial_sessions = parse_session_frame(&initial_frame).await?;
         // 保存 key: name -> (time, preview)
         let mut session_baseline: std::collections::HashMap<String, (String, String)> =
             std::collections::HashMap::new();
@@ -1090,7 +1273,13 @@ pub async fn wait_for_new_message(
         while start.elapsed() < timeout {
             tokio::time::sleep(tokio::time::Duration::from_millis(1800)).await;
 
-            let current_sessions = get_recent_sessions().await?;
+            // 先比较截图摘要；界面没变化就不跑 OCR。
+            let frame = capture_session_frame().await?;
+            if frame.digest == last_digest {
+                continue;
+            }
+            last_digest = frame.digest;
+            let current_sessions = parse_session_frame(&frame).await?;
             for s in current_sessions {
                 let is_changed = match session_baseline.get(&s.name) {
                     Some((old_time, old_preview)) => {
@@ -1397,6 +1586,15 @@ mod tests {
 mod send_safety_tests {
     use super::*;
 
+    fn rect(x: f64, y: f64, width: f64, height: f64) -> WindowRect {
+        WindowRect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
     fn item(text: &str, x: f64, y: f64) -> OcrItem {
         OcrItem {
             text: text.into(),
@@ -1537,5 +1735,49 @@ mod send_safety_tests {
         assert!(error.contains("张三丰 (12)"));
         assert!(error.contains("已停止操作"));
         assert!(check_chat_title("张三", "张三").is_ok());
+    }
+
+    #[test]
+    fn screenshot_digest_detects_content_changes() {
+        let path =
+            std::env::temp_dir().join(format!("wechat_digest_test_{}.bin", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"first frame").unwrap();
+        let first = file_digest(&path).unwrap();
+        std::fs::write(&path, b"second frame").unwrap();
+        let second = file_digest(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn cached_location_requires_matching_window_rect_and_ttl() {
+        let now = Instant::now();
+        let location = CachedChatLocation {
+            window_id: 7,
+            rect: rect(10.0, 20.0, 800.0, 600.0),
+            click_x: 160.0,
+            click_y: 240.0,
+            captured_at: now,
+        };
+        assert!(location.is_reusable(
+            7,
+            rect(10.0, 20.0, 800.0, 600.0),
+            now + Duration::from_secs(60)
+        ));
+        assert!(!location.is_reusable(
+            8,
+            rect(10.0, 20.0, 800.0, 600.0),
+            now + Duration::from_secs(60)
+        ));
+        assert!(!location.is_reusable(
+            7,
+            rect(11.0, 20.0, 800.0, 600.0),
+            now + Duration::from_secs(60)
+        ));
+        assert!(!location.is_reusable(
+            7,
+            rect(10.0, 20.0, 800.0, 600.0),
+            now + CHAT_LOCATION_TTL + Duration::from_secs(1)
+        ));
     }
 }
