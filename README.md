@@ -1,6 +1,6 @@
 # WeChat MCP / 多平台消息网关
 
-Rust 实现的 MCP stdio 服务。面向 Agent 自动化客服、客户管理、跟进与分析。核心按 `(platform, account_id)` 路由到消息适配器；当前实际接入的是 **macOS 桌面微信**，通过 AppleScript、鼠标和本地 Apple Vision OCR 操作可见界面。
+Rust 实现的 MCP stdio 服务。面向 Agent 自动化客服、客户管理、跟进与分析。核心按 `(platform, account_id)` 路由到消息适配器；当前实际接入的是 **macOS 桌面微信**，通过 AppleScript、鼠标和本地 OCR（Apple Vision / Tesseract 兜底）操作可见界面。
 
 这类自动化不能保证账号不受限制或封禁。发送操作不等于送达，OCR 文字不等于完整聊天历史。
 
@@ -168,6 +168,14 @@ MCP 客户端配置示例（一键安装的默认位置；`<HOME>` 替换为你�
 ## 权限与验证
 
 宿主需要 macOS 辅助功能、自动化权限；截图读取需要相应的屏幕录制权限。微信应已启动并登录。
+
+macOS 26+ 上 Apple Vision 精确 OCR 可能不可用或超时，`wechat_ocr` 会自动回退到 Tesseract。建议安装：
+
+```bash
+brew install tesseract tesseract-lang
+```
+
+也可用 `WECHAT_OCR_ENGINE=tesseract` 或 `WECHAT_OCR_ENGINE=vision` 强制指定引擎；`WECHAT_OCR_TESSERACT` 可指定 tesseract 绝对路径。未安装 Tesseract 时仍会尝试 Apple Vision，但可能较慢。
 
 ```bash
 cargo test --locked
