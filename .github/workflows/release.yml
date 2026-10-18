@@ -48,7 +48,7 @@ jobs:
           cp README.md gateway.example.json "dist/$OUT/"
           cp -R skills "dist/$OUT/"
           tar -C dist -czf "dist/$OUT.tar.gz" "$OUT"
-          shasum -a 256 "dist/$OUT.tar.gz" > "dist/$OUT.tar.gz.sha256"
+          (cd dist && shasum -a 256 "$OUT.tar.gz" > "$OUT.tar.gz.sha256")
       - name: 发布 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
