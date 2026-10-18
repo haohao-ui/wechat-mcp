@@ -1,5 +1,6 @@
 mod accounts;
 mod adapters;
+mod article;
 mod clipboard;
 mod crm;
 mod gateway;
@@ -180,7 +181,7 @@ fn is_cancellable(request: &JsonRpcRequest) -> bool {
     };
     if matches!(
         name,
-        "list_conversations" | "get_recent_sessions" | "wait_for_events"
+        "list_conversations" | "get_recent_sessions" | "wait_for_events" | article::TOOL
     ) {
         return true;
     }
@@ -264,6 +265,7 @@ mod tests {
             ("get_messages", json!({}), true),
             ("get_messages", json!({"recipient":"someone"}), false),
             ("list_conversations", json!({}), true),
+            ("fetch_article", json!({"url":"x"}), true),
             ("send_message", json!({}), false),
             ("focus_wechat", json!({}), false),
         ] {
