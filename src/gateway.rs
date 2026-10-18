@@ -88,6 +88,9 @@ impl Gateway {
             }
             return Ok(json!({"accounts":self.accounts.list()}));
         }
+        if name == crate::article::TOOL {
+            return crate::article::execute(args).await;
+        }
         if crm::is_tool(name)
             || crate::listeners::is_tool(name)
             || name == "capture_customer_context"

@@ -57,6 +57,9 @@ jobs:
           for t in wechat_ocr wechat_click wechat_window; do
             swiftc native/$t.swift -o target/native/$t
           done
+      - name: 安装脚本测试（隔离 HOME，不触碰真实 Agent 配置）
+        run: bash scripts/test-install.sh
+
       - name: 协议冒烟测试（隔离环境，不触碰微信）
         run: |
           cargo build --locked

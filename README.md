@@ -27,6 +27,8 @@ MCP stdio（并发请求、取消、单一响应写入）
 - `src/listeners.rs`：后台界面观察、健康状态与持久收件箱等待。
 - `src/main.rs`、`src/mcp.rs`、`src/tools.rs`：协议层与工具定义。
 - `src/wechat.rs`、`src/clipboard.rs`、`native/`：平台实现。
+- `src/article.rs`：公众号文章抓取（公开网页 → Markdown + 图片），不经过桌面适配器。
+- `skills/wechat-article/`：配套 Agent skill。
 
 协议请求可以并行执行，`ping`、账号查询不再等待微信长轮询完成。微信 UI 操作通过进程内互斥锁和当前用户共享的操作系统文件锁串行执行，避免焦点、剪贴板、截图相互干扰。长轮询持有桌面锁，其他 UI 操作需要等待它结束或取消。
 
@@ -48,19 +50,39 @@ MCP stdio（并发请求、取消、单一响应写入）
 
 ```bash
 export GITHUB_TOKEN=ghp_xxx
+set -o pipefail
 curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
   https://raw.githubusercontent.com/haohao-ui/wechat-mcp/main/scripts/install.sh | bash
 ```
 
-脚本会：下载最新 Release 的 macOS 通用二进制并校验 SHA-256（无 Release 时自动从源码构建）→ 安装到 `~/.wechat-mcp/bin` → 生成 `~/.wechat-mcp/gateway.json`（已存在则保留）→ 检测到 Claude Code 时自动注册用户级 MCP 服务 `wechat`，并打印其他客户端的配置。
+脚本会：下载最新 Release 的 macOS 通用二进制并校验 SHA-256（无 Release 时自动从源码构建）→ 安装到 `~/.wechat-mcp/bin` → 生成 `~/.wechat-mcp/gateway.json`（已存在则保留）→ 安装 `wechat-article` skill → 自动识别当前 Agent（Claude Code / Codex / Gemini CLI / Cursor / Windsurf / Cline / OpenCode / Claude Desktop）并注册 MCP 服务 `wechat`。识别不到时退回注册 Claude Code；用 `--agent all` 可一次配置所有检测到已安装的客户端。
 
-可选变量：`WECHAT_MCP_VERSION=v0.1.0` 指定版本，`WECHAT_MCP_FROM_SOURCE=1` 强制源码构建，`WECHAT_MCP_NO_REGISTER=1` 不注册 Claude Code，`WECHAT_MCP_HOME` 修改安装目录。
-
-卸载（保留配置与数据库）：
+**让 Agent 自动安装**：把 [agent-install.md](docs/agent-install.md) 里的提示词交给任意 Agent。它会执行一条命令：
 
 ```bash
+set -o pipefail
 curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
-  https://raw.githubusercontent.com/haohao-ui/wechat-mcp/main/scripts/install.sh | bash -s -- --uninstall
+  https://raw.githubusercontent.com/haohao-ui/wechat-mcp/main/scripts/install.sh | bash -s -- --agent auto --json
+```
+
+安装、MCP 注册、skill 安装和自检都由脚本完成，Agent 只需汇报 JSON 结果。手动指定客户端时把 `--agent auto` 换成 `--agent codex`、`--agent all` 等；`--agent none` 只安装不注册。
+
+可选变量：`WECHAT_MCP_AGENT=codex`（同 `--agent`）、`WECHAT_MCP_VERSION=v0.1.0` 指定版本、`WECHAT_MCP_FROM_SOURCE=1` 强制源码构建、`WECHAT_MCP_HOME` 修改安装目录。
+
+检查安装是否正常（输出 `"check":"passed"` 即正常）：
+
+```bash
+set -o pipefail
+curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+  https://raw.githubusercontent.com/haohao-ui/wechat-mcp/main/scripts/install.sh | bash -s -- --check --json
+```
+
+卸载（移除二进制、skill 和各 Agent 中的 `wechat` 配置，保留配置与数据库）：
+
+```bash
+set -o pipefail
+curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+  https://raw.githubusercontent.com/haohao-ui/wechat-mcp/main/scripts/install.sh | bash -s -- --uninstall --json
 ```
 
 发布新版本：`git tag v0.1.0 && git push origin v0.1.0`，Release 工作流自动构建并上传安装包。
@@ -121,6 +143,16 @@ MCP 客户端配置示例（一键安装的默认位置；`<HOME>` 替换为你�
 | `get_messages` | 上述字段，`recipient` 可选 | 当前可见聊天文字 |
 | `send_message` | 上述字段，`recipient`, `message`, `idempotency_key`；`customer_id` 可选 | 幂等登记并触发文本发送 |
 | `wait_for_message` | 上述字段，`recipient` 可选，`timeout_seconds` 可选 | 等待界面变化；超时为 1–300 秒 |
+
+### 公众号文章
+
+| 工具 | 参数 | 用途 |
+|---|---|---|
+| `fetch_article` | `url`；`output_dir`、`include_markdown` 可选 | 抓取 mp.weixin.qq.com 文章的标题、公众号、作者、发布时间（北京时间）、摘要、封面和 Markdown 正文 |
+
+只请求公开网页（系统 `curl`），不操作微信客户端、不占桌面锁，也不需要 `platform` / `account_id` 和 macOS 隐私权限。提供绝对路径 `output_dir` 时，正文图片下载到 `images/01.jpg…`（按文件头识别格式，单篇上限 300 张），并写入引用本地图片的 `article.md`；部分图片失败会列在 `image_errors`，对应位置保留远程链接。已删除文章、触发微信环境验证、纯图片/视频消息会返回明确错误。阅读数、点赞、评论不在公开页面中，无法获取。
+
+配套 skill 位于 `skills/wechat-article/SKILL.md`，一键安装时会装到 `~/.wechat-mcp/skills/`；脚本还会按客户端把 skill 放到 `~/.claude/skills/`、`~/.agents/skills/`（或 `~/.codex/skills/`），没有 skill 机制的客户端则写入其全局指令文件。
 
 客服工具另提供客户创建/更新/查询、交互记录、上下文快照、事件领取/续租/确认、跟进任务、带证据分析和统计。后台观察通过 `start_listener` / `stop_listener` / `get_listener_status` 管理，启用状态及间隔持久保存、重启恢复；同一数据库的账号监听只允许一个负责人，事件通过 `wait_for_events` / `claim_events` 消费。详见工作流文档。
 

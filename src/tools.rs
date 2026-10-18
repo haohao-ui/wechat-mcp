@@ -126,6 +126,7 @@ pub fn list_tools_with_legacy(legacy_enabled: bool) -> Value {
     }
     tools.extend(gateway_tools());
     tools.extend(crate::service_tools::list());
+    tools.push(crate::article::tool());
     json!({ "tools": tools })
 }
 
