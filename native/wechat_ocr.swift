@@ -1,14 +1,12 @@
 import Foundation
 import Vision
 import ImageIO
+import UniformTypeIdentifiers
 
 guard CommandLine.arguments.count > 1 else {
     fputs("用法: wechat_ocr <图片路径> [--crop x y width height]（图片像素，左上角原点）\n", stderr)
     exit(1)
 }
-
-let imagePath = CommandLine.arguments[1]
-let url = URL(fileURLWithPath: imagePath)
 
 struct TextLine: Codable {
     let text: String
@@ -16,50 +14,234 @@ struct TextLine: Codable {
     let x: Double
 }
 
-var lines: [TextLine] = []
-let handler: VNImageRequestHandler
+let imagePath = CommandLine.arguments[1]
+let url = URL(fileURLWithPath: imagePath)
+
+let image: CGImage
 if CommandLine.arguments.count == 2 {
-    handler = VNImageRequestHandler(url: url, options: [:])
+    guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+          let sourceImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+        fputs("无法读取图片: \(imagePath)\n", stderr)
+        exit(1)
+    }
+    image = sourceImage
 } else {
     guard CommandLine.arguments.count == 7, CommandLine.arguments[2] == "--crop",
           let x = Int(CommandLine.arguments[3]), let y = Int(CommandLine.arguments[4]),
           let width = Int(CommandLine.arguments[5]), let height = Int(CommandLine.arguments[6]),
           x >= 0, y >= 0, width > 0, height > 0,
           let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-          let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
-          x <= image.width, y <= image.height,
-          width <= image.width - x, height <= image.height - y,
-          let cropped = image.cropping(to: CGRect(x: x, y: y, width: width, height: height)) else {
+          let sourceImage = CGImageSourceCreateImageAtIndex(source, 0, nil),
+          x <= sourceImage.width, y <= sourceImage.height,
+          width <= sourceImage.width - x, height <= sourceImage.height - y,
+          let cropped = sourceImage.cropping(to: CGRect(x: x, y: y, width: width, height: height)) else {
         fputs("OCR 裁剪参数无效或无法读取图片（需使用图片实际像素坐标）\n", stderr)
         exit(1)
     }
-    // OCR 坐标相对于裁剪后的图片，与旧的区域截图行为一致。
-    handler = VNImageRequestHandler(cgImage: cropped, options: [:])
+    image = cropped
 }
-let request = VNRecognizeTextRequest { (req, error) in
-    guard let observations = req.results as? [VNRecognizedTextObservation] else { return }
-    for obs in observations {
-        guard let candidate = obs.topCandidates(1).first else { continue }
-        let box = obs.boundingBox
-        // Vision 坐标系 Y 轴从底部向上，转换为顶部向下 (0.0 表示最顶端，1.0 表示最底端)
-        let topY = 1.0 - box.origin.y - box.height
-        lines.append(TextLine(text: candidate.string, y: topY, x: box.origin.x))
+
+func environment(_ key: String) -> String? {
+    ProcessInfo.processInfo.environment[key]
+}
+
+func findTesseract() -> String? {
+    var candidates: [String] = []
+    if let explicit = environment("WECHAT_OCR_TESSERACT"), !explicit.isEmpty {
+        candidates.append(explicit)
+    }
+    candidates.append(contentsOf: [
+        "/opt/homebrew/bin/tesseract",
+        "/usr/local/bin/tesseract",
+    ])
+    if let path = environment("PATH") {
+        for dir in path.split(separator: ":") {
+            candidates.append("\(dir)/tesseract")
+        }
+    }
+    for candidate in candidates where FileManager.default.isExecutableFile(atPath: candidate) {
+        return candidate
+    }
+    return nil
+}
+
+func runVision() -> [TextLine]? {
+    let semaphore = DispatchSemaphore(value: 0)
+    var output: [TextLine] = []
+    var failure: Error?
+    DispatchQueue.global(qos: .userInitiated).async {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = true
+        let handler = VNImageRequestHandler(cgImage: image, options: [:])
+        do {
+            try handler.perform([request])
+            for observation in request.results ?? [] {
+                guard let candidate = observation.topCandidates(1).first else { continue }
+                let box = observation.boundingBox
+                // Vision 的 Y 轴从底部向上；输出改为从上到下的归一化坐标。
+                output.append(TextLine(
+                    text: candidate.string,
+                    y: 1.0 - box.origin.y - box.height,
+                    x: box.origin.x
+                ))
+            }
+        } catch {
+            failure = error
+        }
+        semaphore.signal()
+    }
+    // Vision 精确模型在部分系统上会卡住，必须有超时，否则整个 MCP 调用会挂死。
+    if semaphore.wait(timeout: .now() + .seconds(12)) == .timedOut {
+        fputs("Vision 识别超时\n", stderr)
+        return nil
+    }
+    if let failure {
+        fputs("Vision 识别出错: \(failure)\n", stderr)
+        return nil
+    }
+    return output
+}
+
+func writePNG(_ image: CGImage, to url: URL) -> Bool {
+    guard let destination = CGImageDestinationCreateWithURL(
+        url as CFURL,
+        UTType.png.identifier as CFString,
+        1,
+        nil
+    ) else { return false }
+    CGImageDestinationAddImage(destination, image, nil)
+    return CGImageDestinationFinalize(destination)
+}
+
+func containsCJK(_ text: String) -> Bool {
+    text.unicodeScalars.contains { scalar in
+        (0x4E00...0x9FFF).contains(scalar.value)
+            || (0x3400...0x4DBF).contains(scalar.value)
+            || (0xF900...0xFAFF).contains(scalar.value)
     }
 }
 
-request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
-request.recognitionLevel = .accurate
-request.usesLanguageCorrection = true
+func parseTesseractTSV(_ data: Data) -> [TextLine] {
+    guard let raw = String(data: data, encoding: .utf8) else { return [] }
+    struct Group {
+        var left = Int.max
+        var top = Int.max
+        var right = Int.min
+        var bottom = Int.min
+        var words: [String] = []
+    }
+    var groups: [String: Group] = [:]
+    for line in raw.split(separator: "\n", omittingEmptySubsequences: true) {
+        let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
+        guard fields.count >= 12,
+              Int(fields[0]) == 5,
+              let left = Int(fields[6]),
+              let top = Int(fields[7]),
+              let width = Int(fields[8]),
+              let height = Int(fields[9]) else { continue }
+        let word = String(fields[11]).trimmingCharacters(in: .whitespaces)
+        if word.isEmpty { continue }
+        let key = "\(fields[2])/\(fields[3])/\(fields[4])"
+        var group = groups[key] ?? Group()
+        group.left = min(group.left, left)
+        group.top = min(group.top, top)
+        group.right = max(group.right, left + width)
+        group.bottom = max(group.bottom, top + height)
+        group.words.append(word)
+        groups[key] = group
+    }
+    let imageWidth = Double(image.width)
+    let imageHeight = Double(image.height)
+    return groups.values.compactMap { group in
+        var text = group.words.joined(separator: " ")
+        if containsCJK(text) {
+            text = text.replacingOccurrences(of: " ", with: "")
+        }
+        guard !text.isEmpty else { return nil }
+        return TextLine(
+            text: text,
+            y: min(max(Double(group.top) / imageHeight, 0.0), 1.0),
+            x: min(max(Double(group.left) / imageWidth, 0.0), 1.0)
+        )
+    }
+}
 
-do {
-    try handler.perform([request])
-} catch {
-    fputs("Vision 识别出错: \(error)\n", stderr)
+func runTesseract() -> [TextLine]? {
+    guard let executable = findTesseract() else {
+        fputs("未找到 tesseract；macOS 26+ 可执行 brew install tesseract tesseract-lang\n", stderr)
+        return nil
+    }
+    let tempURL = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("wechat_ocr_\(UUID().uuidString).png")
+    guard writePNG(image, to: tempURL) else {
+        fputs("无法写入 OCR 临时图片\n", stderr)
+        return nil
+    }
+    defer { try? FileManager.default.removeItem(at: tempURL) }
+
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: executable)
+    // 写文件而不是 stdout，避免大图 TSV 超过管道缓冲区导致 tesseract 阻塞。
+    let outputBase = tempURL.deletingPathExtension()
+    let tsvURL = URL(fileURLWithPath: outputBase.path + ".tsv")
+    process.arguments = [tempURL.path, outputBase.path, "-l", "chi_sim+eng", "--psm", "6", "tsv"]
+    let errorPipe = Pipe()
+    process.standardError = errorPipe
+    do {
+        try process.run()
+    } catch {
+        fputs("启动 tesseract 失败: \(error)\n", stderr)
+        return nil
+    }
+    let semaphore = DispatchSemaphore(value: 0)
+    DispatchQueue.global(qos: .userInitiated).async {
+        process.waitUntilExit()
+        semaphore.signal()
+    }
+    if semaphore.wait(timeout: .now() + .seconds(20)) == .timedOut {
+        process.terminate()
+        fputs("tesseract 识别超时\n", stderr)
+        return nil
+    }
+    guard process.terminationStatus == 0 else {
+        let err = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        fputs("tesseract 识别失败: \(err.prefix(300))\n", stderr)
+        return nil
+    }
+    defer { try? FileManager.default.removeItem(at: tsvURL) }
+    guard let data = try? Data(contentsOf: tsvURL) else {
+        fputs("tesseract 未生成 TSV 输出\n", stderr)
+        return nil
+    }
+    let lines = parseTesseractTSV(data)
+    return lines.isEmpty ? nil : lines
+}
+
+let engine = (environment("WECHAT_OCR_ENGINE") ?? "auto").lowercased()
+let majorVersion = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+let tesseractFirst = engine == "tesseract" || (engine == "auto" && majorVersion >= 26)
+
+var lines: [TextLine] = []
+if tesseractFirst {
+    lines = runTesseract() ?? []
+    if lines.isEmpty && engine != "tesseract" {
+        lines = runVision() ?? []
+    }
+} else {
+    lines = runVision() ?? []
+    if lines.isEmpty && engine != "vision" {
+        lines = runTesseract() ?? []
+    }
+}
+
+if lines.isEmpty {
+    fputs("OCR 未识别到文字（可尝试 WECHAT_OCR_ENGINE=tesseract）\n", stderr)
     exit(1)
 }
 
-// 按纵向从上到下排序
-lines.sort { $0.y < $1.y }
+lines.sort { lhs, rhs in lhs.y == rhs.y ? lhs.x < rhs.x : lhs.y < rhs.y }
 
 let encoder = JSONEncoder()
 encoder.outputFormatting = .prettyPrinted

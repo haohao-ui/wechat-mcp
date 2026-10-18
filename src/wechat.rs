@@ -653,6 +653,32 @@ fn title_matches_recipient(title: &str, recipient: &str) -> bool {
     !recipient.is_empty() && normalize_chat_name(title) == recipient
 }
 
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32, 0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0xF900..=0xFAFF)
+}
+
+/// Tesseract 兜底时标题两侧常粘连图标/英文碎片；取最长连续中文片段作为候选。
+/// 仍要求与接收人规范化后完全相等，不接受“包含”关系。
+fn longest_cjk_run(text: &str) -> &str {
+    let mut best = (0, 0);
+    let mut start = None;
+    for (index, c) in text.char_indices() {
+        if is_cjk(c) {
+            start.get_or_insert(index);
+        } else if let Some(begin) = start.take()
+            && index - begin > best.1 - best.0
+        {
+            best = (begin, index);
+        }
+    }
+    if let Some(begin) = start
+        && text.len() - begin > best.1 - best.0
+    {
+        best = (begin, text.len());
+    }
+    &text[best.0..best.1]
+}
+
 fn check_chat_title(title: &str, recipient: &str) -> Result<()> {
     if !title_matches_recipient(title, recipient) {
         bail!(
@@ -670,11 +696,12 @@ pub async fn verify_chat_title(recipient: &str) -> Result<()> {
     if win_w <= 325.0 {
         bail!("微信窗口过窄，无法核验聊天标题");
     }
+    // 群标题文字可能从聊天区左侧留白开始；从 250pt 起截，避免切掉首个汉字。
     let region = format!(
-        "{},{},{},60",
-        (win_x + 315.0).round() as i64,
+        "{},{},{},50",
+        (win_x + 250.0).round() as i64,
         win_y.round() as i64,
-        (win_w - 325.0).round() as i64
+        (win_w - 260.0).round() as i64
     );
     let tmp_file = std::env::temp_dir().join(format!("wechat_title_{}.png", uuid::Uuid::new_v4()));
     let result = async {
@@ -703,13 +730,30 @@ pub async fn verify_chat_title(recipient: &str) -> Result<()> {
         let mut items: Vec<OcrItem> =
             serde_json::from_slice(&output.stdout).context("聊天标题 OCR 返回不是有效 JSON")?;
         items.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
-        // 不在任意 OCR 碎片里找名字；整个标题文本必须相等，识别不全则拒绝。
+        // 优先要求整个标题文本相等；Tesseract 兜底时标题前后常带图标碎片，
+        // 允许标题栏内某个完整文本块单独相等（仍不接受名字片段）。
         let title = items
             .iter()
             .map(|item| item.text.trim())
             .filter(|text| !text.is_empty())
             .collect::<Vec<_>>()
             .join(" ");
+        if check_chat_title(&title, recipient).is_ok() {
+            return Ok(());
+        }
+        for candidate in items
+            .iter()
+            .map(|item| item.text.trim())
+            .filter(|text| !text.is_empty())
+        {
+            let cjk = longest_cjk_run(candidate);
+            if !cjk.is_empty()
+                && (check_chat_title(candidate, recipient).is_ok()
+                    || check_chat_title(cjk, recipient).is_ok())
+            {
+                return Ok(());
+            }
+        }
         check_chat_title(&title, recipient)
     }
     .await;
@@ -1778,6 +1822,20 @@ mod send_safety_tests {
             7,
             rect(10.0, 20.0, 800.0, 600.0),
             now + CHAT_LOCATION_TTL + Duration::from_secs(1)
+        ));
+    }
+
+    #[test]
+    fn cjk_run_ignores_tesseract_title_noise() {
+        let noisy = ">)常德长沙拼车微信交流二群(477)OrvEe-";
+        assert_eq!(longest_cjk_run(noisy), "常德长沙拼车微信交流二群");
+        assert!(title_matches_recipient(
+            longest_cjk_run(noisy),
+            "常德长沙拼车微信交流二群"
+        ));
+        assert!(!title_matches_recipient(
+            longest_cjk_run(noisy),
+            "常德长沙拼车微信交流一群"
         ));
     }
 }
