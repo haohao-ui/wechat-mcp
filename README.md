@@ -55,7 +55,7 @@ curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
   https://raw.githubusercontent.com/haohao-ui/wechat-mcp/main/scripts/install.sh | bash
 ```
 
-脚本会：下载最新 Release 的 macOS 通用二进制并校验 SHA-256（无 Release 时自动从源码构建）→ 安装到 `~/.wechat-mcp/bin` → 生成 `~/.wechat-mcp/gateway.json`（已存在则保留）→ 安装 `wechat-article` skill → 自动识别当前 Agent（Claude Code / Codex / Gemini CLI / Cursor / Windsurf / Cline / OpenCode / Claude Desktop）并注册 MCP 服务 `wechat`。识别不到时退回注册 Claude Code；用 `--agent all` 可一次配置所有检测到已安装的客户端。
+脚本会：下载最新 Release 的 macOS 通用二进制并校验 SHA-256（无 Release 时自动从源码构建）→ 安装到 `~/.wechat-mcp/bin` → 生成 `~/.wechat-mcp/gateway.json`（已存在则保留）→ 安装 `wechat-article` skill → 自动识别当前 Agent（Claude Code / Codex / Gemini CLI / Cursor / Windsurf / Cline / OpenCode / Claude Desktop）并注册 MCP 服务 `wechat`。识别不到时退回注册 Claude Code；用 `--agent all` 可一次配置所有检测到已安装的客户端。安装全程使用绝对路径与 Agent 局部变量，不修改系统的 `PATH`，不污染用户的 Shell 配置文件。
 
 **让 Agent 自动安装**：把 [agent-install.md](docs/agent-install.md) 里的提示词交给任意 Agent。它会执行一条命令：
 

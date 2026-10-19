@@ -85,4 +85,5 @@ curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
 - 脚本会按客户端选择最稳妥的注册方式：Claude Code / Codex / Gemini CLI 优先用各自的 `mcp add` 命令，Cursor / Windsurf / Cline / OpenCode / Claude Desktop 直接合并对应的 JSON 配置；失败时自动回退到直接写配置，并在修改前生成 `.bak` 备份。
 - skill 安装位置：Claude Code → `~/.claude/skills/`；Codex → `~/.agents/skills/` 或 `~/.codex/skills/`；Gemini / Windsurf / Cline / OpenCode 没有统一 skill 目录，改为写入各自的全局指令文件（GEMINI.md、global_rules.md、Cline Rules、AGENTS.md）；Cursor 的用户规则只能手动粘贴；Claude Desktop 会打包成 `~/Desktop/wechat-article-skill.zip` 并提示上传。
 - 各客户端配置路径以官方文档为准。`--agent <id>` 显式指定时会创建该客户端的配置目录；`--agent all` 只包含检测到已安装的客户端，不会凭空创建无关文件。
+- 环境隔离与安全：安装脚本采用绝对路径（默认 `~/.wechat-mcp/bin/wechat-mcp`）和局部变量（`MESSAGE_GATEWAY_CONFIG`）注册 MCP 服务，不修改系统 `PATH`，不污染用户的 Shell 配置文件（如 `~/.zshrc` / `~/.bashrc`）；安装脚本目前仅支持 macOS。
 - skill 的原始文件在仓库 [`skills/wechat-article/SKILL.md`](../skills/wechat-article/SKILL.md)，安装后位于 `~/.wechat-mcp/skills/wechat-article/`。

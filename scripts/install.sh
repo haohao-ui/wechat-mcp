@@ -28,6 +28,10 @@
 #   WECHAT_MCP_SKIP_CHECK=1     安装后不做 MCP 自检
 #   WECHAT_MCP_NO_REGISTER=1    同 --agent none
 #   GITHUB_TOKEN / GH_TOKEN     私有仓库下载用（未设置时尝试 gh auth token）
+#
+# 安全与环境隔离：
+#   脚本采用绝对路径与各 Agent 局部环境变量进行配置，不修改系统全局 PATH，
+#   不污染 ~/.zshrc / ~/.bashrc 等 Shell 配置文件。目前仅支持 macOS。
 set -euo pipefail
 
 REPO="haohao-ui/wechat-mcp"
