@@ -1,6 +1,6 @@
 ---
 name: wechat-article
-description: 读取、保存、总结微信公众号文章。当用户给出 mp.weixin.qq.com 链接，或要求获取/下载/导出/转 Markdown/总结/翻译/分析某篇公众号文章（含正文图片）时使用。依赖 wechat MCP 服务的 fetch_article 工具，不可用时退回 curl 抓取。
+description: 通过公开网页读取、保存或总结 mp.weixin.qq.com 微信公众号文章及正文图片。用于文章链接，不操作个人微信聊天、群聊或好友；桌面操作使用 wechat-operator。
 ---
 
 # 微信公众号文章
@@ -12,7 +12,7 @@ description: 读取、保存、总结微信公众号文章。当用户给出 mp.
 - 消息中出现 `https://mp.weixin.qq.com/s/...` 或 `https://mp.weixin.qq.com/s?__biz=...` 链接。
 - 用户要"看看这篇公众号文章""抓下来""存成 Markdown""连图一起下载""总结/翻译/拆解这篇文章"。
 
-不适用：读取微信聊天记录（用 `get_messages`）、视频号/小程序内容、需要登录才能看的付费文章、阅读数/点赞数/评论（公开页面没有这些数据）。
+个人微信聊天、群聊、好友和监听任务转用 `wechat-operator`。本 Skill 不覆盖视频号/小程序、需登录的付费内容，不能从抓取结果推断阅读数、点赞数或评论。
 
 ## 调用方式
 

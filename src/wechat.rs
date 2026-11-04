@@ -8,6 +8,11 @@ use tokio::process::Command;
 use tracing::{info, warn};
 
 use crate::clipboard;
+use crate::desktop::{protocol::Region, runtime};
+use crate::domain::observation::Snapshot;
+use crate::messaging::reconcile::{Continuity, reconcile};
+
+mod navigation;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -46,6 +51,7 @@ fn get_click_binary_path() -> std::path::PathBuf {
 
 /// 调用原生工具或 macOS 原生 CoreGraphics 发送鼠标单击事件
 pub async fn mouse_click(x: f64, y: f64) -> Result<()> {
+    crate::desktop::overlay::click(x, y, false).await;
     let click_bin = get_click_binary_path();
     info!(
         "执行鼠标点击: ({}, {}) [工具: {:?}, 是否存在: {}]",
@@ -65,10 +71,11 @@ pub async fn mouse_click(x: f64, y: f64) -> Result<()> {
         if !status.success() {
             bail!("wechat_click 退出状态异常: {:?}", status.code());
         }
+        crate::desktop::overlay::click(x, y, true).await;
         return Ok(());
     }
 
-    tokio::task::spawn_blocking(move || -> Result<()> {
+    let result = tokio::task::spawn_blocking(move || -> Result<()> {
         unsafe {
             let pt = CGPoint { x, y };
             // 1 = kCGEventLeftMouseDown, 2 = kCGEventLeftMouseUp, 0 = kCGMouseButtonLeft
@@ -92,7 +99,11 @@ pub async fn mouse_click(x: f64, y: f64) -> Result<()> {
         }
     })
     .await
-    .context("鼠标点击任务失败")?
+    .context("鼠标点击任务失败")?;
+    if result.is_ok() {
+        crate::desktop::overlay::click(x, y, true).await;
+    }
+    result
 }
 
 /// 执行一段 AppleScript 代码，通过 stdin 输入以避免 shell 转义与参数长度问题
@@ -255,12 +266,14 @@ fn get_window_binary_path() -> std::path::PathBuf {
 }
 
 async fn run_window_tool(args: &[&str]) -> Result<String> {
-    let output = Command::new(get_window_binary_path())
-        .kill_on_drop(true)
-        .args(args)
-        .output()
-        .await
-        .context("执行 wechat_window 失败，请先运行 scripts/build.sh 编译原生工具")?;
+    let output = crate::desktop::overlay::capture(
+        Command::new(get_window_binary_path())
+            .kill_on_drop(true)
+            .args(args)
+            .output(),
+    )
+    .await
+    .context("执行 wechat_window 失败，请先运行 scripts/build.sh 编译原生工具")?;
     if !output.status.success() {
         bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
     }
@@ -268,7 +281,14 @@ async fn run_window_tool(args: &[&str]) -> Result<String> {
 }
 
 async fn query_wechat_window() -> Result<WechatWindow> {
-    parse_wechat_window(&run_window_tool(&[]).await?)
+    let window = parse_wechat_window(&run_window_tool(&[]).await?)?;
+    if window.on_screen {
+        let rect = window.rect;
+        crate::desktop::overlay::window(rect.x, rect.y, rect.width, rect.height).await;
+    } else {
+        crate::desktop::overlay::hide().await;
+    }
+    Ok(window)
 }
 
 /// 检查屏幕矩形的并集，允许窗口跨相邻屏幕及位于负坐标屏幕。
@@ -346,6 +366,12 @@ pub async fn open_chat_conversation(recipient: &str) -> Result<()> {
 
     let window = query_wechat_window().await?;
     ensure_window_observable(&window)?;
+    if navigation::open_if_native(recipient).await? {
+        return Ok(());
+    }
+    if verify_chat_title(recipient).await.is_ok() {
+        return Ok(());
+    }
     if let Some((cached_x, cached_y)) =
         cached_chat_location(recipient, window.window_id, window.rect, Instant::now())
     {
@@ -370,19 +396,21 @@ pub async fn open_chat_conversation(recipient: &str) -> Result<()> {
     let list_crop_h = (win_h - 60.0).round() as i64;
 
     let tmp_list_img = format!("/tmp/wechat_list_{}.png", std::process::id());
-    let cap_res = Command::new("screencapture")
-        .kill_on_drop(true)
-        .args([
-            "-R",
-            &format!(
-                "{},{},{},{}",
-                list_crop_x, list_crop_y, list_crop_w, list_crop_h
-            ),
-            "-x",
-            &tmp_list_img,
-        ])
-        .status()
-        .await;
+    let cap_res = crate::desktop::overlay::capture(
+        Command::new("screencapture")
+            .kill_on_drop(true)
+            .args([
+                "-R",
+                &format!(
+                    "{},{},{},{}",
+                    list_crop_x, list_crop_y, list_crop_w, list_crop_h
+                ),
+                "-x",
+                &tmp_list_img,
+            ])
+            .status(),
+    )
+    .await;
 
     let mut found_in_list = false;
     if let Ok(st) = cap_res
@@ -435,47 +463,7 @@ pub async fn open_chat_conversation(recipient: &str) -> Result<()> {
 
     // 方案二：如果左侧列表未直接包含，通过顶部搜索栏输入
     info!("[{}] 不在最近会话前排，启动全局搜索定位...", recipient);
-    let search_result = async {
-        let mut clipboard_guard = clipboard::ClipboardGuard::replace(recipient).await?;
-        let operation_result = async {
-            let search_script = r#"
-        tell application "System Events"
-            tell process "WeChat"
-                set frontmost to true
-                try
-                    click menu item "搜索" of menu "编辑" of menu bar item "编辑" of menu bar 1
-                on error
-                    keystroke "f" using {command down}
-                end try
-                delay 0.3
-                keystroke "a" using {command down}
-                keystroke "v" using {command down}
-            end tell
-        end tell
-    "#;
-            run_applescript(search_script).await?;
-
-            // 等待搜索结果弹窗（0.7s）
-            tokio::time::sleep(tokio::time::Duration::from_millis(700)).await;
-
-            // 搜索结果坐标仅用于尝试打开；标题核验成功前不能发送正文。
-            let click_x = win_x + 230.0;
-            let click_y = win_y + 150.0;
-            info!("尝试点击搜索结果: ({}, {})", click_x, click_y);
-            mouse_click(click_x, click_y).await?;
-
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-            verify_chat_title(recipient).await
-        }
-        .await;
-        let restore_result = clipboard_guard.restore().await;
-        if let Err(error) = &restore_result {
-            warn!("搜索后恢复剪贴板失败，将同步兜底: {error:#}");
-        }
-        operation_result.and(restore_result)
-    }
-    .await;
+    let search_result = navigation::open_legacy_search(recipient, &window).await;
     if search_result.is_err() {
         let close_result = run_applescript(
             r#"
@@ -525,17 +513,44 @@ pub async fn send_message(recipient: &str, message: &str) -> Result<()> {
     // 3. 暂存剪贴板并将正文粘贴发送
     let mut clipboard_guard = clipboard::ClipboardGuard::replace(message).await?;
 
-    let send_script = r#"
+    let paste_script = r#"
         tell application "System Events"
             tell process "WeChat"
                 set frontmost to true
                 keystroke "v" using {command down}
                 delay 0.3
-                key code 36
             end tell
         end tell
     "#;
-    let send_result = run_applescript(send_script).await;
+    let send_result = async {
+        run_applescript(paste_script).await?;
+        // A sentinel prevents a failed Copy from being mistaken for a matching clipboard.
+        clipboard::set_clipboard(&format!("wechat-readback-{}", uuid::Uuid::new_v4())).await?;
+        run_applescript(
+            r#"tell application "System Events"
+            tell process "WeChat"
+                keystroke "a" using {command down}
+                keystroke "c" using {command down}
+                delay 0.15
+            end tell
+        end tell"#,
+        )
+        .await?;
+        let actual = clipboard::get_clipboard()
+            .await?
+            .context("发送前无法读取输入框正文，未触发发送")?;
+        if !same_input_text(&actual, message) {
+            bail!("发送前输入正文读回不一致，未触发发送")
+        }
+        verify_chat_title(recipient).await?;
+        run_applescript(
+            r#"tell application "System Events"
+            tell process "WeChat" to key code 36
+        end tell"#,
+        )
+        .await
+    }
+    .await;
 
     // 4. 恢复原剪贴板
     let restore_result = clipboard_guard.restore().await;
@@ -547,6 +562,11 @@ pub async fn send_message(recipient: &str, message: &str) -> Result<()> {
 
     info!("已触发微信发送操作，送达状态未验证");
     Ok(())
+}
+
+fn same_input_text(actual: &str, expected: &str) -> bool {
+    let normalize = |text: &str| text.replace("\r\n", "\n").replace('\r', "\n");
+    normalize(actual) == normalize(expected)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -692,6 +712,10 @@ fn check_chat_title(title: &str, recipient: &str) -> Result<()> {
 
 /// 核验聊天区顶部标题的显示名称；这不是微信 ID 级身份核验。
 pub async fn verify_chat_title(recipient: &str) -> Result<()> {
+    if let Some(snapshot) = runtime::shared().snapshot(Region::Title, true).await? {
+        ensure_native_snapshot_current(&snapshot).await?;
+        return verify_title_items(native_items(&snapshot), recipient);
+    }
     let (win_x, win_y, win_w, _) = get_wechat_window_rect().await?;
     if win_w <= 325.0 {
         bail!("微信窗口过窄，无法核验聊天标题");
@@ -705,13 +729,15 @@ pub async fn verify_chat_title(recipient: &str) -> Result<()> {
     );
     let tmp_file = std::env::temp_dir().join(format!("wechat_title_{}.png", uuid::Uuid::new_v4()));
     let result = async {
-        let status = Command::new("screencapture")
-            .kill_on_drop(true)
-            .args(["-R", &region, "-x"])
-            .arg(&tmp_file)
-            .status()
-            .await
-            .context("截取聊天标题栏失败")?;
+        let status = crate::desktop::overlay::capture(
+            Command::new("screencapture")
+                .kill_on_drop(true)
+                .args(["-R", &region, "-x"])
+                .arg(&tmp_file)
+                .status(),
+        )
+        .await
+        .context("截取聊天标题栏失败")?;
         if !status.success() {
             bail!("截取聊天标题栏失败，已停止操作");
         }
@@ -727,38 +753,72 @@ pub async fn verify_chat_title(recipient: &str) -> Result<()> {
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
-        let mut items: Vec<OcrItem> =
+        let items: Vec<OcrItem> =
             serde_json::from_slice(&output.stdout).context("聊天标题 OCR 返回不是有效 JSON")?;
-        items.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
-        // 优先要求整个标题文本相等；Tesseract 兜底时标题前后常带图标碎片，
-        // 允许标题栏内某个完整文本块单独相等（仍不接受名字片段）。
-        let title = items
-            .iter()
-            .map(|item| item.text.trim())
-            .filter(|text| !text.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
-        if check_chat_title(&title, recipient).is_ok() {
-            return Ok(());
-        }
-        for candidate in items
-            .iter()
-            .map(|item| item.text.trim())
-            .filter(|text| !text.is_empty())
-        {
-            let cjk = longest_cjk_run(candidate);
-            if !cjk.is_empty()
-                && (check_chat_title(candidate, recipient).is_ok()
-                    || check_chat_title(cjk, recipient).is_ok())
-            {
-                return Ok(());
-            }
-        }
-        check_chat_title(&title, recipient)
+        verify_title_items(items, recipient)
     }
     .await;
     let _ = std::fs::remove_file(&tmp_file);
     result
+}
+
+fn verify_title_items(mut items: Vec<OcrItem>, recipient: &str) -> Result<()> {
+    items.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
+    // 优先要求整个标题文本相等；Tesseract 兜底时标题前后常带图标碎片，
+    // 允许标题栏内某个完整文本块单独相等（仍不接受名字片段）。
+    let title = items
+        .iter()
+        .map(|item| item.text.trim())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if check_chat_title(&title, recipient).is_ok() {
+        return Ok(());
+    }
+    for candidate in items
+        .iter()
+        .map(|item| item.text.trim())
+        .filter(|text| !text.is_empty())
+    {
+        let cjk = longest_cjk_run(candidate);
+        if !cjk.is_empty()
+            && (check_chat_title(candidate, recipient).is_ok()
+                || check_chat_title(cjk, recipient).is_ok())
+        {
+            return Ok(());
+        }
+    }
+    check_chat_title(&title, recipient)
+}
+
+fn native_items(snapshot: &Snapshot) -> Vec<OcrItem> {
+    snapshot
+        .lines
+        .iter()
+        .map(|line| OcrItem {
+            text: line.text.clone(),
+            x: line.bounds.x,
+            y: line.bounds.y,
+        })
+        .collect()
+}
+
+async fn ensure_native_snapshot_current(snapshot: &Snapshot) -> Result<()> {
+    let current = query_wechat_window().await?;
+    ensure_window_observable(&current)?;
+    let window = &snapshot.window;
+    if current.window_id != window.window_id
+        || current.rect
+            != (WindowRect {
+                x: window.x,
+                y: window.y,
+                width: window.width,
+                height: window.height,
+            })
+    {
+        bail!("微信窗口在原生观察期间发生变化，已丢弃本轮结果");
+    }
+    Ok(())
 }
 
 pub fn get_ocr_binary_path() -> std::path::PathBuf {
@@ -895,13 +955,15 @@ async fn capture_session_frame() -> Result<SessionFrame> {
         std::env::temp_dir().join(format!("wechat_sessions_{}.png", uuid::Uuid::new_v4())),
     );
     // 去掉窗口阴影，使图片边界与 CGWindow 的窗口点尺寸对应。
-    let capture = Command::new("screencapture")
-        .kill_on_drop(true)
-        .args(["-l", &window.window_id.to_string(), "-x", "-o", "-t", "png"])
-        .arg(&tmp_file.0)
-        .output()
-        .await
-        .context("截图微信窗口失败，请在系统设置中授予屏幕录制权限")?;
+    let capture = crate::desktop::overlay::capture(
+        Command::new("screencapture")
+            .kill_on_drop(true)
+            .args(["-l", &window.window_id.to_string(), "-x", "-o", "-t", "png"])
+            .arg(&tmp_file.0)
+            .output(),
+    )
+    .await
+    .context("截图微信窗口失败，请在系统设置中授予屏幕录制权限")?;
 
     if !capture.status.success() {
         // 截图期间最小化时，优先报告暂停原因。
@@ -975,9 +1037,33 @@ async fn parse_session_frame(frame: &SessionFrame) -> Result<Vec<ChatSession>> {
 }
 
 /// 获取当前微信左侧最近会话列表及各会话的最新消息预览
-pub async fn get_recent_sessions() -> Result<Vec<ChatSession>> {
+pub(crate) struct SessionRead {
+    pub sessions: Vec<ChatSession>,
+    pub observation: Option<Snapshot>,
+}
+
+pub(crate) async fn read_session_observation() -> Result<SessionRead> {
+    if let Some(snapshot) = runtime::shared().snapshot(Region::Sessions, false).await? {
+        ensure_native_snapshot_current(&snapshot).await?;
+        let window = &snapshot.window;
+        let sessions = group_recent_sessions(
+            native_items(&snapshot),
+            window.x
+                + snapshot.region.x * window.width
+                + snapshot.region.width * window.width / 3.0,
+            window.y + snapshot.region.y * window.height,
+            snapshot.region.height * window.height,
+        );
+        return Ok(SessionRead {
+            sessions,
+            observation: Some(snapshot),
+        });
+    }
     let frame = capture_session_frame().await?;
-    parse_session_frame(&frame).await
+    Ok(SessionRead {
+        sessions: parse_session_frame(&frame).await?,
+        observation: None,
+    })
 }
 
 struct SessionScreenshot(std::path::PathBuf);
@@ -1139,9 +1225,32 @@ fn group_recent_sessions(
 }
 
 /// 聊天区域截图；文件在 Drop 时删除。
-struct ChatFrame {
-    screenshot: ChatScreenshot,
-    digest: u64,
+enum ChatFrame {
+    Legacy {
+        screenshot: ChatScreenshot,
+        digest: u64,
+    },
+    Native(Snapshot),
+}
+
+impl ChatFrame {
+    fn digest(&self) -> u64 {
+        match self {
+            Self::Legacy { digest, .. } => *digest,
+            Self::Native(snapshot) => {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                hasher.write(snapshot.digest.as_bytes());
+                hasher.finish()
+            }
+        }
+    }
+
+    fn epoch(&self) -> String {
+        match self {
+            Self::Native(snapshot) => snapshot.epoch.clone(),
+            Self::Legacy { .. } => "legacy".into(),
+        }
+    }
 }
 
 struct ChatScreenshot(std::path::PathBuf);
@@ -1152,16 +1261,39 @@ impl Drop for ChatScreenshot {
     }
 }
 
+fn chat_text_rect(window: WindowRect) -> Result<WindowRect> {
+    let rect = WindowRect {
+        x: window.x + 315.0,
+        y: window.y + 60.0,
+        width: window.width - 325.0,
+        height: window.height - 220.0,
+    };
+    if !window.is_valid() || !rect.is_valid() {
+        bail!("微信窗口过小，无法截取聊天正文");
+    }
+    Ok(rect)
+}
+
 async fn capture_chat_frame() -> Result<ChatFrame> {
+    if let Some(snapshot) = runtime::shared().snapshot(Region::Chat, false).await? {
+        ensure_native_snapshot_current(&snapshot).await?;
+        return Ok(ChatFrame::Native(snapshot));
+    }
     let (win_x, win_y, win_w, win_h) = get_wechat_window_rect().await?;
 
     // 计算右侧真实聊天气泡区域：
     // 微信左侧导航栏 (~65px) + 会话列表栏 (~250px) 共约 315px
-    // 避开顶部标题栏 (~60px) 与底部输入框发送区 (~120px)
-    let chat_x = (win_x + 315.0).round() as i64;
-    let chat_y = (win_y + 60.0).round() as i64;
-    let chat_w = (win_w - 325.0).max(300.0).round() as i64;
-    let chat_h = (win_h - 180.0).max(200.0).round() as i64;
+    // 避开顶部标题栏 (~60pt) 与底部工具栏、输入框 (~160pt)。
+    let chat = chat_text_rect(WindowRect {
+        x: win_x,
+        y: win_y,
+        width: win_w,
+        height: win_h,
+    })?;
+    let chat_x = chat.x.round() as i64;
+    let chat_y = chat.y.round() as i64;
+    let chat_w = chat.width.round() as i64;
+    let chat_h = chat.height.round() as i64;
 
     info!(
         "读取聊天区域几何坐标: ({}, {}, {}, {})",
@@ -1173,34 +1305,46 @@ async fn capture_chat_frame() -> Result<ChatFrame> {
     );
 
     // 调用系统 screencapture
-    let cap_status = Command::new("screencapture")
-        .kill_on_drop(true)
-        .args([
-            "-R",
-            &format!("{},{},{},{}", chat_x, chat_y, chat_w, chat_h),
-            "-x",
-        ])
-        .arg(&tmp_file.0)
-        .status()
-        .await
-        .context("执行 screencapture 失败")?;
+    let cap_status = crate::desktop::overlay::capture(
+        Command::new("screencapture")
+            .kill_on_drop(true)
+            .args([
+                "-R",
+                &format!("{},{},{},{}", chat_x, chat_y, chat_w, chat_h),
+                "-x",
+            ])
+            .arg(&tmp_file.0)
+            .status(),
+    )
+    .await
+    .context("执行 screencapture 失败")?;
 
     if !cap_status.success() {
         bail!("截取聊天区域失败");
     }
 
     let digest = file_digest(&tmp_file.0)?;
-    Ok(ChatFrame {
+    Ok(ChatFrame::Legacy {
         screenshot: tmp_file,
         digest,
     })
 }
 
 async fn parse_chat_frame(frame: &ChatFrame) -> Result<Vec<String>> {
+    let screenshot = match frame {
+        ChatFrame::Native(snapshot) => {
+            return Ok(snapshot
+                .lines
+                .iter()
+                .map(|line| line.text.trim().to_owned())
+                .collect());
+        }
+        ChatFrame::Legacy { screenshot, .. } => screenshot,
+    };
     let ocr_bin = get_ocr_binary_path();
     let ocr_output = Command::new(&ocr_bin)
         .kill_on_drop(true)
-        .arg(&frame.screenshot.0)
+        .arg(&screenshot.0)
         .output()
         .await
         .context("执行 wechat_ocr 失败")?;
@@ -1224,6 +1368,15 @@ async fn parse_chat_frame(frame: &ChatFrame) -> Result<Vec<String>> {
 
 /// 读取指定联系人/群聊（或当前打开窗口）的聊天记录文字（纯净右侧气泡区域）
 pub async fn read_chat_messages(recipient: Option<&str>) -> Result<Vec<String>> {
+    Ok(read_chat_observation(recipient).await?.text_lines)
+}
+
+pub(crate) struct ChatRead {
+    pub text_lines: Vec<String>,
+    pub observation: Option<Snapshot>,
+}
+
+pub(crate) async fn read_chat_observation(recipient: Option<&str>) -> Result<ChatRead> {
     if !is_wechat_running().await? {
         bail!("微信客户端未运行，请先启动并登录微信");
     }
@@ -1236,7 +1389,36 @@ pub async fn read_chat_messages(recipient: Option<&str>) -> Result<Vec<String>> 
     }
 
     let frame = capture_chat_frame().await?;
-    parse_chat_frame(&frame).await
+    if let Some(target) = recipient {
+        verify_frame_title(&frame, target).await?;
+    }
+    let text_lines = parse_chat_frame(&frame).await?;
+    let observation = match frame {
+        ChatFrame::Native(snapshot) => Some(snapshot),
+        ChatFrame::Legacy { .. } => None,
+    };
+    Ok(ChatRead {
+        text_lines,
+        observation,
+    })
+}
+
+async fn verify_frame_title(frame: &ChatFrame, target: &str) -> Result<()> {
+    match frame {
+        ChatFrame::Native(snapshot) => verify_title_items(
+            snapshot
+                .title_lines
+                .iter()
+                .map(|line| OcrItem {
+                    text: line.text.clone(),
+                    x: line.bounds.x,
+                    y: line.bounds.y,
+                })
+                .collect(),
+            target,
+        ),
+        ChatFrame::Legacy { .. } => verify_chat_title(target).await,
+    }
 }
 
 /// 长轮询等待新消息到达：
@@ -1262,33 +1444,32 @@ pub async fn wait_for_new_message(
         open_chat_conversation(target).await?;
 
         let initial_frame = capture_chat_frame().await?;
-        let mut last_digest = initial_frame.digest;
-        let initial_lines = parse_chat_frame(&initial_frame).await?;
-        let mut known_lines: std::collections::HashSet<String> =
-            initial_lines.into_iter().collect();
+        verify_frame_title(&initial_frame, target).await?;
+        let mut last_digest = initial_frame.digest();
+        let mut epoch = initial_frame.epoch();
+        let mut previous_lines = parse_chat_frame(&initial_frame).await?;
 
         while start.elapsed() < timeout {
             tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
 
             // 先比较截图摘要；界面没变化就不跑 OCR。
             let frame = capture_chat_frame().await?;
-            if frame.digest == last_digest {
+            if frame.digest() == last_digest && frame.epoch() == epoch {
                 continue;
             }
-            last_digest = frame.digest;
+            // A manually switched chat must never be attributed to the old target.
+            verify_frame_title(&frame, target).await?;
+            last_digest = frame.digest();
             let current_lines = parse_chat_frame(&frame).await?;
-            let mut new_lines = Vec::new();
-
-            for line in &current_lines {
-                if !known_lines.contains(line) {
-                    new_lines.push(line.clone());
-                }
+            let result = reconcile(&previous_lines, &current_lines, frame.epoch() == epoch);
+            epoch = frame.epoch();
+            previous_lines = current_lines;
+            if matches!(result.continuity, Continuity::Gap | Continuity::Ambiguous) {
+                return Ok(Some("会话文字连续性无法确认，可能有滚动、窗口重建或重复正文；需要重新读取，未判定为新入站消息".into()));
             }
+            let new_lines = result.new_lines;
 
             if !new_lines.is_empty() {
-                for line in &new_lines {
-                    known_lines.insert(line.clone());
-                }
                 let combined = new_lines.join("\n");
                 info!("监听到会话文字变化，共 {} 行", new_lines.len());
                 return Ok(Some(combined));
@@ -1348,7 +1529,7 @@ pub async fn wait_for_new_message(
                     }
 
                     // 读取该会话的右侧真实气泡记录
-                    let full_chat = read_chat_messages(None).await?;
+                    let full_chat = read_chat_messages(Some(&s.name)).await?;
                     let recent_bubbles = if full_chat.len() > 5 {
                         full_chat[full_chat.len() - 5..].join("\n")
                     } else {
@@ -1356,7 +1537,7 @@ pub async fn wait_for_new_message(
                     };
 
                     let result_msg = format!(
-                        "收到来自 [{}] 的新消息：\n【时间】: {}\n【消息摘要】: {}\n【最新聊天气泡】:\n{}",
+                        "观察到会话 [{}] 的列表变化（未确认收发方向）：\n【时间】: {}\n【列表摘要】: {}\n【可见聊天文字】:\n{}",
                         s.name, s.time, s.preview, recent_bubbles
                     );
                     return Ok(Some(result_msg));
@@ -1629,6 +1810,39 @@ mod tests {
 #[cfg(test)]
 mod send_safety_tests {
     use super::*;
+
+    #[test]
+    fn chat_crop_excludes_tested_input_area_and_never_expands_small_windows() {
+        let chat = chat_text_rect(rect(29.0, 143.0, 880.0, 640.0)).unwrap();
+        // Test-machine input starts at window-relative y=498.
+        assert!(chat.y + chat.height < 143.0 + 498.0);
+        for (width, height) in [(500.0, 400.0), (715.0, 721.0)] {
+            let chat = chat_text_rect(rect(0.0, 0.0, width, height)).unwrap();
+            assert!(chat.x + chat.width <= width);
+            assert!(chat.y + chat.height <= height);
+        }
+        assert!(chat_text_rect(rect(0.0, 0.0, 325.0, 640.0)).is_err());
+        assert!(chat_text_rect(rect(0.0, 0.0, 880.0, 220.0)).is_err());
+    }
+
+    #[test]
+    fn input_readback_preserves_content_and_normalizes_only_line_endings() {
+        assert!(same_input_text("第一行\r\n第二行", "第一行\n第二行"));
+        assert!(same_input_text(
+            "微信 RPA 测试消息，请忽略。",
+            "微信 RPA 测试消息，请忽略。"
+        ));
+        assert!(!same_input_text(
+            "微信RPA测试消息，请忽略。",
+            "微信 RPA 测试消息，请忽略。"
+        ));
+        assert!(!same_input_text(
+            "旧草稿微信 RPA 测试消息，请忽略。",
+            "微信 RPA 测试消息，请忽略。"
+        ));
+        assert!(!same_input_text("金额 100.00", "金额 100"));
+        assert!(!same_input_text(" 正文", "正文"));
+    }
 
     fn rect(x: f64, y: f64, width: f64, height: f64) -> WindowRect {
         WindowRect {

@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 use crate::{
     accounts::{AccountKey, AccountRegistry},
     adapters::{MessageAdapter, Operation},
+    desktop::scheduler::ObservationSchedule,
     resource_lock::ResourceLock,
     storage::{EVENT_SELECT, Store, now, query},
 };
@@ -24,6 +25,7 @@ struct Health {
     last_success_at: Option<i64>,
     last_error: Option<String>,
     queued_observations: u64,
+    last_observation_duration_ms: Option<u64>,
 }
 struct Worker {
     task: JoinHandle<()>,
@@ -46,7 +48,7 @@ impl Listeners {
         if !(2..=60).contains(&interval) {
             bail!("interval_seconds 必须为 2–60");
         }
-        if adapter.account().capabilities.source != "desktop_ocr"
+        if !adapter.account().capabilities.background_observations
             || !adapter.account().capabilities.visible_conversations
         {
             bail!("此适配器不支持桌面会话观察；API 适配器应通过已验证事件接入");
@@ -68,12 +70,16 @@ impl Listeners {
             last_success_at: None,
             last_error: None,
             queued_observations: 0,
+            last_observation_duration_ms: None,
         }));
         let live = health.clone();
         let account = key.clone();
         let task = tokio::spawn(async move {
             let _ownership = ownership;
+            let mut schedule = ObservationSchedule::new(Duration::from_secs(interval));
             loop {
+                schedule.wait().await;
+                let started = Instant::now();
                 let capture = async {
                     if !store.listener_enabled(account.clone()).await? {
                         return Ok(None);
@@ -88,6 +94,8 @@ impl Listeners {
                 let outcome = tokio::time::timeout(Duration::from_secs(30), capture).await;
                 {
                     let mut status = live.lock().expect("listener health lock");
+                    status.last_observation_duration_ms =
+                        Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
                     match outcome {
                         Ok(Ok(None)) => {
                             status.state = "stopped";
@@ -109,7 +117,6 @@ impl Listeners {
                         }
                     }
                 }
-                tokio::time::sleep(Duration::from_secs(interval)).await;
             }
         });
         workers.insert(key.clone(), Worker { task, health });
@@ -280,7 +287,7 @@ impl Listeners {
         if !(2..=60).contains(&interval) {
             bail!("interval_seconds 必须为 2–60");
         }
-        if adapter.account().capabilities.source != "desktop_ocr"
+        if !adapter.account().capabilities.background_observations
             || !adapter.account().capabilities.visible_conversations
         {
             bail!("适配器不支持桌面观察");

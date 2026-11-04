@@ -13,7 +13,7 @@
 #                               auto = 识别当前运行的 Agent；all = 所有检测到已安装的 Agent
 #                               none = 只安装二进制和 skill，不注册 MCP
 #   --configure-only            不下载/安装二进制，只写 Agent 配置和 skill（修复配置用）
-#   --check                     只做 MCP 自检：initialize + tools/list，确认 fetch_article 可用
+#   --check                     只做 MCP 自检：initialize + tools/list，确认个人微信核心工具已暴露
 #   --uninstall                 卸载二进制、skill 和各 Agent 中的 wechat 配置（保留 gateway.json 与数据库）
 #   --json                      输出 JSON 结果摘要（人类可读日志走 stderr）
 #   -h, --help                  显示本帮助
@@ -40,7 +40,8 @@ BIN_DIR="$INSTALL_HOME/bin"
 BIN="$BIN_DIR/wechat-mcp"
 CONFIG="$INSTALL_HOME/gateway.json"
 VERSION_FILE="$INSTALL_HOME/VERSION"
-SKILL_NAME="wechat-article"
+SKILL_NAME="wechat-operator"
+SKILL_NAMES=(wechat-operator wechat-article)
 SKILL_HOME="$INSTALL_HOME/skills/$SKILL_NAME"
 TOOLS=(wechat-mcp wechat_ocr wechat_click wechat_window)
 AGENT_IDS=(claude-code codex gemini cursor windsurf cline opencode claude-desktop)
@@ -302,10 +303,13 @@ INSTR_END='<!-- wechat-mcp:end -->'
 instruction_snippet() {
   cat <<EOF
 $INSTR_BEGIN
-## 微信公众号文章
-处理 mp.weixin.qq.com 链接，或需要获取/保存/总结公众号文章时，先阅读 ${SKILL_HOME}/SKILL.md，并按其中说明调用 wechat MCP 的 fetch_article 工具。
-$INSTR_END
+## 个人微信操作
+个人微信私聊、群聊、好友、桌面诊断和监听任务，先阅读 ${SKILL_HOME}/SKILL.md；按实际工具能力执行，不能把界面变化当作已确认入站消息。
 EOF
+  if skill_complete "wechat-article" "$INSTALL_HOME/skills"; then
+    printf '仅处理 mp.weixin.qq.com 公众号文章网页时，阅读 %s/skills/wechat-article/SKILL.md；不需要操作微信客户端。\n' "$INSTALL_HOME"
+  fi
+  printf '%s\n' "$INSTR_END"
 }
 
 remove_block() {
@@ -438,31 +442,56 @@ json_remove() {
   json_edit "$file" remove "$shape"
 }
 
+skill_files() {
+  case "$1" in
+    wechat-operator)
+      printf '%s\n' SKILL.md references/messaging.md references/environment.md references/events.md references/bot.md
+      ;;
+    wechat-article) printf '%s\n' SKILL.md ;;
+    *) return 1 ;;
+  esac
+}
+
+skill_complete() {
+  local name="$1" root="$2" resource
+  while IFS= read -r resource; do
+    [[ -s "$root/$name/$resource" ]] || return 1
+  done < <(skill_files "$name")
+}
+
 skill_ready() {
-  [[ -f "$SKILL_HOME/SKILL.md" ]]
+  skill_complete "$SKILL_NAME" "$INSTALL_HOME/skills"
 }
 
 copy_skill_to() {
-  local dest="$1"
+  local dest="$1" name root
   skill_ready || return 1
-  rm -rf "$dest"
-  mkdir -p "$(dirname "$dest")"
-  cp -R "$SKILL_HOME" "$dest"
+  root="$(dirname "$dest")"
+  mkdir -p "$root"
+  for name in "${SKILL_NAMES[@]}"; do
+    if skill_complete "$name" "$INSTALL_HOME/skills"; then
+      rm -rf "${root:?}/$name"
+      cp -R "$INSTALL_HOME/skills/$name" "$root/$name"
+    fi
+  done
 }
 
 install_skill_home() {
-  if [[ -n "$SKILL_SRC" && -f "$SKILL_SRC/SKILL.md" ]]; then
-    if [[ "$SKILL_SRC" != "$SKILL_HOME" ]]; then
-      rm -rf "$SKILL_HOME"
-      mkdir -p "$(dirname "$SKILL_HOME")"
-      cp -R "$SKILL_SRC" "$SKILL_HOME"
-      info "已安装 skill 到 $SKILL_HOME"
+  local name source_root="${SKILL_SRC%/*}"
+  for name in "${SKILL_NAMES[@]}"; do
+    if [[ -n "$SKILL_SRC" ]] && skill_complete "$name" "$source_root"; then
+      if [[ "$source_root/$name" != "$INSTALL_HOME/skills/$name" ]]; then
+        mkdir -p "$INSTALL_HOME/skills"
+        rm -rf "$INSTALL_HOME/skills/$name"
+        cp -R "$source_root/$name" "$INSTALL_HOME/skills/$name"
+      fi
+      info "已安装 skill $name"
+    elif skill_complete "$name" "$INSTALL_HOME/skills"; then
+      info "保留已有 skill $name"
+    else
+      warn "缺少完整 skill ${name}，跳过该 skill（MCP 注册不受影响）"
     fi
-  elif skill_ready; then
-    info "保留已有 skill $SKILL_HOME"
-  else
-    warn "未找到 skill 源，跳过 skill 安装（其它 Agent 配置不受影响）"
-  fi
+  done
 }
 
 # ---------- 各 Agent 的注册 ----------
@@ -550,13 +579,17 @@ configure_gemini() {
 }
 
 configure_cursor() {
-  local mcp="failed" note=""
+  local mcp="failed" skill="skipped" note=""
   if json_edit "$HOME/.cursor/mcp.json" set plain; then
     mcp="registered"
     note="写入 $HOME/.cursor/mcp.json"
   fi
   [[ "$mcp" == "registered" ]] || FAILED=1
-  result "cursor" "$mcp" "manual" "${note:+$note; }Cursor 没有全局规则文件，请在 Settings → Rules → User Rules 添加：处理 mp.weixin.qq.com 链接时先阅读 $SKILL_HOME/SKILL.md 并调用 fetch_article"
+  if skill_ready; then
+    skill="manual"
+    note="${note:+$note; }Cursor 没有全局规则文件，请在 Settings → Rules → User Rules 添加：个人微信操作先阅读 $SKILL_HOME/SKILL.md；公众号文章使用 $INSTALL_HOME/skills/wechat-article/SKILL.md（如已安装）"
+  fi
+  result "cursor" "$mcp" "$skill" "$note"
 }
 
 configure_windsurf() {
@@ -602,7 +635,11 @@ configure_cline() {
     mcp="registered"
     note="写入 $file"
   fi
-  rules="$HOME/Documents/Cline/Rules/wechat-article.md"
+  rules="$HOME/Documents/Cline/Rules/wechat-mcp.md"
+  if [[ -f "$HOME/Documents/Cline/Rules/wechat-article.md" ]]; then
+    backup_file "$HOME/Documents/Cline/Rules/wechat-article.md"
+    remove_block "$HOME/Documents/Cline/Rules/wechat-article.md"
+  fi
   if skill_ready && upsert_block "$rules"; then
     skill="instructions"
     note="${note:+$note; }指令 → $rules"
@@ -626,22 +663,24 @@ configure_opencode() {
 }
 
 configure_claude_desktop() {
-  local mcp="failed" skill="skipped" note="" zip="$HOME/Desktop/wechat-article-skill.zip"
+  local mcp="failed" skill="skipped" note="" zip name
   if json_edit "$HOME/Library/Application Support/Claude/claude_desktop_config.json" set plain; then
     mcp="registered"
     note="写入 Claude Desktop 配置（重启 Claude 生效）"
   fi
-  if skill_ready && command -v zip >/dev/null 2>&1; then
-    mkdir -p "$HOME/Desktop"
-    rm -f "$zip"
-    if (cd "$(dirname "$SKILL_HOME")" && zip -qr "$zip" "$SKILL_NAME"); then
+  for name in "${SKILL_NAMES[@]}"; do
+    if skill_complete "$name" "$INSTALL_HOME/skills" && command -v zip >/dev/null 2>&1; then
+      mkdir -p "$HOME/Desktop"
+      zip="$HOME/Desktop/$name-skill.zip"
+      rm -f "$zip"
       skill="manual"
-      note="${note:+$note; }在 设置 → Capabilities → Skills 上传 $zip"
-    else
-      skill="manual"
-      note="${note:+$note; }skill 打包失败，请在 $SKILL_HOME 手动压缩上传"
+      if (cd "$INSTALL_HOME/skills" && zip -qr "$zip" "$name"); then
+        note="${note:+$note; }在 设置 → Capabilities → Skills 分别上传 $zip"
+      else
+        note="${note:+$note; }$name 打包失败，请手动压缩上传"
+      fi
     fi
-  fi
+  done
   [[ "$mcp" == "registered" ]] || FAILED=1
   result "claude-desktop" "$mcp" "$skill" "$note"
 }
@@ -663,7 +702,7 @@ configure_one() {
 # ---------- 卸载 ----------
 
 uninstall_agent() {
-  local id="$1" note="" mcp="removed" skill="removed"
+  local id="$1" note="" mcp="removed" skill="removed" name
   case "$id" in
     claude-code)
       if [[ -f "$HOME/.claude.json" ]] && command -v claude >/dev/null 2>&1; then
@@ -671,8 +710,8 @@ uninstall_agent() {
         note="claude mcp remove --scope user"
       fi
       json_remove "$HOME/.claude.json" claude
-      rm -rf "$HOME/.claude/skills/$SKILL_NAME"
-      note="${note:+$note; }已删除 Claude Code 的 wechat-article skill"
+      for name in "${SKILL_NAMES[@]}"; do rm -rf "$HOME/.claude/skills/$name"; done
+      note="${note:+$note; }已删除 Claude Code 的个人微信及文章 skills"
       ;;
     codex)
       if [[ -f "$HOME/.codex/config.toml" ]] && command -v codex >/dev/null 2>&1; then
@@ -680,7 +719,7 @@ uninstall_agent() {
         note="codex mcp remove"
       fi
       [[ -f "$HOME/.codex/config.toml" ]] && { backup_file "$HOME/.codex/config.toml"; remove_codex_toml_table; }
-      rm -rf "$HOME/.codex/skills/$SKILL_NAME" "$HOME/.agents/skills/$SKILL_NAME"
+      for name in "${SKILL_NAMES[@]}"; do rm -rf "$HOME/.codex/skills/$name" "$HOME/.agents/skills/$name"; done
       [[ -f "$HOME/.codex/AGENTS.md" ]] && { backup_file "$HOME/.codex/AGENTS.md"; remove_block "$HOME/.codex/AGENTS.md"; }
       note="${note:+$note; }已删除 skill 与 AGENTS.md 指令"
       ;;
@@ -705,7 +744,12 @@ uninstall_agent() {
       json_remove "$(cline_settings_path)" plain
       json_remove "$HOME/Library/Application Support/Cursor/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json" plain
       json_remove "$HOME/Library/Application Support/Windsurf/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json" plain
-      rm -f "$HOME/Documents/Cline/Rules/wechat-article.md"
+      for name in wechat-mcp wechat-article; do
+        if [[ -f "$HOME/Documents/Cline/Rules/$name.md" ]]; then
+          backup_file "$HOME/Documents/Cline/Rules/$name.md"
+          remove_block "$HOME/Documents/Cline/Rules/$name.md"
+        fi
+      done
       note="已移除 Cline 配置与规则文件"
       ;;
     opencode)
@@ -715,7 +759,7 @@ uninstall_agent() {
       ;;
     claude-desktop)
       json_remove "$HOME/Library/Application Support/Claude/claude_desktop_config.json" plain
-      rm -f "$HOME/Desktop/wechat-article-skill.zip"
+      for name in "${SKILL_NAMES[@]}"; do rm -f "$HOME/Desktop/$name-skill.zip"; done
       note="已移除 Claude Desktop 配置与 skill 压缩包"
       ;;
     none)
@@ -750,7 +794,7 @@ run_uninstall() {
 # ---------- 自检与输出 ----------
 
 run_check() {
-  local bin="$BIN_DIR/wechat-mcp" out=""
+  local bin="$BIN_DIR/wechat-mcp" out="" name
   if [[ ! -x "$bin" ]]; then
     CHECK_DETAIL="未找到可执行文件 $bin"
     return 1
@@ -766,12 +810,14 @@ run_check() {
       '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
       | "$bin" 2>/dev/null || true)"
   fi
-  if printf '%s' "$out" | grep -q '"fetch_article"'; then
-    CHECK_DETAIL="tools/list 包含 fetch_article"
-    return 0
-  fi
-  CHECK_DETAIL="tools/list 中没有 fetch_article（可能是旧版本，或 MESSAGE_GATEWAY_CONFIG 指向的配置无法加载）"
-  return 1
+  for name in list_accounts list_conversations get_messages send_message get_send_status; do
+    if ! printf '%s' "$out" | grep -q "\"$name\""; then
+      CHECK_DETAIL="tools/list 中没有个人微信工具 ${name}（可能是旧版本，或账号配置无法加载）"
+      return 1
+    fi
+  done
+  CHECK_DETAIL="tools/list 包含个人微信账号、会话及文字收发工具；未执行桌面操作"
+  return 0
 }
 
 do_check_only() {
@@ -941,10 +987,16 @@ prepare_local_fallbacks() {
 install_binaries() {
   info "安装到 $BIN_DIR"
   mkdir -p "$BIN_DIR"
-  local t
+  local t optional
   for t in "${TOOLS[@]}"; do
     [[ -f "$SRC_DIR/$t" ]] || die "安装包缺少 $t"
     install -m 755 "$SRC_DIR/$t" "$BIN_DIR/$t"
+  done
+  # Older releases remain installable; native streaming is explicitly opt-in.
+  for optional in wechat_runtime wechat_overlay wechat_bubbles wechat_bot_worker; do
+    if [[ -f "$SRC_DIR/$optional" ]]; then
+      install -m 755 "$SRC_DIR/$optional" "$BIN_DIR/$optional"
+    fi
   done
   xattr -dr com.apple.quarantine "$BIN_DIR" 2>/dev/null || true
   if [[ -n "$VERSION" ]]; then
@@ -954,16 +1006,23 @@ install_binaries() {
 }
 
 download_skill_if_missing() {
-  [[ -n "$SKILL_SRC" && -f "$SKILL_SRC/SKILL.md" ]] && return 0
-  [[ -n "$REF" ]] || return 0
-  local dest="$TMP/skill"
-  mkdir -p "$dest"
-  curl_gh -o "$dest/SKILL.md" "https://raw.githubusercontent.com/$REPO/$REF/skills/$SKILL_NAME/SKILL.md" \
-    || curl_gh -o "$dest/SKILL.md" "https://raw.githubusercontent.com/$REPO/main/skills/$SKILL_NAME/SKILL.md" \
-    || warn "下载 skill 失败，已跳过"
-  if [[ -s "$dest/SKILL.md" ]]; then
-    SKILL_SRC="$dest"
-  fi
+  local name resource source_root="${SKILL_SRC%/*}" dest="$TMP/skills" found=0
+  for name in "${SKILL_NAMES[@]}"; do
+    if [[ -n "$SKILL_SRC" ]] && skill_complete "$name" "$source_root"; then
+      mkdir -p "$dest"
+      cp -R "$source_root/$name" "$dest/$name"
+    elif [[ -n "$REF" ]]; then
+      while IFS= read -r resource; do
+        mkdir -p "$(dirname "$dest/$name/$resource")"
+        if ! curl_gh -o "$dest/$name/$resource" "https://raw.githubusercontent.com/$REPO/$REF/skills/$name/$resource"; then
+          rm -f "$dest/$name/$resource"
+          warn "下载 $name/$resource 失败"
+        fi
+      done < <(skill_files "$name")
+    fi
+    if skill_complete "$name" "$dest"; then found=1; fi
+  done
+  if [[ "$found" == "1" ]]; then SKILL_SRC="$dest/$SKILL_NAME"; fi
   return 0
 }
 
@@ -1041,7 +1100,7 @@ run_install() {
     printf '   Agent:\n'
     print_agents_summary
     if [[ "$CHECK_STATUS" == "passed" ]]; then
-      printf '   自检: 通过（tools/list 含 fetch_article）\n'
+      printf '   自检: 通过（个人微信工具已暴露；未执行桌面操作）\n'
     elif [[ "$CHECK_STATUS" == "failed" ]]; then
       printf '   自检: 失败（%s）\n' "$CHECK_DETAIL"
     fi
@@ -1052,7 +1111,7 @@ run_install() {
 
 下一步：
   1. 重启上面列出的 Agent（或重新加载 MCP 服务），让 wechat 服务与 skill 生效。
-  2. 验证：重新运行安装脚本并加 --check（或直接发一篇公众号文章链接）。
+  2. 验证：重新运行安装脚本并加 --check，仅检查协议和工具列表，不会发送消息。
   3. 只用 fetch_article 抓文章不需要额外权限；微信消息收发/界面功能需要
      系统设置 → 隐私与安全性 中为宿主程序授予 辅助功能、屏幕录制、自动化，并保持微信已登录。
 EOF

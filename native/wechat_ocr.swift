@@ -2,6 +2,7 @@ import Foundation
 import Vision
 import ImageIO
 import UniformTypeIdentifiers
+import Darwin
 
 guard CommandLine.arguments.count > 1 else {
     fputs("用法: wechat_ocr <图片路径> [--crop x y width height]（图片像素，左上角原点）\n", stderr)
@@ -115,6 +116,28 @@ func writePNG(_ image: CGImage, to url: URL) -> Bool {
     return CGImageDestinationFinalize(destination)
 }
 
+// Explicitly enabled, private evidence makes coordinate/OCR failures inspectable.
+func writeDebugEvidence() throws {
+    let directory = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".wechat-rpa/diagnostics", isDirectory: true)
+    let enabled = directory.appendingPathComponent("capture.enabled")
+    guard FileManager.default.fileExists(atPath: enabled.path) else { return }
+    let attributes = try FileManager.default.attributesOfItem(atPath: directory.path)
+    let flag = try FileManager.default.attributesOfItem(atPath: enabled.path)
+    guard attributes[.type] as? FileAttributeType == .typeDirectory,
+          (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(),
+          ((attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0o777) & 0o077 == 0,
+          flag[.type] as? FileAttributeType == .typeRegular,
+          (flag[.ownerAccountID] as? NSNumber)?.uint32Value == getuid() else {
+        throw NSError(domain: "OCR诊断目录权限不安全", code: 1)
+    }
+    let name = url.lastPathComponent
+    let role = name.contains("title") ? "title" : (name.contains("search") ? "search" : (name.contains("list") || name.contains("session") ? "sessions" : "chat"))
+    let output = directory.appendingPathComponent("\(role).png")
+    guard writePNG(image, to: output) else { throw NSError(domain: "OCR诊断图片保存失败", code: 1) }
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: output.path)
+}
+
 func containsCJK(_ text: String) -> Bool {
     text.unicodeScalars.contains { scalar in
         (0x4E00...0x9FFF).contains(scalar.value)
@@ -219,25 +242,36 @@ func runTesseract() -> [TextLine]? {
     return lines.isEmpty ? nil : lines
 }
 
+do { try writeDebugEvidence() }
+catch { fputs("\(error)\n", stderr); exit(1) }
+
 let engine = (environment("WECHAT_OCR_ENGINE") ?? "auto").lowercased()
+guard ["auto", "vision", "tesseract"].contains(engine) else {
+    fputs("无效的 WECHAT_OCR_ENGINE\n", stderr)
+    exit(1)
+}
 let majorVersion = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
 let tesseractFirst = engine == "tesseract" || (engine == "auto" && majorVersion >= 26)
 
-var lines: [TextLine] = []
+var recognized: [TextLine]?
 if tesseractFirst {
-    lines = runTesseract() ?? []
-    if lines.isEmpty && engine != "tesseract" {
-        lines = runVision() ?? []
+    recognized = runTesseract()
+    if recognized?.isEmpty != false && engine != "tesseract" {
+        if let fallback = runVision(), recognized == nil || !fallback.isEmpty {
+            recognized = fallback
+        }
     }
 } else {
-    lines = runVision() ?? []
-    if lines.isEmpty && engine != "vision" {
-        lines = runTesseract() ?? []
+    recognized = runVision()
+    if recognized?.isEmpty != false && engine != "vision" && findTesseract() != nil {
+        if let fallback = runTesseract(), recognized == nil || !fallback.isEmpty {
+            recognized = fallback
+        }
     }
 }
 
-if lines.isEmpty {
-    fputs("OCR 未识别到文字（可尝试 WECHAT_OCR_ENGINE=tesseract）\n", stderr)
+guard var lines = recognized else {
+    fputs("OCR 引擎失败，无法取得识别结果\n", stderr)
     exit(1)
 }
 
@@ -245,8 +279,10 @@ lines.sort { lhs, rhs in lhs.y == rhs.y ? lhs.x < rhs.x : lhs.y < rhs.y }
 
 let encoder = JSONEncoder()
 encoder.outputFormatting = .prettyPrinted
-if let data = try? encoder.encode(lines), let json = String(data: data, encoding: .utf8) {
-    print(json)
-} else {
-    print("[]")
+do {
+    let data = try encoder.encode(lines)
+    print(String(decoding: data, as: UTF8.self))
+} catch {
+    fputs("OCR 结果编码失败\n", stderr)
+    exit(1)
 }

@@ -7,7 +7,7 @@
 ## 安装提示词
 
 ````text
-请帮我安装 wechat-mcp（macOS 微信 MCP，含公众号文章抓取工具 fetch_article）和配套的 wechat-article skill。安装、MCP 注册、skill 安装和自检都由安装脚本完成，请不要手动修改任何客户端配置。
+请帮我安装 wechat-mcp（macOS 个人微信桌面操作 MCP）和主 Skill wechat-operator，同时保留公众号文章附属 Skill wechat-article。安装、MCP 注册、skill 安装和自检都由安装脚本完成，请不要手动修改任何客户端配置。
 
 【第 1 步：准备 Token】
 如果环境变量 GITHUB_TOKEN 为空，先执行：
@@ -30,7 +30,7 @@
 ## 安装后
 
 - 重启 Agent（或重新加载 MCP 服务），wechat 服务和 skill 才会生效。
-- 自检：把上面的第 2 步命令中的 `--agent auto` 换成 `--check` 再运行一次（输出 `"check":"passed"` 即正常）。
+- 自检：把上面的第 2 步命令中的 `--agent auto` 换成 `--check` 再运行一次（输出 `"check":"passed"` 表示个人微信工具已暴露，不能代替真实桌面收发验收）。
 - 只用 `fetch_article` 抓公众号文章不需要 macOS 隐私权限；微信消息收发、界面操作等功能需要为运行 MCP 的宿主程序授予「辅助功能」「屏幕录制」「自动化」权限，并保持微信已登录。
 
 ## 卸载提示词
@@ -67,7 +67,7 @@ curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
 | 选项 | 作用 |
 |---|---|
 | `--agent <id>` | 指定目标 Agent；`auto` 识别当前 Agent，`all` 配置所有已安装客户端，`none` 只装二进制和 skill |
-| `--check` | 只做 MCP 自检（initialize + tools/list，确认 `fetch_article` 可用） |
+| `--check` | 只做 MCP 自检（initialize + tools/list，确认账号、会话和文字收发工具已暴露，不执行桌面操作） |
 | `--configure-only` | 不下载二进制，只写 Agent 配置和 skill（修复配置时用） |
 | `--uninstall` | 卸载二进制、skill 和所有已知 Agent 中的 `wechat` 配置，保留 `gateway.json` 与数据库 |
 | `--json` | 输出机器可读的 JSON 摘要，人类日志走 stderr |
@@ -75,7 +75,7 @@ curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
 `--json` 成功时最后一行形如：
 
 ```json
-{"ok":true,"action":"install","version":"v0.1.0","source":"release","home":"/path/to/.wechat-mcp","bin":"/path/to/.wechat-mcp/bin/wechat-mcp","config":"/path/to/.wechat-mcp/gateway.json","skill":"/path/to/.wechat-mcp/skills/wechat-article/SKILL.md","check":"passed","agents":[{"id":"codex","mcp":"registered","skill":"installed","note":"codex mcp add"}],"next":["重启或重新加载上面列出的 Agent，让 wechat 服务与 skill 生效"]}
+{"ok":true,"action":"install","version":"v0.1.0","source":"release","home":"/path/to/.wechat-mcp","bin":"/path/to/.wechat-mcp/bin/wechat-mcp","config":"/path/to/.wechat-mcp/gateway.json","skill":"/path/to/.wechat-mcp/skills/wechat-operator/SKILL.md","check":"passed","agents":[{"id":"codex","mcp":"registered","skill":"installed","note":"codex mcp add"}],"next":["重启或重新加载上面列出的 Agent，让 wechat 服务与 skill 生效"]}
 ```
 
 退出码：`0` 表示全部成功；`1` 表示下载/安装/自检或某个 Agent 配置失败，具体原因在 stderr。
@@ -83,7 +83,10 @@ curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
 ## 说明
 
 - 脚本会按客户端选择最稳妥的注册方式：Claude Code / Codex / Gemini CLI 优先用各自的 `mcp add` 命令，Cursor / Windsurf / Cline / OpenCode / Claude Desktop 直接合并对应的 JSON 配置；失败时自动回退到直接写配置，并在修改前生成 `.bak` 备份。
-- skill 安装位置：Claude Code → `~/.claude/skills/`；Codex → `~/.agents/skills/` 或 `~/.codex/skills/`；Gemini / Windsurf / Cline / OpenCode 没有统一 skill 目录，改为写入各自的全局指令文件（GEMINI.md、global_rules.md、Cline Rules、AGENTS.md）；Cursor 的用户规则只能手动粘贴；Claude Desktop 会打包成 `~/Desktop/wechat-article-skill.zip` 并提示上传。
+- skill 安装位置：Claude Code → `~/.claude/skills/`；Codex → `~/.agents/skills/` 或 `~/.codex/skills/`；Gemini / Windsurf / Cline / OpenCode 没有统一 skill 目录，改为写入各自的全局指令文件（GEMINI.md、global_rules.md、Cline Rules、AGENTS.md）；Cursor 的用户规则只能手动粘贴；Claude Desktop 分别打包为 `~/Desktop/wechat-operator-skill.zip` 和 `~/Desktop/wechat-article-skill.zip`，每包各含一个 Skill 并分别上传。
 - 各客户端配置路径以官方文档为准。`--agent <id>` 显式指定时会创建该客户端的配置目录；`--agent all` 只包含检测到已安装的客户端，不会凭空创建无关文件。
 - 环境隔离与安全：安装脚本采用绝对路径（默认 `~/.wechat-mcp/bin/wechat-mcp`）和局部变量（`MESSAGE_GATEWAY_CONFIG`）注册 MCP 服务，不修改系统 `PATH`，不污染用户的 Shell 配置文件（如 `~/.zshrc` / `~/.bashrc`）；安装脚本目前仅支持 macOS。
-- skill 的原始文件在仓库 [`skills/wechat-article/SKILL.md`](../skills/wechat-article/SKILL.md)，安装后位于 `~/.wechat-mcp/skills/wechat-article/`。
+- 主入口为 [`wechat-operator`](../skills/wechat-operator/SKILL.md)，公众号网页读取为附属 [`wechat-article`](../skills/wechat-article/SKILL.md)。安装后的同名目录位于 `~/.wechat-mcp/skills/`；个人微信 Skill 的参考文件随包分发，不依赖仓库外的文档。
+- 主 Skill 缺少任何必需参考文件时，不注册为可用；旧包只有文章 Skill 时不会冒充个人微信操作入口。下载参考文件与入口使用同一版本，不从 main 混入另一版说明。
+- JSON 的 `skill` 字段指向个人微信主入口，未安装时保持既有空字符串行为。`--check` 不会执行发送；安装和配置多个客户端不代表消息会主动唤醒它们。
+- 项目代码中的 Agent 桥接服务与 Skill 分开维护；Skill 提供操作指引，不会因为安装成功就在后台常驻。
