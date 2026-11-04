@@ -3,9 +3,12 @@ mod adapters;
 mod article;
 mod clipboard;
 mod crm;
+mod desktop;
+mod domain;
 mod gateway;
 mod listeners;
 mod mcp;
+mod messaging;
 mod resource_lock;
 #[cfg(test)]
 mod service_tests;
@@ -31,6 +34,12 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
+    if std::env::args().nth(1).as_deref() == Some("--desktop-diagnostics") {
+        let result = desktop::runtime::shared().diagnostics().await;
+        desktop::runtime::shared().shutdown().await;
+        println!("{}", serde_json::to_string(&result?)?);
+        return Ok(());
+    }
     let gateway = Arc::new(Gateway::load()?);
     gateway
         .listeners
@@ -129,6 +138,7 @@ async fn main() -> Result<()> {
         }
     }
     gateway.listeners.shutdown().await;
+    desktop::runtime::shared().shutdown().await;
     Ok(())
 }
 

@@ -1,6 +1,6 @@
-# WeChat MCP / 多平台消息网关
+# WeChat MCP / 个人微信 RPA
 
-Rust 实现的 MCP stdio 服务。面向 Agent 自动化客服、客户管理、跟进与分析。核心按 `(platform, account_id)` 路由到消息适配器；当前实际接入的是 **macOS 桌面微信**，通过 AppleScript、鼠标和本地 OCR（Apple Vision / Tesseract 兜底）操作可见界面。
+Rust 实现的个人微信桌面操作 MCP 服务，以 **macOS 个人微信** 的文字收发、会话观察和 Agent 事件接收为主线，通过 AppleScript、鼠标和本地 OCR 操作可见界面。内部按 `(platform, account_id)` 路由，保留客户管理、跟进和分析的辅助能力；这不表示已接入企业微信或其他消息平台。
 
 这类自动化不能保证账号不受限制或封禁。发送操作不等于送达，OCR 文字不等于完整聊天历史。
 
@@ -28,7 +28,8 @@ MCP stdio（并发请求、取消、单一响应写入）
 - `src/main.rs`、`src/mcp.rs`、`src/tools.rs`：协议层与工具定义。
 - `src/wechat.rs`、`src/clipboard.rs`、`native/`：平台实现。
 - `src/article.rs`：公众号文章抓取（公开网页 → Markdown + 图片），不经过桌面适配器。
-- `skills/wechat-article/`：配套 Agent skill。
+- `skills/wechat-operator/`：个人微信操作主 Skill；按需加载收发、环境和事件参考。
+- `skills/wechat-article/`：独立的公众号网页读取附属 Skill。
 
 协议请求可以并行执行，`ping`、账号查询不再等待微信长轮询完成。微信 UI 操作通过进程内互斥锁和当前用户共享的操作系统文件锁串行执行，避免焦点、剪贴板、截图相互干扰。长轮询持有桌面锁，其他 UI 操作需要等待它结束或取消。
 
@@ -55,7 +56,7 @@ curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
   https://raw.githubusercontent.com/haohao-ui/wechat-mcp/main/scripts/install.sh | bash
 ```
 
-脚本会：下载最新 Release 的 macOS 通用二进制并校验 SHA-256（无 Release 时自动从源码构建）→ 安装到 `~/.wechat-mcp/bin` → 生成 `~/.wechat-mcp/gateway.json`（已存在则保留）→ 安装 `wechat-article` skill → 自动识别当前 Agent（Claude Code / Codex / Gemini CLI / Cursor / Windsurf / Cline / OpenCode / Claude Desktop）并注册 MCP 服务 `wechat`。识别不到时退回注册 Claude Code；用 `--agent all` 可一次配置所有检测到已安装的客户端。安装全程使用绝对路径与 Agent 局部变量，不修改系统的 `PATH`，不污染用户的 Shell 配置文件。
+脚本会：下载最新 Release 的 macOS 通用二进制并校验 SHA-256（无 Release 时自动从源码构建）→ 安装到 `~/.wechat-mcp/bin` → 生成 `~/.wechat-mcp/gateway.json`（已存在则保留）→ 安装个人微信主 Skill `wechat-operator` 及附属 `wechat-article` → 自动识别当前 Agent（Claude Code / Codex / Gemini CLI / Cursor / Windsurf / Cline / OpenCode / Claude Desktop）并注册 MCP 服务 `wechat`。识别不到时退回注册 Claude Code；用 `--agent all` 可一次配置所有检测到已安装的客户端。安装全程使用绝对路径与 Agent 局部变量，不修改系统的 `PATH`，不污染用户的 Shell 配置文件。
 
 **让 Agent 自动安装**：把 [agent-install.md](docs/agent-install.md) 里的提示词交给任意 Agent。它会执行一条命令：
 
@@ -88,6 +89,8 @@ curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
 发布新版本：`git tag v0.1.0 && git push origin v0.1.0`，Release 工作流自动构建并上传安装包。
 
 ## 构建
+
+模块化RPA底座、stream模式和只读能力诊断见 [RPA运行说明](docs/rpa-runtime.md)。默认保持旧驱动；新模式须完成本机实机验收后再启用。
 
 需要 macOS、Rust 1.88+（Edition 2024）及可用的 Swift 编译器：
 
@@ -152,7 +155,9 @@ MCP 客户端配置示例（一键安装的默认位置；`<HOME>` 替换为你�
 
 只请求公开网页（系统 `curl`），不操作微信客户端、不占桌面锁，也不需要 `platform` / `account_id` 和 macOS 隐私权限。提供绝对路径 `output_dir` 时，正文图片下载到 `images/01.jpg…`（按文件头识别格式，单篇上限 300 张），并写入引用本地图片的 `article.md`；部分图片失败会列在 `image_errors`，对应位置保留远程链接。已删除文章、触发微信环境验证、纯图片/视频消息会返回明确错误。阅读数、点赞、评论不在公开页面中，无法获取。
 
-配套 skill 位于 `skills/wechat-article/SKILL.md`，一键安装时会装到 `~/.wechat-mcp/skills/`；脚本还会按客户端把 skill 放到 `~/.claude/skills/`、`~/.agents/skills/`（或 `~/.codex/skills/`），没有 skill 机制的客户端则写入其全局指令文件。
+个人微信操作从 [wechat-operator](skills/wechat-operator/SKILL.md) 进入，按需读取其自包含的收发、环境和事件参考。群聊成员/方向、好友操作和长期常驻等未完成项在主 Skill 中明确标注；公众号文章由独立的 [wechat-article](skills/wechat-article/SKILL.md) 处理。
+
+安装时两个 Skill 及其参考文件一起进入 `~/.wechat-mcp/skills/`，再按客户端分发到 `~/.claude/skills/`、`~/.agents/skills/`（或 `~/.codex/skills/`）；没有 Skill 目录的客户端使用指向相应入口的规则。Claude Desktop 分别打包两个 Skill，不能把多个 Skill 混成一个上传包。安装多个客户端与主动推送到多个 Agent 是不同能力；后者参见 [Agent 桥接说明](docs/agent-bridge.md)。
 
 客服工具另提供客户创建/更新/查询、交互记录、上下文快照、事件领取/续租/确认、跟进任务、带证据分析和统计。后台观察通过 `start_listener` / `stop_listener` / `get_listener_status` 管理，启用状态及间隔持久保存、重启恢复；同一数据库的账号监听只允许一个负责人，事件通过 `wait_for_events` / `claim_events` 消费。详见工作流文档。
 
@@ -189,3 +194,8 @@ python3 tests/service_smoke.py target/release/wechat-mcp
 ## 后续扩展边界
 
 持久收件箱和后台界面观察已实现；它们不能弥补 OCR 的消息身份、方向和历史缺失。宿主 Agent 需要保持消费/调度循环，当前没有主动唤醒已停止 Agent 的连接。下一步可在这一底座接入官方平台事件与回执、独立账号 worker，以及宿主调度桥接。真实微信多账号、WhatsApp 和 TikTok 接入仍未实现。
+
+
+## 白名单 AI 客服 Bot
+
+个人微信可接入本机常驻模型客服。当前受控版本支持多个明确授权的私聊白名单及多群/私聊排除列表，排除优先、会话状态隔离、桌面操作串行；可使用 Codex 或 OpenAI 兼容模型接口，启动前历史不自动回复；群聊自动回复和好友操作关闭。配置、运行状态及停止命令见[Bot运行说明](docs/allowlist-bot.md)，验证证据见[实机记录](research/bot-acceptance-2026-11-04.md)。视觉配置当前仅适配已标定的暗色880×640单倍像素，不是通用生产验收。

@@ -1,0 +1,5 @@
+{
+  "accounts": [
+    {"platform": "wechat", "account_id": "test-desktop", "adapter": "wechat_desktop"}
+  ]
+}

@@ -11,6 +11,10 @@ use uuid::Uuid;
 
 use crate::accounts::AccountKey;
 
+mod chat_context;
+#[cfg(test)]
+mod context_tests;
+
 pub struct Store {
     connection: Mutex<Connection>,
     lock_prefix: std::path::PathBuf,
@@ -369,24 +373,7 @@ pub(crate) fn compute_session_diffs(
     events
 }
 
-impl Store {
-    pub async fn capture(
-        self: &Arc<Self>,
-        key: AccountKey,
-        customer: String,
-        payload: Value,
-    ) -> Result<Value> {
-        self.run(move |conn| {
-            let tx=conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            require_customer(&tx,&key,&customer)?;
-            let event_id=new_id();let time=now();
-            tx.execute("INSERT INTO events(event_id,platform,account_id,customer_id,kind,source,verified,occurred_at,observed_at,payload,state) VALUES(?1,?2,?3,?4,'chat_snapshot','desktop_ocr',0,?5,?5,?6,'recorded')",params![event_id,key.platform,key.account_id,customer,time,payload.to_string()])?;
-            let event=one(&tx,&format!("{EVENT_SELECT} AND event_id=?3"),params![key.platform,key.account_id,event_id])?;
-            tx.commit()?;
-            Ok(json!({"account":key,"data":event}))
-        }).await
-    }
-}
+impl Store {}
 
 impl Store {
     pub fn listener_lock(&self, key: &AccountKey) -> std::path::PathBuf {

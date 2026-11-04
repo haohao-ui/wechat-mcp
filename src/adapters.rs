@@ -6,6 +6,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     accounts::{AccountDescriptor, AccountKey, Capabilities},
+    desktop::actor::DesktopActor,
     wechat,
 };
 
@@ -34,7 +35,7 @@ pub trait MessageAdapter: Send + Sync {
 
 pub struct WechatDesktop {
     account: AccountDescriptor,
-    desktop: Arc<Mutex<()>>,
+    desktop: DesktopActor,
 }
 
 impl WechatDesktop {
@@ -59,7 +60,7 @@ impl WechatDesktop {
                     source: "desktop_ocr".into(),
                 },
             },
-            desktop,
+            desktop: DesktopActor::new(desktop),
         }
     }
 }
@@ -72,24 +73,34 @@ impl MessageAdapter for WechatDesktop {
     fn execute(&self, operation: Operation) -> AdapterFuture<'_> {
         Box::pin(async move {
             // UI focus, clipboard and screenshot files are shared across all requests.
-            let _guard = self.desktop.lock().await;
-            let _process_guard = crate::resource_lock::ResourceLock::desktop().await?;
+            let _lease = self.desktop.acquire().await?;
             let data = match operation {
                 Operation::Focus => {
                     let (x, y, width, height) = wechat::focus_wechat().await?;
                     json!({"status":"executed", "window":{"x":x,"y":y,"width":width,"height":height}})
                 }
                 Operation::ListConversations => {
-                    let sessions = wechat::get_recent_sessions().await?;
-                    let conversations: Vec<_> = sessions.into_iter().map(|s| json!({
+                    let read = wechat::read_session_observation().await?;
+                    let conversations: Vec<_> = read.sessions.into_iter().map(|s| json!({
                         "display_name":s.name, "stable_id":null, "time_text":s.time, "preview":s.preview,
                     })).collect();
-                    json!({"conversations":conversations,"coverage":"visible_only","source":"desktop_ocr"})
+                    let mut data = json!({"conversations":conversations,"coverage":"visible_only","source":"desktop_ocr"});
+                    if let Some(observation) = read.observation {
+                        data["capture"] = json!({"driver":"native_stream","source":"desktop_visual",
+                            "epoch":observation.epoch,"sequence":observation.sequence,
+                            "captured_at_ms":observation.captured_at_ms,"ocr_cached":observation.ocr_cached});
+                    }
+                    data
                 }
                 Operation::ReadMessages { recipient } => {
-                    let lines = wechat::read_chat_messages(recipient.as_deref()).await?;
-                    json!({"recipient":recipient,"text_lines":lines,"coverage":"visible_only",
-                        "source":"desktop_ocr","message_ids_available":false,"direction":"unknown"})
+                    let read = wechat::read_chat_observation(recipient.as_deref()).await?;
+                    let mut data = json!({"recipient":recipient,"text_lines":read.text_lines,"coverage":"visible_only",
+                        "source":"desktop_ocr","message_ids_available":false,"direction":"unknown"});
+                    if let Some(observation) = read.observation {
+                        data["observation"] = json!({"kind":"ocr_text_lines","source":"desktop_visual",
+                            "incoming_verified":false,"snapshot":observation});
+                    }
+                    data
                 }
                 Operation::SendMessage { recipient, message } => {
                     if recipient.trim().is_empty() || message.trim().is_empty() {
