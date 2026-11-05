@@ -258,6 +258,7 @@ class BotCoordinator:
             if name==self.active_name: reason='active'
             elif name not in self.last_visit: reason='initial'
             elif now-self.last_visit[name]>=self.config['idle_check_seconds']: reason='idle_check'
+            elif getattr(self.sessions.get(name),'turn',None) is not None: reason='turn_open'
             elif row is not None:
                 # First unselected sighting: check once more so the baseline cannot hide a message.
                 if prior is None or prior['digest'] is None: reason='initial'
@@ -276,7 +277,7 @@ class BotCoordinator:
                 due.add(name)
                 if reason in ('preview_changed','unread_badge'):
                     self.pending.setdefault(name,(now,-row.get('y',0)))
-                if reason not in ('active','idle_check','pending'):
+                if reason not in ('active','idle_check','pending','turn_open'):
                     log_event('session_switch_due',recipient=name,reason=reason,visible=row is not None,
                               red_pixels=row and row['red_pixels'],baseline_red=prior and prior['min_red'])
         return due
@@ -326,7 +327,8 @@ class BotCoordinator:
             self.last_visit[target['recipient']]=time.monotonic()
             self.pending.pop(target['recipient'],None)
         # File originals are archived only when no chat has a reply in progress or waiting.
-        if not self.stop.is_set() and not self.pending and not any(getattr(self.sessions[n],'had_incoming',False) for n in visited):
+        if (not self.stop.is_set() and not self.pending and not any(getattr(self.sessions[n],'had_incoming',False) for n in visited)
+                and not any(getattr(child,'turn',None) is not None for child in self.sessions.values())):
             await self.download_pending_media()
         state='ignored' if not active else 'paused' if all(self.sessions[n].paused for n in active) else 'watching'
         self.health(state,active_chat=self.active_name)

@@ -29,7 +29,9 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.root=Path(self.temp.name)
         self.config={'schema_version':1,'host':'fixture','account_id':'fixture',
             'allowlist':[{'recipient':'午夜咖啡','kind':'private'}],'state_dir':str(self.root/'state'),
-            'poll_seconds':2,'cooldown_seconds':0,'max_replies_per_hour':20}
+            'poll_seconds':2,'cooldown_seconds':0,'max_replies_per_hour':20,
+            # Reply in the same cycle as the arrival; quiet-period behaviour has its own tests.
+            'turn_quiet_seconds':0}
         self.service=BotService(self.config)
         self.old=frame(bubble('old'))
         self.new=frame(bubble('old'),bubble('你好，介绍一下你自己'))
@@ -74,6 +76,79 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.service=self.restart()
         await self.cycle([self.new,self.new,self.new,self.new])
         self.model.assert_awaited()
+
+    def at(self,seconds):
+        self.service.clock=lambda:1000.0+seconds
+
+    async def test_reply_waits_for_quiet_period(self):
+        self.config['turn_quiet_seconds']=10
+        self.service=self.restart()
+        self.service.advance(self.old)
+        one=frame(bubble('old'),bubble('图片说明'))
+        two=frame(*one['bubbles'],bubble('这是什么'))
+        reply=bubble('你好，我是AI客服助手。','outbound_visual')
+        self.at(0); await self.cycle([one,one])
+        self.at(5); await self.cycle([two,two])
+        self.at(9); await self.cycle([two])
+        self.model.assert_not_awaited()
+        self.at(15); await self.cycle([two,two,frame(*two['bubbles'],reply)])
+        self.model.assert_awaited_once()
+        self.assertEqual(self.model.await_args.args[0],'图片说明\n这是什么')
+        self.assertEqual(sum(name=='send_message' for name,_ in self.calls),1)
+        self.assertIsNone(self.service.turn)
+
+    async def test_turn_closes_at_max_even_while_customer_keeps_sending(self):
+        self.config.update(turn_quiet_seconds=10,turn_max_seconds=60)
+        self.service=self.restart()
+        self.service.advance(self.old)
+        bubbles=[bubble('old')]
+        for second in range(0,60,5):
+            bubbles.append(bubble('m%d'%second))
+            self.at(second); await self.cycle([frame(*bubbles),frame(*bubbles)])
+        self.model.assert_not_awaited()
+        reply=bubble('你好，我是AI客服助手。','outbound_visual')
+        self.at(60); await self.cycle([frame(*bubbles),frame(*bubbles),frame(*bubbles,reply)])
+        self.model.assert_awaited_once()
+        self.assertEqual(len(self.model.await_args.args[0].split('\n')),12)
+        later=frame(*bubbles,reply,bubble('还有一个问题'))
+        self.at(62); await self.cycle([later,later])
+        self.model.assert_awaited_once()  # the next turn waits for its own quiet period
+        self.assertEqual([b['text'] for b in self.service.turn['bubbles']],['还有一个问题'])
+
+    async def test_open_turn_survives_restart(self):
+        self.config['turn_quiet_seconds']=10
+        self.service=self.restart()
+        self.service.advance(self.old)
+        self.at(0); await self.cycle([self.new,self.new])
+        self.service=self.restart()
+        reply=bubble('你好，我是AI客服助手。','outbound_visual')
+        self.at(11); await self.cycle([self.new,self.new,frame(*self.new['bubbles'],reply)])
+        self.model.assert_awaited_once()
+        self.assertEqual(self.model.await_args.args[0],'你好，介绍一下你自己')
+
+    async def test_image_only_turn_replies(self):
+        img={'text':'[图片]','digest':'image:50:40','phash':'0'*16,'media_id':'a'*64,
+             'direction':'inbound_visual','kind':'image'}
+        self.service.advance(self.old)
+        current=frame(bubble('old'),img)
+        reply=bubble('你好，我是AI客服助手。','outbound_visual')
+        capture=type('Capture',(),{})()
+        capture.frame=AsyncMock(side_effect=copy.deepcopy([current,current,current,frame(bubble('old'),img,reply)]))
+        capture.attachments=AsyncMock(return_value=(['x.png'],[{'kind':'image','source':'chat_thumbnail','original_bytes':False}]))
+        with patch('scripts.wechat_bot.service.generate',self.model):
+            await self.service.cycle(self.client,capture)
+        self.model.assert_awaited_once()
+        self.assertEqual(self.model.await_args.kwargs['images'],['x.png'])
+
+    def test_config_turn_keys_validated(self):
+        path=self.root/'config.json'
+        path.write_text(json.dumps({k:v for k,v in self.config.items() if k!='turn_quiet_seconds'}))
+        loaded=load_config(path)
+        self.assertEqual((loaded['turn_quiet_seconds'],loaded['turn_max_seconds'],loaded['images_per_model_call']),(10,60,4))
+        for key,value in [('turn_quiet_seconds',-1),('turn_quiet_seconds',121),('turn_max_seconds',5),
+                          ('turn_max_seconds','60'),('images_per_model_call',0),('images_per_model_call',17)]:
+            path.write_text(json.dumps({**self.config,key:value}))
+            with self.assertRaises(ValueError): load_config(path)
 
     async def test_initial_start_does_not_reply_to_history(self):
         await self.cycle([self.new])
@@ -207,13 +282,18 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.cycle([self.new,self.new,self.new,after])
         self.assertEqual(self.service.cursor,self.new)
 
-    async def test_new_activity_during_model_generation_suppresses_stale_send(self):
+    async def test_new_activity_during_generation_still_sends_and_stays_pending(self):
+        # Spec §5.8: the closed turn is answered; what arrived meanwhile becomes the next turn.
         self.service.advance(self.old)
         changed=frame(*self.new['bubbles'],bubble('新问题'))
-        await self.cycle([self.new,self.new,changed])
-        self.assertEqual(self.calls,[])
+        after=frame(*changed['bubbles'],bubble('你好，我是AI客服助手。','outbound_visual'))
+        await self.cycle([self.new,self.new,changed,after])
+        self.assertEqual(sum(name=='send_message' for name,_ in self.calls),1)
         record=json.loads(next(self.service.root.glob('send-*.json')).read_text())
-        self.assertEqual(record['status'],'superseded')
+        self.assertEqual(record['status'],'triggered')
+        self.assertEqual(self.service.cursor,self.new)  # '新问题' is still ahead of the cursor
+        await self.cycle([after,after,after,frame(*after['bubbles'],bubble('好的','outbound_visual'))])
+        self.assertEqual(self.model.await_args.args[0],'新问题')
 
     async def test_scrolled_echo_with_repeated_greeting_does_not_pause_or_resend(self):
         old=[bubble(x) for x in ['hi','hi','there','question','received']]
@@ -261,9 +341,11 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.service.advance(self.old)
         (self.service.root/'send-limit.json').write_text(json.dumps({'status':'triggered','attempted_at':time.time()}))
         self.service.config['max_replies_per_hour']=1
-        await self.cycle([self.new])
+        await self.cycle([self.new,self.new])
         self.model.assert_not_awaited()
-        self.assertEqual(self.service.cursor,self.old)
+        # The arrival waits in the open turn until the limit allows a reply.
+        self.assertEqual([b['text'] for b in self.service.turn['bubbles']],['你好，介绍一下你自己'])
+        self.assertEqual(list(self.service.root.glob('send-bot*.json')),[])
 
     def test_state_cannot_cross_accounts_or_contacts(self):
         with self.assertRaises(ValueError):
@@ -416,7 +498,7 @@ class HistoryServiceTests(ServiceTests):
         self.history.recent_context = unittest.mock.Mock(side_effect=self.sqlite3.OperationalError('locked'))
         await self.cycle([self.new, self.new, self.new])
         self.model.assert_not_awaited()
-        self.assertEqual(self.service.cursor, self.old)
+        self.assertEqual([b['text'] for b in self.service.turn['bubbles']], ['你好，介绍一下你自己'])
         self.assertEqual(list(self.service.root.glob('send-*.json')), [])
         self.assertEqual(json.loads((self.service.root/'health.json').read_text())['state'], 'history_write_failed')
 
