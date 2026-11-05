@@ -193,7 +193,33 @@ def main(argv=None):
         stats={'recorded_batches':len(records),'triggered':sum(r.get('status')=='triggered' for r in records),
                'client_echo_observed':sum(r.get('client_echo_observed') is True for r in records),
                'needs_review':sum(r.get('status') in ['generating','generated','attempting','unknown'] for r in records)}
-        print(json.dumps({'launchd_loaded':loaded(),'health':health,'stats':stats,'config':str(config_path)},ensure_ascii=False))
+        needs_recalibration=check_needs_recalibration(health,state_dir)
+        if needs_recalibration:
+            sys.stderr.write('界面核对连续失败，请运行 control calibrate 重新定位\n')
+            sys.stderr.flush()
+        print(json.dumps({'launchd_loaded':loaded(),'health':health,'stats':stats,'config':str(config_path),'needs_recalibration':needs_recalibration},ensure_ascii=False))
+
+
+def check_needs_recalibration(health, state_dir=None):
+    if health and isinstance(health, dict):
+        if health.get('state') == 'needs_recalibration':
+            return True
+        sessions = health.get('sessions')
+        if isinstance(sessions, dict):
+            for s in sessions.values():
+                if isinstance(s, dict) and s.get('state') == 'needs_recalibration':
+                    return True
+    if state_dir:
+        sessions_dir = Path(state_dir) / 'sessions'
+        if sessions_dir.exists():
+            for sp in sessions_dir.glob('*/health.json'):
+                try:
+                    s_data = json.loads(sp.read_text())
+                    if isinstance(s_data, dict) and s_data.get('state') == 'needs_recalibration':
+                        return True
+                except Exception:
+                    pass
+    return False
 
 
 if __name__=='__main__': main()
