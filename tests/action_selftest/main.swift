@@ -80,8 +80,14 @@ final class RecordingSink: EventSink {
     var events: [[String:Any]] = []
     var interfereAfterMoves: Int? = nil
     var interfereAfterDown = false
+    /// Real systems report the pointer a few events late (acceptance 2026-11-05, macOS 12).
+    var lag = 0
+    private var history: [CGPoint] = []
     private var moves = 0
-    func cursor() -> CGPoint { position }
+    func cursor() -> CGPoint {
+        if lag > 0 && history.count > lag { return history[history.count-1-lag] }
+        return position
+    }
     func post(_ type: CGEventType, at point: CGPoint, button: CGMouseButton) throws {
         let names: [CGEventType:String] = [.mouseMoved:"moved", .leftMouseDown:"left_down", .leftMouseUp:"left_up",
                                            .rightMouseDown:"right_down", .rightMouseUp:"right_up"]
@@ -91,6 +97,7 @@ final class RecordingSink: EventSink {
             moves += 1
             if moves == interfereAfterMoves { position.x += 50 }
         }
+        history.append(position)  // where the pointer really is after this event
         if type == .leftMouseDown && interfereAfterDown { position.y += 50 }
     }
     func scroll(lines: Int32, at point: CGPoint) throws {
@@ -108,6 +115,8 @@ func execScenario(_ name: String, _ seed: UInt64) -> [String:Any] {
     case "unreachable": rect = CGRect(x:2000, y:400, width:50, height:20)
     case "interfere_move": sink.interfereAfterMoves = 3
     case "interfere_down": sink.interfereAfterDown = true
+    case "lagging_cursor": sink.lag = 2
+    case "lagging_cursor_interfere": sink.lag = 2; sink.interfereAfterMoves = 3
     case "instant": profile = .instant
     case "scroll": rect = CGRect(x:315, y:60, width:565, height:436)
     default: break

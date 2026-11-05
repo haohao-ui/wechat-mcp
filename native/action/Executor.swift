@@ -53,16 +53,39 @@ struct ActionRandom: RandomNumberGenerator {
 /// A pointer more than this far from where we last put it means a person is using the mouse.
 let userInputThreshold: Double = 3
 
+/// The system reports the pointer a few events late, so "ours" means near the path we just posted.
+let recentPathLength = 8
+
+func distanceToSegment(_ p: CGPoint, _ a: CGPoint, _ b: CGPoint) -> Double {
+    let dx = Double(b.x-a.x), dy = Double(b.y-a.y)
+    let length = dx*dx + dy*dy
+    guard length > 1e-12 else { return distance(p, a) }
+    let t = min(max((Double(p.x-a.x)*dx + Double(p.y-a.y)*dy)/length, 0), 1)
+    return distance(p, CGPoint(x:Double(a.x)+t*dx, y:Double(a.y)+t*dy))
+}
+
 final class Executor {
     let sink: EventSink
-    private var lastPosted: CGPoint?
+    private var recent: [CGPoint] = []
+    private var lastPosted: CGPoint? {
+        get { recent.last }
+        set { if let point = newValue { remember(point) } else { recent = [] } }
+    }
 
     init(sink: EventSink) { self.sink = sink }
 
-    /// Throws userInputDetected when the pointer is not where we left it.
+    private func remember(_ point: CGPoint) {
+        recent.append(point)
+        if recent.count > recentPathLength { recent.removeFirst(recent.count - recentPathLength) }
+    }
+
+    /// Throws userInputDetected when the pointer is off the path we recently posted.
     func checkPointer() throws {
-        guard let expected = lastPosted else { return }
-        if distance(sink.cursor(), expected) > userInputThreshold { lastPosted = nil; throw ActionError.userInputDetected }
+        guard let last = recent.last else { return }
+        let here = sink.cursor()
+        var nearest = distance(here, last)
+        for index in recent.indices.dropFirst() { nearest = min(nearest, distanceToSegment(here, recent[index-1], recent[index])) }
+        if nearest > userInputThreshold { recent = []; throw ActionError.userInputDetected }
     }
 
     func run(_ moves: [[TrajectoryPoint]]) throws {
@@ -101,7 +124,7 @@ final class Executor {
     /// user input; a pointer moved between actions (by a person or the system) is just the new start.
     func start() -> CGPoint {
         let here = sink.cursor()
-        lastPosted = here
+        recent = [here]
         return here
     }
 }
