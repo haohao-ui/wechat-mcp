@@ -13,6 +13,7 @@ use crate::domain::observation::Snapshot;
 use crate::messaging::reconcile::{Continuity, reconcile};
 
 mod navigation;
+pub mod files;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -562,6 +563,147 @@ pub async fn send_message(recipient: &str, message: &str) -> Result<()> {
 
     info!("已触发微信发送操作，送达状态未验证");
     Ok(())
+}
+
+/// 发送本机文件（路径已由 files::prepare_send_file 校验）。
+/// 粘贴后先 OCR 输入框确认出现该文件，再复核标题后回车；任何一步失败都清空输入框且不回车。
+pub async fn send_file(recipient: &str, file: &files::FileToSend) -> Result<()> {
+    if !is_wechat_running().await? {
+        bail!("微信客户端未运行，请先启动并登录微信");
+    }
+    info!("准备向 [{}] 发送文件 {}...", recipient, file.name);
+    open_chat_conversation(recipient).await?;
+    let (win_x, win_y, win_w, win_h) = get_wechat_window_rect().await?;
+    mouse_click(win_x + 450.0, win_y + win_h - 80.0).await?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(350)).await;
+    verify_chat_title(recipient).await?;
+
+    // 先保存文本剪贴板；文件引用写入后，结束时恢复原文本。
+    let mut clipboard_guard =
+        clipboard::ClipboardGuard::replace(&format!("wechat-file-{}", uuid::Uuid::new_v4())).await?;
+    let clear_input = r#"tell application "System Events"
+            tell process "WeChat"
+                set frontmost to true
+                keystroke "a" using {command down}
+                key code 51
+                delay 0.2
+            end tell
+        end tell"#;
+    let send_result = async {
+        // 输入框里残留的草稿不能和文件一起发出。
+        run_applescript(clear_input).await?;
+        set_clipboard_file(&file.path).await?;
+        run_applescript(
+            r#"tell application "System Events"
+            tell process "WeChat"
+                set frontmost to true
+                keystroke "v" using {command down}
+                delay 1.0
+            end tell
+        end tell"#,
+        )
+        .await?;
+        let lines = ocr_screen_region(
+            win_x + 315.0,
+            win_y + win_h - 160.0,
+            win_w - 325.0,
+            150.0,
+        )
+        .await?;
+        if !files::input_shows_file(&lines, &file.name) {
+            let _ = run_applescript(clear_input).await;
+            bail!("粘贴后输入框未出现文件 {}，已清空且未触发发送", file.name);
+        }
+        if let Err(error) = verify_chat_title(recipient).await {
+            let _ = run_applescript(clear_input).await;
+            return Err(error);
+        }
+        run_applescript(
+            r#"tell application "System Events"
+            tell process "WeChat" to key code 36
+        end tell"#,
+        )
+        .await
+        .map(|_| ())
+    }
+    .await;
+    let restore_result = clipboard_guard.restore().await;
+    if let Err(error) = &restore_result {
+        warn!("发送文件后恢复剪贴板失败，将同步兜底: {error:#}");
+    }
+    send_result?;
+    restore_result?;
+    info!("已触发微信文件发送操作，送达状态未验证");
+    Ok(())
+}
+
+/// 把一个文件引用写入通用剪贴板（与 Finder 拷贝文件相同的 NSURL 形式）。
+async fn set_clipboard_file(path: &std::path::Path) -> Result<()> {
+    let script = r#"ObjC.import('AppKit');
+function run(argv) {
+    const board = $.NSPasteboard.generalPasteboard;
+    board.clearContents;
+    const ok = board.writeObjects($([$.NSURL.fileURLWithPath(argv[0])]));
+    return ok ? 'ok' : 'failed';
+}"#;
+    let output = Command::new("osascript")
+        .kill_on_drop(true)
+        .args(["-l", "JavaScript", "-e", script])
+        .arg(path)
+        .output()
+        .await
+        .context("执行文件剪贴板脚本失败")?;
+    if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != "ok" {
+        bail!(
+            "无法把文件写入剪贴板: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// 截取屏幕区域（点坐标）并 OCR，返回识别出的文字行。
+async fn ocr_screen_region(x: f64, y: f64, width: f64, height: f64) -> Result<Vec<String>> {
+    if width <= 0.0 || height <= 0.0 {
+        bail!("截图区域无效");
+    }
+    let region = format!(
+        "{},{},{},{}",
+        x.round() as i64,
+        y.round() as i64,
+        width.round() as i64,
+        height.round() as i64
+    );
+    let tmp_file = std::env::temp_dir().join(format!("wechat_input_{}.png", uuid::Uuid::new_v4()));
+    let result = async {
+        let status = crate::desktop::overlay::capture(
+            Command::new("screencapture")
+                .kill_on_drop(true)
+                .args(["-R", &region, "-x"])
+                .arg(&tmp_file)
+                .status(),
+        )
+        .await
+        .context("截取输入框失败")?;
+        if !status.success() {
+            bail!("截取输入框失败，已停止操作");
+        }
+        let output = Command::new(get_ocr_binary_path())
+            .kill_on_drop(true)
+            .arg(&tmp_file)
+            .output()
+            .await
+            .context("执行输入框 OCR 失败")?;
+        if !output.status.success() {
+            bail!("输入框 OCR 失败: {}", String::from_utf8_lossy(&output.stderr).trim());
+        }
+        let items: Vec<OcrItem> =
+            serde_json::from_slice(&output.stdout).context("输入框 OCR 返回不是有效 JSON")?;
+        Ok(items.into_iter().map(|item| item.text).collect())
+    }
+    .await;
+    let _ = std::fs::remove_file(&tmp_file);
+    result
 }
 
 fn same_input_text(actual: &str, expected: &str) -> bool {

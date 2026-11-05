@@ -144,6 +144,10 @@ impl Gateway {
                 "send",
                 &["recipient", "message", "idempotency_key", "customer_id"],
             ),
+            "send_file" => (
+                "send_file",
+                &["recipient", "path", "idempotency_key", "customer_id"],
+            ),
             "list_conversations" | "get_recent_sessions" => ("list", &[]),
             "get_messages" | "read_chat_messages" => ("read", &["recipient"]),
             "wait_for_message" | "wait_for_new_message" => {
@@ -188,6 +192,14 @@ impl Gateway {
                 recipient: required_string(&args, "recipient")?.to_owned(),
                 message: required_string(&args, "message")?.to_owned(),
             },
+            "send_file" => Operation::SendFile {
+                recipient: required_string(&args, "recipient")?.to_owned(),
+                // Validated before the outbox entry and before any desktop action.
+                file: crate::wechat::files::prepare_send_file(
+                    required_string(&args, "path")?,
+                    &crate::wechat::files::default_send_roots(),
+                )?,
+            },
             "wait" => {
                 let timeout = match args.get("timeout_seconds") {
                     None => 60,
@@ -203,11 +215,15 @@ impl Gateway {
             }
             _ => unreachable!("static operation mapping"),
         };
-        if let Operation::SendMessage {
-            ref recipient,
-            ref message,
-        } = operation
-        {
+        let outbox = match &operation {
+            Operation::SendMessage { recipient, message } => Some((recipient.clone(), message.clone())),
+            Operation::SendFile { recipient, file } => Some((recipient.clone(), file.outbox_text())),
+            _ => None,
+        };
+        if let Some((recipient, message)) = outbox {
+            if kind == "send_file" && legacy {
+                bail!("send_file 只能通过统一工具调用");
+            }
             let request_key = if legacy {
                 optional_string(&args, "idempotency_key")?
                     .map(str::to_owned)
@@ -453,6 +469,31 @@ mod tests {
             .await;
         assert_eq!(result["isError"], false);
         assert_eq!(second.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn send_file_checks_the_path_before_any_desktop_action() {
+        let adapter = RecordingAdapter::new("wechat", "local", "local");
+        let mut accounts = AccountRegistry::default();
+        accounts.register(adapter.clone()).unwrap();
+        let gateway = Gateway {
+            accounts,
+            store: Store::memory(),
+            listeners: Listeners::default(),
+            legacy_tools: false,
+        };
+        for args in [
+            json!({"platform":"wechat","account_id":"local","recipient":"r","path":"Desktop/a.pdf","idempotency_key":"k1"}),
+            json!({"platform":"wechat","account_id":"local","recipient":"r","path":"/etc/hosts","idempotency_key":"k2"}),
+            json!({"platform":"wechat","account_id":"local","recipient":"r","path":"/etc/hosts"}),
+            json!({"platform":"wechat","account_id":"local","recipient":"r","path":"/etc/hosts","idempotency_key":"k3","message":"m"}),
+        ] {
+            assert_eq!(gateway.call("send_file", args).await["isError"], true);
+        }
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 0);
+        let tools = crate::tools::list_tools_with_legacy(false);
+        let tool = tools["tools"].as_array().or(tools.as_array()).unwrap().iter().find(|t| t["name"] == "send_file").expect("send_file listed").clone();
+        assert_eq!(tool["inputSchema"]["required"], json!(["platform","account_id","recipient","path","idempotency_key"]));
     }
 
     #[tokio::test]

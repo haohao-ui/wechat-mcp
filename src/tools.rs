@@ -154,6 +154,12 @@ fn gateway_tools() -> Vec<Value> {
             vec!["recipient", "message", "idempotency_key"],
         ),
         (
+            "send_file",
+            "按幂等键记录并发送本机文件（仅限桌面、文稿、下载文件夹，≤10MB）；粘贴后核对输入框出现该文件才回车；送达状态未知，重复键不会再次触发",
+            json!({"recipient":{"type":"string","minLength":1},"path":{"type":"string","minLength":1},"idempotency_key":{"type":"string","minLength":1,"maxLength":256},"customer_id":{"type":"string","minLength":1}}),
+            vec!["recipient", "path", "idempotency_key"],
+        ),
+        (
             "wait_for_message",
             "在指定账号上等待界面消息变化；不是后台订阅",
             json!({"recipient":{"type":"string"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":300}}),

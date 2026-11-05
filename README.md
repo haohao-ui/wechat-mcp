@@ -145,6 +145,7 @@ MCP 客户端配置示例（一键安装的默认位置；`<HOME>` 替换为你�
 | `list_conversations` | `platform`, `account_id` | 当前可见会话 |
 | `get_messages` | 上述字段，`recipient` 可选 | 当前可见聊天文字 |
 | `send_message` | 上述字段，`recipient`, `message`, `idempotency_key`；`customer_id` 可选 | 幂等登记并触发文本发送 |
+| `send_file` | 上述字段，`recipient`, `path`（绝对路径，仅限宿主用户的桌面/文稿/下载，≤10MB）, `idempotency_key`；`customer_id` 可选 | 幂等登记并发送本机文件：粘贴后 OCR 输入框确认出现该文件名、复核标题才回车，输入框残留草稿会先清空 |
 | `wait_for_message` | 上述字段，`recipient` 可选，`timeout_seconds` 可选 | 等待界面变化；超时为 1–300 秒 |
 
 ### 公众号文章
