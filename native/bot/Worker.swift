@@ -283,11 +283,11 @@ final class CaptureWorker {
             let window=try readyWindow(manage:manage).window
             guard titleAccepted(accepted) else { throw Failure.invalid("allowlisted_title_mismatch") }
             guard let wx=window["x"] as? Double,let wy=window["y"] as? Double else { throw Failure.invalid("invalid_window_bounds") }
-            // The chat area (x 315..880, y 60..496 in window points); wheel events go to the pointer.
-            // One step is one 10-line wheel tick, about 90pt on WeChat 4 (measured 2026-11-05): adjacent
-            // steps keep a 247pt image complete in both frames so the pages can be stitched. Tick size stays.
-            let chat=CGRect(x:wx+315,y:wy+60,width:565,height:436)
-            try act { try botActions.scroll(in:chat,lines:Int32(direction=="up" ? 10 : -10),ticks:pages) }
+            let layout = try currentLayout()
+            let chatRegion = try layoutRegion(layout, "chat")
+            let chat=CGRect(x:wx+chatRegion.minX,y:wy+chatRegion.minY,width:chatRegion.width,height:chatRegion.height)
+            let linesPerTick = Int32(layout.scroll.linesPerTick)
+            try act { try botActions.scroll(in:chat,lines:direction=="up" ? linesPerTick : -linesPerTick,ticks:pages) }
             pauseUI(0.1)
             pauseUI(0.3)
             return try capture(recipient,accepted:accepted,manage:manage)
@@ -308,6 +308,8 @@ final class CaptureWorker {
             let (window,resized)=try readyWindow(manage:manage)
             let image=try normalizedFrame(try windowImage(window),window:window).image
             var result=try sessionProbe.probe(image,names:names,debug:params["debug"] as? Bool == true)
+            let layout=try currentLayout()
+            let sessionListRect=try layoutRegion(layout, "session_list")
             if params["debug"] as? Bool == true, let list=image.cropping(to:sessionListRect) {
                 let id=SHA256.hash(data:try canonicalBytes(list)).map { String(format:"%02x",$0) }.joined()
                 try writePNG(list,path:media.appendingPathComponent(id+".png"))

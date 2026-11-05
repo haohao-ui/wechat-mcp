@@ -151,13 +151,15 @@ func saveAttachment(_ item: [String:Any], window:[String:Any], destination:URL, 
           let x=item["x"] as? Int,let y=item["y"] as? Int,
           let w=item["width"] as? Int,let h=item["height"] as? Int else { throw Failure.invalid("wechat_not_foreground_or_invalid_media") }
     let root=AXUIElementCreateApplication(app.processIdentifier)
-    let mediaRect=CGRect(x:(window["x"] as! Double)+315+Double(x),y:(window["y"] as! Double)+60+Double(y),width:Double(w),height:Double(h))
+    let layout = try currentLayout()
+    let chatRegion = try layoutRegion(layout, "chat")
+    let mediaRect=CGRect(x:(window["x"] as! Double)+chatRegion.minX+Double(x),y:(window["y"] as! Double)+chatRegion.minY+Double(y),width:Double(w),height:Double(h))
     // The context menu opens where the press landed; look for it there.
     var point=CGPoint(x:mediaRect.midX,y:mediaRect.midY)
     try act { point=try botActions.rightClick(mediaRect) }
     pauseUI(0.4)
     saveDebugStep("1-after-right-click",root)
-    let titles=["另存为…","另存为...","另存为","存储为…","Save As…","Save As..."]
+    let titles = layout.menuLabels["save_as"] ?? ["另存为…","另存为...","另存为","存储为…","Save As…","Save As..."]
     var roots=[root]
     if let focused=attribute(AXUIElementCreateSystemWide(),"AXFocusedUIElement"), CFGetTypeID(focused)==AXUIElementGetTypeID() {
         roots.append(unsafeBitCast(focused,to:AXUIElement.self))

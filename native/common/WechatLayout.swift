@@ -298,4 +298,8 @@ public struct WechatLayout: Decodable, Equatable {
         }
         return .orderedSame
     }
+
+    public func hasRegion(_ name: String) -> Bool {
+        return regions[name] != nil
+    }
 }
