@@ -126,6 +126,7 @@ pub fn list_tools_with_legacy(legacy_enabled: bool) -> Value {
     }
     tools.extend(gateway_tools());
     tools.extend(crate::service_tools::list());
+    tools.push(json!({"name":"upload_file","description":"把文件内容（base64）存到运行微信的这台电脑，返回本机路径，供 send_file 发送；≤10MB，文件名原样保留（不含路径），每次上传放在新的子目录，不会覆盖已有文件；只保存，不发送","inputSchema":{"type":"object","properties":{"name":{"type":"string","minLength":1,"maxLength":255},"content_base64":{"type":"string","minLength":4}},"required":["name","content_base64"],"additionalProperties":false}}));
     tools.push(crate::article::tool());
     json!({ "tools": tools })
 }

@@ -68,6 +68,77 @@ pub fn prepare_send_file(raw: &str, roots: &[PathBuf]) -> Result<FileToSend> {
     Ok(FileToSend { path, name, size, modified })
 }
 
+/// Where `upload_file` stores files sent from another machine (inside Documents, so send_file accepts them).
+pub fn default_upload_root() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Documents/微信客服附件/待发送"))
+}
+
+/// Saves an uploaded file as `<root>/<random folder>/<name>` and returns its path.
+/// The name is kept as is because WeChat shows it to the recipient; the fresh folder keeps
+/// same-named uploads apart. Everything is checked before anything is written.
+pub fn store_upload(name: &str, content_base64: &str, root: &Path) -> Result<PathBuf> {
+    let valid_name = !name.is_empty()
+        && name.len() <= 255
+        && !name.starts_with('.')
+        && !name.chars().any(|c| c == '/' || c == '\\' || c.is_control());
+    if !valid_name {
+        bail!("name 必须是不含路径的文件名（不能以 . 开头、不含 / \\ 或控制字符，≤255 字节）");
+    }
+    let bytes = decode_base64(content_base64)?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_SEND_FILE_BYTES {
+        bail!("文件大小必须在 1 字节到 10MB 之间");
+    }
+    let folder = root.join(&uuid::Uuid::new_v4().simple().to_string()[..12]);
+    std::fs::create_dir_all(&folder).context("创建上传目录失败")?;
+    let path = folder.join(name);
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, &bytes));
+    if let Err(error) = written {
+        let _ = std::fs::remove_dir_all(&folder);
+        return Err(error).context("写入上传文件失败");
+    }
+    Ok(path)
+}
+
+/// Strict standard base64 (whitespace ignored, padding only at the end), size-capped before decoding.
+pub fn decode_base64(text: &str) -> Result<Vec<u8>> {
+    let clean: Vec<u8> = text.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    if clean.is_empty() || !clean.len().is_multiple_of(4) {
+        bail!("content_base64 不是有效的 base64");
+    }
+    if (clean.len() / 4 * 3) as u64 > MAX_SEND_FILE_BYTES + 2 {
+        bail!("文件大小必须在 1 字节到 10MB 之间");
+    }
+    let padding = clean.iter().rev().take_while(|&&b| b == b'=').count();
+    if padding > 2 || clean[..clean.len() - padding].contains(&b'=') {
+        bail!("content_base64 不是有效的 base64");
+    }
+    let value = |b: u8| -> Result<u32> {
+        Ok(match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => 0,
+            _ => bail!("content_base64 不是有效的 base64"),
+        } as u32)
+    };
+    let mut out = Vec::with_capacity(clean.len() / 4 * 3);
+    for chunk in clean.chunks(4) {
+        let mut n = 0u32;
+        for &b in chunk {
+            n = (n << 6) | value(b)?;
+        }
+        out.extend_from_slice(&[(n >> 16) as u8, (n >> 8) as u8, n as u8]);
+    }
+    out.truncate(out.len() - padding);
+    Ok(out)
+}
+
 /// True when OCR of the chat input shows the pasted file card for `name`.
 /// WeChat may shorten long names with an ellipsis, so a 6+ character prefix before it also counts.
 pub fn input_shows_file(lines: &[String], name: &str) -> bool {
@@ -145,6 +216,41 @@ mod tests {
         assert!(prepare_send_file(root.to_str().unwrap(), &[root.clone()]).is_err());
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    fn upload_keeps_the_name_in_a_fresh_folder_inside_the_send_roots() {
+        let root = scratch();
+        let first = store_upload("报价单 v2.pdf", "JVBERi0xLjQgdGVzdA==", &root).unwrap();
+        assert_eq!(std::fs::read(&first).unwrap(), b"%PDF-1.4 test");
+        assert_eq!(first.file_name().unwrap(), "报价单 v2.pdf");
+        assert!(first.starts_with(&root));
+        // Same name again: a separate folder, the earlier upload is untouched.
+        let second = store_upload("报价单 v2.pdf", "aGk=", &root).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read(&first).unwrap(), b"%PDF-1.4 test");
+        assert_eq!(std::fs::read(&second).unwrap(), b"hi");
+        // The stored file passes the send_file checks.
+        assert_eq!(prepare_send_file(second.to_str().unwrap(), &[root.clone()]).unwrap().name, "报价单 v2.pdf");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn upload_refuses_bad_names_bad_base64_and_bad_sizes() {
+        let root = scratch();
+        for name in ["", ".", "..", "../x.pdf", "a/b.pdf", ".hidden", "a\\b.pdf", "x\0.pdf"] {
+            assert!(store_upload(name, "aGk=", &root).is_err(), "name {name:?}");
+        }
+        for content in ["", "a", "aGk", "aG=k", "a*k=", "aGk==="] {
+            assert!(store_upload("a.txt", content, &root).is_err(), "content {content:?}");
+        }
+        assert_eq!(decode_base64("aGk=\n").unwrap(), b"hi");
+        assert_eq!(decode_base64("aGVsbG8gd29ybGQ=").unwrap(), b"hello world");
+        assert_eq!(decode_base64("/+8=").unwrap(), vec![0xff, 0xef]);
+        let too_big = "A".repeat(((MAX_SEND_FILE_BYTES as usize + 3) / 3 + 1) * 4);
+        assert!(store_upload("big.bin", &too_big, &root).is_err());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0, "nothing left behind");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
