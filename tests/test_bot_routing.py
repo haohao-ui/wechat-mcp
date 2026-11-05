@@ -551,6 +551,43 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
             await self.coordinator.sweep()
             self.assertEqual(len(self.visited()),1)
 
+    async def test_one_character_ocr_misread_is_not_a_preview_change(self):
+        # Acceptance 2026-11-05: a group message re-ran OCR on the whole list and one letter of another
+        # row's preview read differently ("d"→"o"), so the bot visited that chat for nothing.
+        state={'b':{'preview_digest':'p1','preview_key':'岗位信息更新213pdf','red_pixels':0}}
+        self.probe_capture(lambda:state)
+        await self.coordinator.sweep();await self.coordinator.sweep();self.visited()
+        state['b']={'preview_digest':'p2','preview_key':'岗位信息更新213pof','red_pixels':0}
+        await self.coordinator.sweep()
+        self.assertEqual(self.visited(),['a'])
+        state['b']={'preview_digest':'p3','preview_key':'新的消息来了','red_pixels':0}
+        await self.coordinator.sweep()
+        self.assertEqual(self.visited(),['a','b'])
+        state['b']={'preview_digest':'p4','preview_key':'新的消息来了','red_pixels':150}
+        await self.coordinator.sweep()
+        self.assertEqual(self.visited(),['a','b'])
+
+    async def test_leaving_a_chat_does_not_bring_the_bot_straight_back(self):
+        # Acceptance 2026-11-05: after replying in a chat and switching away, its preview (now our reply)
+        # differed from the one remembered before it was opened, so the bot went back once for nothing.
+        state={'a':{'preview_digest':'a1','preview_key':'旧消息','red_pixels':0},
+               'b':{'preview_digest':'b1','preview_key':'b旧','red_pixels':0}}
+        self.probe_capture(lambda:state)
+        async def visit(target): self.coordinator.active_name=target['recipient']
+        self.coordinator.visit=AsyncMock(side_effect=visit)
+        self.coordinator.active_name='b'
+        await self.coordinator.sweep();await self.coordinator.sweep()
+        self.coordinator.active_name='a'           # the bot opens a and replies there
+        state['a']={'preview_digest':'a2','preview_key':'我们的回复内容','red_pixels':0}
+        await self.coordinator.sweep()
+        self.coordinator.active_name='b'           # and moves on to b
+        self.visited()
+        await self.coordinator.sweep()
+        self.assertNotIn('a',self.visited())
+        state['a']={'preview_digest':'a3','preview_key':'我们的回复内容','red_pixels':150}
+        await self.coordinator.sweep()
+        self.assertIn('a',self.visited())
+
     async def test_multiple_changed_sessions_are_visited_in_arrival_order(self):
         self.config['allowlist']=[target('a'),target('b'),target('c'),target('d')];self.save()
         self.coordinator=BotCoordinator(self.path)

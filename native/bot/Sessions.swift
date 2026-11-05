@@ -87,7 +87,8 @@ final class SessionProbe {
         for row in cachedRows where wanted.contains(cleanTitle(row.name)) {
             let summary = ([row.time]+row.preview).joined(separator:"\n")
             let digest = SHA256.hash(data:Data(stablePreview(summary).utf8)).map { String(format:"%02x",$0) }.joined()
-            var item: [String:Any] = ["name":row.name, "y":Int(row.y), "preview_digest":digest,
+            // preview_key (letters/digits only) lets the bot tell a one-letter OCR misread from a new message.
+            var item: [String:Any] = ["name":row.name, "y":Int(row.y), "preview_digest":digest, "preview_key":stablePreview(summary),
                           "red_pixels":redPixels(top:Int(row.y)-30, bottom:Int(row.y)+30)]
             if debug { item["debug_summary"] = summary }
             found.append(item)
