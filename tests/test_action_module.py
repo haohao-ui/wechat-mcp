@@ -1,0 +1,104 @@
+"""Property tests for the shared action module (native/action): human-like but always inside the target.
+
+A small Swift self-test program (tests/action_selftest/main.swift) samples thousands of seeded click
+plans and prints JSON; nothing here posts real mouse events.
+"""
+import json
+from pathlib import Path
+import platform
+import shutil
+import subprocess
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+EPS = 1e-6
+
+
+def inside(point, rect):
+    x, y = point
+    return rect['x'] - EPS <= x <= rect['x'] + rect['w'] + EPS and rect['y'] - EPS <= y <= rect['y'] + rect['h'] + EPS
+
+
+class ActionModuleTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if platform.system() != 'Darwin' or not shutil.which('swiftc'):
+            raise unittest.SkipTest('action module needs macOS swiftc')
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.cli = Path(cls.tmp.name)/'action_selftest'
+        sources = sorted(str(p) for p in (ROOT/'native'/'action').glob('*.swift'))
+        subprocess.run(['swiftc', '-O', *sources, str(ROOT/'tests'/'action_selftest'/'main.swift'), '-o', str(cls.cli)],
+                       check=True, capture_output=True)
+        cls.samples = cls.run_cli('clicks', '5000', '7')
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    @classmethod
+    def run_cli(cls, *args):
+        run = subprocess.run([str(cls.cli), *args], capture_output=True, text=True, timeout=300)
+        if run.returncode:
+            raise AssertionError(run.stderr)
+        return json.loads(run.stdout)
+
+    def test_press_always_inside_effective_region_or_refused(self):
+        kinds = set()
+        for s in self.samples:
+            kinds.add(s['kind'])
+            if s['region'] is None:
+                self.assertIsNone(s['press'], s)
+            else:
+                self.assertIsNotNone(s['press'], s)
+                self.assertTrue(inside(s['press'], s['region']), s)
+        self.assertEqual(kinds, {'normal', 'tiny', 'half_off_screen', 'start_inside', 'off_screen'})
+        self.assertTrue(any(s['region'] is None for s in self.samples))
+
+    def test_peak_speed_in_first_half(self):
+        moves = [s for s in self.samples if s['press'] and s['distance'] >= 30]
+        early = sum(1 for s in moves if s['peak_ratio'] < 0.5)
+        self.assertGreaterEqual(early/len(moves), 0.95)
+
+    def test_duration_follows_fitts(self):
+        for s in self.samples:
+            if s['press'] is None:
+                continue
+            self.assertGreaterEqual(s['duration'], 0.5*s['fitts'] - EPS, s)
+            self.assertLessEqual(s['duration'], 2.0*s['fitts'] + EPS, s)
+        hard = [s['duration'] for s in self.samples if s['press'] and s['distance'] > 600 and s['kind'] == 'tiny']
+        easy = [s['duration'] for s in self.samples if s['press'] and s['distance'] < 150 and s['target_width'] > 60]
+        self.assertTrue(hard and easy)
+        self.assertGreater(sum(hard)/len(hard), sum(easy)/len(easy))
+
+    def test_tremor_bounded_and_vanishes(self):
+        for s in self.samples:
+            if s['press'] is None:
+                continue
+            self.assertLessEqual(s['max_deviation'], 2*s['tremor'] + s['drift'] + EPS, s)
+            self.assertLessEqual(s['tail_deviation'], 0.5, s)
+
+    def test_points_stay_on_screen_and_no_nan(self):
+        negative = 0
+        for s in self.samples:
+            self.assertTrue(s['finite'], s)
+            self.assertTrue(s['on_screen'], s)
+            negative += s['screen']['x'] < 0
+        self.assertGreater(negative, 0, 'some samples use a screen left of the main display')
+
+    def test_small_targets_need_more_corrections(self):
+        tiny = [s['corrections'] for s in self.samples if s['press'] and s['kind'] == 'tiny']
+        large = [s['corrections'] for s in self.samples if s['press'] and s['target_width'] >= 120 and s['target_height'] >= 40]
+        self.assertTrue(tiny and large)
+        self.assertGreater(sum(tiny)/len(tiny), sum(large)/len(large))
+        self.assertLessEqual(max(s['corrections'] for s in self.samples), 3)
+        # Corrections tighten with the target: tiny targets are usually reached before the last (snap) attempt.
+        self.assertLess(sum(tiny)/len(tiny), 2.5)
+
+    def test_same_seed_same_plan(self):
+        self.assertEqual(self.run_cli('clicks', '50', '11'), self.run_cli('clicks', '50', '11'))
+        self.assertNotEqual(self.run_cli('clicks', '50', '11'), self.run_cli('clicks', '50', '12'))
+
+
+if __name__ == '__main__':
+    unittest.main()
