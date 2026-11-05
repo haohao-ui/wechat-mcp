@@ -65,7 +65,18 @@ let darkProfile = ThemeProfile(name:"wechat-4-dark",
     },
     isForeground: { r,g,b in max(r,max(g,b)) > 37 })
 
-let themeProfiles = [darkProfile]
+// Calibrated 2026-11-05 on WeChat 4.1.15: chat background (250,250,250), incoming bubble
+// (238,238,240), own bubble (157,242,159) — the same green rule as dark.
+let lightProfile = ThemeProfile(name:"wechat-4-light",
+    isBackground: { r,g,b in r >= 246 && g >= 246 && b >= 246 },
+    kind: { r,g,b in
+        if isOwnGreen(r,g,b) { return 2 }
+        if r >= 228 && r <= 244 && abs(r-g) <= 8 && abs(r-b) <= 8 { return 1 }
+        return 0
+    },
+    isForeground: { r,g,b in min(r,min(g,b)) < 246 })
+
+let themeProfiles = [darkProfile, lightProfile]
 
 /// Picks the theme whose background fills most of the chat area; refuses light/unknown frames
 /// rather than interpreting arbitrary rectangles as messages.
