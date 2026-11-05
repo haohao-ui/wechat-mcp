@@ -193,6 +193,7 @@ struct BubbleCLI {
                   let window = try JSONSerialization.jsonObject(with:windowData) as? [String:Any],
                   let source = CGImageSourceCreateWithURL(URL(fileURLWithPath:CommandLine.arguments[1]) as CFURL,nil),
                   let full = CGImageSourceCreateImageAtIndex(source,0,nil) else { throw Failure.invalid("invalid_input") }
+            warmUpRecognizer()
             let result = try analyzeFrame(full,window:window)
             let data = try JSONSerialization.data(withJSONObject:result,options:[.sortedKeys])
             print(String(decoding:data,as:UTF8.self))
