@@ -39,6 +39,14 @@ fi
 '''
         await self.ssh('/bin/sh -s',script.replace(b'__OWNER__',self.owner_token.encode()))
         self.active=True
+        try:
+            # Worker still running (e.g. reconnect after the window was minimized): it can restore the
+            # window (manage_window) and click the verified row, which MCP search cannot do.
+            await self.connect(attempts=3)
+            self.last_switch=await self.call('open_session',target=self.recipient,target_names=self.names or [self.recipient])
+            return
+        except (ValueError,RuntimeError,ConnectionError,asyncio.TimeoutError):
+            await self.close_transport()
         # This one admitted GUI operation focuses the allowed chat and starts the helper in its TCC context.
         await self.navigate(self.names)
         await self.connect()
@@ -66,8 +74,8 @@ fi
         self.directory=Path(directory)
         await self.frame()  # The native worker verifies the full title before any new media is returned.
 
-    async def connect(self):
-        for _ in range(20):
+    async def connect(self, attempts=20):
+        for _ in range(attempts):
             try:
                 self.process=await asyncio.create_subprocess_exec(
                     'ssh','-o','BatchMode=yes','-o','LogLevel=ERROR',self.host,
