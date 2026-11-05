@@ -331,7 +331,7 @@ class HistoryStore:
                 handle.write(data)
             os.replace(temporary, target)
         with self.transaction():
-            self.conn.execute('INSERT OR IGNORE INTO media VALUES(?,?,?,?,?,?,?,?)',
+            self.conn.execute('INSERT OR IGNORE INTO media(media_id,kind,filename,extension,size,source,path,created_at) VALUES(?,?,?,?,?,?,?,?)',
                               (digest, kind, filename, extension, len(data), source,
                                str(target.relative_to(self.root/'media')), now_ms()))
             self.conn.execute('UPDATE messages SET media_id=? WHERE message_id=?', (digest, message_id))
@@ -370,18 +370,28 @@ class HistoryStore:
             return []
         family = self.family(contact_id)
         rows = self.conn.execute(
-            f"SELECT m.message_id, m.sender, m.text FROM messages m LEFT JOIN sends s ON s.send_key=m.send_key "
+            f"SELECT m.message_id, m.sender, m.text, d.kind, d.filename, d.understanding, d.path FROM messages m "
+            f"LEFT JOIN sends s ON s.send_key=m.send_key LEFT JOIN media d ON d.media_id=m.media_id "
             f"WHERE m.contact_id IN ({','.join('?'*len(family))}) "
             f"AND NOT (m.sender='bot' AND s.status IN ({','.join('?'*len(self.EXCLUDED_SEND))})) "
             f"ORDER BY m.observed_at DESC, m.rowid DESC", (*family, *self.EXCLUDED_SEND))
         picked = []
-        for message_id, sender, text in rows:
+        for message_id, sender, text, kind, filename, understanding, path in rows:
             if message_id in exclude_ids:
                 continue
-            picked.append({'role': 'user' if sender == 'customer' else 'assistant', 'text': text})
+            item = {'role': 'user' if sender == 'customer' else 'assistant', 'text': text}
+            if kind:
+                item['media'] = {'kind': kind, 'filename': filename, 'understanding': understanding,
+                                 'path': str(self.root/'media'/path) if path else None}
+            picked.append(item)
             if len(picked) == limit:
                 break
         return picked[::-1]
+
+    def set_understanding(self, media_id, text):
+        with self.transaction():
+            self.conn.execute('UPDATE media SET understanding=?, understood_at=? WHERE media_id=?',
+                              (text[:1000], now_ms(), media_id))
 
 
 def compact(text):

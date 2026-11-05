@@ -52,4 +52,9 @@ CREATE TRIGGER messages_fts_update AFTER UPDATE OF text ON messages BEGIN
     2: """
 CREATE INDEX messages_contact_time ON messages(contact_id, observed_at);
 """,
+    # What the model understood from an image, reused as later context (media-turns design §5.4).
+    3: """
+ALTER TABLE media ADD COLUMN understanding TEXT;
+ALTER TABLE media ADD COLUMN understood_at INTEGER;
+""",
 }

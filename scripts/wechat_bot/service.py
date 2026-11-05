@@ -16,6 +16,7 @@ from scripts.agent_bridge.codex import private_directory, write_private
 from scripts.agent_bridge.mcp import MCP
 from .capture import RemoteCapture
 from .history.names import candidate_names, clean_title
+from .understanding import understand
 from .policy import reconcile, stitch, AmbiguousAnchor, ContinuityGap, Policy, echo_matches, fingerprint, new_bubbles, validate_reply
 from .reply import generate
 from .native_capture import NativeCapture
@@ -27,6 +28,17 @@ logger = logging.getLogger('wechat_bot')
 def log_event(event, **fields):
     # Values are metadata only: message bodies, replies and credential config are excluded by callers.
     logger.info(json.dumps({'time':datetime.now(timezone.utc).isoformat(), 'event':event, **fields},ensure_ascii=False))
+
+
+def ensure_unreadable_named(reply, failed):
+    """Every unreadable item is named with a resend request, even when the model left it out (spec §5.6)."""
+    missing=[f['label'] for f in failed if f['label'] not in reply]
+    if not missing:
+        return reply
+    suffix='、'.join(missing)+'打不开，麻烦重发一下。'
+    if len(suffix)>200:
+        suffix='有%d个文件或图片打不开，麻烦重发一下。'%len(missing)
+    return validate_reply(reply[:200-len(suffix)].rstrip()+suffix)
 
 
 def model_view(document):
@@ -345,12 +357,36 @@ class BotService:
             if message_id is None:
                 continue
             try:
-                self.history.attach_media(message_id,item['path'],kind=kind,filename=item.get('filename'),source=item['source']
-                                          if kind=='image' else 'original')
+                item['media_id']=self.history.attach_media(message_id,item['path'],kind=kind,filename=item.get('filename'),
+                                                           source=item['source'] if kind=='image' else 'original')
                 if kind=='file':
                     self.history.finish_media_job(message_id,'done')
             except Exception as error:
                 log_event('history_media_attach_failed',error_type=type(error).__name__)
+
+    async def understand_images(self, text, images, failed, context):
+        """(notes, images for the reply call). Over one batch, images are understood first (spec §5.4)."""
+        batch=self.config.get('images_per_model_call',4)
+        config=self.config.get('model_config') or {}
+        notes,model_images=[],[i['path'] for i in images]
+        if len(images)>batch and config.get('backend')=='openai-compatible':
+            found=await understand(images,text=text,config=config,batch_size=batch)
+            for item,note in zip(images,found):
+                if note is None:
+                    failed.append({'label':item['label'],'kind':'image','reason':'model_failed'})
+                    continue
+                notes.append({'label':item['label'],'notes':note})
+                if self.history is not None and item.get('media_id'):
+                    try: self.history.set_understanding(item['media_id'],note)
+                    except Exception as error: log_event('history_understanding_failed',error_type=type(error).__name__)
+            model_images=[]
+        # Earlier images without a stored understanding are shown again while the batch has room.
+        for item in context:
+            media=item.get('media') or {}
+            if (media.get('kind')=='image' and not media.get('understanding') and media.get('path')
+                    and len(model_images)<batch and Path(media['path']).is_file()):
+                model_images.append(media['path'])
+        return notes,model_images
 
     def own_echo(self, bubble):
         """An outbound bubble matching a reply this contact's service sent in the last 10 minutes."""
@@ -419,8 +455,12 @@ class BotService:
             if not self.target_allowed():
                 record['status']='skipped_by_rule'; self.write_journal(journal,record); return
             model={}
-            reply = validate_reply(await generate('\n'.join(b['text'] for b in incoming),mode='service',context=context,
-                                                  images=[i['path'] for i in images],files=[model_view(f) for f in files],metadata=model,model_config=self.config.get('model_config')))
+            text='\n'.join(b['text'] for b in incoming)
+            notes,model_images=await self.understand_images(text,images,failed,context)
+            reply = validate_reply(await generate(text,mode='service',context=context,images=model_images,
+                                                  files=[model_view(f) for f in files],notes=notes,failed=[f['label'] for f in failed],
+                                                  metadata=model,model_config=self.config.get('model_config')))
+            reply = ensure_unreadable_named(reply,failed)
             timings['model_seconds']=model.get('seconds')
             log_event('model_completed',**model)
             record['model']=model

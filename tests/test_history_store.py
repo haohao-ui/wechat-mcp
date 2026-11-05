@@ -54,6 +54,26 @@ class FingerprintV2Tests(StoreBase):
         self.assertEqual(self.texts(), ['a', '[图片]'])
 
 
+class UnderstandingTests(StoreBase):
+    def test_migration_adds_understanding_columns(self):
+        columns = {r[1] for r in self.store.conn.execute('PRAGMA table_info(media)')}
+        self.assertTrue({'understanding', 'understood_at'} <= columns)
+
+    def test_recent_context_includes_media_understanding(self):
+        self.store.record_frame(self.c, fr(bub('在吗')))
+        img = {'text': '[图片]', 'digest': 'image:1:1', 'phash': '0'*16, 'direction': 'inbound_visual', 'kind': 'image'}
+        rows = self.store.record_frame(self.c, fr(bub('在吗'), img))
+        source = self.tmp/'a.png'; source.write_bytes(b'\x89PNG\r\n\x1a\nx')
+        media_id = self.store.attach_media(rows[0]['message_id'], source, kind='image', filename=None, source='original')
+        context = self.store.recent_context(self.c, 5)
+        self.assertEqual(context[-1]['media']['understanding'], None)
+        self.assertTrue(Path(context[-1]['media']['path']).is_file())
+        self.store.set_understanding(media_id, '一张快递单'*300)
+        context = self.store.recent_context(self.c, 5)
+        self.assertEqual(len(context[-1]['media']['understanding']), 1000)
+        self.assertNotIn('media', context[0])
+
+
 class ContactTests(StoreBase):
     def test_schema_created_private_and_wal(self):
         db = self.state/'history'/'history.sqlite3'

@@ -583,6 +583,54 @@ class HistoryServiceTests(ServiceTests):
         self.assertIn('original',sources)
         self.assertEqual(self.model.await_args.kwargs['images'],[path])
 
+    async def media_turn(self,count,failed=(),reply='已收到'):
+        imgs=[{'text':'[图片]','digest':'image:50:40','phash':'%016x'%(n*0x0f0f0f0f0f),'media_id':('%x'%n)*64,
+               'direction':'inbound_visual','kind':'image'} for n in range(1,count+1)]
+        self.service.advance(self.old)
+        current=frame(bubble('old'),*imgs)
+        sent=frame(*current['bubbles'],bubble(reply,'outbound_visual'))
+        capture=type('Capture',(),{})()
+        capture.frame=AsyncMock(side_effect=copy.deepcopy([current,current,current,sent]))
+        capture.download=AsyncMock(side_effect=RuntimeError('no thumbnails in this fixture'))
+        self.service.config['model_config']={'backend':'openai-compatible','base_url':'https://api.deepseek.com',
+                                             'model':'m','api_key_env':'K','supports_images':True}
+        for n in range(1,count+1): (self.root/('%d.png'%n)).write_bytes(b'\x89PNG\r\n\x1a\n%d'%n)
+        items=[{'path':self.root/('%d.png'%n),'label':'第%d张图片'%n,'source':'original','bubble':b} for n,b in enumerate(imgs,1)]
+        capture.attachments=AsyncMock(return_value=(items,[],list(failed)))
+        self.model=AsyncMock(return_value=reply)
+        notes=AsyncMock(side_effect=lambda images,**kw:['要点'+i['label'] for i in images])
+        with patch('scripts.wechat_bot.service.generate',self.model), patch('scripts.wechat_bot.service.understand',notes):
+            await self.service.cycle(self.client,capture)
+        return notes
+
+    async def test_nine_image_turn_sends_one_reply(self):
+        notes=await self.media_turn(9)
+        self.assertEqual(sum(name=='send_message' for name,_ in self.calls),1)
+        notes.assert_awaited_once()
+        self.assertEqual(self.model.await_args.kwargs['images'],[])
+        self.assertEqual(len(self.model.await_args.kwargs['notes']),9)
+
+    async def test_few_images_go_to_the_model_directly(self):
+        notes=await self.media_turn(3)
+        notes.assert_not_awaited()
+        self.assertEqual(len(self.model.await_args.kwargs['images']),3)
+
+    async def test_failed_item_named_when_model_omits_it(self):
+        await self.media_turn(8,failed=[{'label':'第9张图片','kind':'image','reason':'download_failed'}],reply='已收到')
+        message=next(args['message'] for name,args in self.calls if name=='send_message')
+        self.assertIn('第9张图片打不开，麻烦重发一下。',message)
+        self.assertLessEqual(len(message),200)
+        self.assertEqual(self.model.await_args.kwargs['failed'],['第9张图片'])
+
+    async def test_final_generation_failure_still_pauses(self):
+        self.model=AsyncMock(side_effect=RuntimeError('reply generation failed'))
+        self.service.advance(self.old)
+        with patch('scripts.wechat_bot.service.generate',self.model), self.assertRaises(RuntimeError):
+            capture=type('Capture',(),{})()
+            capture.frame=AsyncMock(side_effect=copy.deepcopy([self.new,self.new]))
+            await self.service.cycle(self.client,capture)
+        self.assertTrue(self.service.paused)
+
     async def test_send_uses_observed_title_for_alias(self):
         entry = {'recipient': '🍓示例联系人甲', 'kind': 'private', 'aliases': ['示例联系人甲']}
         self.config['allowlist'] = [entry]
