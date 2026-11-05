@@ -32,7 +32,7 @@ class EmojiLexiconTests(unittest.TestCase):
         self.assertIn('不要当作满意', entries['[微笑]']['service_hint'])
         self.assertIn('玩笑', entries['[旺柴]']['service_hint'])
         self.assertIn('必须回复', entries['[疑问]']['service_hint'])
-        self.assertIn('不是红包', entries['[红包]']['meaning'])
+        self.assertIn('不是真红包', entries['[红包]']['meaning'])
 
     def test_templates_are_perceptual_hashes_when_present(self):
         for name, entry in self.doc['entries'].items():
