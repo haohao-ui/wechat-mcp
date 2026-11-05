@@ -24,9 +24,22 @@ BADGE_PIXELS=20
 # (light appearance, resized, hidden, desktop busy). These retry each sweep instead of pausing.
 # Consecutive wrong-title switches tolerated before a contact pauses for review.
 TITLE_MISMATCH_LIMIT=3
+RECALIBRATION_LIMIT=5
 WINDOW_UNAVAILABLE=('uncalibrated_theme','unsupported_image_geometry','wechat_not_visible',
                     'window_capture_failed','desktop_busy','vision_timeout',
                     'layout_missing','layout_unreadable')+ACTION_INTERRUPTED
+
+
+def extract_mismatch_failures(error):
+    text=str(error)
+    start=text.find('invalid("layout_mismatch')
+    if start<0: return []
+    end=text.find('")',start)
+    token=text[start+9:end if end>=0 else len(text)]
+    if ':' in token:
+        payload=token.split(':',1)[1]
+        return [f.strip() for f in payload.split(',') if f.strip()]
+    return []
 
 
 def ocr_noise(a, b):
@@ -84,6 +97,7 @@ class BotCoordinator:
         self.last_visit={}
         # name -> (first detected, -row y): older arrivals first; lower rows changed earlier.
         self.pending={}
+        self.layout_mismatches=0
         binding={k:self.config[k] for k in ('host','account_id')}
         path=self.root/'coordinator-binding.json'
         if path.exists() and json.loads(path.read_text())!=binding:
@@ -215,6 +229,7 @@ class BotCoordinator:
             if self.stop.is_set() or not child.target_allowed(): return
             await child.cycle(self.client,self.capture)
             child.title_mismatches=0
+            self.layout_mismatches=0
             if child.cursor is not None and marker.exists(): marker.unlink()
         except ValueError as error:
             if str(error)=='incomplete bottom bubble; no automatic reply' and not child.paused:
@@ -228,6 +243,13 @@ class BotCoordinator:
                     child.health('waiting_for_wechat_window',reason=str(error)[:400],attempt=child.title_mismatches)
                     await self.close_connection()
                     return
+            if not child.paused and 'invalid("layout_mismatch' in str(error):
+                self.layout_mismatches=getattr(self,'layout_mismatches',0)+1
+                failures=extract_mismatch_failures(error)
+                state='needs_recalibration' if self.layout_mismatches>=RECALIBRATION_LIMIT else 'waiting_for_wechat_window'
+                child.health(state,reason=str(error)[:400],failures=failures,attempt=self.layout_mismatches)
+                await self.close_connection()
+                return
             if not child.paused and (layout_unavailable(error) or any(f'invalid("{code}")' in str(error) for code in WINDOW_UNAVAILABLE)):
                 # Nothing was read or sent; the window comes back (e.g. appearance back to dark) without a restart.
                 child.health('waiting_for_wechat_window',reason=str(error)[:400])
