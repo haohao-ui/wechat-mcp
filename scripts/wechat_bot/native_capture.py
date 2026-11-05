@@ -23,6 +23,16 @@ def action_interrupted(error):
     return any(f'invalid("{code}")' in str(error) for code in ACTION_INTERRUPTED)
 
 
+def layout_unavailable(error):
+    # The worker has no usable layout map (missing, unreadable, invalid): nothing may be clicked,
+    # not even through the MCP search fallback, until the map is back (stage B acceptance).
+    return 'invalid("layout_' in str(error)
+
+
+def must_wait(error):
+    return action_interrupted(error) or layout_unavailable(error)
+
+
 def worker_code(error):
     # Worker refusals are fixed codes (invalid("...")), never message content; keep them for diagnosis.
     text=str(error)
@@ -80,7 +90,7 @@ fi
             return
         except (ValueError,RuntimeError,ConnectionError,asyncio.TimeoutError) as error:
             await self.close_transport()
-            if action_interrupted(error): raise
+            if must_wait(error): raise
         # This one admitted GUI operation focuses the allowed chat and starts the helper in its TCC context.
         await self.navigate(self.names)
         await self.connect()
@@ -103,7 +113,7 @@ fi
             # Fast path: click the verified session-list row; the worker checks the exact title after.
             self.last_switch=await self.call('open_session',target=recipient,target_names=self.names)
         except ValueError as error:
-            if action_interrupted(error): raise
+            if must_wait(error): raise
             self.last_switch={'opened':False,'fallback':str(error)[:200]}
             await self.navigate(self.names)
         self.recipient=recipient

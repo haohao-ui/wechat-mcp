@@ -11,7 +11,7 @@ import time
 from scripts.agent_bridge.codex import private_directory, write_private
 from scripts.agent_bridge.mcp import MCP
 from .capture import RemoteCapture
-from .native_capture import ACTION_INTERRUPTED, NativeCapture
+from .native_capture import ACTION_INTERRUPTED, NativeCapture, layout_unavailable
 from .history.names import candidate_names
 from .history.store import HistoryStore
 from .routing import decision, match_entry
@@ -228,7 +228,7 @@ class BotCoordinator:
                     child.health('waiting_for_wechat_window',reason=str(error)[:400],attempt=child.title_mismatches)
                     await self.close_connection()
                     return
-            if not child.paused and any(f'invalid("{code}")' in str(error) for code in WINDOW_UNAVAILABLE):
+            if not child.paused and (layout_unavailable(error) or any(f'invalid("{code}")' in str(error) for code in WINDOW_UNAVAILABLE)):
                 # Nothing was read or sent; the window comes back (e.g. appearance back to dark) without a restart.
                 child.health('waiting_for_wechat_window',reason=str(error)[:400])
                 await self.close_connection()

@@ -223,7 +223,7 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(child.paused)
 
     async def test_layout_errors_wait_instead_of_pausing(self):
-        for code in ('layout_missing', 'layout_unreadable'):
+        for code in ('layout_missing', 'layout_unreadable', 'layout_region_out_of_window:chat', 'layout_missing_menu:save_as', 'layout_schema_unsupported'):
             child=self.coordinator.session(target('a'))
             self.coordinator.connect=AsyncMock(side_effect=ValueError(f'private visual operation failed: invalid("{code}")'))
             await self.coordinator.visit(target('a'))
@@ -352,6 +352,19 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         for kind in ('image','file'):
             with self.assertRaisesRegex(ValueError,'user_input_detected'):
                 await capture.attachments([self.media_item(kind,1,filename='a.pdf')],{'snapshot_id':'s'})
+
+    async def test_layout_error_does_not_fall_back_to_search(self):
+        # Stage B acceptance: with the layout map missing, start() fell back to MCP search navigation,
+        # which clicks and types without any layout check. A layout error must only wait.
+        from scripts.wechat_bot.native_capture import NativeCapture
+        capture=NativeCapture('fixture',AsyncMock(),'a',self.root/'a','0'*64,names=['a'])
+        capture.ssh=AsyncMock(); capture.connect=AsyncMock(); capture.navigate=AsyncMock(); capture.close_transport=AsyncMock()
+        capture.call=AsyncMock(side_effect=ValueError('private visual operation failed: invalid("layout_missing")'))
+        with self.assertRaisesRegex(ValueError,'layout_missing'):
+            await capture.start()
+        with self.assertRaisesRegex(ValueError,'layout_missing'):
+            await capture.retarget('b',self.root/'b',['b'])
+        capture.navigate.assert_not_awaited()
 
     async def test_interrupted_switch_does_not_fall_back_to_search(self):
         # Review I3: MCP navigation clicks and types into search while the person is still using the mouse.
