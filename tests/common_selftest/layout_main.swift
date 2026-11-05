@@ -17,6 +17,23 @@ func run() -> Int32 {
     }
 
     let command = args[1]
+    if command == "memo" {
+        // Steps: "<pid>:<version>" (version "-" = unreadable), "none" (no WeChat found, last one alive),
+        // "gone" (no WeChat found, last one exited).
+        var memo = VersionMemo()
+        var resolved: [Any] = []
+        for step in args.dropFirst(2) {
+            let alive = step != "gone"
+            var found: (pid: Int32, version: String?)? = nil
+            if step != "none" && step != "gone" {
+                let parts = step.split(separator: ":", maxSplits: 1).map(String.init)
+                found = (Int32(parts[0]) ?? 0, parts[1] == "-" ? nil : parts[1])
+            }
+            resolved.append(memo.resolve(lookup: { found }, alive: { _ in alive }) ?? NSNull())
+        }
+        print((try? jsonString(["resolved": resolved])) ?? "{}")
+        return 0
+    }
     do {
         if command == "layout" {
             guard args.count >= 3 else {

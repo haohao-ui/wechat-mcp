@@ -12,19 +12,25 @@ struct Text { let body: String; let x: Double; let y: Double }
 
 private var layoutCache: (path: String, modified: Date?, layout: WechatLayout)?
 
+var versionMemo = VersionMemo()
+
 func wechatAppVersion() -> String? {
-    let ids = ["com.tencent.xinWeChat", "com.tencent.WeChat"]
-    for id in ids {
-        if let app = NSRunningApplication.runningApplications(withBundleIdentifier: id).first {
-            if let bundleURL = app.bundleURL,
-               let bundle = Bundle(url: bundleURL),
-               let ver = bundle.infoDictionary?["CFBundleShortVersionString"] as? String,
-               !ver.isEmpty {
-                return ver
+    return versionMemo.resolve(lookup: {
+        for id in ["com.tencent.xinWeChat", "com.tencent.WeChat"] {
+            guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: id).first else { continue }
+            var version: String? = nil
+            if let url = app.bundleURL,
+               let info = NSDictionary(contentsOf: url.appendingPathComponent("Contents/Info.plist")),
+               let read = info["CFBundleShortVersionString"] as? String, !read.isEmpty {
+                version = read
+            } else {
+                FileHandle.standardError.write(Data("wechat version unreadable: pid \(app.processIdentifier) url \(app.bundleURL?.path ?? "nil")\n".utf8))
             }
+            return (app.processIdentifier, version)
         }
-    }
-    return nil
+        FileHandle.standardError.write(Data("wechat not among running applications\n".utf8))
+        return nil
+    }, alive: { pid in kill(pid, 0) == 0 })
 }
 
 func currentLayout() throws -> WechatLayout {
@@ -358,6 +364,25 @@ func normalizedFrame(_ captured: CGImage, window: [String:Any]) throws -> (image
     return (image, scale)
 }
 
+/// Extensions a WeChat file card may show. Recognising a card is separate from reading it:
+/// `prepare_file` still refuses types the bot cannot read (the reply then says so).
+let fileCardExtensions: Set<String> = ["pdf","txt","md","csv","json","rtf","doc","docx","xls","xlsx","ppt","pptx",
+    "pages","numbers","key","zip","rar","7z","png","jpg","jpeg","gif","heic","mp3","wav","m4a","mp4","mov","apk","dmg"]
+
+/// The card line as a filename, or nil. OCR confuses l with I/1/| in extensions (".xIs" for ".xls").
+func fileNameLine(_ line: String) -> String? {
+    let trimmed=line.trimmingCharacters(in:.whitespaces)
+    guard let dot=trimmed.lastIndex(of:"."), dot != trimmed.startIndex else { return nil }
+    let raw=String(trimmed[trimmed.index(after:dot)...])
+    guard (1...7).contains(raw.count) else { return nil }
+    var ext=raw.lowercased()
+    if !fileCardExtensions.contains(ext) {
+        ext=String(ext.map { "i1|".contains($0) ? "l" : $0 })
+    }
+    guard fileCardExtensions.contains(ext) else { return nil }
+    return String(trimmed[..<dot])+"."+ext
+}
+
 func analyzeFrame(_ captured: CGImage, window: [String:Any], mediaRoot: URL? = nil, recipient: String? = nil, group: Bool = false) throws -> [String:Any] {
     let layout = try currentLayout()
     let titleRegion: WindowRect
@@ -452,9 +477,7 @@ func analyzeFrame(_ captured: CGImage, window: [String:Any], mediaRoot: URL? = n
         if box.y+box.height>=height-2 { clippedBubble=true;continue }
         guard box.y>=2 else { continue }
         let body=texts.filter { $0.x>=Double(box.x) && $0.x<Double(box.x+box.width) && $0.y>=Double(box.y) && $0.y<Double(box.y+box.height) }.map(\.body).joined(separator:"\n")
-        let names=body.components(separatedBy:"\n").filter {
-            $0.range(of:#"\.(pdf|txt|md|csv|json|docx|xlsx|png|jpe?g)$"#,options:[.regularExpression,.caseInsensitive]) != nil
-        }
+        let names=body.components(separatedBy:"\n").compactMap(fileNameLine)
         // WeChat 4 writes sizes as "220.3K" as well as "12KB"; the transfer status shares that line.
         let sizePattern=#"\d+(\.\d+)?\s*(KB|MB|GB|K|M|G|字节|B)"#
         let sizeRange=body.range(of:sizePattern,options:[.regularExpression,.caseInsensitive])

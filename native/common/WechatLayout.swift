@@ -303,3 +303,23 @@ public struct WechatLayout: Decodable, Equatable {
         return regions[name] != nil
     }
 }
+
+/// WeChat's version as last read for the running WeChat process. A long-running worker can fail an
+/// individual read (acceptance 2026-11-06: intermittent layout_missing with the map present); the
+/// version of a live process cannot change, so the reading is reused until a different or no
+/// process is seen. Never invents a version: a new process must be read successfully first.
+struct VersionMemo {
+    private(set) var pid: Int32?
+    private(set) var version: String?
+
+    mutating func resolve(lookup: () -> (pid: Int32, version: String?)?, alive: (Int32) -> Bool) -> String? {
+        if let found = lookup() {
+            if found.pid != pid { pid = found.pid; version = nil }
+            if let read = found.version { version = read }
+            return version
+        }
+        if let known = pid, alive(known) { return version }
+        pid = nil; version = nil
+        return nil
+    }
+}

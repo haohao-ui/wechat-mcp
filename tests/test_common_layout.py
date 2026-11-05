@@ -116,6 +116,17 @@ class CommonLayoutTests(unittest.TestCase):
             self.assertFalse(res.get('ok'))
             self.assertEqual(res.get('error'), 'layout_too_large')
 
+    def test_version_memo_survives_flaky_lookup(self):
+        # Acceptance 2026-11-06: a long-running worker intermittently failed to read WeChat's version
+        # (layout_missing) while the map file was present. The version read for a running WeChat
+        # process is reused while that process lives; a new process must be read afresh.
+        res = self.run_cli('memo', '100:4.1.15', 'none', '100:-', '200:-', 'none', '200:4.2.0', 'gone')
+        self.assertEqual(res['resolved'], ['4.1.15', '4.1.15', '4.1.15', None, None, '4.2.0', None])
+
+    def test_version_memo_needs_a_first_reading(self):
+        res = self.run_cli('memo', 'none', '100:-')
+        self.assertEqual(res['resolved'], [None, None])
+
     def test_version_fallback_picks_nearest_lower(self):
         with tempfile.TemporaryDirectory() as tdir:
             p = Path(tdir)
