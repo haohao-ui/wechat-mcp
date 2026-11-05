@@ -199,7 +199,10 @@ func analyzeFrame(_ captured: CGImage, window: [String:Any], mediaRoot: URL? = n
         let names=body.components(separatedBy:"\n").filter {
             $0.range(of:#"\.(pdf|txt|md|csv|json|docx|xlsx|png|jpe?g)$"#,options:[.regularExpression,.caseInsensitive]) != nil
         }
-        let isFile=names.count==1 && body.range(of:#"\d+(\.\d+)?\s*(KB|MB|GB|字节|B)"#,options:[.regularExpression,.caseInsensitive]) != nil
+        let hasSize=body.range(of:#"\d+(\.\d+)?\s*(KB|MB|GB|字节|B)"#,options:[.regularExpression,.caseInsensitive]) != nil
+        // OCR sometimes misses the size line; a card holding one filename and little else is still a file.
+        let lines=body.components(separatedBy:"\n").filter { !$0.trimmingCharacters(in:.whitespaces).isEmpty }
+        let isFile=names.count==1 && (hasSize || lines.count<=3)
         let neutral=queue.filter { color($0)==1 }.count
         let isImage = !isFile && (box.height>200 || Double(neutral)/Double(box.width*box.height)<0.60)
         guard isFile || isImage else { continue }
@@ -212,6 +215,13 @@ func analyzeFrame(_ captured: CGImage, window: [String:Any], mediaRoot: URL? = n
         }
         var item:[String:Any] = ["text":isImage ? "[图片]" : body,"direction":"inbound_visual","digest":digest,
             "kind":isImage ? "image" : "file","media_id":digest,"x":box.x,"y":box.y,"width":box.width,"height":box.height]
+        if isImage {
+            // Pixels change while WeChat loads an image; continuity uses its size plus a perceptual hash.
+            item["digest"]=SHA256.hash(data:Data("image:\(box.width/4):\(box.height/4)".utf8)).map { String(format:"%02x",$0) }.joined()
+            let rect=CGRect(x:(315+box.x)*scale,y:(60+box.y)*scale,width:box.width*scale,height:box.height*scale)
+            guard let region=captured.cropping(to:rect) else { throw Failure.invalid("media_crop_failed") }
+            item["phash"]=try differenceHash(region)
+        }
         if isFile {
             item["filename"]=names[0]
             let sizes=body.components(separatedBy:"\n").filter { $0.range(of:#"\d+(\.\d+)?\s*(KB|MB|GB|字节|B)"#,options:[.regularExpression,.caseInsensitive]) != nil }
@@ -238,6 +248,22 @@ func analyzeFrame(_ captured: CGImage, window: [String:Any], mediaRoot: URL? = n
         "bubbles":bubbles,"platform_message_verified":false,"sender_verified":false,
         "width":full.width,"height":full.height,"captured_width":captured.width,"clipped_bubble":clippedBubble]
     return result
+}
+
+/// 64-bit dHash: 9x8 grayscale, each bit = left pixel brighter than its right neighbour (row-major hex).
+func differenceHash(_ image: CGImage) throws -> String {
+    var gray=[UInt8](repeating:0,count:9*8)
+    let drawn=gray.withUnsafeMutableBytes { buffer -> Bool in
+        guard let context=CGContext(data:buffer.baseAddress,width:9,height:8,bitsPerComponent:8,bytesPerRow:9,
+                                    space:CGColorSpaceCreateDeviceGray(),bitmapInfo:CGImageAlphaInfo.none.rawValue) else { return false }
+        context.interpolationQuality = .high
+        context.draw(image,in:CGRect(x:0,y:0,width:9,height:8))
+        return true
+    }
+    guard drawn else { throw Failure.invalid("phash_failed") }
+    var bits:UInt64=0
+    for y in 0..<8 { for x in 0..<8 { bits=(bits<<1)|(gray[y*9+x]>gray[y*9+x+1] ? 1 : 0) } }
+    return String(format:"%016llx",bits)
 }
 
 #if !BOT_WORKER

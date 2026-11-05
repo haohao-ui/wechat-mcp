@@ -18,7 +18,7 @@ FRAMES = ROOT/'tests'/'fixtures'/'frames'
 TOP = [('inbound_visual', 'text', '你好'), ('inbound_visual', 'text', '在吗'),
        ('outbound_visual', 'text', '客服助手'), ('inbound_visual', 'text', '你是美女吗'),
        ('outbound_visual', 'text', '没有外貌')]
-BOTTOM = [('inbound_visual', 'text', '岗位信息更新2.13.pdf'), ('inbound_visual', 'text', '测试结束'),
+BOTTOM = [('inbound_visual', 'file', '岗位信息更新2.13.pdf'), ('inbound_visual', 'text', '测试结束'),
           ('inbound_visual', 'text', '浅色测试')]
 
 # name -> (profile, scale, title, bubbles)
@@ -71,6 +71,14 @@ class NativeFrameTests(unittest.TestCase):
                 self.assertEqual([g[:2] for g in got], [b[:2] for b in bubbles])
                 for (_, _, text), (_, _, part) in zip(got, bubbles):
                     self.assertIn(part, text.replace('\n', ''))
+
+    def test_image_bubbles_carry_phash(self):
+        images = [b for name in CASES for b in self.parse(name).get('bubbles', []) if b['kind'] == 'image']
+        if not images:
+            self.skipTest('no image bubbles in the committed fixtures yet (added by remote calibration)')
+        for b in images:
+            self.assertEqual(len(b['phash']), 16)
+            int(b['phash'], 16)
 
     def test_unknown_theme_refused(self):
         # Neither calibrated background dominates the chat area: never guess bubble directions.

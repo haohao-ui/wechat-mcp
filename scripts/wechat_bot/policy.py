@@ -24,8 +24,38 @@ def certain_tail(old, new, current):
     return current[end:]
 
 
+# Image digests encode only the bubble size; `phash` (64-bit dHash, hex) tells same-size images apart
+# and survives WeChat's blurred-preview -> loaded transition within PHASH_TOLERANCE bits.
+PHASH_TOLERANCE = 12
+FINGERPRINT_VERSION = 2
+
+
 def fingerprint(bubble):
-    return (bubble['direction'], bubble['digest'])
+    return (bubble['direction'], bubble['digest'], bubble.get('phash'))
+
+
+def phash_distance(a, b):
+    return bin(int(a, 16) ^ int(b, 16)).count('1')
+
+
+def reconcile(previous, current):
+    """Copy of `current` where each image matching a previous one (same direction and size digest,
+    phash within tolerance) takes that image's identity, so loading never looks like a new message."""
+    result = [dict(b) for b in current]
+    used = set()
+    for item in result:
+        if not item.get('phash'):
+            continue
+        for index, old in enumerate(previous):
+            if (index in used or not old.get('phash') or old['direction'] != item['direction']
+                    or old['digest'] != item['digest']):
+                continue
+            if phash_distance(old['phash'], item['phash']) <= PHASH_TOLERANCE:
+                used.add(index)
+                # media_id stays current: the newest pixels are the loaded image, not the blurred preview.
+                item['phash'] = old['phash']
+                break
+    return result
 
 
 def new_bubbles(previous, current):
