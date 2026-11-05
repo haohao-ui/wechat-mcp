@@ -106,6 +106,10 @@ def parse_json_object(content):
             return None
 
 
+class ModelOutputError(ValueError):
+    """The model answered but not in the required shape; nothing was sent, so callers may retry."""
+
+
 SYSTEM = {
     'reply': '只输出JSON对象，严格使用 {"reply":"回复正文"}，只允许reply一个字段，值为非空字符串。不要输出Markdown或其他字段。',
     'notes': '只输出JSON对象，严格使用 {"notes":["第1张图片的要点", "..."]}，只允许notes一个字段，数组长度等于图片数。不要输出Markdown或其他字段。',
@@ -140,18 +144,26 @@ async def generate_api(prompt, *, images, config, metadata=None, field='reply', 
         result = await asyncio.to_thread(request_completion, config, payload)
         choices = result.get('choices', [])
         if len(choices) != 1 or choices[0].get('finish_reason') != 'stop':
-            raise ValueError('model response missing or incomplete')
+            raise ModelOutputError('model response missing or incomplete (finish_reason=%s)'
+                                   % (choices[0].get('finish_reason') if choices else None))
         message = choices[0].get('message', {})
         if message.get('tool_calls') or not isinstance(message.get('content'), str):
-            raise ValueError('expected model text without tool calls')
+            raise ModelOutputError('expected model text without tool calls')
         parsed = parse_json_object(message['content'])
         if parsed is not None:
             break
     else:
-        raise ValueError('model returned malformed JSON twice')
+        # Shape only, never the body: chat content stays out of logs and journals.
+        content = message['content']
+        raise ModelOutputError('model returned malformed JSON twice (length=%d, has_brace=%s)' % (len(content), '{' in content))
     if not isinstance(parsed, dict) or set(parsed) != {field}:
-        raise ValueError('expected JSON with '+field+' only')
-    reply = check(parsed[field])
+        raise ModelOutputError('expected JSON with '+field+' only')
+    try:
+        reply = check(parsed[field])
+    except ModelOutputError:
+        raise
+    except ValueError as error:
+        raise ModelOutputError(str(error)) from error  # e.g. a reply over 200 characters
     if metadata is not None:
         metadata.update({'backend': 'openai-compatible', 'provider': urllib.parse.urlsplit(config['base_url']).hostname,
                          'requested_model': config['model'], 'model': result.get('model'),
