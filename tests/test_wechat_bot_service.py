@@ -416,6 +416,32 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
                  if top+steps*90>=2 and top+steps*90+size<height-2]
         return frame(*visible)
 
+    async def test_interrupted_gap_scroll_retries_instead_of_rebaselining(self):
+        # Review I2: a person moving the mouse during the gap scroll used to rebaseline, dropping the gap's messages.
+        self.service.advance(frame(bubble('a'),bubble('b')))
+        capture=type('Capture',(),{})()
+        capture.frame=AsyncMock(side_effect=[frame(bubble('x'))]*3)
+        capture.scroll=AsyncMock(side_effect=ValueError('private visual operation failed: invalid("user_input_detected")'))
+        with patch('scripts.wechat_bot.service.generate',self.model):
+            with self.assertRaisesRegex(ValueError,'user_input_detected'):
+                await self.service.cycle(self.client,capture)
+        self.assertEqual([b['text'] for b in self.service.cursor['bubbles']],['a','b'])
+
+    async def test_interrupted_media_fetch_keeps_the_turn_without_pausing(self):
+        # Review I2: an aborted save-as must not pause the contact or tell the customer to resend.
+        imgs=[{'text':'[图片]','digest':'image:50:40','phash':'0f'*8,'media_id':'1'*64,'direction':'inbound_visual','kind':'image'}]
+        self.service.advance(self.old)
+        current=frame(bubble('old'),*imgs)
+        capture=type('Capture',(),{})()
+        capture.frame=AsyncMock(side_effect=copy.deepcopy([current]*4))
+        capture.attachments=AsyncMock(side_effect=ValueError('private visual operation failed: invalid("user_input_detected")'))
+        with patch('scripts.wechat_bot.service.generate',self.model):
+            await self.service.cycle(self.client,capture)
+        self.assertFalse(self.service.paused)
+        self.model.assert_not_awaited()
+        self.assertIsNotNone(self.service.turn)
+        self.assertEqual(list(self.service.root.glob('send-*.json')),[])
+
     async def test_tall_image_gap_recovered_by_scrolling(self):
         # A tall bubble pushed every remembered bubble off screen: scroll up to find the anchor.
         a,b,c,tall=bubble('a'),bubble('b'),bubble('c'),bubble('TALL')
@@ -838,6 +864,21 @@ class HistoryServiceTests(ServiceTests):
         items,snapshot=capture.attachments.await_args.args
         self.assertEqual([i.get('media_id') for i in items if i.get('kind')=='file'],['2'*64])
         self.assertEqual(snapshot['snapshot_id'],'s-now')
+
+    async def test_model_is_told_this_turns_image_count_separately(self):
+        # Review I1: earlier images re-attached from context were counted as this turn's.
+        await self.media_turn(3)
+        kwargs=self.model.await_args.kwargs
+        self.assertEqual(kwargs['image_count'],3)
+        self.assertEqual(kwargs['earlier_images'],len(kwargs['images'])-3)
+
+    async def test_earlier_context_images_follow_this_turns_and_are_counted(self):
+        temp=Path(tempfile.mkdtemp()); this,old=temp/'this.png',temp/'old.png'
+        this.write_bytes(b'x'*10); old.write_bytes(b'y'*10)
+        notes,model_images,earlier=await self.service.understand_images(
+            '[图片]',[{'label':'第1张图片','path':str(this)}],[],[{'role':'customer','text':'[图片]','media':{'kind':'image','path':str(old)}}])
+        self.assertEqual(model_images,[str(this),str(old)])
+        self.assertEqual(earlier,1)
 
     async def test_images_over_the_request_size_are_named_not_paused(self):
         # Review I8: the API rejects more than 30MB of images; the excess is unreadable, not a pause.

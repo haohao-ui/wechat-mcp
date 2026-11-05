@@ -183,6 +183,13 @@ class ExecutorTests(unittest.TestCase):
             self.assertTrue(0.08 - EPS <= b['t'] - a['t'] <= 0.2 + EPS)
         self.assertNotIn('left_down', self.kinds(out))
 
+    def test_press_stays_inside_the_container(self):
+        for seed in range(1, 60):
+            out = self.scenario('within', seed)
+            down = [e for e in out['events'] if e['type'] == 'left_down'][0]
+            self.assertTrue(inside((down['x'], down['y']), out['region']), (seed, down))
+        self.assertEqual(self.scenario('within_disjoint')['error'], 'target_not_reached')
+
     def test_right_click_uses_right_button(self):
         out = self.scenario('right_click')
         self.assertIsNone(out['error'])

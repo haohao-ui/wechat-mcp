@@ -337,6 +337,26 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
     def media_item(kind,index,**extra):
         return {'kind':kind,'media_id':('%x'%index)*64,'text':'[图片]','direction':'inbound_visual',**extra}
 
+    async def test_interrupted_save_is_raised_not_downgraded(self):
+        # Review I2: a mouse move during save-as is a retry, not a thumbnail or "please resend".
+        async def call(op,**params): raise ValueError('private visual operation failed: invalid("user_input_detected")')
+        capture=self.media_capture(call=call)
+        for kind in ('image','file'):
+            with self.assertRaisesRegex(ValueError,'user_input_detected'):
+                await capture.attachments([self.media_item(kind,1,filename='a.pdf')],{'snapshot_id':'s'})
+
+    async def test_interrupted_switch_does_not_fall_back_to_search(self):
+        # Review I3: MCP navigation clicks and types into search while the person is still using the mouse.
+        from scripts.wechat_bot.native_capture import NativeCapture
+        capture=NativeCapture('fixture',AsyncMock(),'a',self.root/'a','0'*64,names=['a'])
+        capture.ssh=AsyncMock(); capture.connect=AsyncMock(); capture.navigate=AsyncMock(); capture.close_transport=AsyncMock()
+        capture.call=AsyncMock(side_effect=ValueError('private visual operation failed: invalid("user_input_detected")'))
+        with self.assertRaisesRegex(ValueError,'user_input_detected'):
+            await capture.start()
+        with self.assertRaisesRegex(ValueError,'user_input_detected'):
+            await capture.retarget('b',self.root/'b',['b'])
+        capture.navigate.assert_not_awaited()
+
     async def test_nine_images_all_returned(self):
         capture=self.media_capture()
         items=[self.media_item('image',i) for i in range(1,10)]
@@ -578,6 +598,7 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.coordinator.active_name='b'
         await self.coordinator.sweep();await self.coordinator.sweep()
         self.coordinator.active_name='a'           # the bot opens a and replies there
+        self.coordinator.session(target('a')).cursor={'bubbles':[{'text':'我们的回复内容。','direction':'outbound_visual'}]}
         state['a']={'preview_digest':'a2','preview_key':'我们的回复内容','red_pixels':0}
         await self.coordinator.sweep()
         self.coordinator.active_name='b'           # and moves on to b
@@ -587,6 +608,39 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         state['a']={'preview_digest':'a3','preview_key':'我们的回复内容','red_pixels':150}
         await self.coordinator.sweep()
         self.assertIn('a',self.visited())
+
+    async def test_message_arriving_while_leaving_is_still_visited(self):
+        # Review I4: a reply arriving between the last read and the switch is marked read (no badge);
+        # the first sighting after leaving shows it, and it does not match what the bot last saw.
+        state={'a':{'preview_digest':'a1','preview_key':'旧消息','red_pixels':0},
+               'b':{'preview_digest':'b1','preview_key':'b旧','red_pixels':0}}
+        self.probe_capture(lambda:state)
+        async def visit(target): self.coordinator.active_name=target['recipient']
+        self.coordinator.visit=AsyncMock(side_effect=visit)
+        self.coordinator.active_name='b'
+        await self.coordinator.sweep();await self.coordinator.sweep()
+        self.coordinator.active_name='a'
+        self.coordinator.session(target('a')).cursor={'bubbles':[{'text':'我们的回复内容。','direction':'outbound_visual'}]}
+        await self.coordinator.sweep()
+        self.coordinator.active_name='b'
+        state['a']={'preview_digest':'a2','preview_key':'好的谢谢','red_pixels':0}
+        self.visited()
+        await self.coordinator.sweep()
+        self.assertIn('a',self.visited())
+
+    async def test_repeated_preview_at_a_new_time_is_a_change(self):
+        # Review I4: the time is compared exactly; only the preview text tolerates one misread letter.
+        state={'b':{'preview_digest':'p1','preview_time':'10:31','preview_key':'图片','red_pixels':0}}
+        self.probe_capture(lambda:state)
+        await self.coordinator.sweep();await self.coordinator.sweep();self.visited()
+        state['b']={'preview_digest':'p2','preview_time':'10:32','preview_key':'图片','red_pixels':0}
+        await self.coordinator.sweep()
+        self.assertEqual(self.visited(),['a','b'])
+        state['b']={'preview_digest':'p3','preview_time':'','preview_key':'','red_pixels':0}
+        await self.coordinator.sweep();self.visited()
+        state['b']={'preview_digest':'p4','preview_time':'','preview_key':'','red_pixels':0}
+        await self.coordinator.sweep()   # no letters or digits to compare: fall back to the digest
+        self.assertEqual(self.visited(),['a','b'])
 
     async def test_multiple_changed_sessions_are_visited_in_arrival_order(self):
         self.config['allowlist']=[target('a'),target('b'),target('c'),target('d')];self.save()

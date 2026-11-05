@@ -42,11 +42,13 @@ class ModelApiTests(unittest.IsolatedAsyncioTestCase):
         # recent_context was counted. The prompt must say only image_count images arrived this turn.
         from scripts.wechat_bot.reply import generate
         with patch('scripts.wechat_bot.model_api.request_completion',return_value=self.result) as request:
-            await generate('示例联系人甲：[图片]',mode='service',model_config=self.config,chat_kind='group',
+            await generate('示例联系人甲：[图片]',mode='service',model_config=self.config,chat_kind='group',image_count=1,earlier_images=0,
                            context=[{'role':'customer','text':'[图片]','media':{'kind':'image','understanding':'一张截图'}}])
         prompt=json.dumps(request.call_args.args[1]['messages'],ensure_ascii=False)
         self.assertIn('recent_context里的图片和文件是之前发的',prompt)
         self.assertIn('本轮收到的图片数量以image_count为准',prompt)
+        self.assertIn('earlier_images',prompt)
+        self.assertIn('\\"image_count\\": 1',prompt)
 
     async def test_generate_api_custom_field(self):
         def check(value):

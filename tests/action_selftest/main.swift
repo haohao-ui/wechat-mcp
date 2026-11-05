@@ -140,6 +140,13 @@ func execScenario(_ name: String, _ seed: UInt64) -> [String:Any] {
         switch name {
         case "scroll": try actions.scroll(in:rect, lines:10, ticks:3)
         case "right_click": let p = try actions.rightClick(rect); pressed = [Double(p.x), Double(p.y)]
+        case "within":
+            // Review I5: a bottom session row whose effective region reaches below the list/window.
+            let container = CGRect(x:500, y:300, width:240, height:110)
+            let p = try actions.click(CGRect(x:500, y:390, width:240, height:40), within:container)
+            pressed = [Double(p.x), Double(p.y)]
+            return ["events":sink.events, "error":NSNull(), "pressed":pressed, "region":rectJSON(container)]
+        case "within_disjoint": try actions.click(rect, within:CGRect(x:0, y:0, width:50, height:50))
         default: try actions.click(rect)
         }
     } catch { failure = String(describing:error) }

@@ -21,7 +21,7 @@ from .model_api import ModelOutputError
 from .history.store import similar
 from .policy import strip_member_count, merge_pages, reconcile, relocate, stitch, AmbiguousAnchor, ContinuityGap, Policy, echo_matches, fingerprint, new_bubbles, validate_reply
 from .reply import generate
-from .native_capture import NativeCapture
+from .native_capture import NativeCapture, action_interrupted
 
 
 logger = logging.getLogger('wechat_bot')
@@ -218,6 +218,8 @@ class BotService:
             try:
                 page=await capture.scroll('up')
             except ValueError as error:
+                # A person moving the mouse is a retry, not a lost anchor (review I2).
+                if action_interrupted(error): raise
                 # e.g. a worker without scroll_chat: nothing moved on the first attempt.
                 log_event('gap_scroll_failed',account_id=self.account,error=str(error)[:200])
                 if attempt==0: return None
@@ -444,7 +446,9 @@ class BotService:
                 total+=size
                 model_images.append(item['path'])
         total=sum(Path(p).stat().st_size for p in model_images)
-        # Earlier images without a stored understanding are shown again while the batch has room.
+        current=len(model_images)
+        # Earlier images without a stored understanding are shown again while the batch has room,
+        # after this turn's images and counted apart (review I1: they were taken as this turn's).
         for item in context:
             media=item.get('media') or {}
             if (media.get('kind')=='image' and not media.get('understanding') and media.get('path')
@@ -452,7 +456,7 @@ class BotService:
                     and total+Path(media['path']).stat().st_size<=MAX_MODEL_IMAGE_BYTES):
                 model_images.append(media['path'])
                 total+=Path(media['path']).stat().st_size
-        return notes,model_images
+        return notes,model_images,len(model_images)-current
 
     def own_echo(self, bubble):
         """An outbound bubble matching a reply this contact's service sent in the last 10 minutes."""
@@ -533,8 +537,9 @@ class BotService:
             model={}
             # In a group each line is attributed to the member named above its bubble.
             text='\n'.join((b['sender']+'：' if self.group and b.get('sender') else '')+b['text'] for b in incoming)
-            notes,model_images=await self.understand_images(text,images,failed,context)
+            notes,model_images,earlier=await self.understand_images(text,images,failed,context)
             reply = validate_reply(await generate(text,mode='service',context=context,images=model_images,
+                                                  image_count=len(images),earlier_images=earlier,
                                                   files=[model_view(f) for f in files],notes=notes,failed=[f['label'] for f in failed],
                                                   chat_kind='group' if self.group else 'private',
                                                   metadata=model,model_config=self.config.get('model_config')))
@@ -576,6 +581,13 @@ class BotService:
             log_event('processing_failed',phase=record['status'],error_type=type(error).__name__,idempotency_key=key)
             record['error']=str(error)[:400]
             failures=pending.get('model_failures',0)
+            if record['status']=='preparing_media' and action_interrupted(error):
+                # Save-as was stopped by a person using the mouse (or the control was off screen):
+                # nothing was sent or given to the model, so keep the turn and try again later.
+                journal.unlink(missing_ok=True)
+                self.keep_turn(pending)
+                self.health('waiting_for_wechat_window',reason=str(error)[:200])
+                return
             if (record['status']=='generating' and failures<MODEL_RETRIES
                     and isinstance(error,(RuntimeError,OSError,asyncio.TimeoutError,ModelOutputError))):
                 # Nothing was sent: keep the turn and retry the model later instead of pausing.

@@ -112,9 +112,12 @@ struct ClickPlan {
 /// Noisy end-point approach: primary movement lands at the sampled point plus distance-proportional error;
 /// outside the effective region → slower corrective movement with 30% of the error; the last allowed
 /// correction goes straight to the sampled point, so a reachable target is always pressed inside.
-func planClick<R: RandomNumberGenerator>(from start: CGPoint, rect: CGRect, screen: CGRect,
+/// `within` bounds only where the press may land (e.g. a list inside a window); the path still uses the screen.
+func planClick<R: RandomNumberGenerator>(from start: CGPoint, rect: CGRect, screen: CGRect, within container: CGRect? = nil,
                                          profile: ActionProfile, rng: inout R) -> ClickPlan {
-    guard let region = reachableRegion(rect, screen:screen) else {
+    var pressBounds = screen
+    if let container = container { pressBounds = screen.intersection(container.insetBy(dx:-0.5, dy:-0.5)) }
+    guard !pressBounds.isNull, let region = reachableRegion(rect, screen:pressBounds) else {
         return ClickPlan(moves:[], press:nil, dwell:0, hold:0, region:nil, targetWidth:0)
     }
     let start = clamp(start, to:screen)

@@ -87,8 +87,10 @@ final class SessionProbe {
         for row in cachedRows where wanted.contains(cleanTitle(row.name)) {
             let summary = ([row.time]+row.preview).joined(separator:"\n")
             let digest = SHA256.hash(data:Data(stablePreview(summary).utf8)).map { String(format:"%02x",$0) }.joined()
-            // preview_key (letters/digits only) lets the bot tell a one-letter OCR misread from a new message.
-            var item: [String:Any] = ["name":row.name, "y":Int(row.y), "preview_digest":digest, "preview_key":stablePreview(summary),
+            // preview_key (letters/digits of the preview only) lets the bot tell a one-letter OCR misread
+            // from a new message; the time is returned apart and compared exactly.
+            var item: [String:Any] = ["name":row.name, "y":Int(row.y), "preview_digest":digest,
+                          "preview_key":stablePreview(row.preview.joined(separator:"\n")), "preview_time":row.time,
                           "red_pixels":redPixels(top:Int(row.y)-30, bottom:Int(row.y)+30)]
             if debug { item["debug_summary"] = summary }
             found.append(item)
@@ -121,7 +123,8 @@ func openSessionRow(_ targets: [String], probe: SessionProbe, capture: () throws
     guard matches.count == 1, let row = matches.first else { throw Failure.invalid("session_row_not_unique_or_missing") }
     let x = window["x"] as! Double, y = window["y"] as! Double
     let local = CGPoint(x:sessionListRect.midX, y:sessionListRect.minY + row.y + 12)
-    guard sessionListRect.insetBy(dx:0, dy:6).contains(local) else { throw Failure.invalid("session_row_out_of_bounds") }
+    // The press lands up to 12pt from this point (effective region of the 40pt row target): keep it in the list.
+    guard sessionListRect.insetBy(dx:0, dy:12).contains(local) else { throw Failure.invalid("session_row_out_of_bounds") }
     let point = CGPoint(x:x + local.x, y:y + local.y)
     // The topmost window under the point must be WeChat's: never click into another app.
     let rows = CGWindowListCopyWindowInfo([.optionOnScreenOnly,.excludeDesktopElements],kCGNullWindowID) as? [[String:Any]] ?? []
@@ -140,7 +143,8 @@ func openSessionRow(_ targets: [String], probe: SessionProbe, capture: () throws
         Thread.sleep(forTimeInterval:0.15)
     }
     // The row's name line: list width, 40pt around the point (effective region ±12pt, never the next row).
-    try act { try botActions.click(CGRect(x:x+sessionListRect.minX, y:point.y-20, width:sessionListRect.width, height:40)) }
+    let list = sessionListRect.offsetBy(dx:x, dy:y)
+    try act { try botActions.click(CGRect(x:x+sessionListRect.minX, y:point.y-20, width:sessionListRect.width, height:40), within:list) }
     let deadline = began + 2.5
     while ProcessInfo.processInfo.systemUptime < deadline {
         Thread.sleep(forTimeInterval:0.15)
