@@ -329,12 +329,20 @@ class BotService:
         self.write_journal(journal,record)
         try:
             unseen = new_bubbles(confirmed['bubbles'],after['bubbles'])
+        except (ContinuityGap, AmbiguousAnchor) as error:
+            # The send has a durable receipt. Tall media can scroll every remembered bubble away;
+            # keep the pre-send cursor so the next cycle applies the usual gap rule (two equal
+            # frames, rebaseline without reply) instead of pausing the contact.
+            record['postflight_error']=str(error)
+            self.write_journal(journal,record)
+            log_event('postflight_gap',idempotency_key=key,durable_send_status=record['status'])
+            unseen = None
         except ValueError as error:
             record['postflight_error']=str(error)
             self.write_journal(journal,record)
             log_event('postflight_failed',idempotency_key=key,durable_send_status=record['status'],error=str(error))
             raise
-        if not any(b['direction']=='inbound_visual' for b in unseen):
+        if unseen is not None and not any(b['direction']=='inbound_visual' for b in unseen):
             self.advance(after)
         log_event('batch_completed',idempotency_key=key,status=record['status'],client_echo_observed=echoed,timings=timings)
         self.health('watching',last_send_id=receipt.get('send_id'),last_client_echo_observed=echoed,delivery='unknown')
