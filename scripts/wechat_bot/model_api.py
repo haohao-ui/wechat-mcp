@@ -106,7 +106,13 @@ def parse_json_object(content):
             return None
 
 
-async def generate_api(prompt, *, images, config, metadata=None):
+SYSTEM = {
+    'reply': '只输出JSON对象，严格使用 {"reply":"回复正文"}，只允许reply一个字段，值为非空字符串。不要输出Markdown或其他字段。',
+    'notes': '只输出JSON对象，严格使用 {"notes":["第1张图片的要点", "..."]}，只允许notes一个字段，数组长度等于图片数。不要输出Markdown或其他字段。',
+}
+
+
+async def generate_api(prompt, *, images, config, metadata=None, field='reply', check=validate_reply):
     validate_config(config)
     if images and not config.get('supports_images', False):
         raise ValueError('configured model has no enabled image support')
@@ -124,7 +130,7 @@ async def generate_api(prompt, *, images, config, metadata=None):
         if total > 30 * 1024 * 1024:
             raise ValueError('combined images exceed 30MiB')
         content.append({'type': 'image_url', 'image_url': {'url': 'data:' + mime + ';base64,' + base64.b64encode(data).decode()}})
-    payload = {'model': config['model'], 'messages': [{'role':'system','content':'只输出JSON对象，严格使用 {"reply":"回复正文"}，只允许reply一个字段，值为非空字符串。不要输出Markdown或其他字段。'}, {'role': 'user', 'content': content if images else prompt}],
+    payload = {'model': config['model'], 'messages': [{'role':'system','content':SYSTEM[field] if field in SYSTEM else '只输出JSON对象，只允许'+field+'一个字段。不要输出Markdown或其他字段。'}, {'role': 'user', 'content': content if images else prompt}],
                'stream': False, 'max_tokens': 1024}
     if config.get('json_output', True):
         payload['response_format'] = {'type': 'json_object'}
@@ -143,9 +149,9 @@ async def generate_api(prompt, *, images, config, metadata=None):
             break
     else:
         raise ValueError('model returned malformed JSON twice')
-    if not isinstance(parsed, dict) or set(parsed) != {'reply'}:
-        raise ValueError('expected JSON with reply only')
-    reply = validate_reply(parsed['reply'])
+    if not isinstance(parsed, dict) or set(parsed) != {field}:
+        raise ValueError('expected JSON with '+field+' only')
+    reply = check(parsed[field])
     if metadata is not None:
         metadata.update({'backend': 'openai-compatible', 'provider': urllib.parse.urlsplit(config['base_url']).hostname,
                          'requested_model': config['model'], 'model': result.get('model'),

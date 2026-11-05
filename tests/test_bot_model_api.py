@@ -37,6 +37,19 @@ class ModelApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(meta['model'],'fixture-actual')
         self.assertNotIn('api_key_file',meta)
 
+    async def test_generate_api_custom_field(self):
+        def check(value):
+            if not isinstance(value,list): raise ValueError('notes must be a list')
+            return value
+        notes={**self.result,'choices':[{'finish_reason':'stop','message':{'content':json.dumps({'notes':['一张收据']})}}]}
+        with patch('scripts.wechat_bot.model_api.request_completion',return_value=notes) as request:
+            value=await generate_api('看图',images=[],config=self.config,field='notes',check=check)
+        self.assertEqual(value,['一张收据'])
+        self.assertIn('{"notes":',request.call_args.args[1]['messages'][0]['content'])
+        with patch('scripts.wechat_bot.model_api.request_completion',return_value=self.result):
+            with self.assertRaises(ValueError):
+                await generate_api('看图',images=[],config=self.config,field='notes',check=check)
+
     async def test_actual_image_bytes_and_capability_gate(self):
         path=self.root/'image.png'; path.write_bytes(b'\x89PNG\r\n\x1a\nfixture')
         with patch('scripts.wechat_bot.model_api.request_completion',return_value=self.result) as request:
