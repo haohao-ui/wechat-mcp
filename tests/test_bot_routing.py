@@ -159,6 +159,28 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(child.paused)
         self.assertEqual(json.loads((child.root/'health.json').read_text())['state'],'waiting_for_stable_frame')
 
+    async def test_unusable_wechat_window_retries_without_permanent_pause(self):
+        # e.g. macOS switched to light appearance: nothing was read or sent, so retry next sweep.
+        child=self.coordinator.session(target('a'))
+        self.coordinator.connect=AsyncMock(side_effect=ValueError('private visual operation failed: invalid("uncalibrated_theme")'))
+        self.coordinator.close_connection=AsyncMock()
+        await self.coordinator.visit(target('a'))
+        self.assertFalse(child.paused)
+        health=json.loads((child.root/'health.json').read_text())
+        self.assertEqual(health['state'],'waiting_for_wechat_window')
+        self.assertIn('uncalibrated_theme',health['reason'])
+        self.coordinator.close_connection.assert_awaited()
+        self.coordinator.connect=AsyncMock()
+        child.cycle=AsyncMock()
+        await self.coordinator.visit(target('a'))
+        child.cycle.assert_awaited_once()
+
+    async def test_other_worker_refusal_still_pauses(self):
+        child=self.coordinator.session(target('a'))
+        self.coordinator.connect=AsyncMock(side_effect=ValueError('private visual operation failed: invalid("allowlisted_title_mismatch")'))
+        await self.coordinator.visit(target('a'))
+        self.assertTrue(child.paused)
+
     async def test_native_retarget_keeps_worker_and_isolates_media_destination(self):
         from scripts.wechat_bot.native_capture import NativeCapture
         child=self.coordinator.session(target('b'))

@@ -20,6 +20,10 @@ from .service import BotService, load_config, log_event
 
 # A real unread badge adds a filled red circle (well over 20 px) on top of the avatar's own red.
 BADGE_PIXELS=20
+# Worker refusals raised before any message is read: the WeChat window is unusable right now
+# (light appearance, resized, hidden, desktop busy). These retry each sweep instead of pausing.
+WINDOW_UNAVAILABLE=('uncalibrated_theme','unsupported_image_geometry','wechat_not_visible',
+                    'window_capture_failed','desktop_busy')
 
 
 class BotCoordinator:
@@ -169,6 +173,11 @@ class BotCoordinator:
         except ValueError as error:
             if str(error)=='incomplete bottom bubble; no automatic reply' and not child.paused:
                 child.health('waiting_for_stable_frame',reason='bottom bubble is incomplete; retry capture without model/send')
+                return
+            if not child.paused and any(f'invalid("{code}")' in str(error) for code in WINDOW_UNAVAILABLE):
+                # Nothing was read or sent; the window comes back (e.g. appearance back to dark) without a restart.
+                child.health('waiting_for_wechat_window',reason=str(error)[:400])
+                await self.close_connection()
                 return
             child.paused=True; child.pause_reason=str(error)[:400]
             child.health('paused',reason=child.pause_reason)
