@@ -64,6 +64,19 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls,[])
         self.assertEqual(len(self.service.cursor['bubbles']),len(self.new['bubbles']))
 
+    async def test_tall_media_scrolling_history_off_after_send_does_not_pause(self):
+        # After a sent reply, tall images/file cards can push every remembered bubble off screen.
+        # The send already has a durable receipt; the gap is handled like any other: rebaseline
+        # once two frames agree, never pause and never send again.
+        self.service.advance(self.old)
+        scrolled=frame(bubble('[图片]'),bubble('在的，我是AI客服助手。','outbound_visual'))
+        await self.cycle([self.new,self.new,self.new,scrolled])
+        self.assertFalse(self.service.paused)
+        await self.cycle([scrolled,scrolled])
+        self.assertFalse(self.service.paused)
+        self.assertEqual(len([1 for name,_ in self.calls if name=='send_message']),1)
+        self.assertEqual(self.service.cursor['bubbles'],scrolled['bubbles'])
+
     async def test_ordinary_incoming_has_no_test_prefix_and_replies_once(self):
         self.service.advance(self.old)
         after=frame(*self.new['bubbles'],bubble('你好，我是AI客服助手。','outbound_visual'))
