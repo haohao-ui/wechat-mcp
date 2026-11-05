@@ -44,11 +44,36 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self): self.temp.cleanup()
 
+    def restart(self):
+        extra={'history':self.history,'contact_id':self.cid} if hasattr(self,'history') else {}
+        return BotService(self.config,**extra)
+
     async def cycle(self,frames):
         capture=type('Capture',(),{})()
         capture.frame=AsyncMock(side_effect=copy.deepcopy(frames))
         with patch('scripts.wechat_bot.service.generate',self.model):
             await self.service.cycle(self.client,capture)
+
+    async def test_legacy_cursor_rebaselines_without_reply(self):
+        # Cursor saved before fingerprint v2: its image digest hashed pixels and has no phash, so the
+        # image can never match again. Rebaseline once instead of replying to visible history.
+        from scripts.wechat_bot.service import write_private
+        legacy=frame(bubble('old'),{'text':'[图片]','digest':'pixels','direction':'inbound_visual','kind':'image'})
+        write_private(self.service.cursor_path,legacy)
+        self.service=self.restart()
+        current=frame(bubble('old'),{'text':'[图片]','digest':'image:50:40','phash':'0'*16,
+                                     'direction':'inbound_visual','kind':'image'},bubble('新消息'))
+        await self.cycle([current,current])
+        self.model.assert_not_awaited()
+        self.assertEqual(self.service.cursor['bubbles'],current['bubbles'])
+
+    async def test_text_only_cursor_from_before_v2_still_replies(self):
+        # Text digests did not change in v2: an old text-only cursor keeps working without a rebaseline.
+        from scripts.wechat_bot.service import write_private
+        write_private(self.service.cursor_path,self.old)
+        self.service=self.restart()
+        await self.cycle([self.new,self.new,self.new,self.new])
+        self.model.assert_awaited()
 
     async def test_initial_start_does_not_reply_to_history(self):
         await self.cycle([self.new])

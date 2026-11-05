@@ -16,7 +16,7 @@ from scripts.agent_bridge.codex import private_directory, write_private
 from scripts.agent_bridge.mcp import MCP
 from .capture import RemoteCapture
 from .history.names import candidate_names, clean_title
-from .policy import AmbiguousAnchor, ContinuityGap, Policy, echo_matches, fingerprint, new_bubbles, validate_reply
+from .policy import reconcile, AmbiguousAnchor, ContinuityGap, Policy, echo_matches, fingerprint, new_bubbles, validate_reply
 from .reply import generate
 from .native_capture import NativeCapture
 
@@ -178,7 +178,10 @@ class BotService:
         self.policy.check_frame(frame)
         if not await self.record(frame, capture):
             return
-        if self.cursor is None or not self.cursor['bubbles']:
+        legacy = self.cursor is not None and any(b.get('kind')=='image' and not b.get('phash') for b in self.cursor['bubbles'])
+        if legacy:
+            log_event('legacy_cursor_rebaseline',account_id=self.account,visible_bubbles=len(frame['bubbles']))
+        if self.cursor is None or not self.cursor['bubbles'] or legacy:
             # An empty baseline (no chat open after a restart or theme switch) anchors nothing:
             # whatever is visible next is history. Cost: a brand-new contact's first message is
             # only recorded; replies start from the second one.
@@ -186,6 +189,8 @@ class BotService:
             self.health('watching',historical_messages_ignored=True)
             return
         ambiguous = None
+        # The same image loads from a blurred preview to full pixels; keep the cursor's identity for it.
+        frame['bubbles'] = reconcile(self.cursor['bubbles'],frame['bubbles'])
         try:
             changes = new_bubbles(self.cursor['bubbles'],frame['bubbles'])
         except AmbiguousAnchor as error:

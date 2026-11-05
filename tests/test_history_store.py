@@ -34,6 +34,26 @@ class StoreBase(unittest.TestCase):
     def senders(self): return self.rows('sender')
 
 
+class FingerprintV2Tests(StoreBase):
+    def test_legacy_history_cursor_resets_without_duplicates(self):
+        import json
+        frame = fr(bub('a'), bub('b'), bub('c'))
+        self.store.conn.execute('INSERT INTO contact_cursor VALUES(?,?,?)',
+                                (self.c, json.dumps([['inbound_visual', 'a'], ['inbound_visual', 'b']]), 0))
+        self.assertEqual(self.store.record_frame(self.c, frame), [])
+        self.assertEqual(self.texts(), [])
+        stored = json.loads(self.store.conn.execute('SELECT frame_fingerprints FROM contact_cursor').fetchone()[0])
+        self.assertEqual(len(stored[0]), 3)
+
+    def test_reconciled_image_is_not_recorded_twice(self):
+        img = lambda h: {'text': '[图片]', 'digest': 'image:50:40', 'direction': 'inbound_visual',
+                         'kind': 'image', 'phash': h, 'media_id': h*4}
+        self.store.record_frame(self.c, fr(bub('a')))
+        self.store.record_frame(self.c, fr(bub('a'), img('0f0f0f0f0f0f0f0f')))
+        self.store.record_frame(self.c, fr(bub('a'), img('0f0f0f0f0f0f0f00')))
+        self.assertEqual(self.texts(), ['a', '[图片]'])
+
+
 class ContactTests(StoreBase):
     def test_schema_created_private_and_wal(self):
         db = self.state/'history'/'history.sqlite3'
