@@ -17,6 +17,7 @@ from scripts.agent_bridge.mcp import MCP
 from .capture import RemoteCapture
 from .history.names import candidate_names, clean_title
 from .understanding import understand
+from .model_api import ModelOutputError
 from .history.store import similar
 from .policy import strip_member_count, merge_pages, reconcile, relocate, stitch, AmbiguousAnchor, ContinuityGap, Policy, echo_matches, fingerprint, new_bubbles, validate_reply
 from .reply import generate
@@ -570,7 +571,7 @@ class BotService:
             record['error']=str(error)[:400]
             failures=pending.get('model_failures',0)
             if (record['status']=='generating' and failures<MODEL_RETRIES
-                    and isinstance(error,(RuntimeError,OSError,asyncio.TimeoutError))):
+                    and isinstance(error,(RuntimeError,OSError,asyncio.TimeoutError,ModelOutputError))):
                 # Nothing was sent: keep the turn and retry the model later instead of pausing.
                 journal.unlink(missing_ok=True)
                 self.keep_turn({**pending,'model_failures':failures+1,'retry_at':self.clock()+MODEL_RETRY_SECONDS})

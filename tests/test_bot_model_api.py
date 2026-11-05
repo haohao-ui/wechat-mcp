@@ -50,6 +50,15 @@ class ModelApiTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await generate_api('看图',images=[],config=self.config,field='notes',check=check)
 
+    async def test_malformed_output_is_a_model_output_error_with_shape_only(self):
+        from scripts.wechat_bot.model_api import ModelOutputError
+        bad={**self.result,'choices':[{'finish_reason':'stop','message':{'content':'好的，这是回复'}}]}
+        with patch('scripts.wechat_bot.model_api.request_completion',return_value=bad):
+            with self.assertRaises(ModelOutputError) as caught:
+                await generate_api('hi',images=[],config=self.config)
+        self.assertIn('length=7',str(caught.exception))
+        self.assertNotIn('好的',str(caught.exception))  # never the body
+
     async def test_actual_image_bytes_and_capability_gate(self):
         path=self.root/'image.png'; path.write_bytes(b'\x89PNG\r\n\x1a\nfixture')
         with patch('scripts.wechat_bot.model_api.request_completion',return_value=self.result) as request:

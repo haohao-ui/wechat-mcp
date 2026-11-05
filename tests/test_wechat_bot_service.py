@@ -288,6 +288,21 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             Policy('fixture','张三','service').check_frame(frame(title='张三 (3)'))
         Policy('fixture','测试群','service',group=True).check_frame(frame(title='测试群 (3)'))
 
+    async def test_malformed_model_output_retries_before_pausing(self):
+        # Acceptance 2026-11-05 (测试群): the model twice returned non-JSON for one image turn; the same
+        # call succeeded when repeated. Nothing was sent, so it is retried like a connection failure.
+        from scripts.wechat_bot.model_api import ModelOutputError
+        self.config['turn_quiet_seconds']=10
+        self.service=self.restart()
+        self.service.advance(self.old)
+        self.model=AsyncMock(side_effect=[ModelOutputError('model returned malformed JSON twice'),'你好，我是AI客服助手。'])
+        self.at(0); await self.cycle([self.new,self.new])
+        self.at(11); await self.cycle([self.new,self.new])
+        self.assertFalse(self.service.paused)
+        reply=bubble('你好，我是AI客服助手。','outbound_visual')
+        self.at(45); await self.cycle([self.new,self.new,frame(*self.new['bubbles'],reply)])
+        self.assertEqual(sum(name=='send_message' for name,_ in self.calls),1)
+
     async def test_initial_start_does_not_reply_to_history(self):
         await self.cycle([self.new])
         self.model.assert_not_awaited()
