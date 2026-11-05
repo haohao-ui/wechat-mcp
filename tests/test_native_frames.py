@@ -46,9 +46,11 @@ class NativeFrameTests(unittest.TestCase):
             raise unittest.SkipTest('native parser needs macOS swiftc')
         cls.tmp = tempfile.TemporaryDirectory()
         cls.cli = Path(cls.tmp.name)/'wechat_bubbles'
-        subprocess.run(['swiftc', '-O', '-parse-as-library', str(ROOT/'native'/'wechat_bubbles.swift'), '-o', str(cls.cli)],
+        common = sorted(str(p) for p in (ROOT/'native'/'common').glob('*.swift'))
+        subprocess.run(['swiftc', '-O', '-parse-as-library', str(ROOT/'native'/'wechat_bubbles.swift')] + common + ['-o', str(cls.cli)],
                        check=True, capture_output=True)
         cls.window = (FRAMES/'window-880x640.json').read_text()
+        cls.default_layout = ROOT/'native'/'layout'/'wechat-4.1.15.json'
 
     @classmethod
     def tearDownClass(cls):
@@ -56,7 +58,8 @@ class NativeFrameTests(unittest.TestCase):
 
     def parse(self, name, window=None, env=None):
         # Never read this machine's real ~/.wechat-rpa/ocr.json; tests choose the engine explicitly.
-        merged = {**os.environ, 'WECHAT_OCR_CONFIG': str(Path(self.tmp.name)/'no-ocr.json'), **(env or {})}
+        merged = {**os.environ, 'WECHAT_OCR_CONFIG': str(Path(self.tmp.name)/'no-ocr.json'),
+                  'WECHAT_LAYOUT': str(self.default_layout), **(env or {})}
         if 'WECHAT_OCR_ENGINE' not in (env or {}):
             merged.pop('WECHAT_OCR_ENGINE', None)
         run = subprocess.run([str(self.cli), str(FRAMES/f'{name}.png'), window or self.window],
@@ -64,6 +67,21 @@ class NativeFrameTests(unittest.TestCase):
         if run.returncode:
             return {'error': run.stderr.strip()}
         return json.loads(run.stdout)
+
+    def test_missing_layout_is_refused(self):
+        frame = self.parse('r1-dark-top', env={'WECHAT_LAYOUT': '/nonexistent.json'})
+        self.assertTrue(any(code in frame.get('error', '') for code in ('layout_missing', 'layout_unreadable')), frame)
+        self.assertNotIn('bubbles', frame)
+
+    def test_layout_drives_the_crop(self):
+        default_layout = json.loads(self.default_layout.read_text())
+        default_layout['regions']['chat_content']['h'] -= 200
+        layout_path = Path(self.tmp.name)/'short-chat.json'
+        layout_path.write_text(json.dumps(default_layout))
+        frame = self.parse('r1-dark-bottom', env={'WECHAT_LAYOUT': str(layout_path)})
+        self.assertNotIn('error', frame)
+        texts = [b['text'] for b in frame.get('bubbles', [])]
+        self.assertFalse(any('浅色测试' in t for t in texts))
 
     def test_frames_parse_to_expected_bubbles(self):
         for name, (profile, scale, title, bubbles) in CASES.items():

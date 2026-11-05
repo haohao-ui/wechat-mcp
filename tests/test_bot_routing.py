@@ -222,6 +222,14 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
             await self.coordinator.visit(target('a'))
         self.assertFalse(child.paused)
 
+    async def test_layout_errors_wait_instead_of_pausing(self):
+        for code in ('layout_missing', 'layout_unreadable'):
+            child=self.coordinator.session(target('a'))
+            self.coordinator.connect=AsyncMock(side_effect=ValueError(f'private visual operation failed: invalid("{code}")'))
+            await self.coordinator.visit(target('a'))
+            self.assertFalse(child.paused, code)
+            self.assertEqual(json.loads((child.root/'health.json').read_text())['state'],'waiting_for_wechat_window')
+
     async def test_other_worker_refusal_still_pauses(self):
         child=self.coordinator.session(target('a'))
         self.coordinator.connect=AsyncMock(side_effect=ValueError('private visual operation failed: invalid("invalid_request")'))
