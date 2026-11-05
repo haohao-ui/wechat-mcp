@@ -25,7 +25,8 @@ BADGE_PIXELS=20
 # Consecutive wrong-title switches tolerated before a contact pauses for review.
 TITLE_MISMATCH_LIMIT=3
 WINDOW_UNAVAILABLE=('uncalibrated_theme','unsupported_image_geometry','wechat_not_visible',
-                    'window_capture_failed','desktop_busy','vision_timeout')+ACTION_INTERRUPTED
+                    'window_capture_failed','desktop_busy','vision_timeout',
+                    'layout_missing','layout_unreadable')+ACTION_INTERRUPTED
 
 
 def ocr_noise(a, b):

@@ -999,9 +999,36 @@ install_binaries() {
     fi
   done
   xattr -dr com.apple.quarantine "$BIN_DIR" 2>/dev/null || true
+  install_layouts
   install_rapidocr_if_requested
   if [[ -n "$VERSION" ]]; then
     printf '%s\n' "$VERSION" > "$VERSION_FILE"
+  fi
+  return 0
+}
+
+install_layouts() {
+  local layout_dir="$HOME/.wechat-rpa/layout"
+  local src_layout=""
+  local script_path="${BASH_SOURCE[0]:-}" local_root=""
+  if [[ -n "$script_path" && -f "$script_path" ]]; then
+    local_root="$(cd "$(dirname "$script_path")/.." 2>/dev/null && pwd || true)"
+  fi
+  if [[ -n "${SRC_DIR:-}" && -d "$SRC_DIR/layout" ]]; then
+    src_layout="$SRC_DIR/layout"
+  elif [[ -n "${SRC_DIR:-}" && -d "$SRC_DIR/native/layout" ]]; then
+    src_layout="$SRC_DIR/native/layout"
+  elif [[ -n "$local_root" && -d "$local_root/native/layout" ]]; then
+    src_layout="$local_root/native/layout"
+  fi
+  if [[ -n "$src_layout" ]]; then
+    mkdir -p "$layout_dir"
+    chmod 700 "$layout_dir"
+    for f in "$src_layout"/*.json; do
+      [[ -f "$f" ]] || continue
+      install -m 600 "$f" "$layout_dir/"
+    done
+    info "已安装界面地图到 $layout_dir"
   fi
   return 0
 }

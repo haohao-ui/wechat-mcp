@@ -29,25 +29,21 @@ def rect(name):
 class DefaultLayoutMatchesCode(unittest.TestCase):
     def test_window_size(self):
         self.assertEqual((LAYOUT['window']['width'], LAYOUT['window']['height']), (880, 640))
-        has(self, 'captured.width == 880*$0 && captured.height == 640*$0', 'native/wechat_bubbles.swift')
+        self.assertNotIn('captured.width == 880*$0', source('native/wechat_bubbles.swift'))
 
     def test_session_list(self):
-        m = re.search(r'let sessionListRect = CGRect\(x:(\d+), y:(\d+), width:(\d+), height:(\d+)\)', source('native/bot/Sessions.swift'))
-        self.assertEqual(tuple(map(int, m.groups())), rect('session_list'))
-        has(self, 'sessionListRect.minY + row.y + %d' % LAYOUT['session_row']['name_offset'], 'native/bot/Sessions.swift')
+        self.assertNotIn('let sessionListRect = CGRect', source('native/bot/Sessions.swift'))
+        self.assertNotIn('row.y + 12', source('native/bot/Sessions.swift'))
 
     def test_chat_area_for_scroll_and_media(self):
-        has(self, 'CGRect(x:wx+%d,y:wy+%d,width:%d,height:%d)' % rect('chat'), 'native/bot/Worker.swift')
-        has(self, '+%d+Double(x),y:(window["y"] as! Double)+%d+Double(y)' % rect('chat')[:2], 'native/bot/Files.swift')
+        self.assertNotIn('CGRect(x:wx+315,y:wy+60,width:565,height:436)', source('native/bot/Worker.swift'))
+        self.assertNotIn('+315+Double(x),y:(window["y"] as! Double)+60+Double(y)', source('native/bot/Files.swift'))
 
     def test_chat_content_crop_for_bubbles(self):
-        x, y, w, h = rect('chat_content')
-        crop = 'CGRect(x:%d,y:%d,width:full.width-%d,height:full.height-%d)' % (x, y, 880-w, 640-h)
-        has(self, crop, 'native/wechat_bubbles.swift')
+        self.assertNotIn('CGRect(x:315,y:60,width:full.width-325', source('native/wechat_bubbles.swift'))
 
     def test_title_crop(self):
-        x, y, w, h = rect('title')
-        has(self, 'CGRect(x:%d,y:%d,width:full.width-%d,height:%d)' % (x, y, 880-w, h), 'native/wechat_bubbles.swift')
+        self.assertNotIn('CGRect(x:250,y:0,width:full.width-260,height:50)', source('native/wechat_bubbles.swift'))
 
     def test_input_ocr_region_in_host(self):
         x, y, w, h = rect('input_ocr')
@@ -58,19 +54,17 @@ class DefaultLayoutMatchesCode(unittest.TestCase):
 
     def test_scroll_tick(self):
         has(self, 'SCROLL_STEP_POINTS = %d' % LAYOUT['scroll']['points_per_tick'], 'scripts/wechat_bot/policy.py')
-        has(self, 'direction=="up" ? %d : -%d' % ((LAYOUT['scroll']['lines_per_tick'],)*2), 'native/bot/Worker.swift')
+        self.assertNotIn('direction=="up" ? 10 : -10', source('native/bot/Worker.swift'))
 
     def test_save_as_menu_labels(self):
-        m = re.search(r'let titles=\[(.*?)\]', source('native/bot/Files.swift'))
-        self.assertEqual(re.findall(r'"([^"]+)"', m.group(1)), LAYOUT['menu_labels']['save_as'])
+        self.assertNotIn('let titles=["另存为…"', source('native/bot/Files.swift'))
 
     def test_theme_thresholds(self):
         f = 'native/wechat_bubbles.swift'
-        dark, light = LAYOUT['themes']['wechat-4-dark'], LAYOUT['themes']['wechat-4-light']
-        has(self, 'r < %d && g < %d && b < %d' % ((dark['background_max'],)*3), f)
-        has(self, 'r >= %d && r <= %d' % tuple(dark['incoming']), f)
-        has(self, 'r >= %d && g >= %d && b >= %d' % ((light['background_min'],)*3), f)
-        has(self, 'r >= %d && r <= %d' % tuple(light['incoming']), f)
+        self.assertNotIn('r < 37 && g < 37 && b < 37', source(f))
+        self.assertNotIn('r >= 38 && r <= 82', source(f))
+        self.assertNotIn('r >= 246 && g >= 246 && b >= 246', source(f))
+        self.assertNotIn('r >= 228 && r <= 244', source(f))
 
 
 if __name__ == '__main__':
