@@ -100,5 +100,80 @@ class ActionModuleTests(unittest.TestCase):
         self.assertNotEqual(self.run_cli('clicks', '50', '11'), self.run_cli('clicks', '50', '12'))
 
 
+class ExecutorTests(unittest.TestCase):
+    """Executor + Actions against a recording sink (simulated cursor and clock)."""
+
+    @classmethod
+    def setUpClass(cls):
+        if platform.system() != 'Darwin' or not shutil.which('swiftc'):
+            raise unittest.SkipTest('action module needs macOS swiftc')
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.cli = Path(cls.tmp.name)/'action_selftest'
+        sources = sorted(str(p) for p in (ROOT/'native'/'action').glob('*.swift'))
+        subprocess.run(['swiftc', '-O', *sources, str(ROOT/'tests'/'action_selftest'/'main.swift'), '-o', str(cls.cli)],
+                       check=True, capture_output=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def scenario(self, name, seed=3):
+        run = subprocess.run([str(self.cli), 'exec', name, str(seed)], capture_output=True, text=True, timeout=60)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        return json.loads(run.stdout)
+
+    def kinds(self, out):
+        return [e['type'] for e in out['events']]
+
+    def test_click_event_order(self):
+        for seed in range(1, 40):
+            out = self.scenario('click', seed)
+            self.assertIsNone(out['error'])
+            kinds = self.kinds(out)
+            self.assertEqual(kinds[-2:], ['left_down', 'left_up'])
+            self.assertTrue(set(kinds[:-2]) == {'moved'} and len(kinds) > 3, kinds)
+            down, up = out['events'][-2:]
+            self.assertTrue(inside((down['x'], down['y']), out['region']))
+            self.assertEqual((down['x'], down['y']), (up['x'], up['y']))
+            self.assertTrue(0.06 - EPS <= up['t'] - down['t'] <= 0.12 + EPS)
+
+    def test_unreachable_target_never_presses(self):
+        out = self.scenario('unreachable')
+        self.assertEqual(out['error'], 'target_not_reached')
+        self.assertFalse({'left_down', 'left_up'} & set(self.kinds(out)))
+
+    def test_user_move_aborts(self):
+        out = self.scenario('interfere_move')
+        self.assertEqual(out['error'], 'user_input_detected')
+        self.assertNotIn('left_down', self.kinds(out))
+
+    def test_user_move_between_down_and_up_still_releases(self):
+        out = self.scenario('interfere_down')
+        self.assertEqual(out['error'], 'user_input_detected')
+        self.assertEqual(self.kinds(out)[-2:], ['left_down', 'left_up'])
+
+    def test_instant_profile_single_move(self):
+        out = self.scenario('instant')
+        self.assertIsNone(out['error'])
+        self.assertEqual(self.kinds(out), ['moved', 'left_down', 'left_up'])
+        self.assertTrue(inside((out['events'][0]['x'], out['events'][0]['y']), out['region']))
+
+    def test_scroll_keeps_tick_size(self):
+        out = self.scenario('scroll')
+        self.assertIsNone(out['error'])
+        ticks = [e for e in out['events'] if e['type'] == 'scroll']
+        self.assertEqual([t['lines'] for t in ticks], [10, 10, 10])
+        for tick in ticks:
+            self.assertTrue(inside((tick['x'], tick['y']), out['region']))
+        for a, b in zip(ticks, ticks[1:]):
+            self.assertTrue(0.08 - EPS <= b['t'] - a['t'] <= 0.2 + EPS)
+        self.assertNotIn('left_down', self.kinds(out))
+
+    def test_right_click_uses_right_button(self):
+        out = self.scenario('right_click')
+        self.assertIsNone(out['error'])
+        self.assertEqual(self.kinds(out)[-2:], ['right_down', 'right_up'])
+
+
 if __name__ == '__main__':
     unittest.main()

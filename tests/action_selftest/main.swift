@@ -73,10 +73,63 @@ func clickSamples(_ n: Int, _ seed: UInt64) -> [[String:Any]] {
     return out
 }
 
+/// Simulated pointer and clock; optionally a "person" moves the mouse at a chosen moment.
+final class RecordingSink: EventSink {
+    var position = CGPoint(x:100, y:100)
+    var clock = 0.0
+    var events: [[String:Any]] = []
+    var interfereAfterMoves: Int? = nil
+    var interfereAfterDown = false
+    private var moves = 0
+    func cursor() -> CGPoint { position }
+    func post(_ type: CGEventType, at point: CGPoint, button: CGMouseButton) throws {
+        let names: [CGEventType:String] = [.mouseMoved:"moved", .leftMouseDown:"left_down", .leftMouseUp:"left_up",
+                                           .rightMouseDown:"right_down", .rightMouseUp:"right_up"]
+        events.append(["type":names[type] ?? "other", "x":Double(point.x), "y":Double(point.y), "t":clock])
+        position = point
+        if type == .mouseMoved {
+            moves += 1
+            if moves == interfereAfterMoves { position.x += 50 }
+        }
+        if type == .leftMouseDown && interfereAfterDown { position.y += 50 }
+    }
+    func scroll(lines: Int32, at point: CGPoint) throws {
+        events.append(["type":"scroll", "lines":Int(lines), "x":Double(point.x), "y":Double(point.y), "t":clock])
+    }
+    func sleep(_ seconds: Double) { clock += max(seconds, 0) }
+}
+
+func execScenario(_ name: String, _ seed: UInt64) -> [String:Any] {
+    let sink = RecordingSink()
+    let screens = [CGRect(x:0, y:0, width:1440, height:900)]
+    var rect = CGRect(x:500, y:400, width:120, height:40)
+    var profile = ActionProfile.standard
+    switch name {
+    case "unreachable": rect = CGRect(x:2000, y:400, width:50, height:20)
+    case "interfere_move": sink.interfereAfterMoves = 3
+    case "interfere_down": sink.interfereAfterDown = true
+    case "instant": profile = .instant
+    case "scroll": rect = CGRect(x:315, y:60, width:565, height:436)
+    default: break
+    }
+    let actions = Actions(sink:sink, profile:profile, seed:seed, screens:screens)
+    var failure: Any = NSNull()
+    do {
+        switch name {
+        case "scroll": try actions.scroll(in:rect, lines:10, ticks:3)
+        case "right_click": try actions.rightClick(rect)
+        default: try actions.click(rect)
+        }
+    } catch { failure = String(describing:error) }
+    return ["events":sink.events, "error":failure, "region":rectJSON(reachableRegion(rect, screen:screens[0]))]
+}
+
 let args = CommandLine.arguments
 var result: Any = ["error":"usage: action_selftest clicks <n> <seed>"]
 if args.count == 4, args[1] == "clicks", let n = Int(args[2]), let seed = UInt64(args[3]) {
     result = clickSamples(n, seed)
+} else if args.count == 4, args[1] == "exec", let seed = UInt64(args[3]) {
+    result = execScenario(args[2], seed)
 } else {
     FileHandle.standardError.write("usage: action_selftest clicks <n> <seed>\n".data(using:.utf8)!)
     exit(2)
