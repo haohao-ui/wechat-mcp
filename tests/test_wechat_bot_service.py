@@ -20,7 +20,7 @@ def bubble(text,direction='inbound_visual'):
 
 
 def frame(*bubbles,title='示例联系人甲'):
-    return {'profile':'wechat-4-dark-1x','title_lines':[title],'bubbles':list(bubbles),'clipped_bubble':False}
+    return {'profile':'wechat-4-dark','scale':1,'title_lines':[title],'bubbles':list(bubbles),'clipped_bubble':False}
 
 
 class ServiceTests(unittest.IsolatedAsyncioTestCase):

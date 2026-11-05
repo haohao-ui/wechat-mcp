@@ -23,8 +23,8 @@ BOTTOM = [('inbound_visual', 'text', '岗位信息更新2.13.pdf'), ('inbound_vi
 
 # name -> (profile, scale, title, bubbles)
 CASES = {
-    'r1-dark-top': ('wechat-4-dark-1x', None, '示例联系人甲', TOP),
-    'r1-dark-bottom': ('wechat-4-dark-1x', None, '示例联系人甲', BOTTOM),
+    'r1-dark-top': ('wechat-4-dark', 1, '示例联系人甲', TOP),
+    'r1-dark-bottom': ('wechat-4-dark', 1, '示例联系人甲', BOTTOM),
 }
 
 

@@ -110,7 +110,7 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_hot_exclusion_after_generation_blocks_send(self):
         child=self.coordinator.session(target('a'))
-        old={'profile':'wechat-4-dark-1x','title_lines':['a'],'bubbles':[{'text':'old','digest':'old','direction':'inbound_visual'}]}
+        old={'profile':'wechat-4-dark','scale':1,'title_lines':['a'],'bubbles':[{'text':'old','digest':'old','direction':'inbound_visual'}]}
         new={**old,'bubbles':old['bubbles']+[{'text':'new','digest':'new','direction':'inbound_visual'}]}
         child.advance(old)
         capture=type('Capture',(),{})();capture.frame=AsyncMock(return_value=new)

@@ -82,7 +82,7 @@ final class SessionProbe {
             found.append(item)
         }
         // Only allowlisted rows leave the worker; other contacts' names/previews stay local.
-        return ["profile":"wechat-4-dark-1x", "rows":found, "row_count":cachedRows.count,
+        return ["profile":"wechat-4", "rows":found, "row_count":cachedRows.count,
                 "list_digest":hash, "ocr_cached":reused]
     }
 }
