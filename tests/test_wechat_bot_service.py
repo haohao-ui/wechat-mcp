@@ -304,66 +304,69 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             await self.service.cycle(self.client,capture)
         return capture,[call.args[0] for call in log.call_args_list]
 
+    @staticmethod
+    def chat(content,steps=0,height=436):
+        """Frame of a chat whose content (bubble, height) list is bottom-aligned, scrolled up `steps` x 90pt."""
+        placed,y=[],height-8
+        for item,size in reversed(content):
+            y-=size; placed.append((item,y,size)); y-=20
+        visible=[{**item,'y':top+steps*90,'height':size} for item,top,size in reversed(placed)
+                 if top+steps*90>=2 and top+steps*90+size<height-2]
+        return frame(*visible)
+
     async def test_tall_image_gap_recovered_by_scrolling(self):
         # A tall bubble pushed every remembered bubble off screen: scroll up to find the anchor.
         a,b,c,tall=bubble('a'),bubble('b'),bubble('c'),bubble('TALL')
+        content=[(a,40),(b,40),(c,40),(tall,380)]
         self.service.advance(frame(a,b))
-        bottom=frame(tall)
+        bottom=self.chat(content)
         reply=bubble('你好，我是AI客服助手。','outbound_visual')
-        capture,events=await self.scroll_cycle([bottom,bottom,bottom,bottom,frame(tall,reply)],
-                                               [frame(b,c,tall),bottom])
+        ups=[self.chat(content,k) for k in (1,2)]
+        capture,events=await self.scroll_cycle([bottom,bottom,bottom,bottom,frame(*bottom['bubbles'],reply)],ups+[bottom])
         self.assertNotIn('continuity_gap_rebaseline',events)
         self.assertEqual(capture.scroll.await_args_list[0].args,('up',))
-        self.assertEqual(capture.scroll.await_args_list[1].args[0],'down')
-        text=self.model.await_args.args[0]
-        self.assertIn('c',text.split('\n'))
-        self.assertIn('TALL',text.split('\n'))
+        self.assertEqual(capture.scroll.await_args_list[-1].args[0],'down')
+        text=self.model.await_args.args[0].split('\n')
+        self.assertEqual(text,['c','TALL'])
 
-    async def test_scrolled_pages_tolerate_image_hash_jitter(self):
-        # Review I6: the same image captured at two scroll positions may differ by a few dHash bits.
-        img=lambda h:{'text':'[图片]','digest':'image:50:40','phash':h,'direction':'inbound_visual','kind':'image','media_id':h*4}
-        a,b,c,d=bubble('a'),bubble('b'),bubble('c'),bubble('d')
+    async def test_consecutive_tall_images_recovered_across_empty_pages(self):
+        # Measured on the remote Mac: 247pt images 267pt apart leave pages with no complete bubble.
+        img=lambda h:{'text':'[图片]','digest':'image:61:61','phash':h,'direction':'inbound_visual','kind':'image','media_id':h*4}
+        a,b=bubble('a'),bubble('b')
+        imgs=[img('0000000000000000'),img('ffffffff00000000'),img('00000000ffffffff')]
+        content=[(a,40),(b,40)]+[(i,247) for i in imgs]
         self.service.advance(frame(a,b))
-        bottom=frame(c,img('00000000000000ff'),d)
+        bottom=self.chat(content)
         reply=bubble('你好，我是AI客服助手。','outbound_visual')
-        capture,events=await self.scroll_cycle([bottom,bottom,bottom,bottom,bottom,frame(*bottom['bubbles'],reply)],
-                                               [frame(b,c,img('000000000000000f')),bottom,bottom])
+        ups=[self.chat(content,k) for k in range(1,9)]
+        capture,events=await self.scroll_cycle([bottom,bottom,bottom,bottom,bottom,frame(*bottom['bubbles'],reply)],ups+[bottom])
         self.assertIn('continuity_gap_recovered',events)
-        self.assertIn('d',self.model.await_args.args[0].split('\n'))
+        self.assertEqual(len(self.model.await_args.args[0].split('\n')),3)
 
     async def test_lost_scroll_down_is_retried_before_giving_up(self):
         # Review I9: the first scroll down did not reach the bottom; one overshoot burst fixes it.
         a,b,c,tall=bubble('a'),bubble('b'),bubble('c'),bubble('TALL')
+        content=[(a,40),(b,40),(c,40),(tall,380)]
         self.service.advance(frame(a,b))
-        bottom=frame(tall)
+        bottom=self.chat(content)
         reply=bubble('你好，我是AI客服助手。','outbound_visual')
-        capture,events=await self.scroll_cycle([bottom,frame(b,c),bottom,bottom,bottom,frame(tall,reply)],
-                                               [frame(b,c,tall),frame(b,c),bottom])
+        ups=[self.chat(content,k) for k in (1,2)]
+        capture,events=await self.scroll_cycle([bottom,ups[0],bottom,bottom,bottom,frame(*bottom['bubbles'],reply)],ups+[ups[0],bottom])
         self.assertIn('continuity_gap_recovered',events)
         self.model.assert_awaited_once()
 
-    async def test_far_anchor_found_after_several_pages(self):
-        # Review I5: nine tall images need several scroll pages before the cursor shows again.
-        a,b,tall=bubble('a'),bubble('b'),bubble('TALL')
-        self.service.advance(frame(a,b))
-        bottom=frame(tall)
-        reply=bubble('你好，我是AI客服助手。','outbound_visual')
-        m=[bubble('m%d'%n) for n in range(1,5)]
-        ups=[frame(m[3],tall),frame(m[2],m[3]),frame(m[1],m[2]),frame(m[0],m[1]),frame(b,m[0])]
-        _,events=await self.scroll_cycle([bottom,bottom,bottom,bottom,frame(tall,reply)],ups+[bottom,bottom])
-        self.assertIn('continuity_gap_recovered',events)
-
     async def test_scroll_recovery_requires_return_to_bottom(self):
         a,b,c,tall=bubble('a'),bubble('b'),bubble('c'),bubble('TALL')
+        content=[(a,40),(b,40),(c,40),(tall,380)]
         old=frame(a,b)
         self.service.advance(old)
-        moved=frame(tall,bubble('X'))
-        capture,events=await self.scroll_cycle([frame(tall),moved,moved],[frame(b,c,tall),frame(tall),frame(tall)])
-        self.assertEqual(capture.scroll.await_args_list[-1].args,('down',))
-        self.assertEqual(capture.scroll.await_args_list[-1].kwargs,{'pages':5})
+        moved=frame(bubble('X'))
+        ups=[self.chat(content,k) for k in (1,2)]
+        capture,events=await self.scroll_cycle([self.chat(content),moved,moved],ups+[moved,moved])
         self.model.assert_not_awaited()
         self.assertEqual(self.service.cursor,old)
         self.assertEqual(json.loads((self.service.root/'health.json').read_text())['state'],'waiting_for_stable_frame')
+        self.assertEqual(capture.scroll.await_args_list[-1].kwargs,{'pages':40})
 
     async def test_unstable_gap_frame_keeps_old_cursor(self):
         self.service.advance(self.old)
@@ -620,11 +623,13 @@ class HistoryServiceTests(ServiceTests):
     async def test_scroll_recovered_messages_are_recorded_in_history(self):
         # Review I7: messages found by scrolling up exist in history too (spec G4).
         a,b,c,tall=bubble('a'),bubble('b'),bubble('c'),bubble('TALL')
+        content=[(a,40),(b,40),(c,40),(tall,380)]
         self.service.advance(frame(a,b))
         self.history.record_frame(self.cid,frame(a,b))
-        bottom=frame(tall)
+        bottom=self.chat(content)
         reply=bubble('你好，我是AI客服助手。','outbound_visual')
-        await self.scroll_cycle([bottom,bottom,bottom,bottom,frame(tall,reply)],[frame(b,c,tall),bottom])
+        await self.scroll_cycle([bottom,bottom,bottom,bottom,frame(*bottom['bubbles'],reply)],
+                                [self.chat(content,1),self.chat(content,2),bottom])
         texts=[r[0] for r in self.history.conn.execute('SELECT text FROM messages WHERE contact_id=? ORDER BY seq',(self.cid,))]
         self.assertEqual(texts[:4],['a','b','c','TALL'])
 

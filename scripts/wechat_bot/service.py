@@ -18,7 +18,7 @@ from .capture import RemoteCapture
 from .history.names import candidate_names, clean_title
 from .understanding import understand
 from .history.store import similar
-from .policy import reconcile, relocate, stitch, AmbiguousAnchor, ContinuityGap, Policy, echo_matches, fingerprint, new_bubbles, validate_reply
+from .policy import merge_pages, reconcile, relocate, stitch, AmbiguousAnchor, ContinuityGap, Policy, echo_matches, fingerprint, new_bubbles, validate_reply
 from .reply import generate
 from .native_capture import NativeCapture
 
@@ -195,7 +195,7 @@ class BotService:
                 # The journal stays authoritative; startup reconciliation repairs the mirror.
                 log_event('history_send_mirror_failed',error_type=type(error).__name__)
 
-    async def recover_gap(self, capture, frame, max_pages=6):
+    async def recover_gap(self, capture, frame, max_pages=30):
         """Changes after the cursor found by scrolling up (tall media pushed every anchor away).
 
         None when no page overlaps or the chat did not return to the same bottom frame; then
@@ -203,8 +203,8 @@ class BotService:
         self.recovery_unconfirmed = False
         if not hasattr(capture,'scroll') or not self.cursor['bubbles']:
             return None
-        pages=[frame['bubbles']]
-        changes=None
+        pages=[frame['bubbles']]  # newest first: pages[k] is k wheel steps above the bottom
+        changes,merged=None,None
         for attempt in range(max_pages):
             try:
                 page=await capture.scroll('up')
@@ -213,37 +213,36 @@ class BotService:
                 log_event('gap_scroll_failed',account_id=self.account,error=str(error)[:200])
                 if attempt==0: return None
                 break
-            pages.insert(0,page['bubbles'])
-            # Each page takes its predecessor's image identities: dHash may jitter between scroll positions.
-            aligned=[reconcile(self.cursor['bubbles'],pages[0])]
-            for newer in pages[1:]:
-                aligned.append(reconcile(aligned[-1],newer))
+            if pages[-1] and page['bubbles']==pages[-1]:
+                break  # top of the conversation: nothing more to see
+            pages.append(page['bubbles'])
             try:
-                changes=stitch(self.cursor['bubbles'],aligned)
+                merged=merge_pages(pages)
+                changes=new_bubbles(self.cursor['bubbles'],reconcile(self.cursor['bubbles'],merged))
                 break
             except (ContinuityGap,AmbiguousAnchor):
-                continue
+                changes=None
         bottom=await self.scroll_to_bottom(capture,len(pages)+2)
-        if bottom is None or list(map(fingerprint,reconcile(frame['bubbles'],bottom['bubbles']))) != list(map(fingerprint,frame['bubbles'])):
+        if list(map(fingerprint,reconcile(frame['bubbles'],bottom['bubbles']))) != list(map(fingerprint,frame['bubbles'])):
             # A lost wheel event can leave the chat scrolled up: overshoot once more before deciding.
-            bottom=await self.scroll_to_bottom(capture,5)
+            bottom=await self.scroll_to_bottom(capture,40)
             if changes is not None and list(map(fingerprint,reconcile(frame['bubbles'],bottom['bubbles']))) != list(map(fingerprint,frame['bubbles'])):
                 self.recovery_unconfirmed = True
                 return None
         if changes is None:
+            log_event('gap_scroll_exhausted',account_id=self.account,pages=len(pages)-1)
             return None
-        for page in aligned:
-            # The history store gets the same pages, so recovered messages are recorded too (spec G4).
-            if not await self.record({**frame,'bubbles':page},capture):
-                self.recovery_unconfirmed = True
-                return None
+        # The history store gets the merged view, so recovered messages are recorded too (spec G4).
+        if not await self.record({**frame,'bubbles':merged},capture):
+            self.recovery_unconfirmed = True
+            return None
         log_event('continuity_gap_recovered',account_id=self.account,pages=len(pages)-1,recovered=len(changes))
         return changes
 
     async def scroll_to_bottom(self, capture, pages):
         while pages>0:
-            await capture.scroll('down',pages=min(5,pages))
-            pages-=5
+            await capture.scroll('down',pages=min(40,pages))
+            pages-=40
         bottom=await capture.frame()
         self.policy.check_frame(bottom)
         return bottom
