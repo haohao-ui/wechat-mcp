@@ -501,9 +501,10 @@ struct BotWorkerMain {
                     do {
                         guard let request=try JSONSerialization.jsonObject(with:Data(line)) as? [String:Any] else { throw Failure.invalid("invalid_json") }
                         id=request["id"] ?? 0
+                        resetOCRReport()
                         let result=try withDesktop { try worker.request(request) }
-                        response=["id":id,"protocol_version":1,"ok":true,"result":result]
-                    } catch { response=["id":id,"protocol_version":1,"ok":false,"error":String(describing:error)] }
+                        response=["id":id,"protocol_version":1,"ok":true,"result":result,"ocr":ocrReport]
+                    } catch { response=["id":id,"protocol_version":1,"ok":false,"error":String(describing:error),"ocr":ocrReport] }
                     var data=try JSONSerialization.data(withJSONObject:response,options:.sortedKeys);data.append(10)
                     handle.write(data)
                 }

@@ -276,6 +276,40 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
             await capture.call('sessions',names=['a'])
             self.assertIs(sent[-1]['params']['manage_window'],flag)
 
+    async def test_coordinator_health_shows_capture_ocr_status(self):
+        from scripts.wechat_bot.native_capture import NativeCapture
+        capture=NativeCapture('fixture',None,'a',self.root/'a')
+        capture.ocr_status={'engine_used':'vision','fallbacks':2,'last_fallback':'rapidocr_unavailable'}
+        self.coordinator.capture=capture
+        self.coordinator.health('watching')
+        health=json.loads((Path(self.config['state_dir'])/'health.json').read_text())
+        self.assertEqual(health['ocr'],capture.ocr_status)
+
+    async def test_worker_calls_record_ocr_engine_and_fallbacks(self):
+        from scripts.wechat_bot.native_capture import NativeCapture
+        capture=NativeCapture('fixture',None,'a',self.root/'a')
+        self.assertIsNone(capture.ocr_status)
+        replies=[{'engine':'rapidocr','engine_used':'vision','fallback':'rapidocr_timeout'},
+                 {'engine':'rapidocr','engine_used':'rapidocr'}, None]
+        sent=[]
+        class Pipe:
+            def write(self,data): sent.append(json.loads(data))
+            async def drain(self): pass
+        class Out:
+            async def readline(self):
+                reply={'protocol_version':1,'id':sent[-1]['id'],'ok':True,'result':{}}
+                ocr=replies[len(sent)-1]
+                if ocr: reply['ocr']=ocr
+                return (json.dumps(reply)+'\n').encode()
+        capture.process=type('P',(),{'stdin':Pipe(),'stdout':Out()})()
+        with patch('scripts.wechat_bot.service.log_event') as logged:
+            await capture.call('sessions',names=['a'])
+            self.assertEqual(capture.ocr_status,{'engine_used':'vision','fallbacks':1,'last_fallback':'rapidocr_timeout'})
+            logged.assert_called_once_with('ocr_fallback',engine='rapidocr',reason='rapidocr_timeout')
+            await capture.call('sessions',names=['a'])
+            await capture.call('sessions',names=['a'])  # an older worker sends no report: keep the last one
+        self.assertEqual(capture.ocr_status,{'engine_used':'rapidocr','fallbacks':1,'last_fallback':'rapidocr_timeout'})
+
     def media_capture(self,call=None,download=None):
         from scripts.wechat_bot.native_capture import NativeCapture
         capture=NativeCapture('fixture',None,'a',self.root/'a')

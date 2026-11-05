@@ -35,6 +35,8 @@ class NativeCapture(RemoteCapture):
         self.names=list(names or [])
         # Group titles carry a member count ("示例群 (3)") that the worker ignores when this is set.
         self.group=bool(group)
+        # Which text engine the worker really used (vision/rapidocr) and how often RapidOCR fell back.
+        self.ocr_status=None
         # Dedicated-machine default: the worker may un-minimize, resize and move WeChat back on screen.
         self.manage_window=bool(manage_window)
         self.process=None
@@ -134,10 +136,22 @@ fi
             except BaseException:
                 await self.close_transport()
                 raise
+        self.record_ocr(response.get('ocr'))
         if not response.get('ok'):
             # A refused operation is a complete, in-sync reply; the transport stays usable.
             raise ValueError('private visual operation failed: '+str(response.get('error')))
         return response['result']
+
+    def record_ocr(self,report):
+        if not isinstance(report,dict) or not report.get('engine_used'):
+            return  # older worker: keep the last known status
+        status=self.ocr_status or {'engine_used':None,'fallbacks':0,'last_fallback':None}
+        status={**status,'engine_used':report['engine_used']}
+        if report.get('fallback'):
+            from .service import log_event  # Lazy: service imports this module.
+            status['fallbacks']+=1; status['last_fallback']=str(report['fallback'])[:200]
+            log_event('ocr_fallback',engine=report.get('engine'),reason=status['last_fallback'])
+        self.ocr_status=status
 
     async def frame(self):
         return self.logged(await self.call('capture'))

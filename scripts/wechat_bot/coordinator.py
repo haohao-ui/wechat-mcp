@@ -93,6 +93,8 @@ class BotCoordinator:
                'allowlist':[x['recipient'] for x in self.rules()['allowlist']],
                'groups_enabled':any(x['kind']=='group' for x in self.rules()['allowlist']),'model_backend':self.config.get('model_config',{}).get('backend','codex-exec'),
                'platform_message_verified':False,'sessions':{},**details}
+        if isinstance(self.capture,NativeCapture) and self.capture.ocr_status:
+            value['ocr']=self.capture.ocr_status
         for name,child in self.sessions.items():
             path=child.root/'health.json'
             value['sessions'][name]=json.loads(path.read_text()) if path.exists() else {'state':'pending'}
