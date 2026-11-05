@@ -78,8 +78,29 @@ pub fn input_shows_file(lines: &[String], name: &str) -> bool {
             return true;
         }
         let shown = line.trim_end_matches(['…', '.']).to_string();
-        line.len() > shown.len() && shown.chars().count() >= 6 && name.starts_with(&shown)
+        if line.len() > shown.len() && shown.chars().count() >= 6 && name.starts_with(&shown) {
+            return true;
+        }
+        middle_elided(&line, &name)
     })
+}
+
+/// WeChat shortens long names in the middle ("桃桃是在偷藏…_v2.mp4"); OCR may drop the ellipsis.
+/// Accept when the shown text is a 4+ character prefix of the name, then only ellipsis-like filler,
+/// then a suffix of the name that includes the whole extension.
+fn middle_elided(shown: &str, name: &str) -> bool {
+    let shown: Vec<char> = shown.chars().collect();
+    let full: Vec<char> = name.chars().collect();
+    let extension = name.rsplit_once('.').map(|(_, ext)| ext.chars().count() + 1).unwrap_or(0);
+    let prefix = shown.iter().zip(&full).take_while(|(a, b)| a == b).count();
+    let suffix = shown.iter().rev().zip(full.iter().rev()).take_while(|(a, b)| a == b).count();
+    if prefix < 4 || extension == 0 || suffix < extension + 1 || prefix + suffix > full.len() {
+        return false;
+    }
+    let middle_end = shown.len().saturating_sub(suffix);
+    shown[prefix.min(middle_end)..middle_end]
+        .iter()
+        .all(|c| matches!(c, '…' | '.' | '_' | '-' | '·'))
 }
 
 #[cfg(test)]
@@ -137,5 +158,10 @@ mod tests {
         assert!(input_shows_file(&["岗位信息更新…".to_string()], "岗位信息更新2.13.pdf"));
         assert!(!input_shows_file(&["发送".to_string()], "岗位信息更新2.13.pdf"));
         assert!(!input_shows_file(&["报价…".to_string()], "岗位信息更新2.13.pdf"));
+        // Long names are shortened in the middle; OCR read the card as below (2026-11-05, mp4).
+        assert!(input_shows_file(&["桃桃是在偷藏__v2.mp4".to_string(), "4.1M".to_string()], "桃桃是在偷藏_轻字幕版_v2.mp4"));
+        assert!(input_shows_file(&["桃桃是在偷藏…_v2.mp4".to_string()], "桃桃是在偷藏_轻字幕版_v2.mp4"));
+        assert!(!input_shows_file(&["别的视频__v2.mp4".to_string()], "桃桃是在偷藏_轻字幕版_v2.mp4"));
+        assert!(!input_shows_file(&["桃桃是在偷藏__v3.mp4".to_string()], "桃桃是在偷藏_轻字幕版_v2.mp4"));
     }
 }
