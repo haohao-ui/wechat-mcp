@@ -172,3 +172,64 @@ class NativeFrameTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class WechatOcrCliTests(unittest.TestCase):
+    """The standalone wechat_ocr command (send_file input check) follows the same engine switch."""
+
+    @classmethod
+    def setUpClass(cls):
+        if platform.system() != 'Darwin' or not shutil.which('swiftc'):
+            raise unittest.SkipTest('wechat_ocr needs macOS swiftc')
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.cli = Path(cls.tmp.name)/'wechat_ocr'
+        subprocess.run(['swiftc', str(ROOT/'native'/'wechat_ocr.swift'), '-o', str(cls.cli)], check=True, capture_output=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def run_ocr(self, env):
+        merged = {**os.environ, 'WECHAT_OCR_CONFIG': str(Path(self.tmp.name)/'no-ocr.json'),
+                  'WECHAT_OCR_TMP': str(Path(self.tmp.name)/'ocr-tmp'), **env}
+        if 'WECHAT_OCR_ENGINE' not in env:
+            merged.pop('WECHAT_OCR_ENGINE', None)
+        return subprocess.run([str(self.cli), str(FRAMES/'r1-dark-top.png')], capture_output=True, text=True,
+                              timeout=120, env=merged)
+
+    def texts(self, run):
+        self.assertEqual(run.returncode, 0, run.stderr)
+        lines = json.loads(run.stdout)
+        for line in lines:
+            self.assertTrue(0 <= line['x'] <= 1 and 0 <= line['y'] <= 1, line)
+        return [line['text'] for line in lines]
+
+    def test_cli_rejects_invalid_engine(self):
+        run = self.run_ocr({'WECHAT_OCR_ENGINE': 'paddle'})
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn('WECHAT_OCR_ENGINE', run.stderr)
+        config = Path(self.tmp.name)/'bad.json'
+        config.write_text('{"engine":"paddle"}')
+        run = self.run_ocr({'WECHAT_OCR_CONFIG': str(config)})
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn('invalid_ocr_engine', run.stderr)
+
+    def test_cli_rapidocr_missing_helper_falls_back(self):
+        run = self.run_ocr({'WECHAT_OCR_ENGINE': 'rapidocr', 'WECHAT_RAPIDOCR_SCRIPT': '/nonexistent/rapidocr_server.py'})
+        self.assertIn('ocr_fallback', run.stderr)
+        self.assertTrue(any('示例联系人甲' in t for t in self.texts(run)))
+
+    def test_cli_reads_engine_from_switch_file(self):
+        config = Path(self.tmp.name)/'rapid.json'
+        config.write_text('{"engine":"rapidocr"}')
+        run = self.run_ocr({'WECHAT_OCR_CONFIG': str(config), 'WECHAT_RAPIDOCR_SCRIPT': '/nonexistent/rapidocr_server.py'})
+        self.assertIn('ocr_fallback', run.stderr)
+
+    def test_cli_rapidocr_reads_title(self):
+        if not RAPID_PYTHON:
+            self.skipTest('set WECHAT_RAPIDOCR_PYTHON to a python with rapidocr_onnxruntime')
+        run = self.run_ocr({'WECHAT_OCR_ENGINE': 'rapidocr', 'WECHAT_RAPIDOCR_PYTHON': RAPID_PYTHON,
+                            'WECHAT_RAPIDOCR_SCRIPT': str(HELPER)})
+        self.assertNotIn('ocr_fallback', run.stderr)
+        self.assertTrue(any('示例联系人甲' in t for t in self.texts(run)))
+        self.assertEqual(list((Path(self.tmp.name)/'ocr-tmp').iterdir()), [], 'temporary image removed')

@@ -245,16 +245,95 @@ func runTesseract() -> [TextLine]? {
 do { try writeDebugEvidence() }
 catch { fputs("\(error)\n", stderr); exit(1) }
 
-let engine = (environment("WECHAT_OCR_ENGINE") ?? "auto").lowercased()
-guard ["auto", "vision", "tesseract"].contains(engine) else {
+/// Same switch file as the bot worker (~/.wechat-rpa/ocr.json or WECHAT_OCR_CONFIG):
+/// missing or "vision" keeps the existing automatic choice; "rapidocr" tries RapidOCR first.
+func switchFileEngine() -> String {
+    let path = environment("WECHAT_OCR_CONFIG") ?? NSHomeDirectory() + "/.wechat-rpa/ocr.json"
+    guard FileManager.default.fileExists(atPath: path) else { return "auto" }
+    guard let data = FileManager.default.contents(atPath: path),
+          let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let value = (object["engine"] as? String)?.lowercased(),
+          ["vision", "rapidocr"].contains(value) else {
+        fputs("invalid_ocr_engine: \(path)\n", stderr)
+        exit(1)
+    }
+    return value == "rapidocr" ? "rapidocr" : "auto"
+}
+
+/// Runs native/rapidocr_server.py --once on the (cropped) image; nil with a reason on any failure.
+func runRapidOCR() -> ([TextLine]?, String) {
+    let python = environment("WECHAT_RAPIDOCR_PYTHON") ?? "/usr/bin/python3"
+    let script = environment("WECHAT_RAPIDOCR_SCRIPT") ?? NSHomeDirectory() + "/.wechat-rpa/bin/rapidocr_server.py"
+    guard FileManager.default.isExecutableFile(atPath: python), FileManager.default.fileExists(atPath: script) else {
+        return (nil, "rapidocr_unavailable")
+    }
+    let folder = environment("WECHAT_OCR_TMP") ?? NSHomeDirectory() + "/.wechat-rpa/ocr-tmp"
+    let path = folder + "/" + UUID().uuidString + ".png"
+    defer { try? FileManager.default.removeItem(atPath: path) }
+    do {
+        try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    } catch { return (nil, "rapidocr_image_write_failed") }
+    guard let destination = CGImageDestinationCreateWithURL(URL(fileURLWithPath: path) as CFURL, "public.png" as CFString, 1, nil) else {
+        return (nil, "rapidocr_image_write_failed")
+    }
+    CGImageDestinationAddImage(destination, image, nil)
+    guard CGImageDestinationFinalize(destination) else { return (nil, "rapidocr_image_write_failed") }
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: python)
+    process.arguments = [script, "--once", path]
+    let output = Pipe()
+    process.standardOutput = output
+    process.standardError = FileHandle.nullDevice
+    var data = Data()
+    let finished = DispatchSemaphore(value: 0)
+    do { try process.run() } catch { return (nil, "rapidocr_unavailable") }
+    DispatchQueue.global(qos: .userInitiated).async {
+        data = output.fileHandleForReading.readDataToEndOfFile()
+        finished.signal()
+    }
+    if finished.wait(timeout: .now() + .seconds(30)) == .timedOut {
+        process.terminate()
+        return (nil, "rapidocr_timeout")
+    }
+    process.waitUntilExit()
+    let objects = String(decoding: data, as: UTF8.self).split(separator: "\n").compactMap {
+        try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+    }
+    if let error = objects.compactMap({ $0["error"] as? String }).first { return (nil, "rapidocr_error: " + error) }
+    guard let lines = objects.compactMap({ $0["lines"] as? [[String: Any]] }).first else { return (nil, "rapidocr_bad_reply") }
+    let width = Double(image.width), height = Double(image.height)
+    // Same format as Vision/Tesseract here: normalised top-left corner of each line.
+    let converted: [TextLine] = lines.compactMap { line in
+        guard let text = line["text"] as? String, let box = line["box"] as? [[Double]], box.count == 4,
+              box.allSatisfy({ $0.count == 2 }),
+              !text.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        let left = box.map { $0[0] }.min() ?? 0, top = box.map { $0[1] }.min() ?? 0
+        return TextLine(text: text, y: min(max(top / height, 0), 1), x: min(max(left / width, 0), 1))
+    }
+    return (converted, "")
+}
+
+var engine = (environment("WECHAT_OCR_ENGINE") ?? "").lowercased()
+if engine.isEmpty { engine = switchFileEngine() }
+guard ["auto", "vision", "tesseract", "rapidocr"].contains(engine) else {
     fputs("无效的 WECHAT_OCR_ENGINE\n", stderr)
     exit(1)
 }
 let majorVersion = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+var recognized: [TextLine]?
+if engine == "rapidocr" {
+    let (lines, reason) = runRapidOCR()
+    recognized = lines
+    if lines == nil {
+        fputs("ocr_fallback: \(reason)\n", stderr)
+        engine = "auto"
+    }
+}
 let tesseractFirst = engine == "tesseract" || (engine == "auto" && majorVersion >= 26)
 
-var recognized: [TextLine]?
-if tesseractFirst {
+if recognized != nil {
+    // RapidOCR answered.
+} else if tesseractFirst {
     recognized = runTesseract()
     if recognized?.isEmpty != false && engine != "tesseract" {
         if let fallback = runVision(), recognized == nil || !fallback.isEmpty {
