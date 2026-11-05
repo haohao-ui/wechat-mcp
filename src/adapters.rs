@@ -22,6 +22,10 @@ pub enum Operation {
         recipient: String,
         message: String,
     },
+    SendFile {
+        recipient: String,
+        file: wechat::files::FileToSend,
+    },
     WaitForMessage {
         recipient: Option<String>,
         timeout_seconds: u64,
@@ -109,6 +113,14 @@ impl MessageAdapter for WechatDesktop {
                     wechat::send_message(&recipient, &message).await?;
                     json!({"recipient":recipient,"status":"triggered","delivery":"unknown",
                         "recipient_verified":true,"recipient_verification":"chat_title_ocr",
+                        "recipient_verification_note":"标题 OCR 已匹配显示名称，仍不是微信 ID 级核验"})
+                }
+                Operation::SendFile { recipient, file } => {
+                    wechat::send_file(&recipient, &file).await?;
+                    json!({"recipient":recipient,"status":"triggered","delivery":"unknown",
+                        "file":{"name":file.name,"size":file.size},
+                        "recipient_verified":true,"recipient_verification":"chat_title_ocr",
+                        "file_verification":"input_ocr_filename",
                         "recipient_verification_note":"标题 OCR 已匹配显示名称，仍不是微信 ID 级核验"})
                 }
                 Operation::WaitForMessage {
