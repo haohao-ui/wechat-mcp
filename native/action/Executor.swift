@@ -97,6 +97,11 @@ final class Executor {
         try sink.scroll(lines:lines, at:point)
     }
 
-    /// Where the pointer starts the next movement: our last position, or the real one at first use.
-    func start() -> CGPoint { lastPosted ?? sink.cursor() }
+    /// Begins an action from wherever the pointer really is. Only movement *during* an action counts as
+    /// user input; a pointer moved between actions (by a person or the system) is just the new start.
+    func start() -> CGPoint {
+        let here = sink.cursor()
+        lastPosted = here
+        return here
+    }
 }
