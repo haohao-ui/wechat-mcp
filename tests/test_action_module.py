@@ -159,6 +159,13 @@ class ExecutorTests(unittest.TestCase):
         second = [e for e in out['events'] if e['type'] == 'moved'][-1]
         self.assertTrue(200 <= second['x'] <= 280 and 200 <= second['y'] <= 230, second)
 
+    def test_pointer_reported_late_is_not_user_input(self):
+        for seed in range(1, 30):
+            out = self.scenario('lagging_cursor', seed)
+            self.assertIsNone(out['error'], seed)
+        out = self.scenario('lagging_cursor_interfere')
+        self.assertEqual(out['error'], 'user_input_detected')
+
     def test_instant_profile_single_move(self):
         out = self.scenario('instant')
         self.assertIsNone(out['error'])
