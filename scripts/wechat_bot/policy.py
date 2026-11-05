@@ -154,8 +154,14 @@ def stitch(cursor, pages):
     raise ContinuityGap('no scrolled page overlaps the cursor')
 
 
+def strip_member_count(title):
+    """WeChat shows a group title as "测试群 (3)"; the member count is not part of its name."""
+    import re
+    return re.sub(r'\s*[(（]\d+[)）]$', '', title)
+
+
 class Policy:
-    def __init__(self, account, recipient, trigger, names=None):
+    def __init__(self, account, recipient, trigger, names=None, group=False):
         if not account or not recipient or not trigger:
             raise ValueError('explicit account, exact private-chat allowlist and test trigger required')
         self.account, self.recipient, self.trigger = account, recipient, trigger
@@ -163,6 +169,7 @@ class Policy:
         self.clean = clean_title
         # Exact title match against the contact's configured name, aliases and confirmed OCR spellings.
         self.accepted = {clean_title(n) for n in (names or [recipient])}
+        self.group = group
 
     def check_frame(self, frame):
         if frame.get('profile') not in ('wechat-4-dark', 'wechat-4-light') or frame.get('scale') not in (1, 2):
@@ -170,6 +177,8 @@ class Policy:
         if frame.get('clipped_bubble'):
             raise ValueError('incomplete bottom bubble; no automatic reply')
         titles = [self.clean(x) for x in frame.get('title_lines', [])]
+        if self.group:
+            titles = [strip_member_count(t) for t in titles]
         if len(titles) != 1 or titles[0] not in self.accepted:
             raise ValueError('exact allowlisted title not verified')
 

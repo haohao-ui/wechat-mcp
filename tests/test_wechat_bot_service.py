@@ -266,6 +266,28 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         capture.scroll.assert_awaited_once_with('down',pages=40)
         self.model.assert_awaited_once()
 
+    async def test_group_turn_names_senders_and_strips_member_count(self):
+        # 测试群 shows as "测试群 (3)"; each left bubble carries its sender name from the label above it.
+        self.config['allowlist']=[{'recipient':'测试群','kind':'group'}]
+        self.config['state_dir']=str(self.root/'group-state')
+        extra={'history':self.history,'contact_id':self.history.ensure_contact('fixture',self.config['allowlist'][0])} if hasattr(self,'history') else {}
+        self.service=BotService(self.config,**extra)
+        old=frame(bubble('old'),title='测试群 (3)')
+        self.service.advance(old)
+        asked={**bubble('@享味来 有货吗'),'sender':'午夜咖啡'}
+        new=frame(bubble('old'),asked,title='测试群 (3)')
+        await self.cycle([new,new,new,frame(bubble('old'),asked,bubble('有的','outbound_visual'),title='测试群 (3)')])
+        self.assertEqual(self.model.await_args.args[0],'午夜咖啡：@享味来 有货吗')
+        self.assertEqual(self.model.await_args.kwargs.get('chat_kind'),'group')
+        send=next(args for name,args in self.calls if name=='send_message')
+        self.assertEqual(send['recipient'],'测试群')
+
+    def test_private_title_with_parentheses_is_not_stripped(self):
+        from scripts.wechat_bot.policy import Policy
+        with self.assertRaises(ValueError):
+            Policy('fixture','张三','service').check_frame(frame(title='张三 (3)'))
+        Policy('fixture','测试群','service',group=True).check_frame(frame(title='测试群 (3)'))
+
     async def test_initial_start_does_not_reply_to_history(self):
         await self.cycle([self.new])
         self.model.assert_not_awaited()
@@ -525,7 +547,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
     def test_config_rejects_group_and_ambiguous_allowlist(self):
         path=self.root/'config.json'
-        for contacts in [[],[{'recipient':'群','kind':'group'}],self.config['allowlist']*2]:
+        for contacts in [[],[{'recipient':'群','kind':'channel'}],self.config['allowlist']*2]:
             path.write_text(json.dumps({**self.config,'allowlist':contacts}))
             with self.assertRaises(ValueError): load_config(path)
 

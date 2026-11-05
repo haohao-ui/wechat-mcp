@@ -231,7 +231,7 @@ final class CaptureWorker {
 
     func titleAccepted(_ accepted: Set<String>) -> Bool {
         guard let titles=cached["title_lines"] as? [String], titles.count==1 else { return false }
-        return accepted.contains(cleanTitle(titles[0]))
+        return titleMatches(titles[0], accepted)
     }
 
     func capture(_ recipient: String, accepted: Set<String>, manage: Bool) throws -> [String:Any] {
@@ -245,7 +245,7 @@ final class CaptureWorker {
         let snapshot = SHA256.hash(data:hashInput).map { String(format:"%02x",$0) }.joined()
         let reused = snapshot == cachedID
         if !reused {
-            cached = try analyzeFrame(image,window:window,mediaRoot:media,recipient:nil)
+            cached = try analyzeFrame(image,window:window,mediaRoot:media,recipient:nil,group:groupTitles)
             var bubbles=cached["bubbles"] as? [[String:Any]] ?? []
             for i in bubbles.indices where bubbles[i]["kind"] as? String == "file" {
                 let original=bubbles[i]["media_id"] as! String
@@ -275,6 +275,7 @@ final class CaptureWorker {
         guard (1...20).contains(names.count), names.allSatisfy({ !$0.isEmpty && $0.count<=64 }) else { throw Failure.invalid("invalid_accepted_names") }
         let accepted=Set(names.map(cleanTitle))
         let manage=params["manage_window"] as? Bool ?? false  // Absent (older client): check only.
+        groupTitles = params["group_title"] as? Bool ?? false
         if operation == "capture" { return try capture(recipient,accepted:accepted,manage:manage) }
         if operation == "scroll_chat" {
             guard let direction=params["direction"] as? String, direction=="up" || direction=="down",

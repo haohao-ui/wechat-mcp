@@ -57,7 +57,16 @@ class RoutingTests(unittest.TestCase):
     def test_malformed_rules_never_become_empty_or_permissive(self):
         for ignore in (None,{},[target('')],[target(' a')],[target('a','unknown')],[target('a'),target('a')],[{'recipient':'a'}],[None]):
             with self.assertRaises(ValueError): validate_rules({'allowlist':[target('a')],'ignorelist':ignore})
-        with self.assertRaises(ValueError): validate_rules({'allowlist':[target('group','group')]})
+        # Groups may be allowlisted (user decision 2026-11-05, 测试群); unknown kinds still fail.
+        validate_rules({'allowlist':[target('group','group')]})
+        with self.assertRaises(ValueError): validate_rules({'allowlist':[target('a','unknown')]})
+
+    def test_allowlisted_group_is_allowed_and_matched_by_name(self):
+        config={'allowlist':[target('a'),target('测试群','group')],'ignorelist':[]}
+        self.assertEqual(decision(config,'测试群'),'allowed')
+        from scripts.wechat_bot.routing import match_entry
+        self.assertEqual(match_entry(config,'测试群')['kind'],'group')
+        self.assertEqual(match_entry(config,'a')['kind'],'private')
 
 
 class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
@@ -196,7 +205,7 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.coordinator.capture=capture;self.coordinator.active_name='a'
         await self.coordinator.connect(child)
         self.assertIs(self.coordinator.capture,capture)
-        capture.retarget.assert_awaited_once_with('b',child.root,['b'])
+        capture.retarget.assert_awaited_once_with('b',child.root,['b'],group=False)
         self.assertEqual(self.coordinator.active_name,'b')
 
     async def test_connect_waits_out_vision_cold_start_by_time_not_attempts(self):
@@ -319,6 +328,19 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         _,files,failed=await capture.attachments(items,{'snapshot_id':'s'})
         self.assertEqual(len(files),1)
         self.assertEqual([(f['label'],f['reason']) for f in failed],[('big2.txt','too_large')])
+
+    async def test_group_capture_accepts_member_count_title(self):
+        from scripts.wechat_bot.native_capture import NativeCapture
+        capture=NativeCapture('fixture',None,'测试群',self.root/'g',group=True)
+        sent=[]
+        class Pipe:
+            def write(self,data): sent.append(json.loads(data))
+            async def drain(self): pass
+        class Out:
+            async def readline(self): return (json.dumps({'protocol_version':1,'id':sent[-1]['id'],'ok':True,'result':{}})+'\n').encode()
+        capture.process=type('P',(),{'stdin':Pipe(),'stdout':Out()})()
+        await capture.call('capture')
+        self.assertIs(sent[-1]['params']['group_title'],True)
 
     async def test_scroll_call_carries_manage_window(self):
         from scripts.wechat_bot.native_capture import NativeCapture
