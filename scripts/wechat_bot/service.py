@@ -16,7 +16,7 @@ from scripts.agent_bridge.codex import private_directory, write_private
 from scripts.agent_bridge.mcp import MCP
 from .capture import RemoteCapture
 from .history.names import candidate_names, clean_title
-from .policy import reconcile, AmbiguousAnchor, ContinuityGap, Policy, echo_matches, fingerprint, new_bubbles, validate_reply
+from .policy import reconcile, stitch, AmbiguousAnchor, ContinuityGap, Policy, echo_matches, fingerprint, new_bubbles, validate_reply
 from .reply import generate
 from .native_capture import NativeCapture
 
@@ -168,6 +168,41 @@ class BotService:
                 # The journal stays authoritative; startup reconciliation repairs the mirror.
                 log_event('history_send_mirror_failed',error_type=type(error).__name__)
 
+    async def recover_gap(self, capture, frame, max_pages=3):
+        """Changes after the cursor found by scrolling up (tall media pushed every anchor away).
+
+        None when no page overlaps or the chat did not return to the same bottom frame; then
+        `self.recovery_unconfirmed` tells the caller whether to wait (True) or rebaseline (False)."""
+        self.recovery_unconfirmed = False
+        if not hasattr(capture,'scroll') or not self.cursor['bubbles']:
+            return None
+        pages=[frame['bubbles']]
+        changes=None
+        for attempt in range(max_pages):
+            try:
+                page=await capture.scroll('up')
+            except ValueError as error:
+                # e.g. a worker without scroll_chat: nothing moved on the first attempt.
+                log_event('gap_scroll_failed',account_id=self.account,error=str(error)[:200])
+                if attempt==0: return None
+                break
+            pages.insert(0,reconcile(self.cursor['bubbles'],page['bubbles']))
+            try:
+                changes=stitch(self.cursor['bubbles'],pages)
+                break
+            except (ContinuityGap,AmbiguousAnchor):
+                continue
+        await capture.scroll('down',pages=len(pages)+1)
+        bottom=await capture.frame()
+        self.policy.check_frame(bottom)
+        if changes is None:
+            return None
+        if list(map(fingerprint,reconcile(frame['bubbles'],bottom['bubbles']))) != list(map(fingerprint,frame['bubbles'])):
+            self.recovery_unconfirmed = True
+            return None
+        log_event('continuity_gap_recovered',account_id=self.account,pages=len(pages)-1,recovered=len(changes))
+        return changes
+
     async def cycle(self, client, capture):
         self.had_incoming = False
         if not self.target_allowed(): return
@@ -201,10 +236,17 @@ class BotService:
             log_event('ambiguous_bubbles_skipped',account_id=self.account,reason=ambiguous,
                       certain_new=len(changes))
         except ContinuityGap:
-            # Visible history no longer overlaps the cursor (cleared chat, long absence): which
-            # messages were handled is unknowable, so rebaseline without replying.
-            ambiguous,changes='visual continuity gap',[]
-            log_event('continuity_gap_rebaseline',account_id=self.account,visible_bubbles=len(frame['bubbles']))
+            recovered = await self.recover_gap(capture, frame)
+            if recovered is not None:
+                changes = recovered
+            elif self.recovery_unconfirmed:
+                self.health('waiting_for_stable_frame',reason='scrolled back but bottom frame changed')
+                return
+            else:
+                # Visible history no longer overlaps the cursor (cleared chat, long absence): which
+                # messages were handled is unknowable, so rebaseline without replying.
+                ambiguous,changes='visual continuity gap',[]
+                log_event('continuity_gap_rebaseline',account_id=self.account,visible_bubbles=len(frame['bubbles']))
         if ambiguous and not changes:
             # Nothing was journaled, sent or given to the model: rebaseline once two frames agree.
             confirmed = await capture.frame()

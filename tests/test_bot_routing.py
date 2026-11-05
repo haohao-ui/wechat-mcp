@@ -246,6 +246,15 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
             await capture.call('sessions',names=['a'])
             self.assertIs(sent[-1]['params']['manage_window'],flag)
 
+    async def test_scroll_call_carries_manage_window(self):
+        from scripts.wechat_bot.native_capture import NativeCapture
+        capture=NativeCapture('fixture',None,'a',self.root/'a',manage_window=True)
+        capture.call=AsyncMock(return_value={'bubbles':[]})
+        await capture.scroll('up',pages=2)
+        capture.call.assert_awaited_once_with('scroll_chat',direction='up',pages=2)
+        with self.assertRaises(ValueError):
+            await capture.scroll('left')
+
     async def test_window_resize_by_worker_is_logged(self):
         from scripts.wechat_bot.native_capture import NativeCapture
         capture=NativeCapture('fixture',None,'a',self.root/'a')
