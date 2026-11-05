@@ -14,6 +14,15 @@ from .capture import RemoteCapture
 MAX_EXTRACTED=24000
 
 
+# Action module refusals: a person moved the mouse, or the control is off screen. Nothing was done;
+# callers retry on a later sweep instead of downgrading (thumbnail, "please resend", MCP search).
+ACTION_INTERRUPTED=('user_input_detected','target_not_reached')
+
+
+def action_interrupted(error):
+    return any(f'invalid("{code}")' in str(error) for code in ACTION_INTERRUPTED)
+
+
 def worker_code(error):
     # Worker refusals are fixed codes (invalid("...")), never message content; keep them for diagnosis.
     text=str(error)
@@ -69,8 +78,9 @@ fi
             await self.connect(seconds=3)
             self.last_switch=await self.call('open_session',target=self.recipient,target_names=self.names or [self.recipient])
             return
-        except (ValueError,RuntimeError,ConnectionError,asyncio.TimeoutError):
+        except (ValueError,RuntimeError,ConnectionError,asyncio.TimeoutError) as error:
             await self.close_transport()
+            if action_interrupted(error): raise
         # This one admitted GUI operation focuses the allowed chat and starts the helper in its TCC context.
         await self.navigate(self.names)
         await self.connect()
@@ -93,6 +103,7 @@ fi
             # Fast path: click the verified session-list row; the worker checks the exact title after.
             self.last_switch=await self.call('open_session',target=recipient,target_names=self.names)
         except ValueError as error:
+            if action_interrupted(error): raise
             self.last_switch={'opened':False,'fallback':str(error)[:200]}
             await self.navigate(self.names)
         self.recipient=recipient
@@ -224,6 +235,7 @@ fi
                     frame=await self.frame()
                     items[index+1:]=relocate(items[index+1:],frame['bubbles'])
                 except (ValueError,RuntimeError) as error:
+                    if action_interrupted(error): raise
                     source='chat_thumbnail'
                     from .service import log_event  # Lazy: service imports this module.
                     log_event('image_original_unavailable',reason=media_reason(error),detail=worker_code(error))
@@ -241,6 +253,7 @@ fi
                     frame=await self.frame()
                     items[index+1:]=relocate(items[index+1:],frame['bubbles'])
                 except (ValueError,RuntimeError) as error:
+                    if action_interrupted(error): raise
                     failed.append({'label':label,'kind':'file','reason':media_reason(error),'detail':worker_code(error)})
                     continue
                 label=info.get('filename') or label

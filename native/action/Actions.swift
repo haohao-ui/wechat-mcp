@@ -40,9 +40,11 @@ final class Actions {
             ?? frames.first ?? CGRect(x:0, y:0, width:100000, height:100000)
     }
 
-    private func plan(_ rect: CGRect) -> ClickPlan {
+    /// `within` also bounds the press (e.g. the session list inside the WeChat window): the effective
+    /// region is clipped to it as it is to the screen, so a press never lands outside the container.
+    private func plan(_ rect: CGRect, within container: CGRect? = nil) -> ClickPlan {
         let start = executor.start()
-        return planClick(from:start, rect:rect, screen:screen(for:rect, from:start), profile:profile, rng:&rng)
+        return planClick(from:start, rect:rect, screen:screen(for:rect, from:start), within:container, profile:profile, rng:&rng)
     }
 
     /// Moves into the control's effective region and returns where the pointer stopped.
@@ -56,8 +58,8 @@ final class Actions {
 
     /// Returns where it pressed (a context menu opens there, not at the control's centre).
     @discardableResult
-    func click(_ rect: CGRect, button: CGMouseButton = .left) throws -> CGPoint {
-        let plan = plan(rect)
+    func click(_ rect: CGRect, button: CGMouseButton = .left, within container: CGRect? = nil) throws -> CGPoint {
+        let plan = plan(rect, within:container)
         guard let point = plan.press else { throw ActionError.targetNotReached }
         try executor.run(plan.moves)
         try executor.press(at:point, button:button, dwell:plan.dwell, hold:plan.hold)

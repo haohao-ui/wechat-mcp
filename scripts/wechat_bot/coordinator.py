@@ -11,7 +11,7 @@ import time
 from scripts.agent_bridge.codex import private_directory, write_private
 from scripts.agent_bridge.mcp import MCP
 from .capture import RemoteCapture
-from .native_capture import NativeCapture
+from .native_capture import ACTION_INTERRUPTED, NativeCapture
 from .history.names import candidate_names
 from .history.store import HistoryStore
 from .routing import decision, match_entry
@@ -25,9 +25,7 @@ BADGE_PIXELS=20
 # Consecutive wrong-title switches tolerated before a contact pauses for review.
 TITLE_MISMATCH_LIMIT=3
 WINDOW_UNAVAILABLE=('uncalibrated_theme','unsupported_image_geometry','wechat_not_visible',
-                    'window_capture_failed','desktop_busy','vision_timeout',
-                    # Action module: a person moved the mouse, or the control is off screen. Nothing was sent.
-                    'user_input_detected','target_not_reached')
+                    'window_capture_failed','desktop_busy','vision_timeout')+ACTION_INTERRUPTED
 
 
 def ocr_noise(a, b):
@@ -41,10 +39,31 @@ def ocr_noise(a, b):
 
 def preview_changed(prior, row):
     # Whole-list OCR reruns whenever any row changes and can misread one letter of another row
-    # (acceptance 2026-11-05: "pdf" read as "pof"). A real message also raises the unread badge.
-    if prior.get('key') is not None and row.get('preview_key') is not None:
+    # (acceptance 2026-11-05: "pdf" read as "pof"). The time must match exactly (review I4: a
+    # repeated "[图片]" a minute later differs only there); only the preview text gets the tolerance.
+    if prior.get('time') is not None and row.get('preview_time') is not None and prior['time'] != row['preview_time']:
+        return True
+    if prior.get('key') and row.get('preview_key'):
         return not ocr_noise(prior['key'], row['preview_key'])
     return row['preview_digest'] != prior['digest']
+
+
+def letters(text):
+    """Letters and digits only, like the worker's preview_key."""
+    return ''.join(c for c in text if c.isalnum())
+
+
+def shows_last_seen(key, child):
+    """True when a row's preview is the last message the bot read in that chat (its own reply, usually)."""
+    bubbles=((getattr(child,'cursor',None) or {}).get('bubbles') or [])
+    if not key or not bubbles:
+        return False
+    last=bubbles[-1]
+    for text in (last.get('text',''), (last.get('sender') or '')+last.get('text','')):
+        seen=letters(text)
+        if seen and (ocr_noise(key, seen[:len(key)]) or ocr_noise(key, seen)):
+            return True
+    return False
 
 
 class BotCoordinator:
@@ -295,7 +314,12 @@ class BotCoordinator:
             elif row is not None:
                 # First unselected sighting: check once more so the baseline cannot hide a message.
                 if prior is None or prior['digest'] is None: reason='initial'
-                elif not prior.get('left') and preview_changed(prior,row): reason='preview_changed'
+                elif prior.get('left'):
+                    # First sighting after leaving: a reference only if it shows what the bot last read;
+                    # a message that arrived while switching is marked read (no badge) but shows here.
+                    if preview_changed(prior,row) and not shows_last_seen(row.get('preview_key'),self.sessions.get(name)):
+                        reason='preview_changed'
+                elif preview_changed(prior,row): reason='preview_changed'
                 elif row['red_pixels']-prior['min_red']>=BADGE_PIXELS: reason='unread_badge'
             if row is not None:
                 # Avatar art may contain red; the badge is measured against the lowest count seen.
@@ -306,9 +330,10 @@ class BotCoordinator:
                     # Its preview changes while open (our own reply); the chat itself was just read, so the
                     # first sighting after leaving is a new reference, not a change (the badge still counts).
                     self.list_state[name]={'digest':prior['digest'] if prior else None,'key':prior and prior.get('key'),
-                                           'min_red':low,'left':True}
+                                           'time':prior and prior.get('time'),'min_red':low,'left':True}
                 else:
-                    self.list_state[name]={'digest':row['preview_digest'],'key':row.get('preview_key'),'min_red':low}
+                    self.list_state[name]={'digest':row['preview_digest'],'key':row.get('preview_key'),
+                                           'time':row.get('preview_time'),'min_red':low}
             if reason is None and name in self.pending: reason='pending'
             if reason:
                 due.add(name)
