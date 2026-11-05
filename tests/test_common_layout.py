@@ -18,8 +18,7 @@ class CommonLayoutTests(unittest.TestCase):
             raise unittest.SkipTest('layout tests need macOS swiftc')
         cls.tmp = tempfile.TemporaryDirectory()
         cls.cli = Path(cls.tmp.name) / 'layout_selftest'
-        sources = [
-            str(ROOT / 'native' / 'common' / 'WechatLayout.swift'),
+        sources = sorted(str(p) for p in (ROOT / 'native' / 'common').glob('*.swift')) + [
             str(ROOT / 'tests' / 'common_selftest' / 'layout_main.swift')
         ]
         # Compilation will fail during Step 2 before WechatLayout.swift is created

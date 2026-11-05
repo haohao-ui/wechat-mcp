@@ -2,35 +2,6 @@
 // Representation, validation, and fallback lookup for WeChat UI layouts.
 import Foundation
 
-// TEMP until Task 1 merges
-public struct WindowPoint: Equatable {
-    public var x: Double
-    public var y: Double
-
-    public init(x: Double, y: Double) {
-        self.x = x
-        self.y = y
-    }
-}
-
-public struct WindowRect: Codable, Equatable {
-    public var x: Double
-    public var y: Double
-    public var w: Double
-    public var h: Double
-
-    public init(x: Double, y: Double, w: Double, h: Double) {
-        self.x = x
-        self.y = y
-        self.w = w
-        self.h = h
-    }
-
-    public func contains(_ p: WindowPoint) -> Bool {
-        return p.x >= x && p.x <= x + w && p.y >= y && p.y <= y + h
-    }
-}
-// END TEMP until Task 1 merges
 
 public enum LayoutError: Error, CustomStringConvertible, Equatable {
     case unreadable

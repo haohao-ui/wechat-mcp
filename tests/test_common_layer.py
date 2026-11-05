@@ -53,6 +53,11 @@ class CommonLayerTests(unittest.TestCase):
         self.assertEqual(data['round_trip'], {'x': 100.0, 'y': 20.0})
         self.assertEqual(data['matched_display'], {'x': -1920.0, 'y': -180.0, 'w': 1920.0, 'h': 1080.0})
 
+    def test_shared_display_edge_belongs_to_one_display(self):
+        data = self.run_cli('shared_display_edge')
+        self.assertEqual(data['edge'], {'x': 0.0, 'y': 0.0, 'w': 1440.0, 'h': 900.0})
+        self.assertIsNone(data['beyond'])
+
     def test_retina_crop_matches_points(self):
         """scale 2 时聊天区 (315,60,565,436) → 像素 (630,120,1130,872)；scale 1 时与点相同"""
         data = self.run_cli('retina_crop_matches_points')

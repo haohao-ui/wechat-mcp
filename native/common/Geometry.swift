@@ -101,7 +101,8 @@ public func displays() -> [CGRect] {
 
 public func display(containing p: ScreenPoint, in displays: [CGRect]) -> CGRect? {
     for rect in displays {
-        if p.x >= rect.minX && p.x <= rect.maxX && p.y >= rect.minY && p.y <= rect.maxY {
+        // Half-open, so a point on an edge two displays share belongs to exactly one of them.
+        if p.x >= rect.minX && p.x < rect.maxX && p.y >= rect.minY && p.y < rect.maxY {
             return rect
         }
     }

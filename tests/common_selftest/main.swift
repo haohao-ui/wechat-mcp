@@ -40,6 +40,14 @@ func runGeometryTest(_ caseName: String) -> Any {
             "matched_display": rectJSON(matched)
         ]
 
+    case "shared_display_edge":
+        // A point on the edge two displays share belongs to exactly one: the one it starts (half-open).
+        let screens = [
+            CGRect(x: -1920, y: -180, width: 1920, height: 1080),
+            CGRect(x: 0, y: 0, width: 1440, height: 900)
+        ]
+        return ["edge": rectJSON(display(containing: ScreenPoint(x: 0, y: 100), in: screens)),
+                "beyond": rectJSON(display(containing: ScreenPoint(x: 1440, y: 100), in: screens))]
     case "retina_crop_matches_points":
         let chat = WindowRect(x: 315, y: 60, w: 565, h: 436)
         guard let frame2 = WindowFrame(origin: ScreenPoint(x: 0, y: 0), width: 880, height: 640, scale: 2),
