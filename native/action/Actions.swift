@@ -54,14 +54,18 @@ final class Actions {
         return point
     }
 
-    func click(_ rect: CGRect, button: CGMouseButton = .left) throws {
+    /// Returns where it pressed (a context menu opens there, not at the control's centre).
+    @discardableResult
+    func click(_ rect: CGRect, button: CGMouseButton = .left) throws -> CGPoint {
         let plan = plan(rect)
         guard let point = plan.press else { throw ActionError.targetNotReached }
         try executor.run(plan.moves)
         try executor.press(at:point, button:button, dwell:plan.dwell, hold:plan.hold)
+        return point
     }
 
-    func rightClick(_ rect: CGRect) throws { try click(rect, button:.right) }
+    @discardableResult
+    func rightClick(_ rect: CGRect) throws -> CGPoint { try click(rect, button:.right) }
 
     /// Wheel ticks over the control. Tick size is the caller's (scroll calibration depends on it);
     /// only the pointer path and the pause between ticks (80–200 ms) are human-like.

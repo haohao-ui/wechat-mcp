@@ -11,5 +11,5 @@ swiftc -parse-as-library native/macos/*.swift -o target/release/wechat_runtime
 target/release/wechat_runtime --self-test
 swiftc native/overlay/main.swift -o target/release/wechat_overlay
 target/release/wechat_overlay --self-test
-swiftc -O -target "$(uname -m)-apple-macos12" -parse-as-library -D BOT_WORKER native/wechat_bubbles.swift native/bot/*.swift -o target/release/wechat_bot_worker
+swiftc -O -target "$(uname -m)-apple-macos12" -parse-as-library -D BOT_WORKER native/wechat_bubbles.swift native/action/*.swift native/bot/*.swift -o target/release/wechat_bot_worker
 install -m 755 native/rapidocr_server.py target/release/rapidocr_server.py

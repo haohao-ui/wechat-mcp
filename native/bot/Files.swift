@@ -23,6 +23,15 @@ func elements(_ root: AXUIElement, depth: Int=0, limit: Int=800) -> [AXUIElement
 
 func pauseUI(_ seconds: Double) { RunLoop.current.run(until:Date().addingTimeInterval(seconds)) }
 
+/// The worker's one "hand" (native/action): human-like paths, presses only inside the control's effective
+/// region, stops when a person moves the mouse. One instance keeps pointer tracking continuous.
+let botActions = Actions()
+
+/// Runs an action and reports its refusals as worker codes (invalid("…")) the bot already classifies.
+func act(_ body: () throws -> Void) throws {
+    do { try body() } catch let error as ActionError { throw Failure.invalid(error.description) }
+}
+
 func key(_ code: CGKeyCode, flags: CGEventFlags=[]) throws {
     guard let down=CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:true),
           let up=CGEvent(keyboardEventSource:nil,virtualKey:code,keyDown:false) else { throw Failure.invalid("key_event_failed") }
@@ -68,9 +77,8 @@ func clickMenuTextOnScreen(_ titles: [String], owner: pid_t, near point: CGPoint
         let image = try windowImage(["window_id":id])
         guard let hit = try recognize(image).first(where:{ text in titles.contains { text.body.contains($0) } }) else { continue }
         let target = CGPoint(x:rect.minX+hit.x*rect.width/Double(image.width), y:rect.minY+hit.y*rect.height/Double(image.height))
-        guard let down=CGEvent(mouseEventSource:nil,mouseType:.leftMouseDown,mouseCursorPosition:target,mouseButton:.left),
-              let up=CGEvent(mouseEventSource:nil,mouseType:.leftMouseUp,mouseCursorPosition:target,mouseButton:.left) else { throw Failure.invalid("mouse_event_failed") }
-        down.post(tap:.cghidEventTap);pauseUI(0.05);up.post(tap:.cghidEventTap)
+        // The menu row: the popup's width (minus its padding) and 22pt around the recognised text.
+        try act { try botActions.click(CGRect(x:rect.minX+8, y:target.y-11, width:rect.width-16, height:22)) }
         return true
     }
     return false
@@ -123,10 +131,11 @@ func saveAttachment(_ item: [String:Any], window:[String:Any], destination:URL, 
           let x=item["x"] as? Int,let y=item["y"] as? Int,
           let w=item["width"] as? Int,let h=item["height"] as? Int else { throw Failure.invalid("wechat_not_foreground_or_invalid_media") }
     let root=AXUIElementCreateApplication(app.processIdentifier)
-    let point=CGPoint(x:(window["x"] as! Double)+315+Double(x+w/2),y:(window["y"] as! Double)+60+Double(y+h/2))
-    guard let down=CGEvent(mouseEventSource:nil,mouseType:.rightMouseDown,mouseCursorPosition:point,mouseButton:.right),
-          let up=CGEvent(mouseEventSource:nil,mouseType:.rightMouseUp,mouseCursorPosition:point,mouseButton:.right) else { throw Failure.invalid("mouse_event_failed") }
-    down.post(tap:.cghidEventTap);up.post(tap:.cghidEventTap);pauseUI(0.4)
+    let mediaRect=CGRect(x:(window["x"] as! Double)+315+Double(x),y:(window["y"] as! Double)+60+Double(y),width:Double(w),height:Double(h))
+    // The context menu opens where the press landed; look for it there.
+    var point=CGPoint(x:mediaRect.midX,y:mediaRect.midY)
+    try act { point=try botActions.rightClick(mediaRect) }
+    pauseUI(0.4)
     saveDebugStep("1-after-right-click",root)
     let titles=["另存为…","另存为...","另存为","存储为…","Save As…","Save As..."]
     var roots=[root]
