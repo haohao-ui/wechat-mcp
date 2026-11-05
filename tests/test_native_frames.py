@@ -5,6 +5,7 @@ Light frames are captured at the same scroll position as their dark twin, so bot
 to the same bubbles (direction, kind, text): a theme must never flip who sent a message.
 """
 import json
+import os
 from pathlib import Path
 import platform
 import shutil
@@ -14,6 +15,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 FRAMES = ROOT/'tests'/'fixtures'/'frames'
+HELPER = ROOT/'native'/'rapidocr_server.py'
+# Set to a python with rapidocr_onnxruntime installed to also run the RapidOCR comparisons.
+RAPID_PYTHON = os.environ.get('WECHAT_RAPIDOCR_PYTHON')
 
 TOP = [('inbound_visual', 'text', '你好'), ('inbound_visual', 'text', '在吗'),
        ('outbound_visual', 'text', '客服助手'), ('inbound_visual', 'text', '你是美女吗'),
@@ -50,9 +54,13 @@ class NativeFrameTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
-    def parse(self, name, window=None):
+    def parse(self, name, window=None, env=None):
+        # Never read this machine's real ~/.wechat-rpa/ocr.json; tests choose the engine explicitly.
+        merged = {**os.environ, 'WECHAT_OCR_CONFIG': str(Path(self.tmp.name)/'no-ocr.json'), **(env or {})}
+        if 'WECHAT_OCR_ENGINE' not in (env or {}):
+            merged.pop('WECHAT_OCR_ENGINE', None)
         run = subprocess.run([str(self.cli), str(FRAMES/f'{name}.png'), window or self.window],
-                             capture_output=True, text=True, timeout=120)
+                             capture_output=True, text=True, timeout=120, env=merged)
         if run.returncode:
             return {'error': run.stderr.strip()}
         return json.loads(run.stdout)
@@ -79,6 +87,82 @@ class NativeFrameTests(unittest.TestCase):
         for b in images:
             self.assertEqual(len(b['phash']), 16)
             int(b['phash'], 16)
+
+    def test_default_engine_reports_vision(self):
+        frame = self.parse('r1-dark-top')
+        self.assertEqual(frame['ocr'], {'engine': 'vision', 'engine_used': 'vision'})
+
+    def test_rapidocr_without_helper_falls_back_visibly(self):
+        env = {'WECHAT_OCR_ENGINE': 'rapidocr', 'WECHAT_RAPIDOCR_SCRIPT': '/nonexistent/rapidocr_server.py'}
+        frame = self.parse('r1-dark-top', env=env)
+        self.assertNotIn('error', frame)
+        self.assertEqual(frame['ocr']['engine'], 'rapidocr')
+        self.assertEqual(frame['ocr']['engine_used'], 'vision')
+        self.assertIn('fallback', frame['ocr'])
+        self.assertEqual([(b['direction'], b['kind']) for b in frame['bubbles']], [t[:2] for t in TOP])
+
+    def test_invalid_engine_is_refused(self):
+        config = Path(self.tmp.name)/'bad-ocr.json'
+        config.write_text('{"engine":"paddle"}')
+        self.assertIn('invalid_ocr_engine', self.parse('r1-dark-top', env={'WECHAT_OCR_CONFIG': str(config)})['error'])
+        self.assertIn('invalid_ocr_engine', self.parse('r1-dark-top', env={'WECHAT_OCR_ENGINE': 'paddle'})['error'])
+
+    def test_switch_file_selects_rapidocr(self):
+        config = Path(self.tmp.name)/'rapid-ocr.json'
+        config.write_text('{"engine":"rapidocr"}')
+        frame = self.parse('r1-dark-top', env={'WECHAT_OCR_CONFIG': str(config),
+                                               'WECHAT_RAPIDOCR_SCRIPT': '/nonexistent/rapidocr_server.py'})
+        self.assertEqual(frame['ocr']['engine'], 'rapidocr')
+
+    def fake_helper(self, name, body):
+        script = Path(self.tmp.name)/name
+        script.write_text('import json, sys\n' + body)
+        return {'WECHAT_OCR_ENGINE': 'rapidocr', 'WECHAT_RAPIDOCR_PYTHON': shutil.which('python3'),
+                'WECHAT_RAPIDOCR_SCRIPT': str(script), 'WECHAT_OCR_TMP': str(Path(self.tmp.name)/'ocr-tmp')}
+
+    def test_helper_noise_lines_are_skipped(self):
+        # Library warnings on stdout must not be taken as results; the title comes from the helper.
+        env = self.fake_helper('noisy.py', (
+            'print("loading model...", flush=True)\n'
+            'print(json.dumps({"ready": True}), flush=True)\n'
+            'for line in sys.stdin:\n'
+            '    print("[W] onnx warning", flush=True)\n'
+            '    print(json.dumps({"lines": [{"text": "噪声测试", "box": [[60,10],[120,10],[120,30],[60,30]], "score": 1}]}), flush=True)\n'))
+        frame = self.parse('r1-dark-top', env=env)
+        self.assertNotIn('error', frame)
+        self.assertEqual(frame['ocr'], {'engine': 'rapidocr', 'engine_used': 'rapidocr'})
+        self.assertEqual(frame['title_lines'], ['噪声测试'])
+
+    def test_hung_helper_times_out_and_falls_back(self):
+        env = self.fake_helper('hung.py', (
+            'import time\nprint(json.dumps({"ready": True}), flush=True)\n'
+            'for line in sys.stdin:\n    time.sleep(600)\n'))
+        frame = self.parse('r1-dark-top', env=env)
+        self.assertNotIn('error', frame)
+        self.assertEqual(frame['ocr']['engine_used'], 'vision')
+        self.assertEqual(frame['ocr']['fallback'], 'rapidocr_timeout')
+        self.assertEqual(frame['title_lines'], ['示例联系人甲'])
+        self.assertEqual(list((Path(self.tmp.name)/'ocr-tmp').iterdir()), [], 'temporary images removed')
+
+    def test_frames_parse_the_same_with_rapidocr(self):
+        if not RAPID_PYTHON:
+            self.skipTest('set WECHAT_RAPIDOCR_PYTHON to a python with rapidocr_onnxruntime')
+        env = {'WECHAT_OCR_ENGINE': 'rapidocr', 'WECHAT_RAPIDOCR_PYTHON': RAPID_PYTHON,
+               'WECHAT_RAPIDOCR_SCRIPT': str(HELPER)}
+        differences = []
+        for name, (profile, scale, title, bubbles) in CASES.items():
+            with self.subTest(name):
+                frame = self.parse(name, env=env)
+                self.assertNotIn('error', frame)
+                self.assertEqual(frame['ocr'], {'engine': 'rapidocr', 'engine_used': 'rapidocr'})
+                self.assertEqual(frame['title_lines'], [title])
+                got = [(b['direction'], b['kind'], b['text']) for b in frame['bubbles']]
+                self.assertEqual([g[:2] for g in got], [b[:2] for b in bubbles])
+                for (_, _, text), (_, _, part) in zip(got, bubbles):
+                    if part not in text.replace('\n', ''):
+                        differences.append((name, part, text))
+        # Spec acceptance 2: text differences are listed for the user, not asserted.
+        print('\nRapidOCR text differences:', differences or 'none')
 
     def test_unknown_theme_refused(self):
         # Neither calibrated background dominates the chat area: never guess bubble directions.
