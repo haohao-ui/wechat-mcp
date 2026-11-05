@@ -10,7 +10,7 @@ import time
 import unicodedata
 
 from scripts.agent_bridge.codex import private_directory
-from scripts.wechat_bot.policy import AmbiguousAnchor, ContinuityGap, echo_matches, fingerprint, new_bubbles
+from scripts.wechat_bot.policy import AmbiguousAnchor, ContinuityGap, echo_matches, fingerprint, new_bubbles, reconcile
 from .names import candidate_names, name_key
 from .schema import MIGRATIONS
 
@@ -171,13 +171,24 @@ class HistoryStore:
         with self.transaction():
             row = self.conn.execute('SELECT frame_fingerprints FROM contact_cursor WHERE contact_id=?', (contact_id,)).fetchone()
             plan = []
-            if row is None:
+            stored = json.loads(row[0]) if row is not None else None
+            if stored is not None and any(len(x) == 2 for x in stored):
+                # Saved before fingerprint v2 (pixel image digests): anchors are not comparable.
+                # Reset the watermark only; the visible frame was already recorded under v1.
+                self.conn.execute('UPDATE contact_cursor SET frame_fingerprints=?, updated_at=? WHERE contact_id=?',
+                                  (json.dumps(list(map(fingerprint, current)), ensure_ascii=False), now_ms(), contact_id))
+                from scripts.wechat_bot.service import log_event  # Lazy: service imports this module.
+                log_event('history_cursor_reset', contact_id=contact_id, visible_bubbles=len(current))
+                return []
+            if stored is None:
                 plan = [(b, 'baseline', dict(baseline_meta or {})) for b in current]
             else:
-                old = [tuple(x) for x in json.loads(row[0])]
+                previous = [{'direction': d, 'digest': g, 'phash': h} for d, g, h in stored]
+                current = frame['bubbles'] = reconcile(previous, current)
+                old = [tuple(x) for x in stored]
                 seen = list(map(fingerprint, current))
                 try:
-                    plan = [(b, 'live', {}) for b in new_bubbles([{'direction': d, 'digest': g} for d, g in old], current)]
+                    plan = [(b, 'live', {}) for b in new_bubbles(previous, current)]
                 except AmbiguousAnchor as error:
                     if self.unstable.get(contact_id) != seen:
                         self.unstable[contact_id] = seen  # one jittery frame must not rewrite history
