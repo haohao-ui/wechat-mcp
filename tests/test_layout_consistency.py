@@ -57,7 +57,8 @@ class DefaultLayoutMatchesCode(unittest.TestCase):
         self.assertNotIn('direction=="up" ? 10 : -10', source('native/bot/Worker.swift'))
 
     def test_save_as_menu_labels(self):
-        self.assertNotIn('let titles=["另存为…"', source('native/bot/Files.swift'))
+        # Menu labels come only from the layout map: no hard-coded copy, not even as a fallback.
+        self.assertNotIn('"另存为…"', source('native/bot/Files.swift'))
 
     def test_theme_thresholds(self):
         f = 'native/wechat_bubbles.swift'

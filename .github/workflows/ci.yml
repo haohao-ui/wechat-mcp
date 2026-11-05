@@ -61,7 +61,7 @@ jobs:
           swiftc native/overlay/main.swift -o target/native/wechat_overlay
           target/native/wechat_overlay --self-test
           swiftc -parse-as-library native/wechat_bubbles.swift native/common/*.swift -o target/native/wechat_bubbles
-          swiftc -target "$(uname -m)-apple-macos12" -parse-as-library -D BOT_WORKER native/wechat_bubbles.swift native/common/*.swift native/action/*.swift native/bot/*.swift -o target/native/wechat_bot_worker
+          swiftc -target "$(uname -m)-apple-macos12" -parse-as-library -D BOT_WORKER native/wechat_bubbles.swift native/common/*.swift native/eyes/*.swift native/action/*.swift native/bot/*.swift -o target/native/wechat_bot_worker
           target/native/wechat_window --self-test
           swiftc -parse-as-library native/macos/*.swift -o target/native/wechat_runtime
           target/native/wechat_runtime --self-test

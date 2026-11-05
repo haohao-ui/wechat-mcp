@@ -159,7 +159,8 @@ func saveAttachment(_ item: [String:Any], window:[String:Any], destination:URL, 
     try act { point=try botActions.rightClick(mediaRect) }
     pauseUI(0.4)
     saveDebugStep("1-after-right-click",root)
-    let titles = layout.menuLabels["save_as"] ?? ["另存为…","另存为...","另存为","存储为…","Save As…","Save As..."]
+    // Labels come only from the layout map; a map without them is a calibration error, not a guess.
+    guard let titles = layout.menuLabels["save_as"], !titles.isEmpty else { throw Failure.invalid("layout_missing_menu:save_as") }
     var roots=[root]
     if let focused=attribute(AXUIElementCreateSystemWide(),"AXFocusedUIElement"), CFGetTypeID(focused)==AXUIElementGetTypeID() {
         roots.append(unsafeBitCast(focused,to:AXUIElement.self))
