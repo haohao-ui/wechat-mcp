@@ -256,6 +256,7 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
             path=self.root/(media_id[:8]+'.png');path.write_bytes(b'x');return path
         capture.call=AsyncMock(side_effect=call or default_call)
         capture.download=AsyncMock(side_effect=download or default_download)
+        capture.frame=AsyncMock(return_value={'snapshot_id':'s','bubbles':[]})
         return capture
 
     @staticmethod
@@ -269,6 +270,22 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([i['label'] for i in images],['第%d张图片'%n for n in range(1,10)])
         self.assertEqual({i['source'] for i in images},{'original'})
         self.assertEqual((files,failed),([],[]))
+
+    async def test_each_save_uses_a_fresh_frame(self):
+        # Acceptance 2026-11-05: after one save-as the screen changed, so the next image was looked up
+        # in a stale snapshot (image_snapshot_changed). Re-capture and relocate after every save.
+        img=lambda n,h:{**self.media_item('image',n),'digest':'image:61:61','phash':h}
+        first,second=img(1,'0000000000000000'),img(2,'ffffffff00000000')
+        fresh={'snapshot_id':'s2','bubbles':[first,{**second,'media_id':'e'*64}]}
+        seen=[]
+        async def call(op,**params):
+            seen.append((params['media_id'],params['snapshot_id']))
+            return {'media_id':params['media_id'],'extension':'jpg','original_bytes':True}
+        capture=self.media_capture(call=call)
+        capture.frame=AsyncMock(return_value=fresh)
+        images,_,_=await capture.attachments([first,second],{'snapshot_id':'s1','bubbles':[first,second]})
+        self.assertEqual(seen,[(first['media_id'],'s1'),('e'*64,'s2')])
+        self.assertEqual({i['source'] for i in images},{'original'})
 
     async def test_original_failure_falls_back_to_thumbnail(self):
         async def call(op,**params): raise ValueError('private visual operation failed: invalid("save_as_menu_missing")')
