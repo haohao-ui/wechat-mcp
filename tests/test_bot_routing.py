@@ -289,7 +289,7 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         capture=self.media_capture(call=call)
         _,files,failed=await capture.attachments([self.media_item('file',1,filename='a.zip')],{'snapshot_id':'s'})
         self.assertEqual(files,[])
-        self.assertEqual(failed,[{'label':'a.zip','kind':'file','reason':'unsupported_type'}])
+        self.assertEqual(failed,[{'label':'a.zip','kind':'file','reason':'unsupported_type','detail':'unsupported_file_type'}])
 
     async def test_oversized_extracts_truncate_not_pause(self):
         async def call(op,**params):

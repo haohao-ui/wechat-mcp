@@ -199,7 +199,10 @@ func analyzeFrame(_ captured: CGImage, window: [String:Any], mediaRoot: URL? = n
         let names=body.components(separatedBy:"\n").filter {
             $0.range(of:#"\.(pdf|txt|md|csv|json|docx|xlsx|png|jpe?g)$"#,options:[.regularExpression,.caseInsensitive]) != nil
         }
-        let hasSize=body.range(of:#"\d+(\.\d+)?\s*(KB|MB|GB|字节|B)"#,options:[.regularExpression,.caseInsensitive]) != nil
+        // WeChat 4 writes sizes as "220.3K" as well as "12KB"; the transfer status shares that line.
+        let sizePattern=#"\d+(\.\d+)?\s*(KB|MB|GB|K|M|G|字节|B)"#
+        let sizeRange=body.range(of:sizePattern,options:[.regularExpression,.caseInsensitive])
+        let hasSize=sizeRange != nil
         // OCR sometimes misses the size line; a card holding one filename and little else is still a file.
         let lines=body.components(separatedBy:"\n").filter { !$0.trimmingCharacters(in:.whitespaces).isEmpty }
         let isFile=names.count==1 && (hasSize || lines.count<=3)
@@ -224,8 +227,10 @@ func analyzeFrame(_ captured: CGImage, window: [String:Any], mediaRoot: URL? = n
         }
         if isFile {
             item["filename"]=names[0]
-            let sizes=body.components(separatedBy:"\n").filter { $0.range(of:#"\d+(\.\d+)?\s*(KB|MB|GB|字节|B)"#,options:[.regularExpression,.caseInsensitive]) != nil }
-            let identity="file:"+names[0]+":"+(sizes.last ?? "")
+            // Identity is filename + size token only: the status text (上传中 -> done) changes in place.
+            let size=sizeRange.map { String(body[$0]).replacingOccurrences(of:" ",with:"") } ?? ""
+            let identity="file:"+names[0]+":"+size
+            item["transfer_pending"]=["上传中","下载中","接收中","发送中"].contains { body.contains($0) }
             item["digest"]=SHA256.hash(data:Data(identity.utf8)).map { String(format:"%02x",$0) }.joined()
         }
         if isImage,let directory=mediaRoot {

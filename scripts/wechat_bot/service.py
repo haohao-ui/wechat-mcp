@@ -31,6 +31,11 @@ def log_event(event, **fields):
     logger.info(json.dumps({'time':datetime.now(timezone.utc).isoformat(), 'event':event, **fields},ensure_ascii=False))
 
 
+# A failed model call before any send is retried this many times, this far apart, then pauses.
+MODEL_RETRIES = 2
+MODEL_RETRY_SECONDS = 30
+# A file card still reading 上传中/下载中 holds the turn this long past turn_max_seconds.
+UPLOAD_EXTRA_SECONDS = 120
 # model_api refuses requests whose images add up to more than this.
 MAX_MODEL_IMAGE_BYTES = 30*1024*1024
 
@@ -124,6 +129,7 @@ class BotService:
         self.ownership = ownership or hashlib.sha256(str(self.root).encode()).hexdigest()
         self.clock = time.time
         self.recovery_unconfirmed = False
+        self.upload_pending = False
         self.turn_path = self.root/'turn.json'
         self.turn = json.loads(self.turn_path.read_text()) if self.turn_path.exists() else None
 
@@ -333,15 +339,22 @@ class BotService:
             self.health('watching')
             return
         self.had_incoming = True
+        self.upload_pending = any(b['direction']=='inbound_visual' and b.get('transfer_pending') for b in frame['bubbles'])
         if not self.turn_due():
-            self.health('waiting_for_turn',pending_visual_messages=len(self.turn['bubbles']))
+            self.health('waiting_for_upload' if self.upload_pending else 'waiting_for_turn',
+                        pending_visual_messages=len(self.turn['bubbles']))
             return
         await self.process_turn(client, capture, timings)
 
     def turn_due(self):
         now = self.clock()
+        if now < self.turn.get('retry_at',0):
+            return False
+        limit = self.config.get('turn_max_seconds',60)
+        if self.upload_pending and now-self.turn['opened_at'] < limit+UPLOAD_EXTRA_SECONDS:
+            return False  # a file still uploading cannot be saved yet
         return (now-self.turn['last_inbound_at'] >= self.config.get('turn_quiet_seconds',10) or
-                now-self.turn['opened_at'] >= self.config.get('turn_max_seconds',60))
+                now-self.turn['opened_at'] >= limit)
 
     def keep_turn(self, turn):
         """Put a closed turn back (stopped before sending) so the next start answers it."""
@@ -494,7 +507,7 @@ class BotService:
             else:
                 fetch=incoming
             for item in failed:
-                log_event('media_failed',account_id=self.account,kind=item['kind'],reason=item['reason'])
+                log_event('media_failed',account_id=self.account,kind=item['kind'],reason=item['reason'],detail=item.get('detail'))
             self.archive_media(fetch,input_ids,images,files)
             timings['media_seconds']=time.perf_counter()-began
             record.update(status='generating',media=[{'kind':f.get('kind','document'),'filename':f.get('filename'),
@@ -547,6 +560,14 @@ class BotService:
         except Exception as error:
             log_event('processing_failed',phase=record['status'],error_type=type(error).__name__,idempotency_key=key)
             record['error']=str(error)[:400]
+            failures=pending.get('model_failures',0)
+            if (record['status']=='generating' and failures<MODEL_RETRIES
+                    and isinstance(error,(RuntimeError,OSError,asyncio.TimeoutError))):
+                # Nothing was sent: keep the turn and retry the model later instead of pausing.
+                journal.unlink(missing_ok=True)
+                self.keep_turn({**pending,'model_failures':failures+1,'retry_at':self.clock()+MODEL_RETRY_SECONDS})
+                self.health('model_retry_wait',reason=str(error)[:200],attempt=failures+1)
+                return
             self.write_journal(journal,record)
             self.paused = True
             self.pause_reason = 'model or send attempt requires review: '+type(error).__name__
