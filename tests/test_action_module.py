@@ -180,3 +180,51 @@ class ExecutorTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class WechatClickCliTests(unittest.TestCase):
+    """wechat_click keeps `wechat_click <x> <y>` and gains an optional size and --plan-only (posts nothing)."""
+
+    @classmethod
+    def setUpClass(cls):
+        if platform.system() != 'Darwin' or not shutil.which('swiftc'):
+            raise unittest.SkipTest('wechat_click needs macOS swiftc')
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.cli = Path(cls.tmp.name)/'wechat_click'
+        sources = sorted(str(p) for p in (ROOT/'native'/'action').glob('*.swift'))
+        subprocess.run(['swiftc', str(ROOT/'native'/'click'/'main.swift'), *sources, '-o', str(cls.cli)],
+                       check=True, capture_output=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def plan(self, *args):
+        run = subprocess.run([str(self.cli), '--plan-only', *args], capture_output=True, text=True, timeout=30)
+        return run, (json.loads(run.stdout) if run.returncode == 0 else None)
+
+    def press(self, events):
+        kinds = [e['type'] for e in events]
+        self.assertEqual(kinds[-2:], ['left_down', 'left_up'])
+        return events[-2]
+
+    def test_point_form_clicks_within_a_small_square(self):
+        for _ in range(10):
+            run, out = self.plan('500', '400')
+            self.assertEqual(run.returncode, 0, run.stderr)
+            down = self.press(out['events'])
+            self.assertLessEqual(abs(down['x'] - 500), 4 + EPS)
+            self.assertLessEqual(abs(down['y'] - 400), 4 + EPS)
+
+    def test_size_form_uses_the_effective_region(self):
+        for _ in range(10):
+            run, out = self.plan('500', '400', '200', '40')
+            self.assertEqual(run.returncode, 0, run.stderr)
+            down = self.press(out['events'])
+            # 200×40 centred on (500,400), 20% inset: x 440..560, y 388..412.
+            self.assertTrue(440 - EPS <= down['x'] <= 560 + EPS and 388 - EPS <= down['y'] <= 412 + EPS, down)
+
+    def test_invalid_arguments_fail(self):
+        for args in (['500'], ['a', 'b'], ['500', '400', '-3', '10'], ['500', '400', '10']):
+            run, _ = self.plan(*args)
+            self.assertNotEqual(run.returncode, 0, args)
