@@ -84,6 +84,9 @@ class BotService:
         self.stop = asyncio.Event()
         self.cursor_path = self.root/'cursor.json'
         self.cursor = json.loads(self.cursor_path.read_text()) if self.cursor_path.exists() else None
+        if self.cursor is not None and self.cursor.get('profile') == 'wechat-4-dark-1x':
+            # Saved before theme profiles existed: that name meant dark theme at 1x.
+            self.cursor = {**self.cursor, 'profile':'wechat-4-dark', 'scale':1}
         if self.cursor is not None:
             self.policy.check_frame(self.cursor)
         self.paused = any(json.loads(p.read_text()).get('status') in ['preparing_media','generating','generated','attempting','unknown']

@@ -157,6 +157,15 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(BotService(self.config).paused)
         self.assertEqual(self.calls,[])
 
+    async def test_restart_accepts_cursor_saved_before_theme_profiles(self):
+        self.service.advance(self.old)
+        legacy=json.loads(self.service.cursor_path.read_text())
+        legacy['profile']='wechat-4-dark-1x'; legacy.pop('scale',None)
+        self.service.cursor_path.write_text(json.dumps(legacy))
+        extra={'history':self.history,'contact_id':self.cid} if hasattr(self,'history') else {}
+        restarted=BotService(self.config,**extra)
+        self.assertEqual((restarted.cursor['profile'],restarted.cursor['scale']),('wechat-4-dark',1))
+
     async def test_stop_during_generation_never_sends_afterward(self):
         self.service.advance(self.old)
         async def stop_model(*_,**__):
