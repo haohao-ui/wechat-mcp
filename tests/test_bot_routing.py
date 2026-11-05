@@ -84,8 +84,8 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
     async def test_sessions_isolate_history_limits_and_pause(self):
         a=self.coordinator.session(target('a'));b=self.coordinator.session(target('b'))
         self.assertNotEqual(a.root,b.root)
-        a.recent_files=[{'filename':'private-a'}]
-        self.assertEqual(b.recent_files,[])
+        a.turn={'bubbles':[{'text':'private-a'}]}
+        self.assertIsNone(b.turn)
         a.paused=True;a.pause_reason='fixture'
         self.coordinator.connect=AsyncMock()
         b.cycle=AsyncMock()
@@ -245,6 +245,63 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
             capture.process=type('P',(),{'stdin':Pipe(),'stdout':Out()})()
             await capture.call('sessions',names=['a'])
             self.assertIs(sent[-1]['params']['manage_window'],flag)
+
+    def media_capture(self,call=None,download=None):
+        from scripts.wechat_bot.native_capture import NativeCapture
+        capture=NativeCapture('fixture',None,'a',self.root/'a')
+        async def default_call(op,**params):
+            if op=='prepare_image': return {'media_id':params['media_id'],'extension':'jpg','original_bytes':True}
+            raise AssertionError(op)
+        async def default_download(media_id,kind='image'):
+            path=self.root/(media_id[:8]+'.png');path.write_bytes(b'x');return path
+        capture.call=AsyncMock(side_effect=call or default_call)
+        capture.download=AsyncMock(side_effect=download or default_download)
+        return capture
+
+    @staticmethod
+    def media_item(kind,index,**extra):
+        return {'kind':kind,'media_id':('%x'%index)*64,'text':'[图片]','direction':'inbound_visual',**extra}
+
+    async def test_nine_images_all_returned(self):
+        capture=self.media_capture()
+        items=[self.media_item('image',i) for i in range(1,10)]
+        images,files,failed=await capture.attachments(items,{'snapshot_id':'s'})
+        self.assertEqual([i['label'] for i in images],['第%d张图片'%n for n in range(1,10)])
+        self.assertEqual({i['source'] for i in images},{'original'})
+        self.assertEqual((files,failed),([],[]))
+
+    async def test_original_failure_falls_back_to_thumbnail(self):
+        async def call(op,**params): raise ValueError('private visual operation failed: invalid("save_as_menu_missing")')
+        capture=self.media_capture(call=call)
+        images,_,failed=await capture.attachments([self.media_item('image',1)],{'snapshot_id':'s'})
+        self.assertEqual(images[0]['source'],'chat_thumbnail')
+        self.assertEqual(failed,[])
+
+    async def test_unreadable_image_goes_to_failed(self):
+        async def call(op,**params): raise ValueError('invalid("save_as_menu_missing")')
+        async def download(media_id,kind='image'): raise RuntimeError('media digest mismatch')
+        capture=self.media_capture(call=call,download=download)
+        images,_,failed=await capture.attachments([self.media_item('image',1)],{'snapshot_id':'s'})
+        self.assertEqual((images,failed),([],[{'label':'第1张图片','kind':'image','reason':'download_failed'}]))
+
+    async def test_unsupported_file_goes_to_failed(self):
+        async def call(op,**params): raise ValueError('private visual operation failed: invalid("unsupported_file_type")')
+        capture=self.media_capture(call=call)
+        _,files,failed=await capture.attachments([self.media_item('file',1,filename='a.zip')],{'snapshot_id':'s'})
+        self.assertEqual(files,[])
+        self.assertEqual(failed,[{'label':'a.zip','kind':'file','reason':'unsupported_type'}])
+
+    async def test_oversized_extracts_truncate_not_pause(self):
+        async def call(op,**params):
+            name='big.txt' if params['media_id'].startswith('1') else 'big2.txt'
+            return {'media_id':params['media_id'],'filename':name,'extension':'txt','original_bytes':True}
+        async def download(media_id,kind='image'):
+            path=self.root/(media_id[:8]+'.txt');path.write_text('字'*20000);return path
+        capture=self.media_capture(call=call,download=download)
+        items=[self.media_item('file',1,filename='big.txt'),self.media_item('file',2,filename='big2.txt')]
+        _,files,failed=await capture.attachments(items,{'snapshot_id':'s'})
+        self.assertEqual(len(files),1)
+        self.assertEqual([(f['label'],f['reason']) for f in failed],[('big2.txt','too_large')])
 
     async def test_scroll_call_carries_manage_window(self):
         from scripts.wechat_bot.native_capture import NativeCapture

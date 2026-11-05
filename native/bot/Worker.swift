@@ -346,6 +346,38 @@ final class CaptureWorker {
             if ext=="pdf" { result["extraction"]=try pdfContents(destination) }
             return result
         }
+        if operation == "prepare_image" {
+            guard let id=params["media_id"] as? String,let snapshot=params["snapshot_id"] as? String else { throw Failure.invalid("missing_image_identity") }
+            let frame=try capture(recipient,accepted:accepted,manage:manage)
+            guard frame["snapshot_id"] as? String==snapshot,
+                  let item=(frame["bubbles"] as? [[String:Any]])?.first(where:{ $0["media_id"] as? String==id && $0["kind"] as? String=="image" })
+            else { throw Failure.invalid("image_snapshot_changed") }
+            let directory=media.appendingPathComponent(id)
+            try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
+            try checkPrivate(directory,type:.typeDirectory,mode:0o700)
+            // WeChat suggests a .jpg name for chat images; the real type is read from the bytes below.
+            let saved=directory.appendingPathComponent("original.jpg")
+            if !FileManager.default.fileExists(atPath:saved.path) {
+                guard !fileAttempts.contains(id) else { throw Failure.invalid("previous_download_outcome_unknown") }
+                fileAttempts.insert(id)
+                try saveAttachment(item,window:cachedWindow,destination:saved,checkSize:false)
+            }
+            let head=try Data(contentsOf:saved).prefix(8)
+            let ext = head.starts(with:[0x89,0x50,0x4E,0x47]) ? "png" : head.starts(with:[0xFF,0xD8,0xFF]) ? "jpg" : ""
+            guard !ext.isEmpty else { throw Failure.invalid("unsupported_image_bytes") }
+            var final=saved
+            if ext=="png" {
+                final=directory.appendingPathComponent("original.png")
+                if !FileManager.default.fileExists(atPath:final.path) { try FileManager.default.moveItem(at:saved,to:final) }
+            }
+            try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:final.path)
+            try checkPrivate(final,type:.typeRegular,mode:0o600)
+            let size=(try FileManager.default.attributesOfItem(atPath:final.path)[.size] as? NSNumber)?.intValue ?? 0
+            guard size>0 && size<=10*1024*1024 else { throw Failure.invalid("media_too_large") }
+            files[id]=final
+            payloads.removeValue(forKey:id)  // a cached thumbnail must not be served as the original
+            return ["media_id":id,"extension":ext,"size":size,"original_bytes":true]
+        }
         if operation == "read_media" {
             guard let id=params["media_id"] as? String,id.count==64,id.allSatisfy({ $0.isHexDigit }),
                   let offset=params["offset"] as? Int, offset>=0 else { throw Failure.invalid("invalid_media_request") }

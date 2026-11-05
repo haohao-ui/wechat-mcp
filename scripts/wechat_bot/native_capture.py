@@ -10,6 +10,18 @@ from pathlib import Path
 from .capture import RemoteCapture
 
 
+# Combined extracted document content given to the model in one reply.
+MAX_EXTRACTED=24000
+
+
+def media_reason(error):
+    text=str(error)
+    for code,reason in [('unsupported_file_type','unsupported_type'),('file_size_limit','too_large'),
+                        ('media_too_large','too_large'),('file_snapshot_changed','snapshot_changed')]:
+        if code in text: return reason
+    return 'download_failed'
+
+
 class NativeCapture(RemoteCapture):
     def __init__(self,*args,names=None,manage_window=True,**kwargs):
         super().__init__(*args,**kwargs)
@@ -165,31 +177,65 @@ fi
             handle.write(data)
         return path
 
-    async def attachments(self,incoming,frame):
+    async def attachments(self,items,frame):
+        """Fetch every image and file of a turn: (images, files, failed); one bad item never aborts the rest.
+
+        Images are labelled 第N张图片 in turn order and prefer the saved original over the chat thumbnail.
+        """
         from .documents import extract
-        images,files=[],[]
-        for item in incoming:
+        images,files,failed=[],[],[]
+        used=0
+        number=0
+        for item in items:
             kind=item.get('kind','text')
             if kind=='image':
-                if len(images)>=4: raise ValueError('at most four images per reply')
-                path=await self.download(item['media_id'])
-                images.append(path)
-                files.append({'kind':'image','source':item.get('image_source','chat_thumbnail'),'original_bytes':False})
+                number+=1
+                label='第%d张图片'%number
+                source='original'
+                try:
+                    await self.call('prepare_image',media_id=item['media_id'],snapshot_id=frame['snapshot_id'])
+                except (ValueError,RuntimeError) as error:
+                    source='chat_thumbnail'
+                    from .service import log_event  # Lazy: service imports this module.
+                    log_event('image_original_unavailable',reason=media_reason(error))
+                try:
+                    path=await self.download(item['media_id'])
+                except (ValueError,RuntimeError) as error:
+                    failed.append({'label':label,'kind':'image','reason':'download_failed'})
+                    continue
+                images.append({'path':path,'label':label,'source':source,'bubble':item})
             elif kind=='file':
-                info=await self.call('prepare_file',media_id=item['media_id'],snapshot_id=frame['snapshot_id'])
-                path=await self.download(item['media_id'],kind='file')
+                label=item.get('filename') or '文件'
+                try:
+                    info=await self.call('prepare_file',media_id=item['media_id'],snapshot_id=frame['snapshot_id'])
+                    path=await self.download(item['media_id'],kind='file')
+                except (ValueError,RuntimeError) as error:
+                    failed.append({'label':label,'kind':'file','reason':media_reason(error)})
+                    continue
+                label=info.get('filename') or label
                 if info['extension'] in ['png','jpg','jpeg']:
-                    images.append(path)
-                    files.append({'filename':info['filename'],'kind':'image','original_bytes':True})
-                else:
+                    images.append({'path':path,'label':label,'source':'original','bubble':item})
+                    continue
+                try:
                     content=extract(path,info['extension'],info.get('extraction'))
-                    for preview in info.get('extraction',{}).get('previews',[]):
-                        if len(images)>=4: raise ValueError('too many PDF/image previews')
-                        images.append(await self.download(preview))
-                    files.append({'filename':info['filename'],'original_bytes':True,**content})
-        if len(json.dumps(files,ensure_ascii=False))>24000:
-            raise ValueError('combined extracted content too large')
-        return images,files
+                except (ValueError,RuntimeError,OSError):
+                    failed.append({'label':label,'kind':'file','reason':'extract_failed'})
+                    continue
+                previews=info.get('extraction',{}).get('previews',[])
+                if not (content.get('text') or content.get('rows') or content.get('sheets') or previews):
+                    failed.append({'label':label,'kind':'file','reason':'empty'})
+                    continue
+                size=len(json.dumps(content,ensure_ascii=False))
+                if used+size>MAX_EXTRACTED:
+                    failed.append({'label':label,'kind':'file','reason':'too_large'})
+                    continue
+                used+=size
+                for page,preview in enumerate(previews,1):
+                    images.append({'path':await self.download(preview),'label':'%s第%d页'%(label,page),
+                                   'source':'preview','bubble':item})
+                files.append({'filename':info['filename'],'label':label,'original_bytes':True,'path':path,
+                              'bubble':item,**content})
+        return images,files,failed
 
     async def close_transport(self):
         if self.process:

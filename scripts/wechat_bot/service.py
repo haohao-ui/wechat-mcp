@@ -29,6 +29,11 @@ def log_event(event, **fields):
     logger.info(json.dumps({'time':datetime.now(timezone.utc).isoformat(), 'event':event, **fields},ensure_ascii=False))
 
 
+def model_view(document):
+    # Local paths and screen geometry never go to the model.
+    return {k:v for k,v in document.items() if k not in ('path','bubble')}
+
+
 def load_config(path):
     value = json.loads(Path(path).read_text())
     allowed = {'schema_version', 'host', 'account_id', 'allowlist', 'state_dir', 'poll_seconds',
@@ -104,8 +109,6 @@ class BotService:
         self.recovery_unconfirmed = False
         self.turn_path = self.root/'turn.json'
         self.turn = json.loads(self.turn_path.read_text()) if self.turn_path.exists() else None
-        self.recent_files_path=self.root/'recent-files.json'
-        self.recent_files=json.loads(self.recent_files_path.read_text()) if self.recent_files_path.exists() else []
 
     def target_allowed(self):
         from .routing import decision
@@ -329,6 +332,26 @@ class BotService:
             self.health('watching',reason='already replied ('+source+')')
         return source is not None
 
+    def archive_media(self, incoming, input_ids, images, files):
+        """Attach each fetched image/file to its history message (spec G4); failures only log."""
+        if self.history is None:
+            return
+        if len(input_ids)!=len(incoming):
+            log_event('media_archive_skipped',account_id=self.account,reason='messages not matched')
+            return
+        pairs=list(zip(incoming,input_ids))
+        for item,kind in [(i,'image') for i in images]+[(f,'file') for f in files]:
+            message_id=next((m for bubble,m in pairs if bubble==item['bubble']),None)
+            if message_id is None:
+                continue
+            try:
+                self.history.attach_media(message_id,item['path'],kind=kind,filename=item.get('filename'),source=item['source']
+                                          if kind=='image' else 'original')
+                if kind=='file':
+                    self.history.finish_media_job(message_id,'done')
+            except Exception as error:
+                log_event('history_media_attach_failed',error_type=type(error).__name__)
+
     def own_echo(self, bubble):
         """An outbound bubble matching a reply this contact's service sent in the last 10 minutes."""
         for path in self.root.glob('send-*.json'):
@@ -379,30 +402,25 @@ class BotService:
         self.health('preparing_media',idempotency_key=key)
         try:
             began=time.perf_counter()
-            images,files=[],[]
-            media=list(incoming)
-            # Follow-up text can refer to a preceding photo; pass the actual visible image, not only its OCR.
-            ids={b.get('media_id') for b in media}
-            media.extend(b for b in confirmed['bubbles'][-6:] if b.get('kind')=='image' and b.get('media_id') not in ids)
-            if any(b.get('kind','text')!='text' for b in media):
+            images,files,failed=[],[],[]
+            if any(b.get('kind','text')!='text' for b in incoming):
                 if not hasattr(capture,'attachments'):
                     raise ValueError('media-capable capture backend required')
-                images,files=await capture.attachments(media,confirmed)
-            if any(b.get('kind')=='file' for b in incoming):
-                self.recent_files=[f for f in files if f.get('original_bytes')][-3:]
-                write_private(self.recent_files_path,self.recent_files)
-            elif self.recent_files:
-                files=files+self.recent_files
+                images,files,failed=await capture.attachments(incoming,confirmed)
+            for item in failed:
+                log_event('media_failed',account_id=self.account,kind=item['kind'],reason=item['reason'])
+            self.archive_media(incoming,input_ids,images,files)
             timings['media_seconds']=time.perf_counter()-began
             record.update(status='generating',media=[{'kind':f.get('kind','document'),'filename':f.get('filename'),
-                'original_bytes':f.get('original_bytes'),'truncated':f.get('truncated',False)} for f in files])
+                'original_bytes':f.get('original_bytes'),'truncated':f.get('truncated',False)} for f in files],
+                images=[{'label':i['label'],'source':i['source']} for i in images],failed=failed)
             self.write_journal(journal,record)
             self.health('generating',idempotency_key=key,image_count=len(images),file_count=len(files))
             if not self.target_allowed():
                 record['status']='skipped_by_rule'; self.write_journal(journal,record); return
             model={}
             reply = validate_reply(await generate('\n'.join(b['text'] for b in incoming),mode='service',context=context,
-                                                  images=images,files=files,metadata=model,model_config=self.config.get('model_config')))
+                                                  images=[i['path'] for i in images],files=[model_view(f) for f in files],metadata=model,model_config=self.config.get('model_config')))
             timings['model_seconds']=model.get('seconds')
             log_event('model_completed',**model)
             record['model']=model
