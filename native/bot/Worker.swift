@@ -18,6 +18,7 @@ func checkPrivate(_ path: URL, type: FileAttributeType, mode: Int) throws {
 /// macOS 14+: ScreenCaptureKit (CGWindowListCreateImage is unavailable on macOS 15+); older: CGWindowList.
 func windowImage(_ window: [String:Any]) throws -> CGImage {
     let id = window["window_id"] as! UInt32
+    #if compiler(>=5.9)  // SCScreenshotManager needs the macOS 14 SDK (Xcode 15+); older toolchains build CG only.
     if #available(macOS 14, *) {
         let done = DispatchSemaphore(value:0)
         var image: CGImage?
@@ -47,6 +48,7 @@ func windowImage(_ window: [String:Any]) throws -> CGImage {
         }
         return image
     }
+    #endif
     guard let image = CGWindowListCreateImage(.null,.optionIncludingWindow,id,[.boundsIgnoreFraming,.bestResolution]) else {
         throw Failure.invalid("window_capture_failed")
     }
