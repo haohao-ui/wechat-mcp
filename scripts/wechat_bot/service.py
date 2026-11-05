@@ -259,6 +259,10 @@ class BotService:
         timings={}
         began=time.perf_counter()
         frame = await capture.frame()
+        if frame.get('clipped_bubble') and hasattr(capture,'scroll'):
+            # Images grow as they load and WeChat may stay scrolled up: go to the bottom, don't wait forever.
+            log_event('clipped_bottom_scrolled',account_id=self.account)
+            frame = await capture.scroll('down',pages=40)
         timings['capture_seconds']=time.perf_counter()-began
         self.policy.check_frame(frame)
         if not await self.record(frame, capture):

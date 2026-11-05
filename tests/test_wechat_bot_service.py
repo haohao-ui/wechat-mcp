@@ -252,6 +252,20 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.service.paused)
         self.assertEqual(self.calls,[])
 
+    async def test_clipped_bottom_scrolls_down_instead_of_waiting_forever(self):
+        # Acceptance 2026-11-05: images grew while loading and WeChat stayed scrolled up; the bottom
+        # image stayed cut by the input box and the bot waited for a better frame that never came.
+        self.service.advance(self.old)
+        clipped={**self.new,'clipped_bubble':True}
+        reply=bubble('你好，我是AI客服助手。','outbound_visual')
+        capture=type('Capture',(),{})()
+        capture.frame=AsyncMock(side_effect=copy.deepcopy([clipped,self.new,self.new,frame(*self.new['bubbles'],reply)]))
+        capture.scroll=AsyncMock(return_value=copy.deepcopy(self.new))
+        with patch('scripts.wechat_bot.service.generate',self.model):
+            await self.service.cycle(self.client,capture)
+        capture.scroll.assert_awaited_once_with('down',pages=40)
+        self.model.assert_awaited_once()
+
     async def test_initial_start_does_not_reply_to_history(self):
         await self.cycle([self.new])
         self.model.assert_not_awaited()
