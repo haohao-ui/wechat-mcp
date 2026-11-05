@@ -312,6 +312,23 @@ class BotService:
         log_event('already_replied',account_id=self.account,source=source)
         self.health('watching',reason='already replied ('+source+')')
 
+    def replied_meanwhile(self, confirmed, latest, input_ids):
+        """Pre-send check (spec §5.9): a person or an earlier send already answered this turn."""
+        source=None
+        if self.history is not None and self.history.replied_after(self.contact_id,input_ids):
+            source='history'
+        else:
+            try:
+                later=new_bubbles(confirmed['bubbles'],reconcile(confirmed['bubbles'],latest['bubbles']))
+            except (ContinuityGap,AmbiguousAnchor):
+                later=[]
+            if any(b['direction']=='outbound_visual' and not self.own_echo(b) for b in later):
+                source='screen'
+        if source:
+            log_event('already_replied',account_id=self.account,source=source)
+            self.health('watching',reason='already replied ('+source+')')
+        return source is not None
+
     def own_echo(self, bubble):
         """An outbound bubble matching a reply this contact's service sent in the last 10 minutes."""
         for path in self.root.glob('send-*.json'):
@@ -346,6 +363,9 @@ class BotService:
         key = self.batch_key(self.turn['baseline'],incoming)
         journal = self.root/('send-'+key+'.json')
         if journal.exists():
+            if json.loads(journal.read_text()).get('status')=='triggered':
+                self.drop_turn('journal')  # sent before a restart; never send it twice
+                return
             self.paused = True
             self.health('paused',reason='existing batch requires review',idempotency_key=key)
             return
@@ -395,6 +415,9 @@ class BotService:
             timings['pre_send_seconds']=time.perf_counter()-began
             # Title/profile only: new arrivals during generation become the next turn (spec §5.8).
             self.policy.check_frame(latest)
+            if self.replied_meanwhile(confirmed,latest,input_ids):
+                record['status']='already_replied'; self.write_journal(journal,record)
+                return
             if self.stop.is_set():
                 record['status']='stopped_before_send'; self.write_journal(journal,record); return
             if not self.target_allowed():
