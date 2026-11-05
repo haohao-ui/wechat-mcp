@@ -88,6 +88,19 @@ impl Gateway {
             }
             return Ok(json!({"accounts":self.accounts.list()}));
         }
+        if name == "upload_file" {
+            for field in object.keys() {
+                if !["name", "content_base64"].contains(&field.as_str()) {
+                    bail!("不支持的参数: {field}");
+                }
+            }
+            let file_name = required_string(&args, "name")?;
+            let content = required_string(&args, "content_base64")?;
+            let root = crate::wechat::files::default_upload_root().context("需要 HOME 才能保存上传文件")?;
+            let path = crate::wechat::files::store_upload(file_name, content, &root)?;
+            let size = std::fs::metadata(&path)?.len();
+            return Ok(json!({"path": path, "name": file_name, "size": size}));
+        }
         if name == crate::article::TOOL {
             return crate::article::execute(args).await;
         }
@@ -494,6 +507,27 @@ mod tests {
         let tools = crate::tools::list_tools_with_legacy(false);
         let tool = tools["tools"].as_array().or(tools.as_array()).unwrap().iter().find(|t| t["name"] == "send_file").expect("send_file listed").clone();
         assert_eq!(tool["inputSchema"]["required"], json!(["platform","account_id","recipient","path","idempotency_key"]));
+    }
+
+    #[tokio::test]
+    async fn upload_file_rejects_bad_input_and_is_listed() {
+        let gateway = Gateway {
+            accounts: AccountRegistry::default(),
+            store: Store::memory(),
+            listeners: Listeners::default(),
+            legacy_tools: false,
+        };
+        for args in [
+            json!({"name":"../a.pdf","content_base64":"aGk="}),
+            json!({"name":"a.pdf","content_base64":"not base64!"}),
+            json!({"name":"a.pdf"}),
+            json!({"name":"a.pdf","content_base64":"aGk=","path":"/tmp/x"}),
+        ] {
+            assert_eq!(gateway.call("upload_file", args).await["isError"], true);
+        }
+        let tools = crate::tools::list_tools_with_legacy(false);
+        let tool = tools["tools"].as_array().unwrap().iter().find(|t| t["name"] == "upload_file").expect("upload_file listed").clone();
+        assert_eq!(tool["inputSchema"]["required"], json!(["name","content_base64"]));
     }
 
     #[tokio::test]

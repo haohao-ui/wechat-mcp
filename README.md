@@ -146,6 +146,7 @@ MCP 客户端配置示例（一键安装的默认位置；`<HOME>` 替换为你�
 | `get_messages` | 上述字段，`recipient` 可选 | 当前可见聊天文字 |
 | `send_message` | 上述字段，`recipient`, `message`, `idempotency_key`；`customer_id` 可选 | 幂等登记并触发文本发送 |
 | `send_file` | 上述字段，`recipient`, `path`（绝对路径，仅限宿主用户的桌面/文稿/下载，≤10MB）, `idempotency_key`；`customer_id` 可选 | 幂等登记并发送本机文件：粘贴后 OCR 输入框确认出现该文件名、复核标题才回车，输入框残留草稿会先清空 |
+| `upload_file` | `name`（纯文件名，原样保留）, `content_base64`（≤10MB）；不需要账号字段 | 把别处的文件存到运行微信的这台电脑（`~/Documents/微信客服附件/待发送/<随机子目录>/<name>`），返回 `path` 供 `send_file` 使用；只保存不发送，不覆盖已有文件 |
 | `wait_for_message` | 上述字段，`recipient` 可选，`timeout_seconds` 可选 | 等待界面变化；超时为 1–300 秒 |
 
 ### 公众号文章
