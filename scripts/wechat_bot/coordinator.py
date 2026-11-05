@@ -30,6 +30,23 @@ WINDOW_UNAVAILABLE=('uncalibrated_theme','unsupported_image_geometry','wechat_no
                     'user_input_detected','target_not_reached')
 
 
+def ocr_noise(a, b):
+    """True when two previews differ by at most one character (an OCR misread, not a new message)."""
+    if a == b: return True
+    if abs(len(a)-len(b)) > 1: return False
+    if len(a) == len(b): return sum(x != y for x, y in zip(a, b)) <= 1
+    short, long_ = (a, b) if len(a) < len(b) else (b, a)
+    return any(long_[:i]+long_[i+1:] == short for i in range(len(long_)))
+
+
+def preview_changed(prior, row):
+    # Whole-list OCR reruns whenever any row changes and can misread one letter of another row
+    # (acceptance 2026-11-05: "pdf" read as "pof"). A real message also raises the unread badge.
+    if prior.get('key') is not None and row.get('preview_key') is not None:
+        return not ocr_noise(prior['key'], row['preview_key'])
+    return row['preview_digest'] != prior['digest']
+
+
 class BotCoordinator:
     def __init__(self, config_path):
         self.config_path=Path(config_path)
@@ -278,16 +295,20 @@ class BotCoordinator:
             elif row is not None:
                 # First unselected sighting: check once more so the baseline cannot hide a message.
                 if prior is None or prior['digest'] is None: reason='initial'
-                elif row['preview_digest']!=prior['digest']: reason='preview_changed'
+                elif not prior.get('left') and preview_changed(prior,row): reason='preview_changed'
                 elif row['red_pixels']-prior['min_red']>=BADGE_PIXELS: reason='unread_badge'
             if row is not None:
                 # Avatar art may contain red; the badge is measured against the lowest count seen.
                 low=row['red_pixels'] if prior is None else min(prior['min_red'],row['red_pixels'])
                 # The selected row's highlight changes OCR (客服/容服), so previews are only compared
                 # in the unselected state; the open chat is captured every sweep regardless.
-                digest=prior['digest'] if prior and name==self.active_name else None
-                if name!=self.active_name: digest=row['preview_digest']
-                self.list_state[name]={'digest':digest,'min_red':low}
+                if name==self.active_name:
+                    # Its preview changes while open (our own reply); the chat itself was just read, so the
+                    # first sighting after leaving is a new reference, not a change (the badge still counts).
+                    self.list_state[name]={'digest':prior['digest'] if prior else None,'key':prior and prior.get('key'),
+                                           'min_red':low,'left':True}
+                else:
+                    self.list_state[name]={'digest':row['preview_digest'],'key':row.get('preview_key'),'min_red':low}
             if reason is None and name in self.pending: reason='pending'
             if reason:
                 due.add(name)
