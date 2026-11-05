@@ -191,9 +191,30 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(child.paused)
         self.assertEqual(json.loads((child.root/'health.json').read_text())['state'],'waiting_for_wechat_window')
 
-    async def test_other_worker_refusal_still_pauses(self):
+    async def test_title_mismatch_retries_twice_then_pauses(self):
+        # Acceptance 2026-11-05: after a manual send left another chat open, one switch landed on the
+        # wrong title. Nothing was read or sent; retry, but a persistent mismatch (renamed contact) pauses.
         child=self.coordinator.session(target('a'))
         self.coordinator.connect=AsyncMock(side_effect=ValueError('private visual operation failed: invalid("allowlisted_title_mismatch")'))
+        for _ in range(2):
+            await self.coordinator.visit(target('a'))
+            self.assertFalse(child.paused)
+            self.assertEqual(json.loads((child.root/'health.json').read_text())['state'],'waiting_for_wechat_window')
+        await self.coordinator.visit(target('a'))
+        self.assertTrue(child.paused)
+
+    async def test_successful_cycle_resets_title_mismatch_count(self):
+        child=self.coordinator.session(target('a'))
+        mismatch=ValueError('private visual operation failed: invalid("allowlisted_title_mismatch")')
+        self.coordinator.connect=AsyncMock(side_effect=[mismatch,mismatch,None,mismatch,mismatch])
+        child.cycle=AsyncMock()
+        for _ in range(5):
+            await self.coordinator.visit(target('a'))
+        self.assertFalse(child.paused)
+
+    async def test_other_worker_refusal_still_pauses(self):
+        child=self.coordinator.session(target('a'))
+        self.coordinator.connect=AsyncMock(side_effect=ValueError('private visual operation failed: invalid("invalid_request")'))
         await self.coordinator.visit(target('a'))
         self.assertTrue(child.paused)
 

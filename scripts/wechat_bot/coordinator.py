@@ -22,6 +22,8 @@ from .service import BotService, load_config, log_event
 BADGE_PIXELS=20
 # Worker refusals raised before any message is read: the WeChat window is unusable right now
 # (light appearance, resized, hidden, desktop busy). These retry each sweep instead of pausing.
+# Consecutive wrong-title switches tolerated before a contact pauses for review.
+TITLE_MISMATCH_LIMIT=3
 WINDOW_UNAVAILABLE=('uncalibrated_theme','unsupported_image_geometry','wechat_not_visible',
                     'window_capture_failed','desktop_busy','vision_timeout')
 
@@ -171,11 +173,20 @@ class BotCoordinator:
             await self.connect(child)
             if self.stop.is_set() or not child.target_allowed(): return
             await child.cycle(self.client,self.capture)
+            child.title_mismatches=0
             if child.cursor is not None and marker.exists(): marker.unlink()
         except ValueError as error:
             if str(error)=='incomplete bottom bubble; no automatic reply' and not child.paused:
                 child.health('waiting_for_stable_frame',reason='bottom bubble is incomplete; retry capture without model/send')
                 return
+            if not child.paused and 'invalid("allowlisted_title_mismatch")' in str(error):
+                # A switch can land on another chat (e.g. after a manual send). Nothing was read or sent,
+                # so retry; a persistent mismatch (renamed contact, wrong config) still pauses.
+                child.title_mismatches=getattr(child,'title_mismatches',0)+1
+                if child.title_mismatches<TITLE_MISMATCH_LIMIT:
+                    child.health('waiting_for_wechat_window',reason=str(error)[:400],attempt=child.title_mismatches)
+                    await self.close_connection()
+                    return
             if not child.paused and any(f'invalid("{code}")' in str(error) for code in WINDOW_UNAVAILABLE):
                 # Nothing was read or sent; the window comes back (e.g. appearance back to dark) without a restart.
                 child.health('waiting_for_wechat_window',reason=str(error)[:400])
