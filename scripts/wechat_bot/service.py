@@ -280,6 +280,12 @@ class BotService:
             self.advance(frame)
             self.health('watching',historical_messages_ignored=True)
             return
+        if not frame['bubbles'] and self.turn is None:
+            # Tall images can leave no complete bubble on screen (acceptance 2026-11-05, group chat).
+            # Such a frame anchors nothing and holds nothing new; replacing the cursor with it made the
+            # next visible messages look like history, so they were never answered. Keep the cursor.
+            self.health('watching',reason='no complete bubble visible')
+            return
         ambiguous = None
         # The same image loads from a blurred preview to full pixels; keep the cursor's identity for it.
         frame['bubbles'] = reconcile(self.cursor['bubbles'],frame['bubbles'])
