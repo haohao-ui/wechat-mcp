@@ -125,6 +125,15 @@ class HttpTests(ServerBase):
         r = self.get('/v1/contacts?name='+urllib.parse.quote('小美'))
         self.assertEqual(json.loads(r.body)['contact_id'], self.c)
 
+    def test_http_unexpected_error_is_json_500(self):
+        from unittest.mock import patch
+        with patch.object(HistoryQuery, 'list_contacts', side_effect=RuntimeError('boom /secret/path')):
+            r = self.get('/v1/contacts')
+        self.assertEqual(r.status, 500)
+        body = json.loads(r.body)
+        self.assertEqual(body['error']['code'], 'internal')
+        self.assertNotIn('secret', r.body.decode())
+
     def test_http_default_bind_is_loopback(self):
         self.assertEqual(load_config(self.path)['history_http']['bind'], '127.0.0.1')
 

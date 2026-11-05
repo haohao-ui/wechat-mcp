@@ -57,6 +57,19 @@ class QueryTests(unittest.TestCase):
             seen += self.texts(page)
         self.assertEqual(seen, self.expected_texts+['新'])
 
+    def test_tail_cursor_follows_new_messages(self):
+        page = self.q.get_history(self.c, limit=500)
+        self.assertIsNone(page['next_cursor'])
+        self.writer.record_frame(self.c, fr(*self.visible, bub('好的，已为您登记', 'outbound_visual'), bub('后来的')))
+        newer = self.q.get_history(self.c, cursor=page['tail_cursor'])
+        self.assertEqual(self.texts(newer), ['后来的'])
+
+    def test_clock_rollback_does_not_skip_messages(self):
+        page = self.q.get_history(self.c, limit=500)
+        self.writer.record_frame(self.c, fr(*self.visible, bub('好的，已为您登记', 'outbound_visual'), bub('回拨后')))
+        self.writer.conn.execute("update messages set observed_at=1 where text='回拨后'")
+        self.assertEqual(self.texts(self.q.get_history(self.c, cursor=page['tail_cursor'])), ['回拨后'])
+
     def test_desc_order_and_time_range(self):
         page = self.q.get_history(self.c, order='desc', limit=2)
         self.assertEqual(self.texts(page), ['好的，已为您登记', '收到'])

@@ -191,6 +191,16 @@ class MessageTests(StoreBase):
         ctx = self.store.recent_context(self.c, 10, exclude_ids=frozenset({rows[-1]['message_id']}))
         self.assertEqual([(x['role'], x['text']) for x in ctx], [('user', '旧问题'), ('user', '问'), ('assistant', '答')])
 
+    def test_recent_context_excludes_never_attempted_reply(self):
+        self.store.record_frame(self.c, fr(bub('问')))
+        self.store.record_bot_reply(self.c, 'g', '未发出', 'generated', {}, [])
+        self.store.record_bot_reply(self.c, 'u', '可能已发出', 'unknown', {}, [])
+        self.assertEqual([x['text'] for x in self.store.recent_context(self.c, 5)], ['问', '可能已发出'])
+
+    def test_contact_time_index_exists(self):
+        names = {r[1] for r in self.store.conn.execute("PRAGMA index_list('messages')")}
+        self.assertIn('messages_contact_time', names)
+
     def test_fts_trigger_indexes_text(self):
         self.store.record_frame(self.c, fr(bub('还是上次那个款')))
         hit = self.store.conn.execute("select count(*) from messages_fts where messages_fts match '上次那'").fetchone()[0]

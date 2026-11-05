@@ -45,6 +45,11 @@ class RoutingTests(unittest.TestCase):
         self.assertIs(match_entry({'allowlist':[entry]},'小美'),entry)
         self.assertIsNone(match_entry({'allowlist':[entry]},'别人'))
 
+    def test_names_longer_than_worker_limit_rejected(self):
+        with self.assertRaises(ValueError): validate_rules({'allowlist':[target('长'*65)]})
+        with self.assertRaises(ValueError): validate_rules({'allowlist':[{'recipient':'a','kind':'private','aliases':['长'*65]}]})
+        validate_rules({'allowlist':[target('长'*64)]})
+
     def test_same_name_exclusion_blocks_ambiguous_kind(self):
         config={'allowlist':[target('same')],'ignorelist':[target('same','group')]}
         self.assertEqual(decision(config,'same','private'),'ignored')
@@ -186,6 +191,28 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(capture.recipient,'b')
         self.assertFalse(capture.last_switch['opened'])
 
+    async def test_fallback_navigation_tries_alias_names(self):
+        from scripts.wechat_bot.native_capture import NativeCapture
+        client=AsyncMock()
+        client.tool=AsyncMock(side_effect=[RuntimeError('title mismatch'),{'ok':True}])
+        capture=NativeCapture('fixture',client,'🍓a',self.root/'a',names=['🍓a','a'])
+        capture.frame=AsyncMock()
+        capture.call=AsyncMock(side_effect=ValueError('private visual operation failed: wechat_row_not_topmost'))
+        await capture.retarget('🍓a',str(self.root/'a'),['🍓a','a'])
+        self.assertEqual([c.kwargs['recipient'] for c in client.tool.await_args_list],['🍓a','a'])
+
+    async def test_reconcile_skips_never_sent_replies_and_keeps_journal_time(self):
+        child=self.coordinator.session(target('a'))
+        from scripts.agent_bridge.codex import write_private
+        write_private(child.root/'send-s1.json',{'idempotency_key':'s1','status':'superseded','reply':'作废','input':[]})
+        write_private(child.root/'send-t1.json',{'idempotency_key':'t1','status':'triggered','reply':'已发','input':[],
+                                                 'created_at':1000.0,'attempted_at':1001.0})
+        self.coordinator.reconcile_journals()
+        h=self.coordinator.history
+        self.assertIsNone(h.send('s1'))
+        at=h.conn.execute("select observed_at from messages where send_key='t1'").fetchone()[0]
+        self.assertEqual(at,1001000)
+
     async def test_worker_refusal_keeps_transport_open(self):
         from scripts.wechat_bot.native_capture import NativeCapture
         capture=NativeCapture('fixture',None,'a',self.root/'a')
@@ -321,6 +348,16 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.probe_capture(lambda:{})
         await restarted.sweep()
         self.assertEqual(self.visited(),['b'])
+
+    async def test_following_alias_suggestion_after_merge_starts(self):
+        self.coordinator.session(target('a'));self.coordinator.session(target('b'))
+        h=self.coordinator.history;a=h.resolve('fixture','a');h.merge(h.resolve('fixture','b'),a)
+        self.config['allowlist']=[{'recipient':'a','kind':'private','aliases':['b']}];self.save()
+        restarted=BotCoordinator(self.path);self.coordinator=restarted
+        self.probe_capture(lambda:{})
+        await restarted.sweep()
+        self.assertEqual(restarted.sessions['a'].contact_id,a)
+        self.assertEqual(self.visited(),['a'])
 
     async def rename_and_sweep(self,restart):
         child=self.coordinator.session(target('a'))

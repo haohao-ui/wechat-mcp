@@ -23,6 +23,8 @@ def validate_rules(config):
             for value in [recipient,*aliases]:
                 if not isinstance(value,str) or not value.strip() or value!=value.strip():
                     raise ValueError('exact conversation name without surrounding whitespace required')
+                if len(value)>64:
+                    raise ValueError('conversation names are limited to 64 characters (native worker limit)')
             if kind not in ('private','group') or (name=='allowlist' and kind!='private'):
                 raise ValueError('only private chats can be allowlisted; exclusions support private/group')
             identity=(recipient,kind)

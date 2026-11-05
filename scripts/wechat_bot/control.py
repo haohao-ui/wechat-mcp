@@ -102,7 +102,14 @@ def history_command(args):
                     "(SELECT 1 FROM contact_names c WHERE c.contact_id=o.contact_id AND c.name_key=o.name_key AND c.source IN ('config','alias'))",(row[0],))]
                 contacts.append({'contact_id':row[0],'display_name':row[1],'merged_into':row[2],'messages':count,
                                  'last_observed_at':last,'unmatched_observed_names':unmatched})
-            print(json.dumps({'database':str(db),'bytes':db.stat().st_size,
+            # Merged contacts: their names should be added to the target's allowlist aliases.
+            suggestions=[]
+            for row in store.conn.execute('SELECT contact_id FROM contacts WHERE merged_into IS NOT NULL ORDER BY rowid').fetchall():
+                into=store.canonical(row[0])
+                names=[r[0] for r in store.conn.execute("SELECT raw_name FROM contact_names WHERE contact_id=? AND source IN ('config','alias') ORDER BY id",(row[0],))]
+                into_name=store.conn.execute('SELECT display_name FROM contacts WHERE contact_id=?',(into,)).fetchone()[0]
+                suggestions.append({'into':into,'into_name':into_name,'add_aliases':names})
+            print(json.dumps({'database':str(db),'bytes':db.stat().st_size,'alias_suggestions':suggestions,
                               'messages':store.conn.execute('SELECT COUNT(*) FROM messages').fetchone()[0],
                               'pending_file_downloads':store.conn.execute("SELECT COUNT(*) FROM media_jobs WHERE status='pending'").fetchone()[0],
                               'contacts':contacts},ensure_ascii=False))

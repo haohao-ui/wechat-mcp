@@ -49,4 +49,7 @@ CREATE TRIGGER messages_fts_update AFTER UPDATE OF text ON messages BEGIN
   INSERT INTO messages_fts(messages_fts, rowid, text) VALUES ('delete', old.rowid, old.text);
   INSERT INTO messages_fts(rowid, text) VALUES (new.rowid, new.text); END;
 """,
+    2: """
+CREATE INDEX messages_contact_time ON messages(contact_id, observed_at);
+""",
 }

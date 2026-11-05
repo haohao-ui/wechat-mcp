@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import sys
 import threading
 import urllib.parse
 
@@ -86,6 +87,10 @@ def make_server(query, token, bind, port):
                 self.reply(status, body, kind)
             except QueryError as error:
                 self.error(404 if error.code == 'not_found' else 400, error.code, error.message)
+            except Exception as error:
+                # No internals (paths, SQL, names) in the response or the log.
+                print(json.dumps({'event': 'history_http_error', 'error_type': type(error).__name__}), file=sys.stderr, flush=True)
+                self.error(500, 'internal', 'internal error')
 
         def dispatch(self, action, match, url):
             pairs = urllib.parse.parse_qs(url.query, keep_blank_values=True, strict_parsing=False)
