@@ -134,7 +134,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         reply=bubble('你好，我是AI客服助手。','outbound_visual')
         capture=type('Capture',(),{})()
         capture.frame=AsyncMock(side_effect=copy.deepcopy([current,current,current,frame(bubble('old'),img,reply)]))
-        capture.attachments=AsyncMock(return_value=(['x.png'],[{'kind':'image','source':'chat_thumbnail','original_bytes':False}]))
+        capture.attachments=AsyncMock(return_value=([{'path':'x.png','label':'第1张图片','source':'chat_thumbnail','bubble':img}],[],[]))
         with patch('scripts.wechat_bot.service.generate',self.model):
             await self.service.cycle(self.client,capture)
         self.model.assert_awaited_once()
@@ -563,6 +563,25 @@ class HistoryServiceTests(ServiceTests):
         self.assertFalse(any(name=='send_message' for name,_ in self.calls))
         record=json.loads(next(self.service.root.glob('send-*.json')).read_text())
         self.assertEqual(record['status'],'already_replied')
+
+    async def test_turn_media_attached_to_history(self):
+        img={'text':'[图片]','digest':'image:50:40','phash':'0'*16,'media_id':'a'*64,
+             'direction':'inbound_visual','kind':'image'}
+        self.service.advance(self.old)
+        current=frame(bubble('old'),img)
+        path=self.root/'x.png';path.write_bytes(b'\x89PNG\r\n\x1a\noriginal')
+        thumb=self.root/'t.png';thumb.write_bytes(b'\x89PNG\r\n\x1a\nthumbnail')
+        capture=type('Capture',(),{})()
+        capture.frame=AsyncMock(side_effect=copy.deepcopy([current,current,current,
+                                frame(bubble('old'),img,bubble('你好，我是AI客服助手。','outbound_visual'))]))
+        capture.download=AsyncMock(return_value=thumb)  # history records the thumbnail on sight
+        capture.attachments=AsyncMock(return_value=([{'path':path,'label':'第1张图片','source':'original','bubble':img}],[],
+                                                    [{'label':'a.zip','kind':'file','reason':'unsupported_type'}]))
+        with patch('scripts.wechat_bot.service.generate',self.model):
+            await self.service.cycle(self.client,capture)
+        sources=[r[0] for r in self.history.conn.execute('SELECT source FROM media')]
+        self.assertIn('original',sources)
+        self.assertEqual(self.model.await_args.kwargs['images'],[path])
 
     async def test_send_uses_observed_title_for_alias(self):
         entry = {'recipient': '🍓示例联系人甲', 'kind': 'private', 'aliases': ['示例联系人甲']}
