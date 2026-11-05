@@ -25,6 +25,8 @@ BOTTOM = [('inbound_visual', 'text', '岗位信息更新2.13.pdf'), ('inbound_vi
 CASES = {
     'r1-dark-top': ('wechat-4-dark', 1, '午夜咖啡', TOP),
     'r1-dark-bottom': ('wechat-4-dark', 1, '午夜咖啡', BOTTOM),
+    'r1-light-top': ('wechat-4-light', 1, '午夜咖啡', TOP),
+    'r1-light-bottom': ('wechat-4-light', 1, '午夜咖啡', BOTTOM),
 }
 
 
@@ -64,6 +66,11 @@ class NativeFrameTests(unittest.TestCase):
                 self.assertEqual([g[:2] for g in got], [b[:2] for b in bubbles])
                 for (_, _, text), (_, _, part) in zip(got, bubbles):
                     self.assertIn(part, text.replace('\n', ''))
+
+    def test_unknown_theme_refused(self):
+        # Neither calibrated background dominates the chat area: never guess bubble directions.
+        frame = self.parse('unknown-gray')
+        self.assertIn('uncalibrated_theme', frame.get('error', ''))
 
 
 if __name__ == '__main__':
