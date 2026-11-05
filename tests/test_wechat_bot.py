@@ -239,3 +239,22 @@ class StitchTests(unittest.TestCase):
         from scripts.wechat_bot.policy import ContinuityGap, stitch
         with self.assertRaises(ContinuityGap):
             stitch([bubble('a')], [[bubble('x')], [bubble('y')]])
+
+
+class ReviewFixTests(unittest.TestCase):
+    def test_similar_new_image_is_not_taken_for_scrolled_away_one(self):
+        # Review C1: cursor ends with screenshot A; B, C, D (same size, B close to A) push A away.
+        from scripts.wechat_bot.policy import ContinuityGap, reconcile
+        a = image('0000000000000000')
+        b, c, d = image('0000000000000fff'), image('ffffffff00000000'), image('00000000ffffffff')
+        prev, cur = [bubble('x'), a], [b, c, d]
+        fixed = reconcile(prev, cur)
+        self.assertEqual(fixed[0]['phash'], b['phash'])
+        with self.assertRaises(ContinuityGap):
+            new_bubbles(prev, fixed)
+
+    def test_loading_image_beside_text_still_reconciles(self):
+        from scripts.wechat_bot.policy import reconcile
+        prev = [bubble('x'), image('0000000000000000')]
+        cur = [bubble('x'), image('0000000000000fff'), bubble('y')]
+        self.assertEqual(new_bubbles(prev, reconcile(prev, cur)), [cur[2]])

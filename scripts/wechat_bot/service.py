@@ -17,7 +17,8 @@ from scripts.agent_bridge.mcp import MCP
 from .capture import RemoteCapture
 from .history.names import candidate_names, clean_title
 from .understanding import understand
-from .policy import reconcile, stitch, AmbiguousAnchor, ContinuityGap, Policy, echo_matches, fingerprint, new_bubbles, validate_reply
+from .history.store import similar
+from .policy import reconcile, relocate, stitch, AmbiguousAnchor, ContinuityGap, Policy, echo_matches, fingerprint, new_bubbles, validate_reply
 from .reply import generate
 from .native_capture import NativeCapture
 
@@ -28,6 +29,10 @@ logger = logging.getLogger('wechat_bot')
 def log_event(event, **fields):
     # Values are metadata only: message bodies, replies and credential config are excluded by callers.
     logger.info(json.dumps({'time':datetime.now(timezone.utc).isoformat(), 'event':event, **fields},ensure_ascii=False))
+
+
+# model_api refuses requests whose images add up to more than this.
+MAX_MODEL_IMAGE_BYTES = 30*1024*1024
 
 
 def ensure_unreadable_named(reply, failed):
@@ -190,7 +195,7 @@ class BotService:
                 # The journal stays authoritative; startup reconciliation repairs the mirror.
                 log_event('history_send_mirror_failed',error_type=type(error).__name__)
 
-    async def recover_gap(self, capture, frame, max_pages=3):
+    async def recover_gap(self, capture, frame, max_pages=6):
         """Changes after the cursor found by scrolling up (tall media pushed every anchor away).
 
         None when no page overlaps or the chat did not return to the same bottom frame; then
@@ -208,22 +213,40 @@ class BotService:
                 log_event('gap_scroll_failed',account_id=self.account,error=str(error)[:200])
                 if attempt==0: return None
                 break
-            pages.insert(0,reconcile(self.cursor['bubbles'],page['bubbles']))
+            pages.insert(0,page['bubbles'])
+            # Each page takes its predecessor's image identities: dHash may jitter between scroll positions.
+            aligned=[reconcile(self.cursor['bubbles'],pages[0])]
+            for newer in pages[1:]:
+                aligned.append(reconcile(aligned[-1],newer))
             try:
-                changes=stitch(self.cursor['bubbles'],pages)
+                changes=stitch(self.cursor['bubbles'],aligned)
                 break
             except (ContinuityGap,AmbiguousAnchor):
                 continue
-        await capture.scroll('down',pages=len(pages)+1)
-        bottom=await capture.frame()
-        self.policy.check_frame(bottom)
+        bottom=await self.scroll_to_bottom(capture,len(pages)+2)
+        if bottom is None or list(map(fingerprint,reconcile(frame['bubbles'],bottom['bubbles']))) != list(map(fingerprint,frame['bubbles'])):
+            # A lost wheel event can leave the chat scrolled up: overshoot once more before deciding.
+            bottom=await self.scroll_to_bottom(capture,5)
+            if changes is not None and list(map(fingerprint,reconcile(frame['bubbles'],bottom['bubbles']))) != list(map(fingerprint,frame['bubbles'])):
+                self.recovery_unconfirmed = True
+                return None
         if changes is None:
             return None
-        if list(map(fingerprint,reconcile(frame['bubbles'],bottom['bubbles']))) != list(map(fingerprint,frame['bubbles'])):
-            self.recovery_unconfirmed = True
-            return None
+        for page in aligned:
+            # The history store gets the same pages, so recovered messages are recorded too (spec G4).
+            if not await self.record({**frame,'bubbles':page},capture):
+                self.recovery_unconfirmed = True
+                return None
         log_event('continuity_gap_recovered',account_id=self.account,pages=len(pages)-1,recovered=len(changes))
         return changes
+
+    async def scroll_to_bottom(self, capture, pages):
+        while pages>0:
+            await capture.scroll('down',pages=min(5,pages))
+            pages-=5
+        bottom=await capture.frame()
+        self.policy.check_frame(bottom)
+        return bottom
 
     async def cycle(self, client, capture):
         self.had_incoming = False
@@ -321,6 +344,11 @@ class BotService:
         return (now-self.turn['last_inbound_at'] >= self.config.get('turn_quiet_seconds',10) or
                 now-self.turn['opened_at'] >= self.config.get('turn_max_seconds',60))
 
+    def keep_turn(self, turn):
+        """Put a closed turn back (stopped before sending) so the next start answers it."""
+        self.turn = turn
+        write_private(self.turn_path,turn)
+
     def drop_turn(self, source):
         self.turn = None
         self.turn_path.unlink(missing_ok=True)
@@ -380,12 +408,25 @@ class BotService:
                     try: self.history.set_understanding(item['media_id'],note)
                     except Exception as error: log_event('history_understanding_failed',error_type=type(error).__name__)
             model_images=[]
+        else:
+            # The API refuses a request over MAX_MODEL_IMAGE_BYTES: later images become unreadable instead.
+            model_images,total=[],0
+            for item in images:
+                size=Path(item['path']).stat().st_size
+                if total+size>MAX_MODEL_IMAGE_BYTES:
+                    failed.append({'label':item['label'],'kind':'image','reason':'too_large'})
+                    continue
+                total+=size
+                model_images.append(item['path'])
+        total=sum(Path(p).stat().st_size for p in model_images)
         # Earlier images without a stored understanding are shown again while the batch has room.
         for item in context:
             media=item.get('media') or {}
             if (media.get('kind')=='image' and not media.get('understanding') and media.get('path')
-                    and len(model_images)<batch and Path(media['path']).is_file()):
+                    and len(model_images)<batch and Path(media['path']).is_file()
+                    and total+Path(media['path']).stat().st_size<=MAX_MODEL_IMAGE_BYTES):
                 model_images.append(media['path'])
+                total+=Path(media['path']).stat().st_size
         return notes,model_images
 
     def own_echo(self, bubble):
@@ -393,7 +434,7 @@ class BotService:
         for path in self.root.glob('send-*.json'):
             record = json.loads(path.read_text())
             if (record.get('reply') and time.time()-record.get('attempted_at',0) < 600
-                    and echo_matches(bubble.get('text',''),record['reply'])):
+                    and (echo_matches(bubble.get('text',''),record['reply']) or similar(bubble.get('text',''),record['reply']))):
                 return True
         return False
 
@@ -425,14 +466,18 @@ class BotService:
             if json.loads(journal.read_text()).get('status')=='triggered':
                 self.drop_turn('journal')  # sent before a restart; never send it twice
                 return
-            self.paused = True
-            self.health('paused',reason='existing batch requires review',idempotency_key=key)
-            return
+            if json.loads(journal.read_text()).get('status')=='stopped_before_send':
+                journal.unlink()  # stopped before any send attempt: answer the restored turn now
+            else:
+                self.paused = True
+                self.health('paused',reason='existing batch requires review',idempotency_key=key)
+                return
         record = {'status':'preparing_media','account_id':self.account,'recipient':self.recipient,
                   'idempotency_key':key,'input':incoming,'direction_evidence':'visual_candidate',
                   'created_at':time.time(),'platform_message_verified':False,'timings':timings}
         self.write_journal(journal,record)
         # The journal now owns this turn; a restart never blindly repeats an uncertain attempt.
+        pending = self.turn
         self.turn = None
         self.turn_path.unlink(missing_ok=True)
         self.health('preparing_media',idempotency_key=key)
@@ -442,10 +487,16 @@ class BotService:
             if any(b.get('kind','text')!='text' for b in incoming):
                 if not hasattr(capture,'attachments'):
                     raise ValueError('media-capable capture backend required')
-                images,files,failed=await capture.attachments(incoming,confirmed)
+                # Media IDs are bound to the frame they were seen in: fetch from what is on screen now.
+                snapshot=await capture.frame()
+                self.policy.check_frame(snapshot)
+                fetch=relocate(incoming,snapshot['bubbles'])
+                images,files,failed=await capture.attachments(fetch,snapshot)
+            else:
+                fetch=incoming
             for item in failed:
                 log_event('media_failed',account_id=self.account,kind=item['kind'],reason=item['reason'])
-            self.archive_media(incoming,input_ids,images,files)
+            self.archive_media(fetch,input_ids,images,files)
             timings['media_seconds']=time.perf_counter()-began
             record.update(status='generating',media=[{'kind':f.get('kind','document'),'filename':f.get('filename'),
                 'original_bytes':f.get('original_bytes'),'truncated':f.get('truncated',False)} for f in files],
@@ -467,7 +518,7 @@ class BotService:
             record.update(status='generated',reply=reply)
             self.write_journal(journal,record)
             if self.stop.is_set():
-                record['status']='stopped_before_send'; self.write_journal(journal,record); return
+                record['status']='stopped_before_send'; self.write_journal(journal,record); self.keep_turn(pending); return
             began=time.perf_counter()
             latest = await capture.frame()
             timings['pre_send_seconds']=time.perf_counter()-began
@@ -477,7 +528,7 @@ class BotService:
                 record['status']='already_replied'; self.write_journal(journal,record)
                 return
             if self.stop.is_set():
-                record['status']='stopped_before_send'; self.write_journal(journal,record); return
+                record['status']='stopped_before_send'; self.write_journal(journal,record); self.keep_turn(pending); return
             if not self.target_allowed():
                 record['status']='skipped_by_rule'; self.write_journal(journal,record); return
             if self.history is not None:
