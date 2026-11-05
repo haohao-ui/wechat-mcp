@@ -1,0 +1,991 @@
+{
+  "schema": 1,
+  "wechat_version": "4.1.15",
+  "status": "draft-2026-11-06",
+  "notes": "释义初稿：meaning 为字面意思，chat_uses 为微信语境常见用法，service_hint 为客服处理建议；由模型结合上下文判断本次含义。templates 待在文件传输助手采集（1x/2x）。用户可随时审改、补充。",
+  "entries": {
+    "[OK]": {
+      "templates": {},
+      "meaning": "好的、没问题",
+      "chat_uses": [
+        "确认收到",
+        "同意",
+        "结束对话"
+      ],
+      "service_hint": "多为确认；若前面是我方提问，视为同意；对话可能已结束，简短回应即可"
+    },
+    "[强]": {
+      "templates": {},
+      "meaning": "点赞、厉害、好",
+      "chat_uses": [
+        "认可",
+        "确认",
+        "夸奖"
+      ],
+      "service_hint": "视为认可或确认，简短致谢"
+    },
+    "[好的]": {
+      "templates": {},
+      "meaning": "好的（文字表情）",
+      "chat_uses": [
+        "确认",
+        "同意"
+      ],
+      "service_hint": "同 [OK]"
+    },
+    "[握手]": {
+      "templates": {},
+      "meaning": "握手、成交、合作愉快",
+      "chat_uses": [
+        "达成一致",
+        "客气"
+      ],
+      "service_hint": "视为达成一致，可确认后续安排"
+    },
+    "[抱拳]": {
+      "templates": {},
+      "meaning": "抱拳、拜托、多谢",
+      "chat_uses": [
+        "感谢",
+        "拜托",
+        "客气"
+      ],
+      "service_hint": "前面是请求时表示'拜托了'，否则表示感谢；礼貌回应"
+    },
+    "[合十]": {
+      "templates": {},
+      "meaning": "双手合十、拜托、感谢",
+      "chat_uses": [
+        "感谢",
+        "请求",
+        "祈愿"
+      ],
+      "service_hint": "多为感谢或恳请，礼貌回应；若在请求后出现，按'拜托'理解并给出进展"
+    },
+    "[胜利]": {
+      "templates": {},
+      "meaning": "比耶、搞定",
+      "chat_uses": [
+        "开心",
+        "完成"
+      ],
+      "service_hint": "表示事情办成或心情好，轻松回应"
+    },
+    "[耶]": {
+      "templates": {},
+      "meaning": "耶、开心",
+      "chat_uses": [
+        "开心",
+        "庆祝"
+      ],
+      "service_hint": "轻松回应"
+    },
+    "[鼓掌]": {
+      "templates": {},
+      "meaning": "鼓掌、赞同",
+      "chat_uses": [
+        "夸奖",
+        "认可",
+        "起哄"
+      ],
+      "service_hint": "视为认可；也可能是调侃，结合上文"
+    },
+    "[666]": {
+      "templates": {},
+      "meaning": "厉害、玩得溜",
+      "chat_uses": [
+        "夸奖",
+        "调侃"
+      ],
+      "service_hint": "多为夸奖，偶有反讽，结合上文"
+    },
+    "[拳头]": {
+      "templates": {},
+      "meaning": "加油、给力",
+      "chat_uses": [
+        "鼓励",
+        "决心"
+      ],
+      "service_hint": "视为鼓励"
+    },
+    "[加油]": {
+      "templates": {},
+      "meaning": "加油",
+      "chat_uses": [
+        "鼓励",
+        "打气"
+      ],
+      "service_hint": "视为鼓励，礼貌回应"
+    },
+    "[弱]": {
+      "templates": {},
+      "meaning": "差、不行、踩",
+      "chat_uses": [
+        "否定",
+        "不满",
+        "差评"
+      ],
+      "service_hint": "表示不满意或否定，主动询问原因并致歉"
+    },
+    "[微笑]": {
+      "templates": {},
+      "meaning": "字面是微笑",
+      "chat_uses": [
+        "客气",
+        "无语",
+        "敷衍",
+        "不满（常用作阴阳怪气）"
+      ],
+      "service_hint": "不要当作满意；前面是投诉、等待或催促时按不满处理并致歉；单独出现时语气保持礼貌谨慎"
+    },
+    "[笑脸]": {
+      "templates": {},
+      "meaning": "开心的笑",
+      "chat_uses": [
+        "友好",
+        "客气"
+      ],
+      "service_hint": "一般表示友好，正常回应"
+    },
+    "[呲牙]": {
+      "templates": {},
+      "meaning": "咧嘴笑",
+      "chat_uses": [
+        "开心",
+        "友好",
+        "尴尬地笑"
+      ],
+      "service_hint": "多为友好开心"
+    },
+    "[憨笑]": {
+      "templates": {},
+      "meaning": "傻笑、憨厚地笑",
+      "chat_uses": [
+        "友好",
+        "不好意思"
+      ],
+      "service_hint": "友好，轻松回应"
+    },
+    "[偷笑]": {
+      "templates": {},
+      "meaning": "偷着乐",
+      "chat_uses": [
+        "暗自开心",
+        "调侃"
+      ],
+      "service_hint": "轻松回应，可能在开玩笑"
+    },
+    "[坏笑]": {
+      "templates": {},
+      "meaning": "不怀好意地笑",
+      "chat_uses": [
+        "开玩笑",
+        "调侃"
+      ],
+      "service_hint": "多为玩笑，不要当真"
+    },
+    "[奸笑]": {
+      "templates": {},
+      "meaning": "奸诈地笑",
+      "chat_uses": [
+        "开玩笑",
+        "得意"
+      ],
+      "service_hint": "多为玩笑"
+    },
+    "[愉快]": {
+      "templates": {},
+      "meaning": "心情愉快",
+      "chat_uses": [
+        "开心"
+      ],
+      "service_hint": "正常友好回应"
+    },
+    "[破涕为笑]": {
+      "templates": {},
+      "meaning": "哭着笑、笑出眼泪",
+      "chat_uses": [
+        "很好笑",
+        "哭笑不得"
+      ],
+      "service_hint": "轻松回应"
+    },
+    "[捂脸]": {
+      "templates": {},
+      "meaning": "捂脸、尴尬又好笑",
+      "chat_uses": [
+        "自嘲",
+        "哭笑不得",
+        "不好意思"
+      ],
+      "service_hint": "语气轻松回应；可能对自己的错误感到不好意思，安抚即可"
+    },
+    "[嘿哈]": {
+      "templates": {},
+      "meaning": "嘿哈、来劲",
+      "chat_uses": [
+        "兴奋",
+        "起哄"
+      ],
+      "service_hint": "轻松回应"
+    },
+    "[机智]": {
+      "templates": {},
+      "meaning": "机智、聪明",
+      "chat_uses": [
+        "得意",
+        "自夸"
+      ],
+      "service_hint": "轻松回应"
+    },
+    "[旺柴]": {
+      "templates": {},
+      "meaning": "调侃、俏皮（狗头）",
+      "chat_uses": [
+        "开玩笑",
+        "反话",
+        "缓和语气"
+      ],
+      "service_hint": "前面的话可能是玩笑或反话，不要当真；不要据此承诺或执行"
+    },
+    "[得意]": {
+      "templates": {},
+      "meaning": "得意、骄傲",
+      "chat_uses": [
+        "炫耀",
+        "开心"
+      ],
+      "service_hint": "轻松回应"
+    },
+    "[调皮]": {
+      "templates": {},
+      "meaning": "吐舌头、调皮",
+      "chat_uses": [
+        "开玩笑",
+        "撒娇"
+      ],
+      "service_hint": "多为玩笑"
+    },
+    "[害羞]": {
+      "templates": {},
+      "meaning": "害羞",
+      "chat_uses": [
+        "不好意思",
+        "客气"
+      ],
+      "service_hint": "友好回应"
+    },
+    "[脸红]": {
+      "templates": {},
+      "meaning": "脸红、不好意思",
+      "chat_uses": [
+        "害羞",
+        "尴尬"
+      ],
+      "service_hint": "友好回应"
+    },
+    "[色]": {
+      "templates": {},
+      "meaning": "花痴、喜欢",
+      "chat_uses": [
+        "很喜欢某物",
+        "夸好看"
+      ],
+      "service_hint": "表示很喜欢（如商品图），可顺势介绍"
+    },
+    "[亲亲]": {
+      "templates": {},
+      "meaning": "亲一下",
+      "chat_uses": [
+        "表达亲近",
+        "感谢（亲昵）"
+      ],
+      "service_hint": "保持礼貌、不要回应亲昵，按感谢理解"
+    },
+    "[嘴唇]": {
+      "templates": {},
+      "meaning": "亲吻",
+      "chat_uses": [
+        "亲昵"
+      ],
+      "service_hint": "保持礼貌、按友好理解"
+    },
+    "[爱心]": {
+      "templates": {},
+      "meaning": "爱心、喜欢",
+      "chat_uses": [
+        "喜欢",
+        "感谢"
+      ],
+      "service_hint": "按喜欢或感谢理解，礼貌回应"
+    },
+    "[拥抱]": {
+      "templates": {},
+      "meaning": "抱抱",
+      "chat_uses": [
+        "安慰",
+        "亲近",
+        "感谢"
+      ],
+      "service_hint": "按友好或感谢理解"
+    },
+    "[玫瑰]": {
+      "templates": {},
+      "meaning": "送花、感谢",
+      "chat_uses": [
+        "感谢",
+        "祝贺",
+        "示好"
+      ],
+      "service_hint": "按感谢理解"
+    },
+    "[庆祝]": {
+      "templates": {},
+      "meaning": "庆祝",
+      "chat_uses": [
+        "祝贺",
+        "开心"
+      ],
+      "service_hint": "顺势祝贺"
+    },
+    "[烟花]": {
+      "templates": {},
+      "meaning": "放烟花、庆祝",
+      "chat_uses": [
+        "节日祝福",
+        "庆祝"
+      ],
+      "service_hint": "可回节日或庆祝祝福"
+    },
+    "[爆竹]": {
+      "templates": {},
+      "meaning": "放鞭炮、过年",
+      "chat_uses": [
+        "新年祝福"
+      ],
+      "service_hint": "可回新年祝福"
+    },
+    "[福]": {
+      "templates": {},
+      "meaning": "福",
+      "chat_uses": [
+        "新年祝福"
+      ],
+      "service_hint": "回新年祝福"
+    },
+    "[發]": {
+      "templates": {},
+      "meaning": "发财",
+      "chat_uses": [
+        "恭喜发财",
+        "祝福"
+      ],
+      "service_hint": "回祝福"
+    },
+    "[礼物]": {
+      "templates": {},
+      "meaning": "礼物",
+      "chat_uses": [
+        "祝福",
+        "赠送"
+      ],
+      "service_hint": "按祝福理解；不要承诺赠品"
+    },
+    "[蛋糕]": {
+      "templates": {},
+      "meaning": "蛋糕、生日",
+      "chat_uses": [
+        "生日祝福"
+      ],
+      "service_hint": "可回生日祝福"
+    },
+    "[红包]": {
+      "templates": {},
+      "meaning": "红包表情（不是真红包）",
+      "chat_uses": [
+        "讨红包（玩笑）",
+        "祝福"
+      ],
+      "service_hint": "这是表情不是红包消息；不要承诺发红包或优惠，礼貌回应"
+    },
+    "[啤酒]": {
+      "templates": {},
+      "meaning": "干杯",
+      "chat_uses": [
+        "庆祝",
+        "社交"
+      ],
+      "service_hint": "轻松回应"
+    },
+    "[咖啡]": {
+      "templates": {},
+      "meaning": "喝咖啡",
+      "chat_uses": [
+        "休息",
+        "邀约（客气）"
+      ],
+      "service_hint": "轻松回应"
+    },
+    "[太阳]": {
+      "templates": {},
+      "meaning": "太阳、早上好",
+      "chat_uses": [
+        "问早",
+        "好天气"
+      ],
+      "service_hint": "可回早安问候"
+    },
+    "[月亮]": {
+      "templates": {},
+      "meaning": "月亮、晚安",
+      "chat_uses": [
+        "道晚安"
+      ],
+      "service_hint": "可回晚安；对话可能结束"
+    },
+    "[睡]": {
+      "templates": {},
+      "meaning": "睡觉、困",
+      "chat_uses": [
+        "晚安",
+        "无聊"
+      ],
+      "service_hint": "可能要结束对话，简短回应"
+    },
+    "[困]": {
+      "templates": {},
+      "meaning": "困了",
+      "chat_uses": [
+        "疲惫",
+        "无聊"
+      ],
+      "service_hint": "简短回应"
+    },
+    "[再见]": {
+      "templates": {},
+      "meaning": "再见、挥手",
+      "chat_uses": [
+        "结束对话",
+        "告别",
+        "也可表示'不想聊了'"
+      ],
+      "service_hint": "按结束对话处理，礼貌告别；若前面有争执，按不满处理"
+    },
+    "[疑问]": {
+      "templates": {},
+      "meaning": "问号、不明白",
+      "chat_uses": [
+        "没看懂",
+        "质疑",
+        "催问"
+      ],
+      "service_hint": "对方没看懂或不认同，换种说法重新解释，必须回复"
+    },
+    "[Emm]": {
+      "templates": {},
+      "meaning": "嗯……、迟疑",
+      "chat_uses": [
+        "犹豫",
+        "无语",
+        "不太认同"
+      ],
+      "service_hint": "对方在犹豫或不太满意，补充说明或询问顾虑"
+    },
+    "[发呆]": {
+      "templates": {},
+      "meaning": "发呆、愣住",
+      "chat_uses": [
+        "没反应过来",
+        "无语"
+      ],
+      "service_hint": "可能没看懂，简要再解释"
+    },
+    "[惊讶]": {
+      "templates": {},
+      "meaning": "吃惊",
+      "chat_uses": [
+        "意外",
+        "不敢相信"
+      ],
+      "service_hint": "结合上文：对价格或结果意外时补充说明"
+    },
+    "[哇]": {
+      "templates": {},
+      "meaning": "哇、惊叹",
+      "chat_uses": [
+        "惊喜",
+        "惊讶"
+      ],
+      "service_hint": "多为惊喜，顺势回应"
+    },
+    "[天啊]": {
+      "templates": {},
+      "meaning": "天哪",
+      "chat_uses": [
+        "震惊",
+        "难以置信"
+      ],
+      "service_hint": "结合上文，必要时安抚或解释"
+    },
+    "[晕]": {
+      "templates": {},
+      "meaning": "晕、头大",
+      "chat_uses": [
+        "被绕晕",
+        "无奈"
+      ],
+      "service_hint": "对方被说晕了，用更简单的话重新说明"
+    },
+    "[让我看看]": {
+      "templates": {},
+      "meaning": "让我看看",
+      "chat_uses": [
+        "好奇",
+        "想看详情"
+      ],
+      "service_hint": "对方想看具体内容，提供可用的信息或说明需人工提供"
+    },
+    "[吃瓜]": {
+      "templates": {},
+      "meaning": "吃瓜、围观",
+      "chat_uses": [
+        "看热闹",
+        "旁观"
+      ],
+      "service_hint": "群聊中常见，一般无需针对回复"
+    },
+    "[社会社会]": {
+      "templates": {},
+      "meaning": "社会、厉害（调侃）",
+      "chat_uses": [
+        "调侃",
+        "夸张"
+      ],
+      "service_hint": "多为玩笑"
+    },
+    "[撇嘴]": {
+      "templates": {},
+      "meaning": "撇嘴、不屑",
+      "chat_uses": [
+        "不满",
+        "委屈",
+        "不以为然"
+      ],
+      "service_hint": "按不满处理，询问原因并安抚"
+    },
+    "[白眼]": {
+      "templates": {},
+      "meaning": "翻白眼",
+      "chat_uses": [
+        "无语",
+        "不满",
+        "嫌弃"
+      ],
+      "service_hint": "按不满处理，致歉并给出解决办法"
+    },
+    "[翻白眼]": {
+      "templates": {},
+      "meaning": "翻白眼",
+      "chat_uses": [
+        "无语",
+        "不满"
+      ],
+      "service_hint": "同 [白眼]"
+    },
+    "[傲慢]": {
+      "templates": {},
+      "meaning": "傲慢、不理",
+      "chat_uses": [
+        "不屑",
+        "生气"
+      ],
+      "service_hint": "按不满处理"
+    },
+    "[鄙视]": {
+      "templates": {},
+      "meaning": "鄙视",
+      "chat_uses": [
+        "看不起",
+        "不满"
+      ],
+      "service_hint": "按不满处理，避免争辩"
+    },
+    "[右哼哼]": {
+      "templates": {},
+      "meaning": "哼、不服",
+      "chat_uses": [
+        "生气",
+        "不满"
+      ],
+      "service_hint": "按不满处理"
+    },
+    "[发怒]": {
+      "templates": {},
+      "meaning": "生气",
+      "chat_uses": [
+        "愤怒",
+        "投诉"
+      ],
+      "service_hint": "按投诉处理：道歉、问清问题、给出处理方式或转人工"
+    },
+    "[咒骂]": {
+      "templates": {},
+      "meaning": "骂人",
+      "chat_uses": [
+        "非常生气"
+      ],
+      "service_hint": "保持礼貌、不对骂；致歉并建议转人工处理"
+    },
+    "[抓狂]": {
+      "templates": {},
+      "meaning": "抓狂",
+      "chat_uses": [
+        "很着急",
+        "崩溃"
+      ],
+      "service_hint": "对方很着急或很烦，优先安抚并给出明确下一步"
+    },
+    "[裂开]": {
+      "templates": {},
+      "meaning": "崩溃、心态炸了（多为夸张玩笑）",
+      "chat_uses": [
+        "失望",
+        "无奈",
+        "玩笑式崩溃"
+      ],
+      "service_hint": "可能对结果失望，适当安抚；若语气轻松则轻松回应"
+    },
+    "[苦涩]": {
+      "templates": {},
+      "meaning": "苦笑",
+      "chat_uses": [
+        "无奈",
+        "失望",
+        "勉强接受"
+      ],
+      "service_hint": "对方有点失望，表示理解并尽量补救"
+    },
+    "[叹气]": {
+      "templates": {},
+      "meaning": "叹气",
+      "chat_uses": [
+        "无奈",
+        "失望"
+      ],
+      "service_hint": "表示理解，询问还有什么能帮忙"
+    },
+    "[汗]": {
+      "templates": {},
+      "meaning": "流汗、无语",
+      "chat_uses": [
+        "尴尬",
+        "无语"
+      ],
+      "service_hint": "可能对回复不满意或觉得尴尬，补充说明"
+    },
+    "[擦汗]": {
+      "templates": {},
+      "meaning": "擦汗",
+      "chat_uses": [
+        "尴尬",
+        "紧张",
+        "松口气"
+      ],
+      "service_hint": "结合上文"
+    },
+    "[尴尬]": {
+      "templates": {},
+      "meaning": "尴尬",
+      "chat_uses": [
+        "不好意思",
+        "冷场"
+      ],
+      "service_hint": "缓和气氛，简短回应"
+    },
+    "[囧]": {
+      "templates": {},
+      "meaning": "窘迫",
+      "chat_uses": [
+        "尴尬",
+        "无奈"
+      ],
+      "service_hint": "缓和气氛"
+    },
+    "[无语]": {
+      "templates": {},
+      "meaning": "无话可说",
+      "chat_uses": [
+        "不满",
+        "无奈"
+      ],
+      "service_hint": "按不满处理，致歉并补充"
+    },
+    "[难过]": {
+      "templates": {},
+      "meaning": "难过",
+      "chat_uses": [
+        "失落",
+        "伤心"
+      ],
+      "service_hint": "表示理解与安抚"
+    },
+    "[流泪]": {
+      "templates": {},
+      "meaning": "流泪",
+      "chat_uses": [
+        "伤心",
+        "感动"
+      ],
+      "service_hint": "结合上文：抱怨后为伤心，感谢后为感动"
+    },
+    "[大哭]": {
+      "templates": {},
+      "meaning": "大哭",
+      "chat_uses": [
+        "很伤心",
+        "夸张地委屈"
+      ],
+      "service_hint": "安抚；可能是夸张表达"
+    },
+    "[快哭了]": {
+      "templates": {},
+      "meaning": "快哭了",
+      "chat_uses": [
+        "委屈",
+        "着急"
+      ],
+      "service_hint": "安抚并尽快给出办法"
+    },
+    "[委屈]": {
+      "templates": {},
+      "meaning": "委屈",
+      "chat_uses": [
+        "觉得被冤枉",
+        "不满"
+      ],
+      "service_hint": "致歉，说明会核实处理"
+    },
+    "[可怜]": {
+      "templates": {},
+      "meaning": "可怜巴巴",
+      "chat_uses": [
+        "求帮忙",
+        "求优惠"
+      ],
+      "service_hint": "对方在恳求，礼貌说明能做什么；不要擅自承诺优惠"
+    },
+    "[失望]": {
+      "templates": {},
+      "meaning": "失望",
+      "chat_uses": [
+        "不满意"
+      ],
+      "service_hint": "致歉并补救或转人工"
+    },
+    "[心碎]": {
+      "templates": {},
+      "meaning": "心碎",
+      "chat_uses": [
+        "失望",
+        "伤心"
+      ],
+      "service_hint": "安抚"
+    },
+    "[凋谢]": {
+      "templates": {},
+      "meaning": "花谢了",
+      "chat_uses": [
+        "失望",
+        "不开心"
+      ],
+      "service_hint": "安抚"
+    },
+    "[恐惧]": {
+      "templates": {},
+      "meaning": "害怕",
+      "chat_uses": [
+        "担心",
+        "紧张"
+      ],
+      "service_hint": "说明情况、打消顾虑"
+    },
+    "[惊恐]": {
+      "templates": {},
+      "meaning": "惊恐",
+      "chat_uses": [
+        "害怕",
+        "担心"
+      ],
+      "service_hint": "说明情况、打消顾虑"
+    },
+    "[发抖]": {
+      "templates": {},
+      "meaning": "发抖",
+      "chat_uses": [
+        "害怕",
+        "冷"
+      ],
+      "service_hint": "结合上文"
+    },
+    "[皱眉]": {
+      "templates": {},
+      "meaning": "皱眉",
+      "chat_uses": [
+        "不满",
+        "疑惑"
+      ],
+      "service_hint": "询问哪里不满意或没明白"
+    },
+    "[衰]": {
+      "templates": {},
+      "meaning": "倒霉",
+      "chat_uses": [
+        "自嘲",
+        "沮丧"
+      ],
+      "service_hint": "安抚"
+    },
+    "[生病]": {
+      "templates": {},
+      "meaning": "生病",
+      "chat_uses": [
+        "身体不适",
+        "不舒服"
+      ],
+      "service_hint": "表示关心"
+    },
+    "[吐]": {
+      "templates": {},
+      "meaning": "呕吐、恶心",
+      "chat_uses": [
+        "嫌弃",
+        "反感"
+      ],
+      "service_hint": "按不满处理"
+    },
+    "[闭嘴]": {
+      "templates": {},
+      "meaning": "闭嘴",
+      "chat_uses": [
+        "不想说",
+        "让对方别说"
+      ],
+      "service_hint": "可能不满或想结束，简短礼貌回应"
+    },
+    "[嘘]": {
+      "templates": {},
+      "meaning": "嘘、保密",
+      "chat_uses": [
+        "别声张",
+        "保密"
+      ],
+      "service_hint": "轻松回应"
+    },
+    "[打脸]": {
+      "templates": {},
+      "meaning": "打脸",
+      "chat_uses": [
+        "自嘲说错",
+        "被打脸"
+      ],
+      "service_hint": "轻松回应"
+    },
+    "[敲打]": {
+      "templates": {},
+      "meaning": "敲打",
+      "chat_uses": [
+        "开玩笑地责备"
+      ],
+      "service_hint": "多为玩笑"
+    },
+    "[菜刀]": {
+      "templates": {},
+      "meaning": "菜刀",
+      "chat_uses": [
+        "生气（多为玩笑）",
+        "威胁（玩笑）"
+      ],
+      "service_hint": "多为玩笑式生气，按不满轻度处理"
+    },
+    "[炸弹]": {
+      "templates": {},
+      "meaning": "炸弹",
+      "chat_uses": [
+        "生气",
+        "刷屏玩笑"
+      ],
+      "service_hint": "结合上文"
+    },
+    "[骷髅]": {
+      "templates": {},
+      "meaning": "骷髅",
+      "chat_uses": [
+        "吓死了",
+        "笑死了（夸张）"
+      ],
+      "service_hint": "多为夸张表达"
+    },
+    "[便便]": {
+      "templates": {},
+      "meaning": "便便",
+      "chat_uses": [
+        "嫌弃",
+        "搞怪"
+      ],
+      "service_hint": "多为搞怪或嫌弃"
+    },
+    "[猪头]": {
+      "templates": {},
+      "meaning": "猪头",
+      "chat_uses": [
+        "骂人笨（玩笑）",
+        "自嘲"
+      ],
+      "service_hint": "多为玩笑"
+    },
+    "[悠闲]": {
+      "templates": {},
+      "meaning": "悠闲",
+      "chat_uses": [
+        "无聊",
+        "没事做"
+      ],
+      "service_hint": "轻松回应"
+    },
+    "[抠鼻]": {
+      "templates": {},
+      "meaning": "抠鼻、不在乎",
+      "chat_uses": [
+        "无所谓",
+        "不屑"
+      ],
+      "service_hint": "轻度不满或敷衍"
+    },
+    "[跳跳]": {
+      "templates": {},
+      "meaning": "蹦跳",
+      "chat_uses": [
+        "开心"
+      ],
+      "service_hint": "轻松回应"
+    },
+    "[转圈]": {
+      "templates": {},
+      "meaning": "转圈",
+      "chat_uses": [
+        "开心",
+        "兴奋"
+      ],
+      "service_hint": "轻松回应"
+    },
+    "[勾引]": {
+      "templates": {},
+      "meaning": "勾手指、过来",
+      "chat_uses": [
+        "招呼",
+        "调侃"
+      ],
+      "service_hint": "按招呼理解，保持礼貌"
+    }
+  }
+}
