@@ -157,6 +157,39 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.cycle([later,later,later,after])
         self.assertEqual(sum(name=='send_message' for name,_ in self.calls),1)
 
+    async def scroll_cycle(self,frames,pages):
+        capture=type('Capture',(),{})()
+        capture.frame=AsyncMock(side_effect=copy.deepcopy(frames))
+        capture.scroll=AsyncMock(side_effect=copy.deepcopy(pages))
+        with patch('scripts.wechat_bot.service.generate',self.model), \
+             patch('scripts.wechat_bot.service.log_event') as log:
+            await self.service.cycle(self.client,capture)
+        return capture,[call.args[0] for call in log.call_args_list]
+
+    async def test_tall_image_gap_recovered_by_scrolling(self):
+        # A tall bubble pushed every remembered bubble off screen: scroll up to find the anchor.
+        a,b,c,tall=bubble('a'),bubble('b'),bubble('c'),bubble('TALL')
+        self.service.advance(frame(a,b))
+        bottom=frame(tall)
+        reply=bubble('你好，我是AI客服助手。','outbound_visual')
+        capture,events=await self.scroll_cycle([bottom,bottom,bottom,bottom,frame(tall,reply)],
+                                               [frame(b,c,tall),bottom])
+        self.assertNotIn('continuity_gap_rebaseline',events)
+        self.assertEqual(capture.scroll.await_args_list[0].args,('up',))
+        self.assertEqual(capture.scroll.await_args_list[1].args[0],'down')
+        text=self.model.await_args.args[0]
+        self.assertIn('c',text.split('\n'))
+        self.assertIn('TALL',text.split('\n'))
+
+    async def test_scroll_recovery_requires_return_to_bottom(self):
+        a,b,c,tall=bubble('a'),bubble('b'),bubble('c'),bubble('TALL')
+        old=frame(a,b)
+        self.service.advance(old)
+        capture,events=await self.scroll_cycle([frame(tall),frame(tall,bubble('X'))],[frame(b,c,tall),frame(tall)])
+        self.model.assert_not_awaited()
+        self.assertEqual(self.service.cursor,old)
+        self.assertEqual(json.loads((self.service.root/'health.json').read_text())['state'],'waiting_for_stable_frame')
+
     async def test_unstable_gap_frame_keeps_old_cursor(self):
         self.service.advance(self.old)
         await self.cycle([frame(bubble('完全不同')),frame(bubble('完全不同'),bubble('又变了'))])

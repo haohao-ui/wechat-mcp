@@ -227,3 +227,15 @@ class ImageIdentityTests(unittest.TestCase):
         prev = [image('0000000000000000')]
         cur = [image('00000000000fffff')]  # 20 bits
         self.assertEqual(reconcile(prev, cur)[0]['phash'], '00000000000fffff')
+
+
+class StitchTests(unittest.TestCase):
+    def test_stitch_joins_pages_after_cursor(self):
+        from scripts.wechat_bot.policy import stitch
+        a, b, c, d = bubble('a'), bubble('b'), bubble('c'), bubble('D')
+        self.assertEqual(stitch([a, b], [[a, b, c], [c, d]]), [c, d])
+
+    def test_stitch_without_overlap_raises(self):
+        from scripts.wechat_bot.policy import ContinuityGap, stitch
+        with self.assertRaises(ContinuityGap):
+            stitch([bubble('a')], [[bubble('x')], [bubble('y')]])

@@ -276,6 +276,25 @@ final class CaptureWorker {
         let accepted=Set(names.map(cleanTitle))
         let manage=params["manage_window"] as? Bool ?? false  // Absent (older client): check only.
         if operation == "capture" { return try capture(recipient,accepted:accepted,manage:manage) }
+        if operation == "scroll_chat" {
+            guard let direction=params["direction"] as? String, direction=="up" || direction=="down",
+                  let pages=params["pages"] as? Int, (1...5).contains(pages) else { throw Failure.invalid("invalid_scroll_request") }
+            let window=try readyWindow(manage:manage).window
+            guard titleAccepted(accepted) else { throw Failure.invalid("allowlisted_title_mismatch") }
+            guard let wx=window["x"] as? Double,let wy=window["y"] as? Double else { throw Failure.invalid("invalid_window_bounds") }
+            // Centre of the chat area (x 315..880, y 60..496 in window points); wheel events go to the pointer.
+            let point=CGPoint(x:wx+315+282,y:wy+60+218)
+            guard let move=CGEvent(mouseEventSource:nil,mouseType:.mouseMoved,mouseCursorPosition:point,mouseButton:.left) else { throw Failure.invalid("mouse_event_failed") }
+            move.post(tap:.cghidEventTap);pauseUI(0.1)
+            for _ in 0..<pages {
+                guard let wheel=CGEvent(scrollWheelEvent2Source:nil,units:.line,wheelCount:1,
+                                        wheel1:Int32(direction=="up" ? 12 : -12),wheel2:0,wheel3:0) else { throw Failure.invalid("scroll_event_failed") }
+                wheel.location=point
+                wheel.post(tap:.cghidEventTap);pauseUI(0.15)
+            }
+            pauseUI(0.3)
+            return try capture(recipient,accepted:accepted,manage:manage)
+        }
         if operation == "open_session" {
             guard let target=params["target"] as? String, !target.isEmpty, target.count<=64 else { throw Failure.invalid("invalid_session_target") }
             let targets=(params["target_names"] as? [String]) ?? [target]

@@ -80,6 +80,22 @@ def new_bubbles(previous, current):
     return current[size:]
 
 
+def stitch(cursor, pages):
+    """New bubbles after `cursor`, joined across scrolled pages ordered oldest -> newest (last = current).
+
+    The oldest page overlapping the cursor starts the run; each later page must overlap its predecessor.
+    """
+    for index, page in enumerate(pages):
+        try:
+            changes = new_bubbles(cursor, page)
+        except ContinuityGap:
+            continue
+        for older, newer in zip(pages[index:], pages[index+1:]):
+            changes = changes + new_bubbles(older, newer)
+        return changes
+    raise ContinuityGap('no scrolled page overlaps the cursor')
+
+
 class Policy:
     def __init__(self, account, recipient, trigger, names=None):
         if not account or not recipient or not trigger:
