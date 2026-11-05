@@ -9,7 +9,7 @@ enum Failure: Error { case invalid(String) }
 struct Box { let x: Int; let y: Int; let width: Int; let height: Int }
 struct Text { let body: String; let x: Double; let y: Double }
 
-func recognize(_ image: CGImage) throws -> [Text] {
+func recognize(_ image: CGImage, timeout: Double = 12) throws -> [Text] {
     let completed = DispatchSemaphore(value:0)
     var result: [Text] = []
     var failure: Error?
@@ -17,9 +17,18 @@ func recognize(_ image: CGImage) throws -> [Text] {
         do { result = try recognizeNow(image) } catch { failure = error }
         completed.signal()
     }
-    guard completed.wait(timeout:.now()+12) == .success else { throw Failure.invalid("vision_timeout") }
+    guard completed.wait(timeout:.now()+timeout) == .success else { throw Failure.invalid("vision_timeout") }
     if let failure = failure { throw failure }
     return result
+}
+
+/// Loads the Vision text model once (cold start is ~30s on macOS 26+; warm frames take <1s).
+func warmUpRecognizer() {
+    guard let context = CGContext(data:nil,width:200,height:60,bitsPerComponent:8,bytesPerRow:0,
+        space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+    context.setFillColor(CGColor(red:1,green:1,blue:1,alpha:1)); context.fill(CGRect(x:0,y:0,width:200,height:60))
+    guard let image = context.makeImage() else { return }
+    do { _ = try recognize(image, timeout:60) } catch { fputs("vision warm-up failed: \(error)\n", stderr) }
 }
 
 func recognizeNow(_ image: CGImage) throws -> [Text] {

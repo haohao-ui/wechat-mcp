@@ -23,7 +23,7 @@ BADGE_PIXELS=20
 # Worker refusals raised before any message is read: the WeChat window is unusable right now
 # (light appearance, resized, hidden, desktop busy). These retry each sweep instead of pausing.
 WINDOW_UNAVAILABLE=('uncalibrated_theme','unsupported_image_geometry','wechat_not_visible',
-                    'window_capture_failed','desktop_busy')
+                    'window_capture_failed','desktop_busy','vision_timeout')
 
 
 class BotCoordinator:

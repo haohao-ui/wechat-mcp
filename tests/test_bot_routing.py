@@ -175,6 +175,13 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         await self.coordinator.visit(target('a'))
         child.cycle.assert_awaited_once()
 
+    async def test_vision_timeout_retries_without_permanent_pause(self):
+        child=self.coordinator.session(target('a'))
+        self.coordinator.connect=AsyncMock(side_effect=ValueError('private visual operation failed: invalid("vision_timeout")'))
+        await self.coordinator.visit(target('a'))
+        self.assertFalse(child.paused)
+        self.assertEqual(json.loads((child.root/'health.json').read_text())['state'],'waiting_for_wechat_window')
+
     async def test_other_worker_refusal_still_pauses(self):
         child=self.coordinator.session(target('a'))
         self.coordinator.connect=AsyncMock(side_effect=ValueError('private visual operation failed: invalid("allowlisted_title_mismatch")'))
