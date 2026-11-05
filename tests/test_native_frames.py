@@ -83,6 +83,17 @@ class NativeFrameTests(unittest.TestCase):
         texts = [b['text'] for b in frame.get('bubbles', [])]
         self.assertFalse(any('浅色测试' in t for t in texts))
 
+    def test_any_file_card_is_a_file_not_text(self):
+        # Acceptance 2026-11-06: an .xls card ("27.4M 对方上传中" -> "未下载") was read as a text bubble;
+        # its pixels changed with the status line, so continuity broke and the file was never answered.
+        frame = self.parse('r1-light-xls-card')
+        self.assertNotIn('error', frame)
+        files = [b for b in frame['bubbles'] if b['kind'] == 'file']
+        self.assertEqual(len(files), 1, frame['bubbles'])
+        self.assertTrue(files[0]['filename'].replace(' ', '').endswith('最新.xls'), files[0])
+        self.assertFalse(any(b['kind'] == 'text' and '.xls' in b['text'].split('\n')[0] and '27.4M' in b['text']
+                             for b in frame['bubbles']))
+
     def test_frames_parse_to_expected_bubbles(self):
         for name, (profile, scale, title, bubbles) in CASES.items():
             with self.subTest(name):
