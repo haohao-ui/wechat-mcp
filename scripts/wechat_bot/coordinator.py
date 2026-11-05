@@ -62,10 +62,10 @@ class BotCoordinator:
             try: current[self.history.ensure_contact(self.config['account_id'],entry,follow_merge=False)]=entry
             except ValueError: pass
         for row in self.history.conn.execute(
-                "SELECT contact_id, display_name FROM contacts WHERE account_id=? AND kind='private'",(self.config['account_id'],)).fetchall():
+                "SELECT contact_id, display_name, kind FROM contacts WHERE account_id=? AND kind IN ('private','group')",(self.config['account_id'],)).fetchall():
             if (self.root/'sessions'/row[0]/'binding.json').exists():
                 # Prefer today's allowlist entry: after a rename the old display name is only an alias.
-                self.session(current.get(row[0],{'recipient':row[1],'kind':'private'}))
+                self.session(current.get(row[0],{'recipient':row[1],'kind':row[2]}))
 
     def rules(self):
         value=load_config(self.config_path)
@@ -89,7 +89,7 @@ class BotCoordinator:
     def health(self, state, **details):
         value={'pid':os.getpid(),'state':state,'account_id':self.config['account_id'],
                'allowlist':[x['recipient'] for x in self.rules()['allowlist']],
-               'groups_enabled':False,'model_backend':self.config.get('model_config',{}).get('backend','codex-exec'),
+               'groups_enabled':any(x['kind']=='group' for x in self.rules()['allowlist']),'model_backend':self.config.get('model_config',{}).get('backend','codex-exec'),
                'platform_message_verified':False,'sessions':{},**details}
         for name,child in self.sessions.items():
             path=child.root/'health.json'
@@ -130,7 +130,7 @@ class BotCoordinator:
         if isinstance(self.capture,NativeCapture):
             if not child.target_allowed(): return
             child.health('connecting')
-            await self.capture.retarget(child.recipient,child.root,child.names)
+            await self.capture.retarget(child.recipient,child.root,child.names,group=child.group)
             self.active_name=child.recipient
             switch=self.capture.last_switch or {}
             log_event('chat_switched',recipient=child.recipient,clicked=switch.get('clicked'),
@@ -147,7 +147,8 @@ class BotCoordinator:
         if not child.target_allowed(): return
         capture_class=NativeCapture if self.config.get('capture_backend','native')=='native' else RemoteCapture
         self.capture=capture_class(self.config['host'],self.client,child.recipient,child.root,child.ownership,names=child.names,
-                                   manage_window=self.config.get('manage_window',True))
+                                   manage_window=self.config.get('manage_window',True),
+                                   **({'group':child.group} if capture_class is NativeCapture else {}))
         child.health('connecting')
         await self.capture.start()
         self.active_name=child.recipient

@@ -15,6 +15,17 @@ func cleanTitle(_ raw: String) -> String {
     return kept.trimmingCharacters(in:.whitespacesAndNewlines)
 }
 
+/// Set per worker request: the open conversation is an allowlisted group.
+var groupTitles = false
+
+/// A group title reads "示例群 (3)"; the member count is not part of the name. Private titles are exact.
+func titleMatches(_ raw: String, _ accepted: Set<String>) -> Bool {
+    let title = cleanTitle(raw)
+    if accepted.contains(title) { return true }
+    guard groupTitles, let range = title.range(of:#"\s*[(（]\d+[)）]$"#, options:.regularExpression) else { return false }
+    return accepted.contains(String(title[..<range.lowerBound]))
+}
+
 func isBadgeRed(_ r: Int, _ g: Int, _ b: Int) -> Bool { r >= 200 && g <= 90 && b <= 90 }
 
 /// OCR punctuation flips with the row's selection highlight (〕/]/】, ，/,, …/.); compare letters and digits only.
@@ -99,7 +110,7 @@ func titleNames(_ full: CGImage) throws -> [String] {
 /// Any doubt throws, and the caller falls back to the slower MCP navigation.
 func openSessionRow(_ targets: [String], probe: SessionProbe, capture: () throws -> ([String:Any], CGImage)) throws -> [String:Any] {
     let accepted = Set(targets.map(cleanTitle))
-    func isTarget(_ titles: [String]) -> Bool { titles.count == 1 && accepted.contains(cleanTitle(titles[0])) }
+    func isTarget(_ titles: [String]) -> Bool { titles.count == 1 && titleMatches(titles[0], accepted) }
     let began = ProcessInfo.processInfo.systemUptime
     guard AXIsProcessTrusted() else { throw Failure.invalid("post_event_not_allowed") }
     let (window, image) = try capture()

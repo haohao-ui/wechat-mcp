@@ -1,4 +1,4 @@
-"""Conversation rules. Exclusions take precedence over explicitly allowed private chats.
+"""Conversation rules. Exclusions take precedence over explicitly allowed private chats and groups.
 
 Names compare by `name_key`, so OCR variants of emoji/symbol names resolve to the same entry."""
 from .history.names import candidate_names, name_key
@@ -11,7 +11,7 @@ def validate_rules(config):
         if not isinstance(entries,list) or len(entries)>200:
             raise ValueError(name+' must be an array of at most 200 conversations')
         if name=='allowlist' and not entries:
-            raise ValueError('at least one explicitly allowlisted private contact required')
+            raise ValueError('at least one explicitly allowlisted conversation required')
         seen=set()
         for entry in entries:
             if not isinstance(entry,dict) or not {'recipient','kind'}<=set(entry)<={'recipient','kind','aliases'}:
@@ -25,8 +25,8 @@ def validate_rules(config):
                     raise ValueError('exact conversation name without surrounding whitespace required')
                 if len(value)>64:
                     raise ValueError('conversation names are limited to 64 characters (native worker limit)')
-            if kind not in ('private','group') or (name=='allowlist' and kind!='private'):
-                raise ValueError('only private chats can be allowlisted; exclusions support private/group')
+            if kind not in ('private','group'):
+                raise ValueError('conversation kind must be private or group')
             identity=(recipient,kind)
             if identity in seen:
                 raise ValueError('duplicate '+name+' entry')
@@ -38,15 +38,16 @@ def validate_rules(config):
                         raise ValueError('allowlist names collide after normalization')
 
 
-def match_entry(config, raw_name, kind='private'):
+def match_entry(config, raw_name, kind=None):
+    # kind=None: the desktop title alone cannot tell a group from a private chat; names are unique.
     key=name_key(raw_name)
     for entry in config.get('allowlist', []):
-        if entry['kind']==kind and any(name_key(n)==key for n in candidate_names(entry)):
+        if (kind is None or entry['kind']==kind) and any(name_key(n)==key for n in candidate_names(entry)):
             return entry
     return None
 
 
-def decision(config, recipient, kind='private'):
+def decision(config, recipient, kind=None):
     # The desktop cannot prove chat kind/WeChat ID. A same-title exclusion of either kind wins.
     key=name_key(recipient)
     if any(name_key(n)==key for x in config.get('ignorelist', []) for n in candidate_names(x)):

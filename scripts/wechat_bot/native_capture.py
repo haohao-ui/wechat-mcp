@@ -30,9 +30,11 @@ def media_reason(error):
 
 
 class NativeCapture(RemoteCapture):
-    def __init__(self,*args,names=None,manage_window=True,**kwargs):
+    def __init__(self,*args,names=None,manage_window=True,group=False,**kwargs):
         super().__init__(*args,**kwargs)
         self.names=list(names or [])
+        # Group titles carry a member count ("示例群 (3)") that the worker ignores when this is set.
+        self.group=bool(group)
         # Dedicated-machine default: the worker may un-minimize, resize and move WeChat back on screen.
         self.manage_window=bool(manage_window)
         self.process=None
@@ -81,8 +83,9 @@ fi
                 error=failure
         raise error
 
-    async def retarget(self, recipient, directory, names=None):
+    async def retarget(self, recipient, directory, names=None, group=False):
         self.names=list(names or [recipient])
+        self.group=bool(group)
         # Keep the GUI worker and its status indicator alive while selecting the next authorized chat.
         try:
             # Fast path: click the verified session-list row; the worker checks the exact title after.
@@ -118,7 +121,7 @@ fi
             self.counter+=1
             value={'protocol_version':1,'id':self.counter,'operation':operation,
                    'params':{'recipient':self.recipient,'accepted_names':self.names or [self.recipient],
-                             'manage_window':self.manage_window,**params}}
+                             'manage_window':self.manage_window,'group_title':self.group,**params}}
             try:
                 self.process.stdin.write(json.dumps(value).encode()+b'\n')
                 await self.process.stdin.drain()

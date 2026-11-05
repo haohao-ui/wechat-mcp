@@ -110,7 +110,7 @@ func normalizedFrame(_ captured: CGImage, window: [String:Any]) throws -> (image
     return (image, scale)
 }
 
-func analyzeFrame(_ captured: CGImage, window: [String:Any], mediaRoot: URL? = nil, recipient: String? = nil) throws -> [String:Any] {
+func analyzeFrame(_ captured: CGImage, window: [String:Any], mediaRoot: URL? = nil, recipient: String? = nil, group: Bool = false) throws -> [String:Any] {
     let (full, scale) = try normalizedFrame(captured, window:window)
     guard let title = full.cropping(to:CGRect(x:250,y:0,width:full.width-260,height:50)),
           // Ends at the input separator (y=496): a fully scrolled last bubble keeps ~8px above it.
@@ -249,6 +249,20 @@ func analyzeFrame(_ captured: CGImage, window: [String:Any], mediaRoot: URL? = n
         bubbles.append(item)
     }
     bubbles.sort { ($0["y"] as! Int)<($1["y"] as! Int) }
+    if group {
+        // Group chats print the member's name just above each left bubble, left-aligned with it.
+        let boxes=bubbles.compactMap { b -> CGRect? in
+            guard let x=b["x"] as? Int,let y=b["y"] as? Int,let w=b["width"] as? Int,let h=b["height"] as? Int else { return nil }
+            return CGRect(x:x,y:y,width:w,height:h)
+        }
+        let outside=texts.filter { t in !boxes.contains { $0.contains(CGPoint(x:t.x,y:t.y)) } }
+        for index in bubbles.indices where bubbles[index]["direction"] as? String == "inbound_visual" {
+            guard let x=bubbles[index]["x"] as? Int,let y=bubbles[index]["y"] as? Int else { continue }
+            let label=outside.filter { Double(y)-$0.y > 2 && Double(y)-$0.y < 30 && $0.x > Double(x) && $0.x < Double(x+260)
+                && $0.body.range(of:#"^\d{1,2}:\d{2}$"#,options:.regularExpression) == nil }.min { abs($0.x-Double(x)) < abs($1.x-Double(x)) }
+            if let label=label { bubbles[index]["sender"]=label.body }
+        }
+    }
     let result: [String:Any] = ["profile":theme.name,"scale":scale,"title_lines":titleNames,
         "bubbles":bubbles,"platform_message_verified":false,"sender_verified":false,
         "width":full.width,"height":full.height,"captured_width":captured.width,"clipped_bubble":clippedBubble]

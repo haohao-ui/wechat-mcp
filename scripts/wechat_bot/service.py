@@ -18,7 +18,7 @@ from .capture import RemoteCapture
 from .history.names import candidate_names, clean_title
 from .understanding import understand
 from .history.store import similar
-from .policy import merge_pages, reconcile, relocate, stitch, AmbiguousAnchor, ContinuityGap, Policy, echo_matches, fingerprint, new_bubbles, validate_reply
+from .policy import strip_member_count, merge_pages, reconcile, relocate, stitch, AmbiguousAnchor, ContinuityGap, Policy, echo_matches, fingerprint, new_bubbles, validate_reply
 from .reply import generate
 from .native_capture import NativeCapture
 
@@ -104,11 +104,12 @@ class BotService:
         self.account = config['account_id']
         self.history, self.contact_id = history, contact_id
         self.names = names or candidate_names(config['allowlist'][0])
-        self.policy = Policy(self.account,self.recipient,'service',names=self.names)
-        binding = {'host':config['host'],'account_id':self.account,'recipient':self.recipient,'kind':'private'}
+        self.group = config['allowlist'][0].get('kind')=='group'
+        self.policy = Policy(self.account,self.recipient,'service',names=self.names,group=self.group)
+        binding = {'host':config['host'],'account_id':self.account,'recipient':self.recipient,'kind':config['allowlist'][0].get('kind','private')}
         if contact_id:
             # Renaming a contact (new recipient, old name as alias) must keep its state directory.
-            binding = {'host':config['host'],'account_id':self.account,'contact_id':contact_id,'kind':'private'}
+            binding = {'host':config['host'],'account_id':self.account,'contact_id':contact_id,'kind':config['allowlist'][0].get('kind','private')}
         binding_path = self.root/'binding.json'
         if binding_path.exists() and json.loads(binding_path.read_text()) != binding:
             raise ValueError('state belongs to a different account or contact; use a separate state directory')
@@ -148,7 +149,7 @@ class BotService:
             log_event('state',state=state,account_id=self.account,**details)
             self.last_health_log=signature; self.last_health_log_at=now
         write_private(self.root/'health.json', {'pid':os.getpid(),'state':state,'updated_at':time.time(),
-            'account_id':self.account,'allowlist':[self.recipient],'groups_enabled':False,
+            'account_id':self.account,'allowlist':[self.recipient],'groups_enabled':self.group,
             'model_backend':self.config.get('model_config',{}).get('backend','codex-exec'),'platform_message_verified':False,**details})
 
     def advance(self, frame):
@@ -166,7 +167,8 @@ class BotService:
                 bool(recent and time.time()-max(recent) < self.config['cooldown_seconds']))
 
     def clean_recipient(self, frame):
-        return clean_title(frame['title_lines'][0])
+        title = clean_title(frame['title_lines'][0])
+        return strip_member_count(title) if self.group else title
 
     def history_failed(self, error):
         log_event('history_write_failed',account_id=self.account,error_type=type(error).__name__)
@@ -522,10 +524,12 @@ class BotService:
             if not self.target_allowed():
                 record['status']='skipped_by_rule'; self.write_journal(journal,record); return
             model={}
-            text='\n'.join(b['text'] for b in incoming)
+            # In a group each line is attributed to the member named above its bubble.
+            text='\n'.join((b['sender']+'：' if self.group and b.get('sender') else '')+b['text'] for b in incoming)
             notes,model_images=await self.understand_images(text,images,failed,context)
             reply = validate_reply(await generate(text,mode='service',context=context,images=model_images,
                                                   files=[model_view(f) for f in files],notes=notes,failed=[f['label'] for f in failed],
+                                                  chat_kind='group' if self.group else 'private',
                                                   metadata=model,model_config=self.config.get('model_config')))
             reply = ensure_unreadable_named(reply,failed)
             timings['model_seconds']=model.get('seconds')
