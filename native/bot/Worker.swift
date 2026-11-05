@@ -59,15 +59,63 @@ func selectedWindow() throws -> [String:Any] {
         guard let owner = row[kCGWindowOwnerName as String] as? String, ["WeChat","微信"].contains(owner),
               row[kCGWindowLayer as String] as? Int == 0,
               let id = row[kCGWindowNumber as String] as? UInt32,
+              let pid = row[kCGWindowOwnerPID as String] as? Int32,
               let bounds = row[kCGWindowBounds as String] as? [String:Any],
               let rect = CGRect(dictionaryRepresentation:bounds as CFDictionary),rect.width > 0,rect.height > 0 else { return nil }
-        return ["window_id":id,"x":Double(rect.minX),"y":Double(rect.minY),"width":Double(rect.width),"height":Double(rect.height),"on_screen":true]
+        return ["window_id":id,"pid":Int(pid),"x":Double(rect.minX),"y":Double(rect.minY),"width":Double(rect.width),"height":Double(rect.height),"on_screen":true]
     }
     guard let result = choices.sorted(by:{
         let a=($0["width"] as! Double)*($0["height"] as! Double),b=($1["width"] as! Double)*($1["height"] as! Double)
         return a == b ? ($0["window_id"] as! UInt32) < ($1["window_id"] as! UInt32) : a > b
     }).first else { throw Failure.invalid("wechat_not_visible") }
     return result
+}
+
+func axValue<T>(_ element: AXUIElement, _ attribute: String, _ type: AXValueType, _ empty: T) -> T? {
+    var raw: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, attribute as CFString, &raw) == .success, let raw = raw,
+          CFGetTypeID(raw) == AXValueGetTypeID() else { return nil }
+    var value = empty
+    return AXValueGetValue(raw as! AXValue, type, &value) ? value : nil
+}
+
+/// Returns the WeChat main window at the calibrated 880x640 points, resizing it once if needed.
+/// Only the AX main window is ever resized, and never while minimized or full screen; any doubt
+/// (several candidate windows, no permission, size not taking effect) is "window unavailable".
+func readyWindow() throws -> (window: [String:Any], resized: Bool) {
+    let window = try selectedWindow()
+    if (window["width"] as! Double).rounded() == 880 && (window["height"] as! Double).rounded() == 640 { return (window, false) }
+    guard AXIsProcessTrusted() else { throw Failure.invalid("unsupported_image_geometry") }
+    let app = AXUIElementCreateApplication(pid_t(window["pid"] as! Int))
+    var raw: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(app, kAXMainWindowAttribute as CFString, &raw) == .success, let main = raw,
+          CFGetTypeID(main) == AXUIElementGetTypeID() else { throw Failure.invalid("wechat_not_visible") }
+    let element = main as! AXUIElement
+    for flag in [kAXMinimizedAttribute as String, "AXFullScreen"] {
+        var state: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, flag as CFString, &state) == .success, (state as? Bool) == true {
+            throw Failure.invalid("wechat_not_visible")
+        }
+    }
+    guard let origin = axValue(element, kAXPositionAttribute as String, .cgPoint, CGPoint.zero),
+          let size = axValue(element, kAXSizeAttribute as String, .cgSize, CGSize.zero),
+          abs(origin.x - (window["x"] as! Double)) < 1, abs(origin.y - (window["y"] as! Double)) < 1,
+          abs(size.width - (window["width"] as! Double)) < 1, abs(size.height - (window["height"] as! Double)) < 1 else {
+        // The largest WeChat window is not the main window (e.g. an image viewer): do not touch it.
+        throw Failure.invalid("wechat_not_visible")
+    }
+    var target = CGSize(width:880, height:640)
+    guard let value = AXValueCreate(.cgSize, &target),
+          AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, value) == .success else {
+        throw Failure.invalid("unsupported_image_geometry")
+    }
+    Thread.sleep(forTimeInterval:0.3)
+    let after = try selectedWindow()
+    guard after["window_id"] as? UInt32 == window["window_id"] as? UInt32,
+          (after["width"] as! Double).rounded() == 880, (after["height"] as! Double).rounded() == 640 else {
+        throw Failure.invalid("unsupported_image_geometry")
+    }
+    return (after, true)
 }
 
 func canonicalBytes(_ image: CGImage) throws -> Data {
@@ -134,7 +182,7 @@ final class CaptureWorker {
 
     func capture(_ recipient: String, accepted: Set<String>) throws -> [String:Any] {
         let began=ProcessInfo.processInfo.systemUptime
-        let window = try selectedWindow()
+        let (window, resized) = try readyWindow()
         let id = window["window_id"] as! UInt32
         let image = try windowImage(window)
         guard let panel = try normalizedFrame(image,window:window).image.cropping(to:CGRect(x:300,y:0,width:570,height:496)) else { throw Failure.invalid("window_capture_failed") }
@@ -159,6 +207,7 @@ final class CaptureWorker {
         result["observed_title"]=(cached["title_lines"] as? [String])?.first ?? ""
         result["captured_at_ms"]=Int64(Date().timeIntervalSince1970*1000)
         result["capture_seconds"]=ProcessInfo.processInfo.systemUptime-began
+        if resized { result["window_resized"]=true }
         return result
     }
 
@@ -177,7 +226,7 @@ final class CaptureWorker {
             let targets=(params["target_names"] as? [String]) ?? [target]
             guard (1...20).contains(targets.count), targets.allSatisfy({ !$0.isEmpty && $0.count<=64 }) else { throw Failure.invalid("invalid_session_target") }
             return try openSessionRow(targets,probe:sessionProbe) {
-                let window=try selectedWindow()
+                let window=try readyWindow().window
                 return (window,try normalizedFrame(try windowImage(window),window:window).image)
             }
         }
@@ -185,7 +234,7 @@ final class CaptureWorker {
             guard let names=params["names"] as? [String], !names.isEmpty, names.count<=50,
                   names.allSatisfy({ !$0.isEmpty && $0.count<=64 }) else { throw Failure.invalid("invalid_session_names") }
             let began=ProcessInfo.processInfo.systemUptime
-            let window=try selectedWindow()
+            let window=try readyWindow().window
             let image=try normalizedFrame(try windowImage(window),window:window).image
             var result=try sessionProbe.probe(image,names:names,debug:params["debug"] as? Bool == true)
             if params["debug"] as? Bool == true, let list=image.cropping(to:sessionListRect) {
