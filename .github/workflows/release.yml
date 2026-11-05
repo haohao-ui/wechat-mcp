@@ -40,16 +40,19 @@ jobs:
           lipo -create -output "dist/$OUT/wechat-mcp" \
             target/aarch64-apple-darwin/release/wechat-mcp \
             target/x86_64-apple-darwin/release/wechat-mcp
-          for t in wechat_ocr wechat_click wechat_window; do
+          for t in wechat_ocr wechat_window; do
             swiftc -O -target arm64-apple-macos13 native/$t.swift -o "/tmp/$t-arm64"
             swiftc -O -target x86_64-apple-macos13 native/$t.swift -o "/tmp/$t-x86_64"
             lipo -create -output "dist/$OUT/$t" "/tmp/$t-arm64" "/tmp/$t-x86_64"
           done
+          swiftc -O -target arm64-apple-macos13 native/click/main.swift native/action/*.swift -o /tmp/wechat_click-arm64
+          swiftc -O -target x86_64-apple-macos13 native/click/main.swift native/action/*.swift -o /tmp/wechat_click-x86_64
+          lipo -create -output "dist/$OUT/wechat_click" /tmp/wechat_click-arm64 /tmp/wechat_click-x86_64
           swiftc -O -parse-as-library -target arm64-apple-macos13 native/wechat_bubbles.swift -o /tmp/wechat_bubbles-arm64
           swiftc -O -parse-as-library -target x86_64-apple-macos13 native/wechat_bubbles.swift -o /tmp/wechat_bubbles-x86_64
           lipo -create -output "dist/$OUT/wechat_bubbles" /tmp/wechat_bubbles-arm64 /tmp/wechat_bubbles-x86_64
-          swiftc -O -parse-as-library -D BOT_WORKER -target arm64-apple-macos12 native/wechat_bubbles.swift native/bot/*.swift -o /tmp/wechat_bot_worker-arm64
-          swiftc -O -parse-as-library -D BOT_WORKER -target x86_64-apple-macos12 native/wechat_bubbles.swift native/bot/*.swift -o /tmp/wechat_bot_worker-x86_64
+          swiftc -O -parse-as-library -D BOT_WORKER -target arm64-apple-macos12 native/wechat_bubbles.swift native/action/*.swift native/bot/*.swift -o /tmp/wechat_bot_worker-arm64
+          swiftc -O -parse-as-library -D BOT_WORKER -target x86_64-apple-macos12 native/wechat_bubbles.swift native/action/*.swift native/bot/*.swift -o /tmp/wechat_bot_worker-x86_64
           lipo -create -output "dist/$OUT/wechat_bot_worker" /tmp/wechat_bot_worker-arm64 /tmp/wechat_bot_worker-x86_64
           swiftc -O -target arm64-apple-macos13 native/overlay/main.swift -o /tmp/wechat_overlay-arm64
           swiftc -O -target x86_64-apple-macos13 native/overlay/main.swift -o /tmp/wechat_overlay-x86_64

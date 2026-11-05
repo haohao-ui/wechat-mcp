@@ -1,13 +1,40 @@
 import Cocoa
 import ApplicationServices
 
-guard CommandLine.arguments.count >= 3 else {
-    exit(1)
+// wechat_click <x> <y> [<width> <height>]  — clicks inside the control centred on (x, y), screen points.
+// Without a size the control is a 12×12 square. --plan-only prints the planned events and posts nothing.
+// Movement, press and checks come from the shared action module (native/action).
+var arguments = Array(CommandLine.arguments.dropFirst())
+let planOnly = arguments.first == "--plan-only"
+if planOnly { arguments.removeFirst() }
+guard arguments.count == 2 || arguments.count == 4 else { exit(1) }
+let numbers = arguments.compactMap(Double.init)
+guard numbers.count == arguments.count, numbers.allSatisfy({ $0.isFinite }) else { exit(1) }
+let x = numbers[0], y = numbers[1]
+let width = numbers.count == 4 ? numbers[2] : 12, height = numbers.count == 4 ? numbers[3] : 12
+guard width > 0, height > 0 else { exit(1) }
+let target = CGRect(x: x - width/2, y: y - height/2, width: width, height: height)
+
+/// Records what would be posted (pointer follows our own moves; no time passes).
+final class PlanSink: EventSink {
+    var position = CGEvent(source: nil)?.location ?? .zero
+    var events: [[String: Any]] = []
+    func cursor() -> CGPoint { position }
+    func post(_ type: CGEventType, at point: CGPoint, button: CGMouseButton) throws {
+        let names: [CGEventType: String] = [.mouseMoved: "moved", .leftMouseDown: "left_down", .leftMouseUp: "left_up"]
+        events.append(["type": names[type] ?? "other", "x": Double(point.x), "y": Double(point.y)])
+        position = point
+    }
+    func scroll(lines: Int32, at point: CGPoint) throws {}
+    func sleep(_ seconds: Double) {}
 }
 
-guard let x = Double(CommandLine.arguments[1]),
-      let y = Double(CommandLine.arguments[2]), x.isFinite, y.isFinite else {
-    exit(1)
+if planOnly {
+    let sink = PlanSink()
+    do { try Actions(sink: sink).click(target) } catch { fputs("wechat_click: \(error)\n", stderr); exit(1) }
+    let data = try! JSONSerialization.data(withJSONObject: ["events": sink.events])
+    print(String(decoding: data, as: UTF8.self))
+    exit(0)
 }
 
 guard AXIsProcessTrusted() else {
@@ -32,28 +59,12 @@ if debugEnabled {
         audit["hit_window_id"] = (hit[kCGWindowNumber as String] as? NSNumber)?.uint32Value ?? 0
     }
 }
-let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: pt, mouseButton: .left)
-let up = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: pt, mouseButton: .left)
-
-guard let down = down, let up = up else {
-    fputs("wechat_click: event_creation_failed\n", stderr)
+do {
+    try Actions().click(target)
+} catch {
+    fputs("wechat_click: \(error)\n", stderr)
     exit(1)
 }
-let origin = CGEvent(source: nil)?.location ?? pt
-for step in 1...12 {
-    let t = Double(step) / 12
-    let progress = t * t * (3 - 2 * t)
-    let position = CGPoint(x: origin.x + (pt.x-origin.x)*progress, y: origin.y + (pt.y-origin.y)*progress)
-    guard let move = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: position, mouseButton: .left) else {
-        fputs("wechat_click: movement_event_creation_failed\n", stderr)
-        exit(1)
-    }
-    move.post(tap: .cghidEventTap)
-    Thread.sleep(forTimeInterval: 0.015)
-}
-down.post(tap: .cghidEventTap)
-Thread.sleep(forTimeInterval: 0.06)
-up.post(tap: .cghidEventTap)
 if debugEnabled {
     if let location = CGEvent(source: nil)?.location {
         audit["pointer_after_x"] = Double(location.x)
