@@ -1,5 +1,6 @@
 """Install and inspect the current user's launchd bot service. Never edits the remote GUI bundle."""
 import argparse
+import base64
 import json
 import os
 from pathlib import Path
@@ -136,6 +137,10 @@ def main(argv=None):
     install.add_argument('--recipient',required=True)
     install.add_argument('--allow-replies',action='store_true',required=True)
     for action in ['status','start','stop']: sub.add_parser(action)
+    cal = sub.add_parser('calibrate')
+    cal.add_argument('--accept', action='store_true', help='Accept candidate layout after validation')
+    cal.add_argument('--config', default=default_config)
+    cal.add_argument('--layout-dir', default=None, help='Layout directory override')
     sub.add_parser('history-http').add_argument('command',choices=['install','start','stop','status'])
     args=parser.parse_args(argv)
     base,config_path,plist_path=locations()
@@ -143,6 +148,8 @@ def main(argv=None):
         return history_command(args)
     if args.action=='history-http':
         return history_http(args.command,config_path,base)
+    if args.action=='calibrate':
+        return calibrate_command(args)
     if args.action=='install':
         if loaded() or config_path.exists():
             raise RuntimeError('bot service already configured; inspect status and config before changing it')
@@ -220,6 +227,277 @@ def check_needs_recalibration(health, state_dir=None):
                 except Exception:
                     pass
     return False
+
+
+def get_running_wechat_version():
+    env_ver = os.environ.get('WECHAT_VERSION')
+    if env_ver:
+        return env_ver.strip()
+    try:
+        res = subprocess.run(
+            ['osascript', '-e', 'tell application "System Events" to get version of (first application process whose bundle identifier is "com.tencent.xinWeChat" or bundle identifier is "com.tencent.WeChat")'],
+            capture_output=True, text=True, timeout=5
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout.strip()
+    except Exception:
+        pass
+    for app_path in [Path('/Applications/WeChat.app/Contents/Info.plist')]:
+        if app_path.exists():
+            try:
+                with open(app_path, 'rb') as f:
+                    plist = plistlib.load(f)
+                    if 'CFBundleShortVersionString' in plist:
+                        return plist['CFBundleShortVersionString']
+            except Exception:
+                pass
+    return None
+
+
+def validate_layout_candidate(candidate):
+    if not isinstance(candidate, dict):
+        raise ValueError('layout_unreadable')
+    if candidate.get('schema') != 1:
+        raise ValueError('layout_schema_unsupported')
+    window = candidate.get('window')
+    if not isinstance(window, dict) or 'width' not in window or 'height' not in window:
+        raise ValueError('layout_invalid_value:window')
+    try:
+        win_w = float(window['width'])
+        win_h = float(window['height'])
+    except (ValueError, TypeError):
+        raise ValueError('layout_invalid_value:window')
+    regions = candidate.get('regions')
+    if not isinstance(regions, dict):
+        raise ValueError('layout_unreadable')
+    required_regions = ['session_list', 'title', 'chat', 'input']
+    for req in required_regions:
+        if req not in regions:
+            raise ValueError(f'layout_missing_region:{req}')
+    for name, rect in regions.items():
+        if not isinstance(rect, dict):
+            raise ValueError(f'layout_invalid_value:{name}')
+        try:
+            x = float(rect.get('x', 0))
+            y = float(rect.get('y', 0))
+            w = float(rect.get('w', 0))
+            h = float(rect.get('h', 0))
+        except (ValueError, TypeError):
+            raise ValueError(f'layout_invalid_value:{name}')
+        if w <= 0:
+            raise ValueError(f'layout_invalid_value:{name}.w')
+        if h <= 0:
+            raise ValueError(f'layout_invalid_value:{name}.h')
+        if x < 0 or y < 0 or (x + w) > win_w or (y + h) > win_h:
+            raise ValueError(f'layout_region_out_of_window:{name}')
+    scroll = candidate.get('scroll')
+    if not isinstance(scroll, dict):
+        raise ValueError('layout_invalid_value:scroll')
+    try:
+        if float(scroll.get('points_per_tick', 0)) <= 0:
+            raise ValueError('layout_invalid_value:scroll.points_per_tick')
+        if int(scroll.get('lines_per_tick', 0)) <= 0:
+            raise ValueError('layout_invalid_value:scroll.lines_per_tick')
+    except (ValueError, TypeError):
+        raise ValueError('layout_invalid_value:scroll')
+
+
+def generate_candidate(base_layout, worker_result, layout_dir=None):
+    if layout_dir is None:
+        layout_dir = Path.home() / '.wechat-rpa' / 'layout'
+    layout_dir = Path(layout_dir)
+    layout_dir.mkdir(parents=True, exist_ok=True)
+
+    measured = worker_result.get('measured', {})
+    candidate = json.loads(json.dumps(base_layout))
+    window_h = float(candidate.get('window', {}).get('height', 640.0))
+
+    diffs = []
+    missing = []
+
+    expected_anchors = [a['name'] for a in candidate.get('anchors', [])]
+    for name in expected_anchors:
+        if name not in measured or measured[name] is None:
+            missing.append(name)
+
+    if 'input_divider' in measured and measured['input_divider'] is not None:
+        divider = float(measured['input_divider'])
+        if 'chat' in candidate.get('regions', {}):
+            chat = candidate['regions']['chat']
+            new_chat_h = divider - float(chat['y'])
+            if chat.get('h') != new_chat_h:
+                diffs.append({'field': 'chat.h', 'old': chat.get('h'), 'new': new_chat_h})
+                chat['h'] = new_chat_h
+        if 'chat_content' in candidate.get('regions', {}):
+            chat_content = candidate['regions']['chat_content']
+            new_cc_h = divider - float(chat_content['y'])
+            if chat_content.get('h') != new_cc_h:
+                diffs.append({'field': 'chat_content.h', 'old': chat_content.get('h'), 'new': new_cc_h})
+                chat_content['h'] = new_cc_h
+        if 'input' in candidate.get('regions', {}):
+            inp = candidate['regions']['input']
+            if inp.get('y') != divider:
+                diffs.append({'field': 'input.y', 'old': inp.get('y'), 'new': divider})
+                inp['y'] = divider
+            new_inp_h = window_h - divider
+            if inp.get('h') != new_inp_h:
+                diffs.append({'field': 'input.h', 'old': inp.get('h'), 'new': new_inp_h})
+                inp['h'] = new_inp_h
+
+    if 'list_border' in measured and measured['list_border'] is not None:
+        border = float(measured['list_border'])
+        if 'session_list' in candidate.get('regions', {}):
+            s_list = candidate['regions']['session_list']
+            new_w = border - float(s_list['x'])
+            if s_list.get('w') != new_w:
+                diffs.append({'field': 'session_list.w', 'old': s_list.get('w'), 'new': new_w})
+                s_list['w'] = new_w
+
+    version = candidate.get('wechat_version', 'unknown')
+    cand_json_path = layout_dir / f'candidate-wechat-{version}.json'
+    cand_png_path = layout_dir / f'candidate-wechat-{version}.png'
+
+    fd = os.open(str(cand_json_path), os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+    with open(fd, 'w', encoding='utf-8') as f:
+        json.dump(candidate, f, indent=2, ensure_ascii=False)
+        f.write('\n')
+
+    if 'annotated_png_base64' in worker_result and worker_result['annotated_png_base64']:
+        raw_png = base64.b64decode(worker_result['annotated_png_base64'])
+        fd_png = os.open(str(cand_png_path), os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+        with open(fd_png, 'wb') as f:
+            f.write(raw_png)
+
+    return diffs, missing, candidate
+
+
+def calibrate_accept(layout_dir=None, running_version=None):
+    if layout_dir is None:
+        layout_dir = Path.home() / '.wechat-rpa' / 'layout'
+    layout_dir = Path(layout_dir)
+
+    if running_version is None:
+        running_version = get_running_wechat_version()
+    if not running_version:
+        raise ValueError('running_wechat_version_unknown')
+
+    cand_path = layout_dir / f'candidate-wechat-{running_version}.json'
+    if not cand_path.exists():
+        raise ValueError(f'candidate_not_found: {cand_path}')
+
+    if cand_path.stat().st_size > 256 * 1024:
+        raise ValueError('layout_too_large')
+
+    try:
+        candidate_data = json.loads(cand_path.read_text(encoding='utf-8'))
+    except Exception:
+        raise ValueError('layout_unreadable')
+
+    validate_layout_candidate(candidate_data)
+
+    cand_version = candidate_data.get('wechat_version')
+    if cand_version != running_version:
+        raise ValueError(f'version_mismatch: candidate is {cand_version}, running is {running_version}')
+
+    active_path = layout_dir / f'wechat-{running_version}.json'
+
+    backup_path = None
+    if active_path.exists():
+        timestamp = time.strftime('%Y%m%d%H%M%S')
+        backup_name = f'wechat-{running_version}.json.bak-{timestamp}'
+        backup_path = layout_dir / backup_name
+        if backup_path.exists():
+            backup_name = f'wechat-{running_version}.json.bak-{timestamp}-{int(time.time()*1000)%1000}'
+            backup_path = layout_dir / backup_name
+        shutil.copy2(active_path, backup_path)
+        backup_path.chmod(0o600)
+
+    tmp_path = layout_dir / f'.tmp-wechat-{running_version}-{os.getpid()}.json'
+    shutil.copy2(cand_path, tmp_path)
+    tmp_path.chmod(0o600)
+    os.replace(tmp_path, active_path)
+    active_path.chmod(0o600)
+
+    return {
+        'accepted': True,
+        'version': running_version,
+        'active_layout': str(active_path),
+        'backup': str(backup_path) if backup_path else None
+    }
+
+
+def load_active_layout(version, layout_dir=None):
+    if layout_dir:
+        custom_path = Path(layout_dir) / f'wechat-{version}.json'
+        if custom_path.exists():
+            return json.loads(custom_path.read_text(encoding='utf-8'))
+    rpa_layout = Path.home() / '.wechat-rpa' / 'layout' / f'wechat-{version}.json'
+    if rpa_layout.exists():
+        return json.loads(rpa_layout.read_text(encoding='utf-8'))
+    repo_layout = Path(__file__).resolve().parents[2] / 'native' / 'layout' / f'wechat-{version}.json'
+    if repo_layout.exists():
+        return json.loads(repo_layout.read_text(encoding='utf-8'))
+    fallback_dir = Path(__file__).resolve().parents[2] / 'native' / 'layout'
+    if fallback_dir.exists():
+        matches = sorted(fallback_dir.glob('wechat-*.json'))
+        if matches:
+            return json.loads(matches[-1].read_text(encoding='utf-8'))
+    raise ValueError(f'layout_missing_for_version:{version}')
+
+
+def run_worker_calibrate(config):
+    host = config.get('host', '127.0.0.1')
+    from .native_capture import NativeCapture
+    import asyncio
+    async def _run():
+        capture = NativeCapture(host, None, '', Path.home() / '.wechat-rpa', '0'*64)
+        await capture.connect()
+        try:
+            return await capture.calibrate()
+        finally:
+            await capture.close_transport()
+    return asyncio.run(_run())
+
+
+def calibrate_command(args):
+    layout_dir = Path(args.layout_dir) if getattr(args, 'layout_dir', None) else Path.home() / '.wechat-rpa' / 'layout'
+    if getattr(args, 'accept', False):
+        try:
+            res = calibrate_accept(layout_dir=layout_dir)
+            print(json.dumps(res, ensure_ascii=False))
+            return
+        except Exception as e:
+            sys.stderr.write(f'calibrate accept failed: {e}\n')
+            raise SystemExit(1)
+
+    version = get_running_wechat_version() or '4.1.15'
+    base_layout = load_active_layout(version, layout_dir=layout_dir)
+
+    config_path = Path(getattr(args, 'config', locations()[1]))
+    config = load_config(config_path) if config_path.exists() else {}
+    worker_result = run_worker_calibrate(config)
+
+    diffs, missing, candidate = generate_candidate(base_layout, worker_result, layout_dir=layout_dir)
+
+    if diffs:
+        sys.stdout.write("Differences from current layout:\n")
+        for d in diffs:
+            sys.stdout.write(f"  {d['field']}: {d['old']} -> {d['new']}\n")
+    else:
+        sys.stdout.write("No layout differences detected.\n")
+
+    if missing:
+        sys.stdout.write("Missing measurements (preserved original values):\n")
+        for m in missing:
+            sys.stdout.write(f"  {m}\n")
+
+    result = {
+        'candidate_json': str(layout_dir / f'candidate-wechat-{version}.json'),
+        'candidate_png': str(layout_dir / f'candidate-wechat-{version}.png'),
+        'differences': diffs,
+        'missing': missing
+    }
+    print(json.dumps(result, ensure_ascii=False))
 
 
 if __name__=='__main__': main()
