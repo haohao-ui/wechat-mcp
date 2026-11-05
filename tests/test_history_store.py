@@ -175,6 +175,24 @@ class MessageTests(StoreBase):
         self.store.record_frame(self.c, fr(bub('在吗'), bub('人工：订单已经发顺丰了', 'outbound_visual')))
         self.assertEqual(self.senders(), ['customer', 'bot', 'self_other'])
 
+    def test_replied_after_sees_manual_reply(self):
+        rows = self.store.record_frame(self.c, fr(bub('在吗')))
+        self.store.record_frame(self.c, fr(bub('在吗'), bub('图片呢')))
+        ids = [m for m, in self.store.conn.execute("select message_id from messages where text='图片呢'")]
+        self.assertFalse(self.store.replied_after(self.c, ids))
+        self.store.record_frame(self.c, fr(bub('在吗'), bub('图片呢'), bub('人工：收到', 'outbound_visual')))
+        self.assertTrue(self.store.replied_after(self.c, ids))
+        self.assertFalse(self.store.replied_after(self.c, []))
+
+    def test_replied_after_ignores_failed_bot_send(self):
+        self.store.record_frame(self.c, fr(bub('在吗')))
+        self.store.record_frame(self.c, fr(bub('在吗'), bub('图片呢')))
+        ids = [m for m, in self.store.conn.execute("select message_id from messages where text='图片呢'")]
+        self.store.record_bot_reply(self.c, 'k', '在的', 'generated', {}, ids)
+        self.assertFalse(self.store.replied_after(self.c, ids))
+        self.store.update_send('k', 'triggered')
+        self.assertTrue(self.store.replied_after(self.c, ids))
+
     def test_old_or_imported_reply_is_not_echo_target(self):
         self.store.record_frame(self.c, fr(bub('问')))
         self.store.record_bot_reply(self.c, 'old', '好的，稍等', 'triggered', {}, [])

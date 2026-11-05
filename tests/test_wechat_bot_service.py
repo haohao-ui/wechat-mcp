@@ -150,6 +150,55 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             path.write_text(json.dumps({**self.config,key:value}))
             with self.assertRaises(ValueError): load_config(path)
 
+    async def test_manual_reply_during_wait_cancels_turn(self):
+        self.config['turn_quiet_seconds']=10
+        self.service=self.restart()
+        self.service.advance(self.old)
+        self.at(0); await self.cycle([self.new,self.new])
+        answered=frame(*self.new['bubbles'],bubble('人工：我是店长，马上处理','outbound_visual'))
+        with patch('scripts.wechat_bot.service.log_event') as log:
+            self.at(4); await self.cycle([answered])
+        self.assertIn(('already_replied','screen'),[(c.args[0],c.kwargs.get('source')) for c in log.call_args_list])
+        self.at(30); await self.cycle([answered])
+        self.model.assert_not_awaited()
+        self.assertEqual(self.calls,[])
+        self.assertIsNone(self.service.turn)
+
+    async def test_manual_reply_while_generating_blocks_send(self):
+        self.service.advance(self.old)
+        answered=frame(*self.new['bubbles'],bubble('人工：我是店长，马上处理','outbound_visual'))
+        await self.cycle([self.new,self.new,answered])
+        self.assertFalse(any(name=='send_message' for name,_ in self.calls))
+        record=json.loads(next(self.service.root.glob('send-*.json')).read_text())
+        self.assertEqual(record['status'],'already_replied')
+        self.assertFalse(self.service.paused)
+
+    async def test_reprocessed_triggered_turn_is_not_resent(self):
+        self.config['turn_quiet_seconds']=10
+        self.service=self.restart()
+        self.service.advance(self.old)
+        self.at(0); await self.cycle([self.new,self.new])
+        key=self.service.batch_key(self.service.turn['baseline'],self.service.turn['bubbles'])
+        (self.service.root/('send-'+key+'.json')).write_text(json.dumps({'status':'triggered','idempotency_key':key}))
+        self.at(11); await self.cycle([self.new])
+        self.assertFalse(self.service.paused)
+        self.assertEqual(self.calls,[])
+        self.assertIsNone(self.service.turn)
+
+    async def test_own_echo_is_not_human_reply(self):
+        self.config['turn_quiet_seconds']=10
+        self.service=self.restart()
+        self.service.advance(self.old)
+        reply=bubble('你好，我是AI客服助手。','outbound_visual')
+        self.at(0); await self.cycle([self.new,self.new])
+        # The customer wrote again just before our reply landed: the echo below it is ours, not a person's.
+        again=frame(*self.new['bubbles'],bubble('第二个问题'),reply)
+        self.at(11); await self.cycle([self.new,self.new,again])
+        self.at(12); await self.cycle([again,again])
+        self.assertEqual([b['text'] for b in self.service.turn['bubbles']],['第二个问题'])
+        self.at(23); await self.cycle([again,again,frame(*again['bubbles'],bubble('好的','outbound_visual'))])
+        self.assertEqual(sum(name=='send_message' for name,_ in self.calls),2)
+
     async def test_initial_start_does_not_reply_to_history(self):
         await self.cycle([self.new])
         self.model.assert_not_awaited()
@@ -506,6 +555,14 @@ class HistoryServiceTests(ServiceTests):
         await self.cycle([self.new])
         self.model.assert_not_awaited()
         self.assertEqual(self.texts(), ['old', '你好，介绍一下你自己'])
+
+    async def test_history_reply_blocks_send(self):
+        self.service.advance(self.old)
+        self.history.replied_after=unittest.mock.Mock(return_value=True)
+        await self.cycle([self.new,self.new,self.new])
+        self.assertFalse(any(name=='send_message' for name,_ in self.calls))
+        record=json.loads(next(self.service.root.glob('send-*.json')).read_text())
+        self.assertEqual(record['status'],'already_replied')
 
     async def test_send_uses_observed_title_for_alias(self):
         entry = {'recipient': '🍓示例联系人甲', 'kind': 'private', 'aliases': ['示例联系人甲']}
