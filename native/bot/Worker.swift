@@ -322,6 +322,15 @@ final class CaptureWorker {
             if resized { result["window_resized"]=true }
             return result
         }
+        // Dev-only: capture each save step under ~/.wechat-rpa/debug-save/ only when this request asks for it.
+        saveDebugDirectory = nil
+        if params["debug_save"] as? Bool == true {
+            saveDebugDirectory = base.appendingPathComponent("debug-save")
+            if let directory=saveDebugDirectory {
+                try? FileManager.default.removeItem(at:directory)
+                try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
+            }
+        }
         if operation == "prepare_file" {
             guard let id=params["media_id"] as? String,let snapshot=params["snapshot_id"] as? String else { throw Failure.invalid("missing_file_identity") }
             let frame=try capture(recipient,accepted:accepted,manage:manage)
@@ -337,7 +346,7 @@ final class CaptureWorker {
             if !FileManager.default.fileExists(atPath:destination.path) {
                 guard !fileAttempts.contains(id) else { throw Failure.invalid("previous_download_outcome_unknown") }
                 fileAttempts.insert(id)
-                try saveAttachment(item,window:cachedWindow,destination:destination)
+                try closingDialogsOnFailure { try saveAttachment(item,window:cachedWindow,destination:destination) }
             }
             try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:destination.path)
             try checkPrivate(destination,type:.typeRegular,mode:0o600)
@@ -362,7 +371,7 @@ final class CaptureWorker {
             if !FileManager.default.fileExists(atPath:saved.path) {
                 guard !fileAttempts.contains(id) else { throw Failure.invalid("previous_download_outcome_unknown") }
                 fileAttempts.insert(id)
-                try saveAttachment(item,window:cachedWindow,destination:saved,checkSize:false)
+                try closingDialogsOnFailure { try saveAttachment(item,window:cachedWindow,destination:saved,checkSize:false) }
             }
             let head=try Data(contentsOf:saved).prefix(8)
             let ext = head.starts(with:[0x89,0x50,0x4E,0x47]) ? "png" : head.starts(with:[0xFF,0xD8,0xFF]) ? "jpg" : ""
@@ -400,6 +409,14 @@ final class CaptureWorker {
                     "sha256":digest]
         }
         throw Failure.invalid("unsupported_operation")
+    }
+}
+
+/// A failed save must not leave a menu, save panel or "replace?" alert covering the chat.
+func closingDialogsOnFailure(_ body: () throws -> Void) throws {
+    do { try body() } catch {
+        try? key(53);pauseUI(0.2);try? key(53);pauseUI(0.2)
+        throw error
     }
 }
 
