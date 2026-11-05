@@ -61,7 +61,7 @@ class Policy:
         self.accepted = {clean_title(n) for n in (names or [recipient])}
 
     def check_frame(self, frame):
-        if frame.get('profile') != 'wechat-4-dark-1x':
+        if frame.get('profile') not in ('wechat-4-dark', 'wechat-4-light') or frame.get('scale') not in (1, 2):
             raise ValueError('uncalibrated visual profile')
         if frame.get('clipped_bubble'):
             raise ValueError('incomplete bottom bubble; no automatic reply')

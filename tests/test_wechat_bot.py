@@ -20,7 +20,7 @@ def bubble(text, direction='inbound_visual', digest=None):
 
 
 def frame(*bubbles, title='午夜咖啡'):
-    return {'profile': 'wechat-4-dark-1x', 'title_lines': [title], 'bubbles': list(bubbles)}
+    return {'profile': 'wechat-4-dark', 'scale': 1, 'title_lines': [title], 'bubbles': list(bubbles)}
 
 
 class BotPolicyTests(unittest.TestCase):
@@ -101,10 +101,20 @@ class BotPolicyTests(unittest.TestCase):
             policy.check_frame(frame(bubble('x'),title='别人'))
 
     def test_unknown_theme_rejected(self):
-        wrong = frame()
-        wrong['profile'] = 'light'
-        with self.assertRaisesRegex(ValueError, 'uncalibrated'):
-            self.policy.check_frame(wrong)
+        for profile, scale in [('light', 1), ('wechat-4-dark-1x', 1), ('wechat-4-dark', 3), ('wechat-4-light', None)]:
+            wrong = frame()
+            wrong['profile'] = profile
+            if scale is None: wrong.pop('scale')
+            else: wrong['scale'] = scale
+            with self.subTest(profile=profile, scale=scale), self.assertRaisesRegex(ValueError, 'uncalibrated'):
+                self.policy.check_frame(wrong)
+
+    def test_calibrated_themes_and_scales_accepted(self):
+        for profile in ['wechat-4-dark', 'wechat-4-light']:
+            for scale in [1, 2]:
+                ok = frame(bubble('x'))
+                ok['profile'], ok['scale'] = profile, scale
+                self.policy.check_frame(ok)
 
     def test_incomplete_latest_bubble_blocks_auto_reply(self):
         partial = frame(bubble('old'), bubble('Bot验证1104'))

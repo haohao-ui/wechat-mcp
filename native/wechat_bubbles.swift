@@ -44,6 +44,39 @@ func recognizeNow(_ image: CGImage) throws -> [Text] {
     }.sorted { $0.y < $1.y }
 }
 
+/// Calibrated colour rules for one WeChat 4.1.15 theme, applied in 880x640 1x coordinates.
+struct ThemeProfile {
+    let name: String
+    let isBackground: (Int,Int,Int) -> Bool
+    /// 0 = none, 1 = incoming (left) bubble fill, 2 = own (right, green) bubble fill.
+    let kind: (Int,Int,Int) -> Int
+    /// Anything that is not chat background; used to find media and file cards.
+    let isForeground: (Int,Int,Int) -> Bool
+}
+
+func isOwnGreen(_ r: Int, _ g: Int, _ b: Int) -> Bool { g > 110 && g > r+45 && g > b+30 }
+
+let darkProfile = ThemeProfile(name:"wechat-4-dark",
+    isBackground: { r,g,b in r < 37 && g < 37 && b < 37 },
+    kind: { r,g,b in
+        if isOwnGreen(r,g,b) { return 2 }
+        if r >= 38 && r <= 82 && abs(r-g) <= 8 && abs(r-b) <= 8 { return 1 }
+        return 0
+    },
+    isForeground: { r,g,b in max(r,max(g,b)) > 37 })
+
+let themeProfiles = [darkProfile]
+
+/// Picks the theme whose background fills most of the chat area; refuses light/unknown frames
+/// rather than interpreting arbitrary rectangles as messages.
+func detectTheme(_ pixels: [UInt8], count: Int) throws -> ThemeProfile {
+    let samples = stride(from:0,to:count,by:101).map { (Int(pixels[$0*4]),Int(pixels[$0*4+1]),Int(pixels[$0*4+2])) }
+    for profile in themeProfiles where samples.filter({ profile.isBackground($0.0,$0.1,$0.2) }).count > samples.count/2 {
+        return profile
+    }
+    throw Failure.invalid("uncalibrated_theme")
+}
+
 func analyzeFrame(_ full: CGImage, window: [String:Any], mediaRoot: URL? = nil, recipient: String? = nil) throws -> [String:Any] {
     guard let pointWidth = window["width"] as? Double, let pointHeight = window["height"] as? Double,
           window["on_screen"] as? Bool == true,
@@ -65,18 +98,10 @@ func analyzeFrame(_ full: CGImage, window: [String:Any], mediaRoot: URL? = nil, 
         context.draw(chat,in:CGRect(x:0,y:0,width:width,height:height)); return true
     }
     guard rendered else { throw Failure.invalid("bitmap_failed") }
+    let theme = try detectTheme(pixels, count:width*height)
     func color(_ index: Int) -> Int {
-        let r=Int(pixels[index*4]), g=Int(pixels[index*4+1]), b=Int(pixels[index*4+2])
-        if g > 110 && g > r+45 && g > b+30 { return 2 }
-        if r >= 38 && r <= 82 && abs(r-g) <= 8 && abs(r-b) <= 8 { return 1 }
-        return 0
+        theme.kind(Int(pixels[index*4]),Int(pixels[index*4+1]),Int(pixels[index*4+2]))
     }
-    // Refuse light/unknown themes rather than interpreting arbitrary rectangles as messages.
-    let background = stride(from:0,to:width*height,by:101).filter {
-        let r=Int(pixels[$0*4]),g=Int(pixels[$0*4+1]),b=Int(pixels[$0*4+2])
-        return r < 37 && g < 37 && b < 37
-    }.count
-    guard background > (width*height/101)/2 else { throw Failure.invalid("uncalibrated_theme") }
     var visited = [Bool](repeating:false,count:width*height)
     var regions: [(Box,Int)] = []
     var clippedBubble = false
@@ -121,7 +146,7 @@ func analyzeFrame(_ full: CGImage, window: [String:Any], mediaRoot: URL? = nil, 
     // Media rectangles have the same left anchor, but do not have a uniform text-bubble fill.
     var broadVisited=[Bool](repeating:false,count:width*height)
     func foreground(_ index: Int) -> Bool {
-        return max(pixels[index*4],max(pixels[index*4+1],pixels[index*4+2])) > 37
+        return theme.isForeground(Int(pixels[index*4]),Int(pixels[index*4+1]),Int(pixels[index*4+2]))
     }
     for start in 0..<(width*height) where !broadVisited[start] {
         broadVisited[start]=true
@@ -177,7 +202,7 @@ func analyzeFrame(_ full: CGImage, window: [String:Any], mediaRoot: URL? = nil, 
         bubbles.append(item)
     }
     bubbles.sort { ($0["y"] as! Int)<($1["y"] as! Int) }
-    let result: [String:Any] = ["profile":"wechat-4-dark-1x","title_lines":titleNames,
+    let result: [String:Any] = ["profile":theme.name,"scale":1,"title_lines":titleNames,
         "bubbles":bubbles,"platform_message_verified":false,"sender_verified":false,
         "width":full.width,"height":full.height,"clipped_bubble":clippedBubble]
     return result
