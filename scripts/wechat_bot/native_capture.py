@@ -38,8 +38,18 @@ fi
         await self.ssh('/bin/sh -s',script.replace(b'__OWNER__',self.owner_token.encode()))
         self.active=True
         # This one admitted GUI operation focuses the allowed chat and starts the helper in its TCC context.
-        await self.client.tool('get_messages',recipient=self.recipient)
+        await self.navigate(self.names)
         await self.connect()
+
+    async def navigate(self, names):
+        # The MCP navigation matches the title exactly; OCR may drop emoji, so try each configured name.
+        error=None
+        for name in names or [self.recipient]:
+            try:
+                return await self.client.tool('get_messages',recipient=name)
+            except Exception as failure:
+                error=failure
+        raise error
 
     async def retarget(self, recipient, directory, names=None):
         self.names=list(names or [recipient])
@@ -49,7 +59,7 @@ fi
             self.last_switch=await self.call('open_session',target=recipient,target_names=self.names)
         except ValueError as error:
             self.last_switch={'opened':False,'fallback':str(error)[:200]}
-            await self.client.tool('get_messages',recipient=recipient)
+            await self.navigate(self.names)
         self.recipient=recipient
         self.directory=Path(directory)
         await self.frame()  # The native worker verifies the full title before any new media is returned.

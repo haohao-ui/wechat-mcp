@@ -138,10 +138,13 @@ class MigrateTests(unittest.TestCase):
         store = self.store()
         self.assertEqual(store.resolve('acct', '乙'), b)
         store.conn.close()
+        with contextlib.redirect_stdout(io.StringIO()):
+            run('merge-contact', '--from', '乙', '--into', '甲')
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             run('history-status')
         status = json.loads(out.getvalue())
+        self.assertEqual(status['alias_suggestions'], [{'into': a, 'into_name': '甲', 'add_aliases': ['乙']}])
         self.assertEqual(status['messages'], 0)
         self.assertEqual(len(status['contacts']), 2)
         backup = self.base/'backup.sqlite3'

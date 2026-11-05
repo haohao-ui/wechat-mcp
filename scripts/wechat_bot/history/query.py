@@ -133,15 +133,15 @@ class HistoryQuery:
                 where.append(clause)
                 params.append(value)
         if cursor:
-            at, rid, cursor_order = decode_cursor(cursor, 3)
-            if cursor_order != order:
+            # Write order (rowid), not wall-clock time: a clock rollback cannot hide later messages.
+            rid, cursor_order = decode_cursor(cursor, 2)
+            if cursor_order != order or type(rid) is not int:
                 raise QueryError('invalid_argument', 'cursor order mismatch')
-            op = '>' if order == 'asc' else '<'
-            where.append(f'(m.observed_at {op} ? OR (m.observed_at = ? AND m.rowid {op} ?))')
-            params += [at, at, rid]
+            where.append('m.rowid > ?' if order == 'asc' else 'm.rowid < ?')
+            params.append(rid)
         return ' AND '.join(where), params
 
-    def _page(self, sql, params, limit, order, with_context=False):
+    def _page(self, sql, params, limit, order, with_context=False, tail=None):
         rows = self.conn.execute(sql, (*params, limit + 1)).fetchall()
         items = [self._message(r) for r in rows[:limit]]
         if with_context:
@@ -150,15 +150,20 @@ class HistoryQuery:
                     'SELECT message_id FROM messages WHERE contact_id=? AND seq BETWEEN ? AND ? AND seq != ? ORDER BY seq',
                     (item['contact_id'], item['seq'] - 2, item['seq'] + 2, item['seq']))]
         last = rows[limit - 1] if len(rows) > limit else None
-        return {'items': items, 'next_cursor': encode_cursor([last['observed_at'], last['rid'], order]) if last else None}
+        page = {'items': items, 'next_cursor': encode_cursor([last['rid'], order]) if last else None}
+        if order == 'asc':
+            # Always present: poll with it later to receive only messages written afterwards.
+            end = rows[min(len(rows), limit) - 1]['rid'] if rows else (decode_cursor(tail, 2)[0] if tail else 0)
+            page['tail_cursor'] = encode_cursor([end, 'asc'])
+        return page
 
     def get_history(self, contact_id, since=None, until=None, cursor=None, limit=100, order='asc'):
         check_limit(limit, 'history')
         _, family = self._family(contact_id)
         where, params = self._range(family, since, until, cursor, order)
         direction = 'ASC' if order == 'asc' else 'DESC'
-        return self._page(MESSAGE_SELECT + f'WHERE {where} ORDER BY m.observed_at {direction}, m.rowid {direction} LIMIT ?',
-                          params, limit, order)
+        return self._page(MESSAGE_SELECT + f'WHERE {where} ORDER BY m.rowid {direction} LIMIT ?',
+                          params, limit, order, tail=cursor)
 
     def get_recent_messages(self, contact_id, limit=None):
         limit = check_limit(self.default_recent if limit is None else limit, 'recent')
@@ -179,7 +184,7 @@ class HistoryQuery:
         else:
             where += " AND m.text LIKE ? ESCAPE '\\'"
             params.append('%' + q.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%')
-        return self._page(MESSAGE_SELECT + f'WHERE {where} ORDER BY m.observed_at DESC, m.rowid DESC LIMIT ?',
+        return self._page(MESSAGE_SELECT + f'WHERE {where} ORDER BY m.rowid DESC LIMIT ?',
                           params, limit, 'desc', with_context=True)
 
     def get_message(self, message_id):

@@ -164,7 +164,7 @@ python3 -m scripts.wechat_bot.control merge-contact --from 旧名或c_ID --into 
 python3 -m scripts.wechat_bot.control unmerge-contact --merge-id N
 ```
 
-`control history-status` 显示每个联系人的消息数和未匹配的识别名称（提示补别名）；`control history-backup --to <新文件>` 在线备份。
+名称最长 64 个字符。`control history-status` 显示每个联系人的消息数、未匹配的识别名称，以及合并后建议加进目标联系人 `aliases` 的名称（`alias_suggestions`，照做不会冲突）；`control history-backup --to <新文件>` 在线备份。
 
 ### 查询接口（只读）
 
@@ -186,6 +186,6 @@ curl -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:8765/v1/contacts/<conta
 curl -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:8765/v1/search?q=上次那个款"
 ```
 
-路由：`/v1/contacts`、`/v1/contacts/{id}`、`/v1/contacts/{id}/recent`、`/v1/contacts/{id}/messages`（`since`/`until` 毫秒、`cursor`、`limit`≤500、`order`）、`/v1/search`（`q`，少于 3 个字用模糊匹配）、`/v1/messages/{id}`、`/v1/media/{id}`。分页返回 `next_cursor`。
+路由：`/v1/contacts`、`/v1/contacts/{id}`、`/v1/contacts/{id}/recent`、`/v1/contacts/{id}/messages`（`since`/`until` 毫秒、`cursor`、`limit`≤500、`order`）、`/v1/search`（`q`，少于 3 个字用模糊匹配）、`/v1/messages/{id}`、`/v1/media/{id}`。分页返回 `next_cursor`（还有下一页时非空）；正序查询总会返回 `tail_cursor`，稍后用它查询即可只拿到之后写入的新消息。排序按写入顺序，不受系统时钟回拨影响。意外错误返回 JSON `500 internal`，不暴露内部细节。
 
 限制：只保存 Bot 实际看到的消息；时间为观察时间而非微信发送时间；`self_other` 不区分人工回复和未配对的 Bot 回显；名称依赖 OCR，需要时补别名。

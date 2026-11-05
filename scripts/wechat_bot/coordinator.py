@@ -214,8 +214,11 @@ class BotCoordinator:
                 key=record.get('idempotency_key')
                 if not key: continue
                 existing=self.history.send(key)
-                if existing is None and record.get('reply'):
-                    self.history.record_bot_reply(child.contact_id,key,record['reply'],record['status'],record.get('model',{}),[])
+                if existing is None and record.get('reply') and record.get('status') in ('attempting','triggered','unknown'):
+                    # Only replies that were (or may have been) sent; placed at their journal time.
+                    at=record.get('attempted_at',record.get('created_at'))
+                    self.history.record_bot_reply(child.contact_id,key,record['reply'],record['status'],record.get('model',{}),[],
+                                                  observed_at=int(at*1000) if at else None)
                     existing=self.history.send(key)
                 if existing and (existing['status']!=record['status'] or
                                  ('client_echo_observed' in record and existing['echo_observed']!=int(bool(record['client_echo_observed'])))):

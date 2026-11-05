@@ -95,6 +95,9 @@ class HistoryStore:
         names = candidate_names(entry)
         with self.transaction():
             owners = set().union(*(self._owners(account_id, name_key(n), follow_merge=follow_merge) for n in names))
+            if len(owners) > 1 and len({self.canonical(o) for o in owners}) == 1:
+                # The entry names a merge target together with contacts merged into it: use the target.
+                owners = {self.canonical(owners.pop())}
             if len(owners) > 1:
                 raise NameConflict('names of %r belong to different contacts' % entry['recipient'])
             stamp = now_ms()
@@ -159,7 +162,8 @@ class HistoryStore:
 
     # Messages -------------------------------------------------------------
 
-    EXCLUDED_SEND = ('superseded', 'stopped_before_send', 'skipped_by_rule')
+    # Replies that certainly never reached the chat stay out of model context (attempting/unknown may have).
+    EXCLUDED_SEND = ('superseded', 'stopped_before_send', 'skipped_by_rule', 'generated', 'preparing_media', 'generating')
 
     def record_frame(self, contact_id, frame, *, batch_key=None, baseline_meta=None, pair_imported=False):
         """Append bubbles not yet recorded for this contact; one transaction with the watermark."""
