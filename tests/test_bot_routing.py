@@ -199,6 +199,14 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         capture.retarget.assert_awaited_once_with('b',child.root,['b'])
         self.assertEqual(self.coordinator.active_name,'b')
 
+    async def test_window_resize_by_worker_is_logged(self):
+        from scripts.wechat_bot.native_capture import NativeCapture
+        capture=NativeCapture('fixture',None,'a',self.root/'a')
+        capture.call=AsyncMock(return_value={'profile':'wechat-4-light','scale':2,'window_resized':True})
+        with patch('scripts.wechat_bot.service.log_event') as logged:
+            await capture.frame()
+        logged.assert_called_once_with('window_resized',profile='wechat-4-light',scale=2)
+
     async def test_native_retarget_switches_recipient_and_directory(self):
         from scripts.wechat_bot.native_capture import NativeCapture
         capture=NativeCapture('fixture',AsyncMock(),'a',self.root/'a')

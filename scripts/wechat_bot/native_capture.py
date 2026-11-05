@@ -102,7 +102,11 @@ fi
         return response['result']
 
     async def frame(self):
-        return await self.call('capture')
+        result=await self.call('capture')
+        if result.get('window_resized'):
+            from .service import log_event  # Lazy: service imports this module.
+            log_event('window_resized',profile=result.get('profile'),scale=result.get('scale'))
+        return result
 
     async def sessions(self, names, debug=False):
         # Read-only probe of the left session list; only allowlisted rows are returned.
