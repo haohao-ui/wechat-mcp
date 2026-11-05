@@ -4,10 +4,77 @@ import CoreGraphics
 import ImageIO
 import Vision
 import CryptoKit
+import AppKit
 
 enum Failure: Error { case invalid(String) }
 struct Box { let x: Int; let y: Int; let width: Int; let height: Int }
 struct Text { let body: String; let x: Double; let y: Double }
+
+private var layoutCache: (path: String, modified: Date?, layout: WechatLayout)?
+
+func wechatAppVersion() -> String? {
+    let ids = ["com.tencent.xinWeChat", "com.tencent.WeChat"]
+    for id in ids {
+        if let app = NSRunningApplication.runningApplications(withBundleIdentifier: id).first {
+            if let bundleURL = app.bundleURL,
+               let bundle = Bundle(url: bundleURL),
+               let ver = bundle.infoDictionary?["CFBundleShortVersionString"] as? String,
+               !ver.isEmpty {
+                return ver
+            }
+        }
+    }
+    return nil
+}
+
+func currentLayout() throws -> WechatLayout {
+    let env = ProcessInfo.processInfo.environment
+    let path: String
+    if let explicit = env["WECHAT_LAYOUT"]?.trimmingCharacters(in: .whitespaces), !explicit.isEmpty {
+        path = explicit
+    } else {
+        guard let ver = wechatAppVersion() else {
+            throw Failure.invalid("layout_missing")
+        }
+        let layoutDir = env["WECHAT_LAYOUT_DIR"] ?? (NSHomeDirectory() + "/.wechat-rpa/layout")
+        guard let found = WechatLayout.path(forVersion: ver, directory: layoutDir) else {
+            throw Failure.invalid("layout_missing")
+        }
+        path = found
+    }
+
+    guard FileManager.default.fileExists(atPath: path) else {
+        throw Failure.invalid("layout_missing")
+    }
+
+    let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+    let modified = attrs?[.modificationDate] as? Date
+
+    if let cached = layoutCache, cached.path == path, cached.modified == modified {
+        return cached.layout
+    }
+
+    let loaded: WechatLayout
+    do {
+        loaded = try WechatLayout.load(path: path)
+    } catch let err as LayoutError {
+        throw Failure.invalid(err.description)
+    } catch {
+        throw Failure.invalid("layout_unreadable")
+    }
+
+    layoutCache = (path, modified, loaded)
+    return loaded
+}
+
+func layoutRegion(_ layout: WechatLayout, _ name: String) throws -> CGRect {
+    do {
+        let r = try layout.region(name)
+        return CGRect(x:r.x, y:r.y, width:r.w, height:r.h)
+    } catch let err as LayoutError {
+        throw Failure.invalid(err.description)
+    }
+}
 
 func recognize(_ image: CGImage, timeout: Double = 12) throws -> [Text] {
     let completed = DispatchSemaphore(value:0)
@@ -214,65 +281,96 @@ struct ThemeProfile {
 
 func isOwnGreen(_ r: Int, _ g: Int, _ b: Int) -> Bool { g > 110 && g > r+45 && g > b+30 }
 
-let darkProfile = ThemeProfile(name:"wechat-4-dark",
-    isBackground: { r,g,b in r < 37 && g < 37 && b < 37 },
-    kind: { r,g,b in
-        if isOwnGreen(r,g,b) { return 2 }
-        if r >= 38 && r <= 82 && abs(r-g) <= 8 && abs(r-b) <= 8 { return 1 }
-        return 0
-    },
-    isForeground: { r,g,b in max(r,max(g,b)) > 37 })
-
-// Calibrated 2026-11-05 on WeChat 4.1.15: chat background (250,250,250), incoming bubble
-// (238,238,240), own bubble (157,242,159) — the same green rule as dark.
-let lightProfile = ThemeProfile(name:"wechat-4-light",
-    isBackground: { r,g,b in r >= 246 && g >= 246 && b >= 246 },
-    kind: { r,g,b in
-        if isOwnGreen(r,g,b) { return 2 }
-        if r >= 228 && r <= 244 && abs(r-g) <= 8 && abs(r-b) <= 8 { return 1 }
-        return 0
-    },
-    isForeground: { r,g,b in min(r,min(g,b)) < 246 })
-
-let themeProfiles = [darkProfile, lightProfile]
+func themeProfiles(_ layout: WechatLayout) -> [ThemeProfile] {
+    var profiles: [ThemeProfile] = []
+    if let dark = layout.themes["wechat-4-dark"],
+       let bgMax = dark.backgroundMax,
+       let incoming = dark.incoming, incoming.count == 2 {
+        let low = incoming[0], high = incoming[1]
+        profiles.append(ThemeProfile(
+            name: "wechat-4-dark",
+            isBackground: { r, g, b in r < bgMax && g < bgMax && b < bgMax },
+            kind: { r, g, b in
+                if isOwnGreen(r, g, b) { return 2 }
+                if r >= low && r <= high && abs(r - g) <= 8 && abs(r - b) <= 8 { return 1 }
+                return 0
+            },
+            isForeground: { r, g, b in max(r, max(g, b)) > bgMax }
+        ))
+    }
+    if let light = layout.themes["wechat-4-light"],
+       let bgMin = light.backgroundMin,
+       let incoming = light.incoming, incoming.count == 2 {
+        let low = incoming[0], high = incoming[1]
+        profiles.append(ThemeProfile(
+            name: "wechat-4-light",
+            isBackground: { r, g, b in r >= bgMin && g >= bgMin && b >= bgMin },
+            kind: { r, g, b in
+                if isOwnGreen(r, g, b) { return 2 }
+                if r >= low && r <= high && abs(r - g) <= 8 && abs(r - b) <= 8 { return 1 }
+                return 0
+            },
+            isForeground: { r, g, b in min(r, min(g, b)) < bgMin }
+        ))
+    }
+    return profiles
+}
 
 /// Picks the theme whose background fills most of the chat area; refuses light/unknown frames
 /// rather than interpreting arbitrary rectangles as messages.
-func detectTheme(_ pixels: [UInt8], count: Int) throws -> ThemeProfile {
+func detectTheme(_ pixels: [UInt8], count: Int, profiles: [ThemeProfile]) throws -> ThemeProfile {
     let samples = stride(from:0,to:count,by:101).map { (Int(pixels[$0*4]),Int(pixels[$0*4+1]),Int(pixels[$0*4+2])) }
-    for profile in themeProfiles where samples.filter({ profile.isBackground($0.0,$0.1,$0.2) }).count > samples.count/2 {
+    for profile in profiles where samples.filter({ profile.isBackground($0.0,$0.1,$0.2) }).count > samples.count/2 {
         return profile
     }
     throw Failure.invalid("uncalibrated_theme")
 }
 
-/// Maps a 1x or Retina (2x) capture of the 880x640-point window onto the calibrated 1x pixel grid.
+func detectTheme(_ pixels: [UInt8], count: Int) throws -> ThemeProfile {
+    let layout = try currentLayout()
+    return try detectTheme(pixels, count: count, profiles: themeProfiles(layout))
+}
+
+/// Maps a 1x or Retina (2x) capture of the window onto the calibrated 1x pixel grid.
 /// All layout constants and colour rules are defined on that grid; the original stays available
 /// for full-resolution media crops.
 func normalizedFrame(_ captured: CGImage, window: [String:Any]) throws -> (image: CGImage, scale: Int) {
+    let layout = try currentLayout()
+    let targetWidth = layout.window.width
+    let targetHeight = layout.window.height
+    let twInt = Int(targetWidth)
+    let thInt = Int(targetHeight)
     guard let pointWidth = window["width"] as? Double, let pointHeight = window["height"] as? Double,
           window["on_screen"] as? Bool == true,
-          pointWidth.rounded() == 880, pointHeight.rounded() == 640,
-          let scale = [1,2].first(where: { captured.width == 880*$0 && captured.height == 640*$0 }) else {
+          pointWidth.rounded() == targetWidth, pointHeight.rounded() == targetHeight,
+          let scale = [1,2].first(where: { captured.width == twInt*$0 && captured.height == thInt*$0 }) else {
         throw Failure.invalid("unsupported_image_geometry")
     }
     if scale == 1 { return (captured, 1) }
-    guard let context = CGContext(data:nil,width:880,height:640,bitsPerComponent:8,bytesPerRow:0,
+    guard let context = CGContext(data:nil,width:twInt,height:thInt,bitsPerComponent:8,bytesPerRow:0,
             space:CGColorSpaceCreateDeviceRGB(),
             bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else {
         throw Failure.invalid("bitmap_failed")
     }
     context.interpolationQuality = .high
-    context.draw(captured,in:CGRect(x:0,y:0,width:880,height:640))
+    context.draw(captured,in:CGRect(x:0,y:0,width:targetWidth,height:targetHeight))
     guard let image = context.makeImage() else { throw Failure.invalid("bitmap_failed") }
     return (image, scale)
 }
 
 func analyzeFrame(_ captured: CGImage, window: [String:Any], mediaRoot: URL? = nil, recipient: String? = nil, group: Bool = false) throws -> [String:Any] {
+    let layout = try currentLayout()
+    let titleRegion: WindowRect
+    let chatContentRegion: WindowRect
+    do {
+        titleRegion = try layout.region("title")
+        chatContentRegion = try layout.region("chat_content")
+    } catch let err as LayoutError {
+        throw Failure.invalid(err.description)
+    }
     let (full, scale) = try normalizedFrame(captured, window:window)
-    guard let title = full.cropping(to:CGRect(x:250,y:0,width:full.width-260,height:50)),
-          // Ends at the input separator (y=496): a fully scrolled last bubble keeps ~8px above it.
-          let chat = full.cropping(to:CGRect(x:315,y:60,width:full.width-325,height:full.height-204)) else {
+    guard let title = full.cropping(to:CGRect(x:titleRegion.x,y:titleRegion.y,width:titleRegion.w,height:titleRegion.h)),
+          let chat = full.cropping(to:CGRect(x:chatContentRegion.x,y:chatContentRegion.y,width:chatContentRegion.w,height:chatContentRegion.h)) else {
         throw Failure.invalid("unsupported_image_geometry")
     }
     let titleNames = try recognize(title).filter { $0.x >= 50 && $0.x < 220 }.map(\.body)
@@ -286,7 +384,7 @@ func analyzeFrame(_ captured: CGImage, window: [String:Any], mediaRoot: URL? = n
         context.draw(chat,in:CGRect(x:0,y:0,width:width,height:height)); return true
     }
     guard rendered else { throw Failure.invalid("bitmap_failed") }
-    let theme = try detectTheme(pixels, count:width*height)
+    let theme = try detectTheme(pixels, count:width*height, profiles:themeProfiles(layout))
     func color(_ index: Int) -> Int {
         theme.kind(Int(pixels[index*4]),Int(pixels[index*4+1]),Int(pixels[index*4+2]))
     }
@@ -379,7 +477,9 @@ func analyzeFrame(_ captured: CGImage, window: [String:Any], mediaRoot: URL? = n
         if isImage {
             // Pixels change while WeChat loads an image; continuity uses its size plus a perceptual hash.
             item["digest"]=SHA256.hash(data:Data("image:\(box.width/4):\(box.height/4)".utf8)).map { String(format:"%02x",$0) }.joined()
-            let rect=CGRect(x:(315+box.x)*scale,y:(60+box.y)*scale,width:box.width*scale,height:box.height*scale)
+            let chatX = Int(chatContentRegion.x)
+            let chatY = Int(chatContentRegion.y)
+            let rect=CGRect(x:(chatX+box.x)*scale,y:(chatY+box.y)*scale,width:box.width*scale,height:box.height*scale)
             guard let region=captured.cropping(to:rect) else { throw Failure.invalid("media_crop_failed") }
             item["phash"]=try differenceHash(region)
         }
@@ -395,7 +495,9 @@ func analyzeFrame(_ captured: CGImage, window: [String:Any], mediaRoot: URL? = n
             let path=directory.appendingPathComponent(digest+".png")
             if !FileManager.default.fileExists(atPath:path.path) {
                 // Crop media from the original capture so Retina images keep their full resolution.
-                guard let cropped=captured.cropping(to:CGRect(x:(315+box.x)*scale,y:(60+box.y)*scale,
+                let chatX = Int(chatContentRegion.x)
+                let chatY = Int(chatContentRegion.y)
+                guard let cropped=captured.cropping(to:CGRect(x:(chatX+box.x)*scale,y:(chatY+box.y)*scale,
                                                               width:box.width*scale,height:box.height*scale)),
                       let destination=CGImageDestinationCreateWithURL(path as CFURL,"public.png" as CFString,1,nil) else { throw Failure.invalid("media_crop_failed") }
                 CGImageDestinationAddImage(destination,cropped,nil)

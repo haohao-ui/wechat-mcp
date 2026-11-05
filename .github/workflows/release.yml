@@ -48,8 +48,8 @@ jobs:
           swiftc -O -target arm64-apple-macos13 native/click/main.swift native/common/*.swift native/action/*.swift -o /tmp/wechat_click-arm64
           swiftc -O -target x86_64-apple-macos13 native/click/main.swift native/common/*.swift native/action/*.swift -o /tmp/wechat_click-x86_64
           lipo -create -output "dist/$OUT/wechat_click" /tmp/wechat_click-arm64 /tmp/wechat_click-x86_64
-          swiftc -O -parse-as-library -target arm64-apple-macos13 native/wechat_bubbles.swift -o /tmp/wechat_bubbles-arm64
-          swiftc -O -parse-as-library -target x86_64-apple-macos13 native/wechat_bubbles.swift -o /tmp/wechat_bubbles-x86_64
+          swiftc -O -parse-as-library -target arm64-apple-macos13 native/wechat_bubbles.swift native/common/*.swift -o /tmp/wechat_bubbles-arm64
+          swiftc -O -parse-as-library -target x86_64-apple-macos13 native/wechat_bubbles.swift native/common/*.swift -o /tmp/wechat_bubbles-x86_64
           lipo -create -output "dist/$OUT/wechat_bubbles" /tmp/wechat_bubbles-arm64 /tmp/wechat_bubbles-x86_64
           swiftc -O -parse-as-library -D BOT_WORKER -target arm64-apple-macos12 native/wechat_bubbles.swift native/common/*.swift native/action/*.swift native/bot/*.swift -o /tmp/wechat_bot_worker-arm64
           swiftc -O -parse-as-library -D BOT_WORKER -target x86_64-apple-macos12 native/wechat_bubbles.swift native/common/*.swift native/action/*.swift native/bot/*.swift -o /tmp/wechat_bot_worker-x86_64
@@ -62,6 +62,7 @@ jobs:
           lipo -create -output "dist/$OUT/wechat_runtime" /tmp/wechat_runtime-arm64 /tmp/wechat_runtime-x86_64
           cp README.md gateway.example.json "dist/$OUT/"
           cp -R skills "dist/$OUT/"
+          cp -R native/layout "dist/$OUT/"
           tar -C dist -czf "dist/$OUT.tar.gz" "$OUT"
           (cd dist && shasum -a 256 "$OUT.tar.gz" > "$OUT.tar.gz.sha256")
       - name: 发布 GitHub Release

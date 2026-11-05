@@ -5,9 +5,6 @@ import Foundation
 import CoreGraphics
 import CryptoKit
 
-// Calibrated for the 880x640 1x dark WeChat 4 window used by analyzeFrame.
-let sessionListRect = CGRect(x:60, y:60, width:240, height:580)
-
 /// Trims whitespace and zero-width characters only; same rule as Python `clean_title`.
 func cleanTitle(_ raw: String) -> String {
     let invisible: Set<Unicode.Scalar> = Set((0x200B...0x200F).compactMap(Unicode.Scalar.init) + [Unicode.Scalar(0x2060)!, Unicode.Scalar(0xFEFF)!])
@@ -60,7 +57,9 @@ final class SessionProbe {
     var cachedRows: [SessionRow] = []
 
     func probe(_ full: CGImage, names: [String], debug: Bool = false) throws -> [String:Any] {
-        guard full.width == 880, full.height == 640, let list = full.cropping(to:sessionListRect) else {
+        let layout = try currentLayout()
+        let sessionListRect = try layoutRegion(layout, "session_list")
+        guard full.width == Int(layout.window.width), full.height == Int(layout.window.height), let list = full.cropping(to:sessionListRect) else {
             throw Failure.invalid("unsupported_image_geometry")
         }
         let width = list.width, height = list.height
@@ -102,8 +101,10 @@ final class SessionProbe {
 }
 
 func titleNames(_ full: CGImage) throws -> [String] {
-    guard full.width == 880, full.height == 640,
-          let title = full.cropping(to:CGRect(x:250,y:0,width:full.width-260,height:50)) else {
+    let layout = try currentLayout()
+    let titleRect = try layoutRegion(layout, "title")
+    guard full.width == Int(layout.window.width), full.height == Int(layout.window.height),
+          let title = full.cropping(to:titleRect) else {
         throw Failure.invalid("unsupported_image_geometry")
     }
     return try recognize(title).filter { $0.x >= 50 && $0.x < 220 }.map(\.body)
@@ -121,8 +122,10 @@ func openSessionRow(_ targets: [String], probe: SessionProbe, capture: () throws
     _ = try probe.probe(image, names:targets)
     let matches = probe.cachedRows.filter { accepted.contains(cleanTitle($0.name)) }
     guard matches.count == 1, let row = matches.first else { throw Failure.invalid("session_row_not_unique_or_missing") }
+    let layout = try currentLayout()
+    let sessionListRect = try layoutRegion(layout, "session_list")
     let x = window["x"] as! Double, y = window["y"] as! Double
-    let local = CGPoint(x:sessionListRect.midX, y:sessionListRect.minY + row.y + 12)
+    let local = CGPoint(x:sessionListRect.midX, y:sessionListRect.minY + row.y + layout.sessionRow.nameOffset)
     // The press lands up to 12pt from this point (effective region of the 40pt row target): keep it in the list.
     guard sessionListRect.insetBy(dx:0, dy:12).contains(local) else { throw Failure.invalid("session_row_out_of_bounds") }
     let point = CGPoint(x:x + local.x, y:y + local.y)
