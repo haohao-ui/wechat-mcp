@@ -10,7 +10,7 @@ import time
 import unicodedata
 
 from scripts.agent_bridge.codex import private_directory
-from scripts.wechat_bot.policy import AmbiguousAnchor, ContinuityGap, echo_matches, fingerprint, new_bubbles, reconcile
+from scripts.wechat_bot.policy import AmbiguousAnchor, ContinuityGap, echo_matches, fingerprint, new_bubbles, phash_distance, PHASH_TOLERANCE, reconcile
 from .names import candidate_names, name_key
 from .schema import MIGRATIONS
 
@@ -276,15 +276,21 @@ class HistoryStore:
                                 capture=capture, send_key=send_key, observed_at=observed_at)['message_id']
 
     def match_recent_inbound(self, contact_id, bubbles):
-        """Message IDs of the newest recorded inbound messages matching these bubbles, in order."""
-        rows = list(self.conn.execute("SELECT message_id, bubble_digest FROM messages WHERE contact_id=? AND direction='inbound' ORDER BY seq DESC LIMIT 200", (contact_id,)))
+        """Message IDs of the newest recorded inbound messages matching these bubbles, in order.
+
+        Images also need a phash within tolerance: same-size screenshots share one size digest."""
+        rows = list(self.conn.execute("SELECT message_id, bubble_digest, meta FROM messages WHERE contact_id=? AND direction='inbound' ORDER BY seq DESC LIMIT 200", (contact_id,)))
         found, used = [], set()
         for bubble in reversed(bubbles):
-            for message_id, digest in rows:
-                if message_id not in used and digest == bubble.get('digest'):
-                    used.add(message_id)
-                    found.append(message_id)
-                    break
+            for message_id, digest, meta in rows:
+                if message_id in used or digest != bubble.get('digest'):
+                    continue
+                stored = json.loads(meta or '{}').get('phash')
+                if bubble.get('phash') and stored and phash_distance(stored, bubble['phash']) > PHASH_TOLERANCE:
+                    continue
+                used.add(message_id)
+                found.append(message_id)
+                break
         return found[::-1]
 
     def replied_after(self, contact_id, message_ids):

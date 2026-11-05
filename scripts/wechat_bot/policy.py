@@ -38,23 +38,54 @@ def phash_distance(a, b):
     return bin(int(a, 16) ^ int(b, 16)).count('1')
 
 
+def same_bubble(old, new):
+    if old['direction'] != new['direction'] or old['digest'] != new['digest']:
+        return False
+    if old.get('phash') and new.get('phash'):
+        return phash_distance(old['phash'], new['phash']) <= PHASH_TOLERANCE
+    return old.get('phash') == new.get('phash')
+
+
+def relocate(items, current):
+    """`items` with each image/file replaced by its counterpart in `current` (fresh media_id and geometry).
+
+    Media IDs are tied to the frame they were captured in; items no longer on screen stay unchanged.
+    """
+    used, result = set(), []
+    for item in items:
+        match = None
+        if item.get('kind') in ('image', 'file'):
+            candidates = [(index, b) for index, b in enumerate(current)
+                          if index not in used and b.get('kind') == item['kind'] and same_bubble(item, b)]
+            if candidates:
+                match = min(candidates, key=lambda pair: phash_distance(pair[1]['phash'], item['phash'])
+                            if item.get('phash') and pair[1].get('phash') else 0)
+        if match is None:
+            result.append(item)
+        else:
+            used.add(match[0])
+            result.append({**match[1], 'phash': item.get('phash', match[1].get('phash'))})
+    return result
+
+
 def reconcile(previous, current):
-    """Copy of `current` where each image matching a previous one (same direction and size digest,
-    phash within tolerance) takes that image's identity, so loading never looks like a new message."""
+    """Copy of `current` where images inside the overlap with `previous` take the previous identity.
+
+    Only position-aligned images are matched, in the longest suffix/prefix overlap that also holds a
+    non-image bubble: a lone similar-looking screenshot never inherits a scrolled-away image's identity.
+    """
     result = [dict(b) for b in current]
-    used = set()
-    for item in result:
-        if not item.get('phash'):
+    for size in range(min(len(previous), len(current)), 0, -1):
+        window = list(zip(previous[-size:], result[:size]))
+        if not all(same_bubble(old, new) for old, new in window):
             continue
-        for index, old in enumerate(previous):
-            if (index in used or not old.get('phash') or old['direction'] != item['direction']
-                    or old['digest'] != item['digest']):
-                continue
-            if phash_distance(old['phash'], item['phash']) <= PHASH_TOLERANCE:
-                used.add(index)
+        if all(new.get('kind') == 'image' for _, new in window):
+            continue
+        for old, new in window:
+            if new.get('phash'):
                 # media_id stays current: the newest pixels are the loaded image, not the blurred preview.
-                item['phash'] = old['phash']
-                break
+                new['phash'] = old['phash']
+        break
     return result
 
 

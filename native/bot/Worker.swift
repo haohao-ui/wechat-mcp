@@ -286,11 +286,12 @@ final class CaptureWorker {
             let point=CGPoint(x:wx+315+282,y:wy+60+218)
             guard let move=CGEvent(mouseEventSource:nil,mouseType:.mouseMoved,mouseCursorPosition:point,mouseButton:.left) else { throw Failure.invalid("mouse_event_failed") }
             move.post(tap:.cghidEventTap);pauseUI(0.1)
-            for _ in 0..<pages {
+            // One "page" is three 10-line wheel ticks (about one chat height; calibrated on the remote Mac).
+            for _ in 0..<(pages*3) {
                 guard let wheel=CGEvent(scrollWheelEvent2Source:nil,units:.line,wheelCount:1,
-                                        wheel1:Int32(direction=="up" ? 12 : -12),wheel2:0,wheel3:0) else { throw Failure.invalid("scroll_event_failed") }
+                                        wheel1:Int32(direction=="up" ? 10 : -10),wheel2:0,wheel3:0) else { throw Failure.invalid("scroll_event_failed") }
                 wheel.location=point
-                wheel.post(tap:.cghidEventTap);pauseUI(0.15)
+                wheel.post(tap:.cghidEventTap);pauseUI(0.1)
             }
             pauseUI(0.3)
             return try capture(recipient,accepted:accepted,manage:manage)

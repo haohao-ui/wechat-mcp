@@ -133,12 +133,13 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         current=frame(bubble('old'),img)
         reply=bubble('你好，我是AI客服助手。','outbound_visual')
         capture=type('Capture',(),{})()
-        capture.frame=AsyncMock(side_effect=copy.deepcopy([current,current,current,frame(bubble('old'),img,reply)]))
-        capture.attachments=AsyncMock(return_value=([{'path':'x.png','label':'第1张图片','source':'chat_thumbnail','bubble':img}],[],[]))
+        capture.frame=AsyncMock(side_effect=copy.deepcopy([current,current,current,current,frame(bubble('old'),img,reply)]))
+        shot=self.root/'x.png';shot.write_bytes(b'\x89PNG\r\n\x1a\nx')
+        capture.attachments=AsyncMock(return_value=([{'path':shot,'label':'第1张图片','source':'chat_thumbnail','bubble':img}],[],[]))
         with patch('scripts.wechat_bot.service.generate',self.model):
             await self.service.cycle(self.client,capture)
         self.model.assert_awaited_once()
-        self.assertEqual(self.model.await_args.kwargs['images'],['x.png'])
+        self.assertEqual(self.model.await_args.kwargs['images'],[shot])
 
     def test_config_turn_keys_validated(self):
         path=self.root/'config.json'
@@ -198,6 +199,18 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([b['text'] for b in self.service.turn['bubbles']],['第二个问题'])
         self.at(23); await self.cycle([again,again,frame(*again['bubbles'],bubble('好的','outbound_visual'))])
         self.assertEqual(sum(name=='send_message' for name,_ in self.calls),2)
+
+    async def test_ocr_noisy_own_echo_is_not_human_reply(self):
+        # Review C3: OCR reads 'AI' as 'Al'; the echo is still ours, so the next turn must survive.
+        self.config['turn_quiet_seconds']=10
+        self.service=self.restart()
+        self.service.advance(self.old)
+        noisy=bubble('你好，我是Al客服助手。','outbound_visual')
+        again=frame(*self.new['bubbles'],bubble('第二个问题'),noisy)
+        self.at(0); await self.cycle([self.new,self.new])
+        self.at(11); await self.cycle([self.new,self.new,again])
+        self.at(12); await self.cycle([again,again])
+        self.assertEqual([b['text'] for b in self.service.turn['bubbles']],['第二个问题'])
 
     async def test_initial_start_does_not_reply_to_history(self):
         await self.cycle([self.new])
@@ -285,6 +298,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         capture=type('Capture',(),{})()
         capture.frame=AsyncMock(side_effect=copy.deepcopy(frames))
         capture.scroll=AsyncMock(side_effect=copy.deepcopy(pages))
+        capture.attachments=AsyncMock(return_value=([],[],[]))
         with patch('scripts.wechat_bot.service.generate',self.model), \
              patch('scripts.wechat_bot.service.log_event') as log:
             await self.service.cycle(self.client,capture)
@@ -305,11 +319,48 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('c',text.split('\n'))
         self.assertIn('TALL',text.split('\n'))
 
+    async def test_scrolled_pages_tolerate_image_hash_jitter(self):
+        # Review I6: the same image captured at two scroll positions may differ by a few dHash bits.
+        img=lambda h:{'text':'[图片]','digest':'image:50:40','phash':h,'direction':'inbound_visual','kind':'image','media_id':h*4}
+        a,b,c,d=bubble('a'),bubble('b'),bubble('c'),bubble('d')
+        self.service.advance(frame(a,b))
+        bottom=frame(c,img('00000000000000ff'),d)
+        reply=bubble('你好，我是AI客服助手。','outbound_visual')
+        capture,events=await self.scroll_cycle([bottom,bottom,bottom,bottom,bottom,frame(*bottom['bubbles'],reply)],
+                                               [frame(b,c,img('000000000000000f')),bottom,bottom])
+        self.assertIn('continuity_gap_recovered',events)
+        self.assertIn('d',self.model.await_args.args[0].split('\n'))
+
+    async def test_lost_scroll_down_is_retried_before_giving_up(self):
+        # Review I9: the first scroll down did not reach the bottom; one overshoot burst fixes it.
+        a,b,c,tall=bubble('a'),bubble('b'),bubble('c'),bubble('TALL')
+        self.service.advance(frame(a,b))
+        bottom=frame(tall)
+        reply=bubble('你好，我是AI客服助手。','outbound_visual')
+        capture,events=await self.scroll_cycle([bottom,frame(b,c),bottom,bottom,bottom,frame(tall,reply)],
+                                               [frame(b,c,tall),frame(b,c),bottom])
+        self.assertIn('continuity_gap_recovered',events)
+        self.model.assert_awaited_once()
+
+    async def test_far_anchor_found_after_several_pages(self):
+        # Review I5: nine tall images need several scroll pages before the cursor shows again.
+        a,b,tall=bubble('a'),bubble('b'),bubble('TALL')
+        self.service.advance(frame(a,b))
+        bottom=frame(tall)
+        reply=bubble('你好，我是AI客服助手。','outbound_visual')
+        m=[bubble('m%d'%n) for n in range(1,5)]
+        ups=[frame(m[3],tall),frame(m[2],m[3]),frame(m[1],m[2]),frame(m[0],m[1]),frame(b,m[0])]
+        _,events=await self.scroll_cycle([bottom,bottom,bottom,bottom,frame(tall,reply)],ups+[bottom,bottom])
+        self.assertIn('continuity_gap_recovered',events)
+
     async def test_scroll_recovery_requires_return_to_bottom(self):
         a,b,c,tall=bubble('a'),bubble('b'),bubble('c'),bubble('TALL')
         old=frame(a,b)
         self.service.advance(old)
-        capture,events=await self.scroll_cycle([frame(tall),frame(tall,bubble('X'))],[frame(b,c,tall),frame(tall)])
+        moved=frame(tall,bubble('X'))
+        capture,events=await self.scroll_cycle([frame(tall),moved,moved],[frame(b,c,tall),frame(tall),frame(tall)])
+        self.assertEqual(capture.scroll.await_args_list[-1].args,('down',))
+        self.assertEqual(capture.scroll.await_args_list[-1].kwargs,{'pages':5})
         self.model.assert_not_awaited()
         self.assertEqual(self.service.cursor,old)
         self.assertEqual(json.loads((self.service.root/'health.json').read_text())['state'],'waiting_for_stable_frame')
@@ -385,6 +436,21 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls,[])
         record=json.loads(next(self.service.root.glob('send-*.json')).read_text())
         self.assertEqual(record['status'],'stopped_before_send')
+
+    async def test_turn_stopped_before_send_is_answered_after_restart(self):
+        # Review I4: a stop (launchd restart, deploy) after generation must not lose the turn.
+        self.service.advance(self.old)
+        async def stop_model(*_,**__):
+            self.service.stop.set()
+            return '你好，我是AI客服助手。'
+        self.model.side_effect=stop_model
+        await self.cycle([self.new,self.new])
+        self.service=self.restart()
+        self.model.side_effect=None
+        reply=bubble('你好，我是AI客服助手。','outbound_visual')
+        await self.cycle([self.new,self.new,frame(*self.new['bubbles'],reply)])
+        self.assertEqual(sum(name=='send_message' for name,_ in self.calls),1)
+        self.assertFalse(self.service.paused)
 
     async def test_rate_limit_preserves_pending_input(self):
         self.service.advance(self.old)
@@ -551,6 +617,17 @@ class HistoryServiceTests(ServiceTests):
         self.assertEqual(list(self.service.root.glob('send-*.json')), [])
         self.assertEqual(json.loads((self.service.root/'health.json').read_text())['state'], 'history_write_failed')
 
+    async def test_scroll_recovered_messages_are_recorded_in_history(self):
+        # Review I7: messages found by scrolling up exist in history too (spec G4).
+        a,b,c,tall=bubble('a'),bubble('b'),bubble('c'),bubble('TALL')
+        self.service.advance(frame(a,b))
+        self.history.record_frame(self.cid,frame(a,b))
+        bottom=frame(tall)
+        reply=bubble('你好，我是AI客服助手。','outbound_visual')
+        await self.scroll_cycle([bottom,bottom,bottom,bottom,frame(tall,reply)],[frame(b,c,tall),bottom])
+        texts=[r[0] for r in self.history.conn.execute('SELECT text FROM messages WHERE contact_id=? ORDER BY seq',(self.cid,))]
+        self.assertEqual(texts[:4],['a','b','c','TALL'])
+
     async def test_baseline_frame_is_recorded_without_reply(self):
         await self.cycle([self.new])
         self.model.assert_not_awaited()
@@ -572,7 +649,7 @@ class HistoryServiceTests(ServiceTests):
         path=self.root/'x.png';path.write_bytes(b'\x89PNG\r\n\x1a\noriginal')
         thumb=self.root/'t.png';thumb.write_bytes(b'\x89PNG\r\n\x1a\nthumbnail')
         capture=type('Capture',(),{})()
-        capture.frame=AsyncMock(side_effect=copy.deepcopy([current,current,current,
+        capture.frame=AsyncMock(side_effect=copy.deepcopy([current,current,current,current,
                                 frame(bubble('old'),img,bubble('你好，我是AI客服助手。','outbound_visual'))]))
         capture.download=AsyncMock(return_value=thumb)  # history records the thumbnail on sight
         capture.attachments=AsyncMock(return_value=([{'path':path,'label':'第1张图片','source':'original','bubble':img}],[],
@@ -590,11 +667,11 @@ class HistoryServiceTests(ServiceTests):
         current=frame(bubble('old'),*imgs)
         sent=frame(*current['bubbles'],bubble(reply,'outbound_visual'))
         capture=type('Capture',(),{})()
-        capture.frame=AsyncMock(side_effect=copy.deepcopy([current,current,current,sent]))
+        capture.frame=AsyncMock(side_effect=copy.deepcopy([current,current,current,current,sent]))
         capture.download=AsyncMock(side_effect=RuntimeError('no thumbnails in this fixture'))
         self.service.config['model_config']={'backend':'openai-compatible','base_url':'https://api.deepseek.com',
                                              'model':'m','api_key_env':'K','supports_images':True}
-        for n in range(1,count+1): (self.root/('%d.png'%n)).write_bytes(b'\x89PNG\r\n\x1a\n%d'%n)
+        for n in range(1,count+1): (self.root/('%d.png'%n)).write_bytes(b'\x89PNG\r\n\x1a\n%03d'%n)  # 11 bytes
         items=[{'path':self.root/('%d.png'%n),'label':'第%d张图片'%n,'source':'original','bubble':b} for n,b in enumerate(imgs,1)]
         capture.attachments=AsyncMock(return_value=(items,[],list(failed)))
         self.model=AsyncMock(return_value=reply)
@@ -630,6 +707,37 @@ class HistoryServiceTests(ServiceTests):
             capture.frame=AsyncMock(side_effect=copy.deepcopy([self.new,self.new]))
             await self.service.cycle(self.client,capture)
         self.assertTrue(self.service.paused)
+
+    async def test_media_is_fetched_from_the_current_frame(self):
+        # Review C2: file media IDs belong to the frame they were seen in; a later text changes the frame.
+        pdf={'text':'报价.pdf\n12KB','digest':'file:报价.pdf:12KB','media_id':'1'*64,'filename':'报价.pdf',
+             'direction':'inbound_visual','kind':'file'}
+        self.config['turn_quiet_seconds']=10
+        self.service=self.restart()
+        self.service.advance(self.old)
+        first=frame(bubble('old'),pdf)
+        later=frame(bubble('old'),pdf,bubble('帮我看看'))
+        now={**later,'snapshot_id':'s-now','bubbles':[bubble('old'),{**pdf,'media_id':'2'*64},bubble('帮我看看')]}
+        self.at(0); await self.cycle([first,first])
+        self.at(3); await self.cycle([later,later])
+        capture=type('Capture',(),{})()
+        capture.frame=AsyncMock(side_effect=copy.deepcopy([later,now,now,frame(*now['bubbles'],bubble('好的','outbound_visual'))]))
+        capture.download=AsyncMock(side_effect=RuntimeError('no thumbnails'))
+        capture.attachments=AsyncMock(return_value=([],[],[]))
+        self.at(14)
+        with patch('scripts.wechat_bot.service.generate',self.model):
+            await self.service.cycle(self.client,capture)
+        items,snapshot=capture.attachments.await_args.args
+        self.assertEqual([i.get('media_id') for i in items if i.get('kind')=='file'],['2'*64])
+        self.assertEqual(snapshot['snapshot_id'],'s-now')
+
+    async def test_images_over_the_request_size_are_named_not_paused(self):
+        # Review I8: the API rejects more than 30MB of images; the excess is unreadable, not a pause.
+        with patch('scripts.wechat_bot.service.MAX_MODEL_IMAGE_BYTES',25):
+            await self.media_turn(3)
+        self.assertFalse(self.service.paused)
+        self.assertEqual(len(self.model.await_args.kwargs['images']),2)
+        self.assertEqual(self.model.await_args.kwargs['failed'],['第3张图片'])
 
     async def test_send_uses_observed_title_for_alias(self):
         entry = {'recipient': '🍓示例联系人甲', 'kind': 'private', 'aliases': ['示例联系人甲']}

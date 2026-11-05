@@ -45,6 +45,14 @@ class FingerprintV2Tests(StoreBase):
         stored = json.loads(self.store.conn.execute('SELECT frame_fingerprints FROM contact_cursor').fetchone()[0])
         self.assertEqual(len(stored[0]), 3)
 
+    def test_same_size_older_image_is_not_matched_to_a_new_one(self):
+        img = lambda h: {'text': '[图片]', 'digest': 'image:50:40', 'direction': 'inbound_visual',
+                         'kind': 'image', 'phash': h}
+        self.store.record_frame(self.c, fr(bub('a')))
+        old = self.store.record_frame(self.c, fr(bub('a'), img('0000000000000000')))[0]['message_id']
+        self.assertEqual(self.store.match_recent_inbound(self.c, [img('ffffffffffffffff')]), [])
+        self.assertEqual(self.store.match_recent_inbound(self.c, [img('000000000000000f')]), [old])
+
     def test_reconciled_image_is_not_recorded_twice(self):
         img = lambda h: {'text': '[图片]', 'digest': 'image:50:40', 'direction': 'inbound_visual',
                          'kind': 'image', 'phash': h, 'media_id': h*4}
