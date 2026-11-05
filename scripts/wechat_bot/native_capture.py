@@ -190,10 +190,12 @@ fi
         Images are labelled 第N张图片 in turn order and prefer the saved original over the chat thumbnail.
         """
         from .documents import extract
+        from .policy import relocate
         images,files,failed=[],[],[]
         used=0
         number=0
-        for item in items:
+        items=list(items)
+        for index,item in enumerate(items):
             kind=item.get('kind','text')
             if kind=='image':
                 number+=1
@@ -201,6 +203,9 @@ fi
                 source='original'
                 try:
                     await self.call('prepare_image',media_id=item['media_id'],snapshot_id=frame['snapshot_id'])
+                    # Save-as changes the screen; later items are looked up in a fresh frame.
+                    frame=await self.frame()
+                    items[index+1:]=relocate(items[index+1:],frame['bubbles'])
                 except (ValueError,RuntimeError) as error:
                     source='chat_thumbnail'
                     from .service import log_event  # Lazy: service imports this module.
@@ -216,6 +221,8 @@ fi
                 try:
                     info=await self.call('prepare_file',media_id=item['media_id'],snapshot_id=frame['snapshot_id'])
                     path=await self.download(item['media_id'],kind='file')
+                    frame=await self.frame()
+                    items[index+1:]=relocate(items[index+1:],frame['bubbles'])
                 except (ValueError,RuntimeError) as error:
                     failed.append({'label':label,'kind':'file','reason':media_reason(error),'detail':worker_code(error)})
                     continue
