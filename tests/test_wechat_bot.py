@@ -200,3 +200,30 @@ class BotRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def image(phash, digest='image:50:40', media_id=None):
+    return {'text': '[图片]', 'direction': 'inbound_visual', 'kind': 'image', 'digest': digest,
+            'phash': phash, 'media_id': media_id or phash*4}
+
+
+class ImageIdentityTests(unittest.TestCase):
+    def test_loading_image_reconciles_to_same_fingerprint(self):
+        from scripts.wechat_bot.policy import fingerprint, reconcile
+        prev = [bubble('hi'), image('0f0f0f0f0f0f0f0f')]
+        cur = [bubble('hi'), image('0f0f0f0f0f0f0f00')]  # loaded: 4 bits differ
+        fixed = reconcile(prev, cur)
+        self.assertEqual(fingerprint(fixed[1]), fingerprint(prev[1]))
+        self.assertEqual(fixed[1]['media_id'], cur[1]['media_id'])  # download the loaded pixels
+        self.assertEqual(new_bubbles(prev, fixed), [])
+        self.assertEqual(cur[1]['phash'], '0f0f0f0f0f0f0f00')  # input not mutated
+
+    def test_same_size_different_images_are_distinct(self):
+        a, b, c = image('0000000000000000'), image('ffffffff00000000'), image('00000000ffffffff')
+        self.assertEqual(new_bubbles([a, b], [a, b, c]), [c])
+
+    def test_far_phash_is_not_reconciled(self):
+        from scripts.wechat_bot.policy import reconcile
+        prev = [image('0000000000000000')]
+        cur = [image('00000000000fffff')]  # 20 bits
+        self.assertEqual(reconcile(prev, cur)[0]['phash'], '00000000000fffff')
