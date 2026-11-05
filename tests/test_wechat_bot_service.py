@@ -212,6 +212,46 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.at(12); await self.cycle([again,again])
         self.assertEqual([b['text'] for b in self.service.turn['bubbles']],['第二个问题'])
 
+    async def test_upload_in_progress_delays_turn(self):
+        # Acceptance 2026-11-05: the PDF card still read 对方上传中 when the quiet period ended.
+        self.config['turn_quiet_seconds']=10
+        self.service=self.restart()
+        self.service.advance(self.old)
+        card={'text':'报价.pdf\nPDF\n220.3K 对方上传中','digest':'file:报价.pdf:220.3K','direction':'inbound_visual',
+              'kind':'file','filename':'报价.pdf','media_id':'1'*64,'transfer_pending':True}
+        uploading=frame(bubble('old'),card)
+        done=frame(bubble('old'),{**card,'text':'报价.pdf\nPDF\n220.3K','transfer_pending':False})
+        self.at(0); await self.cycle([uploading,uploading])
+        self.at(15); await self.cycle([uploading])
+        self.model.assert_not_awaited()
+        self.assertEqual(json.loads((self.service.root/'health.json').read_text())['state'],'waiting_for_upload')
+        capture=type('Capture',(),{})()
+        capture.frame=AsyncMock(side_effect=copy.deepcopy([done,done,done,frame(*done['bubbles'],bubble('好的','outbound_visual'))]))
+        capture.download=AsyncMock(side_effect=RuntimeError('no thumbnails'))
+        capture.attachments=AsyncMock(return_value=([],[],[]))
+        self.at(20)
+        with patch('scripts.wechat_bot.service.generate',self.model):
+            await self.service.cycle(self.client,capture)
+        self.model.assert_awaited_once()
+
+    async def test_model_connection_failure_retries_before_pausing(self):
+        # Nothing was sent yet: a transient model outage keeps the turn and retries, then pauses.
+        self.config['turn_quiet_seconds']=10
+        self.service=self.restart()
+        self.service.advance(self.old)
+        self.model=AsyncMock(side_effect=RuntimeError('model connection failed; not automatically retried'))
+        self.at(0); await self.cycle([self.new,self.new])
+        for second in [11,45]:
+            self.at(second); await self.cycle([self.new,self.new])
+            self.assertFalse(self.service.paused)
+            self.assertIsNotNone(self.service.turn)
+        self.at(80)
+        with self.assertRaises(RuntimeError):
+            await self.cycle([self.new,self.new])
+        self.assertEqual(self.model.await_count,3)
+        self.assertTrue(self.service.paused)
+        self.assertEqual(self.calls,[])
+
     async def test_initial_start_does_not_reply_to_history(self):
         await self.cycle([self.new])
         self.model.assert_not_awaited()
@@ -414,7 +454,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_model_failure_pauses_and_survives_restart(self):
         self.service.advance(self.old)
         self.model.side_effect=RuntimeError('model unavailable')
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(RuntimeError), patch('scripts.wechat_bot.service.MODEL_RETRIES',0):
             await self.cycle([self.new,self.new])
         self.assertTrue(self.service.paused)
         self.assertTrue(BotService(self.config).paused)
@@ -562,7 +602,7 @@ class HistoryServiceTests(ServiceTests):
     async def test_model_failure_pauses_and_survives_restart(self):
         self.service.advance(self.old)
         self.model.side_effect = RuntimeError('model unavailable')
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(RuntimeError), patch('scripts.wechat_bot.service.MODEL_RETRIES', 0):
             await self.cycle([self.new, self.new])
         self.assertTrue(self.service.paused)
         self.assertTrue(BotService(self.config, history=self.history, contact_id=self.cid).paused)
@@ -707,7 +747,8 @@ class HistoryServiceTests(ServiceTests):
     async def test_final_generation_failure_still_pauses(self):
         self.model=AsyncMock(side_effect=RuntimeError('reply generation failed'))
         self.service.advance(self.old)
-        with patch('scripts.wechat_bot.service.generate',self.model), self.assertRaises(RuntimeError):
+        with patch('scripts.wechat_bot.service.generate',self.model), self.assertRaises(RuntimeError), \
+             patch('scripts.wechat_bot.service.MODEL_RETRIES',0):
             capture=type('Capture',(),{})()
             capture.frame=AsyncMock(side_effect=copy.deepcopy([self.new,self.new]))
             await self.service.cycle(self.client,capture)

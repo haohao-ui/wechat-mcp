@@ -14,6 +14,13 @@ from .capture import RemoteCapture
 MAX_EXTRACTED=24000
 
 
+def worker_code(error):
+    # Worker refusals are fixed codes (invalid("...")), never message content; keep them for diagnosis.
+    text=str(error)
+    start=text.find('invalid("')
+    return text[start+9:text.find('")',start)][:120] if start>=0 else type(error).__name__
+
+
 def media_reason(error):
     text=str(error)
     for code,reason in [('unsupported_file_type','unsupported_type'),('file_size_limit','too_large'),
@@ -197,7 +204,7 @@ fi
                 except (ValueError,RuntimeError) as error:
                     source='chat_thumbnail'
                     from .service import log_event  # Lazy: service imports this module.
-                    log_event('image_original_unavailable',reason=media_reason(error))
+                    log_event('image_original_unavailable',reason=media_reason(error),detail=worker_code(error))
                 try:
                     path=await self.download(item['media_id'])
                 except (ValueError,RuntimeError) as error:
@@ -210,7 +217,7 @@ fi
                     info=await self.call('prepare_file',media_id=item['media_id'],snapshot_id=frame['snapshot_id'])
                     path=await self.download(item['media_id'],kind='file')
                 except (ValueError,RuntimeError) as error:
-                    failed.append({'label':label,'kind':'file','reason':media_reason(error)})
+                    failed.append({'label':label,'kind':'file','reason':media_reason(error),'detail':worker_code(error)})
                     continue
                 label=info.get('filename') or label
                 if info['extension'] in ['png','jpg','jpeg']:

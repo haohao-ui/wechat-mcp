@@ -55,14 +55,14 @@ func saveAttachment(_ item: [String:Any], window:[String:Any], destination:URL, 
     // Images carry no size text; their saved size is checked after the download instead.
     if checkSize {
         let body=item["text"] as? String ?? ""
-        let expression=try NSRegularExpression(pattern:#"(\d+(?:\.\d+)?)\s*(KB|MB|GB|字节|B)"#,options:.caseInsensitive)
+        let expression=try NSRegularExpression(pattern:#"(\d+(?:\.\d+)?)\s*(KB|MB|GB|K|M|G|字节|B)"#,options:.caseInsensitive)
         let range=NSRange(body.startIndex..<body.endIndex,in:body)
         // OCR may miss the size line; the saved file's size is checked by the caller either way.
         if let match=expression.matches(in:body,range:range).last,
            let number=Range(match.range(at:1),in:body),let unitRange=Range(match.range(at:2),in:body),
            let amount=Double(body[number]) {
             let unit=body[unitRange].uppercased()
-            let multiplier:Double = unit=="GB" ? 1073741824 : unit=="MB" ? 1048576 : unit=="KB" ? 1024 : 1
+            let multiplier:Double = unit.hasPrefix("G") ? 1073741824 : unit.hasPrefix("M") ? 1048576 : unit.hasPrefix("K") ? 1024 : 1
             guard amount*multiplier<=10*1024*1024 else { throw Failure.invalid("file_size_limit") }
         }
     }
