@@ -32,7 +32,7 @@ def log_event(event, **fields):
 def load_config(path):
     value = json.loads(Path(path).read_text())
     allowed = {'schema_version', 'host', 'account_id', 'allowlist', 'state_dir', 'poll_seconds',
-               'cooldown_seconds', 'max_replies_per_hour','capture_backend','model_config','ignorelist','idle_check_seconds','context_messages','history_http'}
+               'cooldown_seconds', 'max_replies_per_hour','capture_backend','model_config','ignorelist','idle_check_seconds','context_messages','history_http','manage_window'}
     if set(value)-allowed or value.get('schema_version') != 1:
         raise ValueError('unsupported bot config schema or field')
     from .routing import validate_rules
@@ -51,6 +51,8 @@ def load_config(path):
         number = value.setdefault(key,default)
         if type(number) is not int or not low <= number <= high:
             raise ValueError('invalid ' + key)
+    if type(value.setdefault('manage_window',True)) is not bool:
+        raise ValueError('invalid manage_window')
     number = value.setdefault('context_messages',5)
     if type(number) is not int or not 0 <= number <= 100:
         raise ValueError('invalid context_messages')

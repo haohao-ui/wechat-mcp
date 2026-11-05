@@ -395,7 +395,8 @@ class ConfigFieldTests(unittest.TestCase):
             loaded = load_config(path)
             self.assertEqual(loaded['context_messages'], 5)
             self.assertEqual(loaded['history_http'], {'bind': '127.0.0.1', 'port': 8765})
-            for extra in [{'context_messages': -1}, {'context_messages': 101}, {'context_messages': '5'},
+            self.assertIs(loaded['manage_window'], True)  # dedicated machine: bot may restore/resize WeChat
+            for extra in [{'manage_window': 'yes'}, {'manage_window': 1}, {'context_messages': -1}, {'context_messages': 101}, {'context_messages': '5'},
                           {'history_http': {'bind': '127.0.0.1', 'port': 0}}, {'history_http': {'host': 'x'}}]:
                 path.write_text(json.dumps({**base, **extra}))
                 with self.assertRaises(ValueError):

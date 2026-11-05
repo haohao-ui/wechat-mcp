@@ -10,9 +10,11 @@ from .capture import RemoteCapture
 
 
 class NativeCapture(RemoteCapture):
-    def __init__(self,*args,names=None,**kwargs):
+    def __init__(self,*args,names=None,manage_window=True,**kwargs):
         super().__init__(*args,**kwargs)
         self.names=list(names or [])
+        # Dedicated-machine default: the worker may un-minimize, resize and move WeChat back on screen.
+        self.manage_window=bool(manage_window)
         self.process=None
         self.counter=0
         self.last_switch=None
@@ -83,7 +85,8 @@ fi
         async with self.rpc_lock:
             self.counter+=1
             value={'protocol_version':1,'id':self.counter,'operation':operation,
-                   'params':{'recipient':self.recipient,'accepted_names':self.names or [self.recipient],**params}}
+                   'params':{'recipient':self.recipient,'accepted_names':self.names or [self.recipient],
+                             'manage_window':self.manage_window,**params}}
             try:
                 self.process.stdin.write(json.dumps(value).encode()+b'\n')
                 await self.process.stdin.drain()
@@ -102,7 +105,10 @@ fi
         return response['result']
 
     async def frame(self):
-        result=await self.call('capture')
+        return self.logged(await self.call('capture'))
+
+    @staticmethod
+    def logged(result):
         if result.get('window_resized'):
             from .service import log_event  # Lazy: service imports this module.
             log_event('window_resized',profile=result.get('profile'),scale=result.get('scale'))
@@ -110,7 +116,7 @@ fi
 
     async def sessions(self, names, debug=False):
         # Read-only probe of the left session list; only allowlisted rows are returned.
-        return await self.call('sessions',names=list(names),debug=debug)
+        return self.logged(await self.call('sessions',names=list(names),debug=debug))
 
     async def download(self,media_id,kind='image'):
         if len(media_id)!=64 or any(x not in '0123456789abcdef' for x in media_id):

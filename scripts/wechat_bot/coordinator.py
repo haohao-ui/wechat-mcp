@@ -146,7 +146,8 @@ class BotCoordinator:
             if status.get('enabled'): raise ValueError('another observer is enabled')
         if not child.target_allowed(): return
         capture_class=NativeCapture if self.config.get('capture_backend','native')=='native' else RemoteCapture
-        self.capture=capture_class(self.config['host'],self.client,child.recipient,child.root,child.ownership,names=child.names)
+        self.capture=capture_class(self.config['host'],self.client,child.recipient,child.root,child.ownership,names=child.names,
+                                   manage_window=self.config.get('manage_window',True))
         child.health('connecting')
         await self.capture.start()
         self.active_name=child.recipient
