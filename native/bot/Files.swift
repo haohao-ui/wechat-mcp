@@ -23,6 +23,23 @@ func elements(_ root: AXUIElement, depth: Int=0, limit: Int=800) -> [AXUIElement
 
 func pauseUI(_ seconds: Double) { RunLoop.current.run(until:Date().addingTimeInterval(seconds)) }
 
+/// Polls `condition` (keeping the run loop going) until it holds or `seconds` pass.
+func waitUntil(seconds: Double, _ condition: () -> Bool) -> Bool {
+    let deadline=Date().addingTimeInterval(seconds)
+    while Date()<deadline {
+        if condition() { return true }
+        pauseUI(0.1)
+    }
+    return condition()
+}
+
+/// The save panel's name field, when it has keyboard focus.
+func focusedNameField(_ root: AXUIElement) -> AXUIElement? {
+    guard let ref=attribute(root,"AXFocusedUIElement"), CFGetTypeID(ref)==AXUIElementGetTypeID() else { return nil }
+    let element=unsafeBitCast(ref,to:AXUIElement.self)
+    return attribute(element,"AXIdentifier") as? String=="saveAsNameTextField" ? element : nil
+}
+
 /// The worker's one "hand" (native/action): human-like paths, presses only inside the control's effective
 /// region, stops when a person moves the mouse. One instance keeps pointer tracking continuous.
 let botActions = Actions()
@@ -126,6 +143,9 @@ func saveAttachment(_ item: [String:Any], window:[String:Any], destination:URL, 
             guard amount*multiplier<=10*1024*1024 else { throw Failure.invalid("file_size_limit") }
         }
     }
+    // Right after a previous save the system save-panel service can still be reported as frontmost.
+    let wechatIDs=["com.tencent.xinWeChat","com.tencent.WeChat"]
+    _ = waitUntil(seconds:1.5) { wechatIDs.contains(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "") }
     guard let app=NSWorkspace.shared.frontmostApplication,
           ["com.tencent.xinWeChat","com.tencent.WeChat"].contains(app.bundleIdentifier ?? ""),
           let x=item["x"] as? Int,let y=item["y"] as? Int,
@@ -167,17 +187,15 @@ func saveAttachment(_ item: [String:Any], window:[String:Any], destination:URL, 
     // reliably in WeChat's accessibility tree. The name field has focus, so type the name and press Return.
     // A unique name never triggers "replace?" and can be found if the panel stayed in another folder.
     let staged="wxbot-"+String(UUID().uuidString.prefix(8)).lowercased()+"."+destination.pathExtension
+    // The panel can take well over a second to take focus (acceptance 2026-11-05: a fixed 1s wait failed
+    // whenever the step screenshots were off). Wait for the name field itself, then for our name in it.
+    guard waitUntil(seconds:5, { focusedNameField(root) != nil }) else { throw Failure.invalid("save_name_field_not_focused") }
     try key(0,flags:[.maskCommand]);pauseUI(0.1)
-    try paste(staged);pauseUI(0.3)
+    try paste(staged)
+    let named = waitUntil(seconds:2) { focusedNameField(root).map { attribute($0,"AXValue") as? String==staged } ?? false }
     saveDebugStep("4-after-name",root)
     // Return only when the panel's own name field holds exactly our name (verified 2026-11-05).
-    guard let focusedRef=attribute(root,"AXFocusedUIElement"), CFGetTypeID(focusedRef)==AXUIElementGetTypeID() else {
-        throw Failure.invalid("save_name_field_not_focused")
-    }
-    let focused=unsafeBitCast(focusedRef,to:AXUIElement.self)
-    guard attribute(focused,"AXIdentifier") as? String=="saveAsNameTextField", attribute(focused,"AXValue") as? String==staged else {
-        throw Failure.invalid("save_name_not_set")
-    }
+    guard named else { throw Failure.invalid("save_name_not_set") }
     try key(36);pauseUI(0.5)
     saveDebugStep("5-after-return",root)
     let home=FileManager.default.homeDirectoryForCurrentUser
