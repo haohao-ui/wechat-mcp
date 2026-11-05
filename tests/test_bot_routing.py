@@ -199,6 +199,20 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         capture.retarget.assert_awaited_once_with('b',child.root,['b'])
         self.assertEqual(self.coordinator.active_name,'b')
 
+    async def test_reconnect_reuses_running_worker_before_mcp_search(self):
+        # A minimized window makes MCP search fail; the running worker can restore it and click the row.
+        from scripts.wechat_bot.native_capture import NativeCapture
+        capture=NativeCapture('fixture',AsyncMock(),'a',self.root/'a','0'*64,names=['a'])
+        capture.ssh=AsyncMock(); capture.connect=AsyncMock(); capture.navigate=AsyncMock()
+        capture.call=AsyncMock(return_value={'opened':True})
+        await capture.start()
+        capture.call.assert_awaited_once_with('open_session',target='a',target_names=['a'])
+        capture.navigate.assert_not_awaited()
+        capture.call=AsyncMock(side_effect=ValueError('private visual operation failed: invalid("wechat_not_visible")'))
+        capture.close_transport=AsyncMock()
+        await capture.start()
+        capture.navigate.assert_awaited_once_with(['a'])
+
     async def test_worker_calls_carry_manage_window_switch(self):
         from scripts.wechat_bot.native_capture import NativeCapture
         for flag in (True, False):

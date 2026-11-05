@@ -95,19 +95,24 @@ func axFlag(_ element: AXUIElement, _ attribute: String) -> Bool {
 
 /// Un-minimizes WeChat's main window (dedicated-machine mode). Throws when there is nothing to restore.
 func restoreMinimizedWeChat() throws {
-    guard AXIsProcessTrusted(),
-          let app = NSRunningApplication.runningApplications(withBundleIdentifier:"com.tencent.xinWeChat").first else {
-        throw Failure.invalid("wechat_not_visible")
+    func unavailable(_ why: String) -> Failure {
+        fputs("restore minimized WeChat: \(why)\n", stderr)  // operator diagnostics in bot-worker.log
+        return Failure.invalid("wechat_not_visible")
+    }
+    guard AXIsProcessTrusted() else { throw unavailable("accessibility not trusted") }
+    guard let app = NSRunningApplication.runningApplications(withBundleIdentifier:"com.tencent.xinWeChat").first else {
+        throw unavailable("WeChat not running")
     }
     let ax = AXUIElementCreateApplication(app.processIdentifier)
     var raw: CFTypeRef?
     let windows = AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute as CFString, &raw) == .success ? (raw as? [AXUIElement] ?? []) : []
     let minimized = windows.filter { axFlag($0, kAXMinimizedAttribute as String) }
+    fputs("restore minimized WeChat: \(windows.count) AX windows, \(minimized.count) minimized\n", stderr)
     // Several minimized windows (e.g. an image viewer too): restore only the main one, else wait.
     guard let target = axElement(ax, kAXMainWindowAttribute as String).flatMap({ main in minimized.first { CFEqual($0, main) } })
             ?? (minimized.count == 1 ? minimized[0] : nil),
           AXUIElementSetAttributeValue(target, kAXMinimizedAttribute as CFString, kCFBooleanFalse) == .success else {
-        throw Failure.invalid("wechat_not_visible")
+        throw unavailable("no unique minimized main window or un-minimize refused")
     }
     Thread.sleep(forTimeInterval:0.6)
 }
