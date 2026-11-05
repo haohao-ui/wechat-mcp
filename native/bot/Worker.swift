@@ -283,18 +283,12 @@ final class CaptureWorker {
             let window=try readyWindow(manage:manage).window
             guard titleAccepted(accepted) else { throw Failure.invalid("allowlisted_title_mismatch") }
             guard let wx=window["x"] as? Double,let wy=window["y"] as? Double else { throw Failure.invalid("invalid_window_bounds") }
-            // Centre of the chat area (x 315..880, y 60..496 in window points); wheel events go to the pointer.
-            let point=CGPoint(x:wx+315+282,y:wy+60+218)
-            guard let move=CGEvent(mouseEventSource:nil,mouseType:.mouseMoved,mouseCursorPosition:point,mouseButton:.left) else { throw Failure.invalid("mouse_event_failed") }
-            move.post(tap:.cghidEventTap);pauseUI(0.1)
+            // The chat area (x 315..880, y 60..496 in window points); wheel events go to the pointer.
             // One step is one 10-line wheel tick, about 90pt on WeChat 4 (measured 2026-11-05): adjacent
-            // steps keep a 247pt image complete in both frames so the pages can be stitched.
-            for _ in 0..<pages {
-                guard let wheel=CGEvent(scrollWheelEvent2Source:nil,units:.line,wheelCount:1,
-                                        wheel1:Int32(direction=="up" ? 10 : -10),wheel2:0,wheel3:0) else { throw Failure.invalid("scroll_event_failed") }
-                wheel.location=point
-                wheel.post(tap:.cghidEventTap);pauseUI(0.1)
-            }
+            // steps keep a 247pt image complete in both frames so the pages can be stitched. Tick size stays.
+            let chat=CGRect(x:wx+315,y:wy+60,width:565,height:436)
+            try act { try botActions.scroll(in:chat,lines:Int32(direction=="up" ? 10 : -10),ticks:pages) }
+            pauseUI(0.1)
             pauseUI(0.3)
             return try capture(recipient,accepted:accepted,manage:manage)
         }

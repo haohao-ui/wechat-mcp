@@ -138,14 +138,8 @@ func openSessionRow(_ targets: [String], probe: SessionProbe, capture: () throws
         app.activate(options:[])
         Thread.sleep(forTimeInterval:0.15)
     }
-    guard let down = CGEvent(mouseEventSource:nil, mouseType:.leftMouseDown, mouseCursorPosition:point, mouseButton:.left),
-          let up = CGEvent(mouseEventSource:nil, mouseType:.leftMouseUp, mouseCursorPosition:point, mouseButton:.left),
-          let move = CGEvent(mouseEventSource:nil, mouseType:.mouseMoved, mouseCursorPosition:point, mouseButton:.left) else {
-        throw Failure.invalid("event_creation_failed")
-    }
-    move.post(tap:.cghidEventTap); Thread.sleep(forTimeInterval:0.03)
-    down.post(tap:.cghidEventTap); Thread.sleep(forTimeInterval:0.05)
-    up.post(tap:.cghidEventTap)
+    // The row's name line: list width, 40pt around the point (effective region ±12pt, never the next row).
+    try act { try botActions.click(CGRect(x:x+sessionListRect.minX, y:point.y-20, width:sessionListRect.width, height:40)) }
     let deadline = began + 2.5
     while ProcessInfo.processInfo.systemUptime < deadline {
         Thread.sleep(forTimeInterval:0.15)

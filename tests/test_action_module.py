@@ -173,6 +173,9 @@ class ExecutorTests(unittest.TestCase):
         out = self.scenario('right_click')
         self.assertIsNone(out['error'])
         self.assertEqual(self.kinds(out)[-2:], ['right_down', 'right_up'])
+        # The context menu opens where the press landed; callers get that point back.
+        down = out['events'][-2]
+        self.assertEqual(out['pressed'], [down['x'], down['y']])
 
 
 if __name__ == '__main__':

@@ -114,14 +114,15 @@ func execScenario(_ name: String, _ seed: UInt64) -> [String:Any] {
     }
     let actions = Actions(sink:sink, profile:profile, seed:seed, screens:screens)
     var failure: Any = NSNull()
+    var pressed: Any = NSNull()
     do {
         switch name {
         case "scroll": try actions.scroll(in:rect, lines:10, ticks:3)
-        case "right_click": try actions.rightClick(rect)
+        case "right_click": let p = try actions.rightClick(rect); pressed = [Double(p.x), Double(p.y)]
         default: try actions.click(rect)
         }
     } catch { failure = String(describing:error) }
-    return ["events":sink.events, "error":failure, "region":rectJSON(reachableRegion(rect, screen:screens[0]))]
+    return ["events":sink.events, "error":failure, "pressed":pressed, "region":rectJSON(reachableRegion(rect, screen:screens[0]))]
 }
 
 let args = CommandLine.arguments

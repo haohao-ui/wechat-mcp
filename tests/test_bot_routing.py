@@ -191,6 +191,16 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(child.paused)
         self.assertEqual(json.loads((child.root/'health.json').read_text())['state'],'waiting_for_wechat_window')
 
+    async def test_user_input_detected_is_retryable(self):
+        # The action module stops when a person moves the mouse, or when a control is off screen;
+        # nothing was sent, so wait and retry instead of pausing.
+        for code in ('user_input_detected','target_not_reached'):
+            child=self.coordinator.session(target('a'))
+            self.coordinator.connect=AsyncMock(side_effect=ValueError(f'private visual operation failed: invalid("{code}")'))
+            await self.coordinator.visit(target('a'))
+            self.assertFalse(child.paused, code)
+            self.assertEqual(json.loads((child.root/'health.json').read_text())['state'],'waiting_for_wechat_window')
+
     async def test_title_mismatch_retries_twice_then_pauses(self):
         # Acceptance 2026-11-05: after a manual send left another chat open, one switch landed on the
         # wrong title. Nothing was read or sent; retry, but a persistent mismatch (renamed contact) pauses.

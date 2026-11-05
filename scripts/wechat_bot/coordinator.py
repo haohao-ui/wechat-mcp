@@ -25,7 +25,9 @@ BADGE_PIXELS=20
 # Consecutive wrong-title switches tolerated before a contact pauses for review.
 TITLE_MISMATCH_LIMIT=3
 WINDOW_UNAVAILABLE=('uncalibrated_theme','unsupported_image_geometry','wechat_not_visible',
-                    'window_capture_failed','desktop_busy','vision_timeout')
+                    'window_capture_failed','desktop_busy','vision_timeout',
+                    # Action module: a person moved the mouse, or the control is off screen. Nothing was sent.
+                    'user_input_detected','target_not_reached')
 
 
 class BotCoordinator:
