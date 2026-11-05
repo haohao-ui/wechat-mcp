@@ -32,7 +32,8 @@ def log_event(event, **fields):
 def load_config(path):
     value = json.loads(Path(path).read_text())
     allowed = {'schema_version', 'host', 'account_id', 'allowlist', 'state_dir', 'poll_seconds',
-               'cooldown_seconds', 'max_replies_per_hour','capture_backend','model_config','ignorelist','idle_check_seconds','context_messages','history_http','manage_window'}
+               'cooldown_seconds', 'max_replies_per_hour','capture_backend','model_config','ignorelist','idle_check_seconds','context_messages','history_http','manage_window',
+               'turn_quiet_seconds','turn_max_seconds','images_per_model_call'}
     if set(value)-allowed or value.get('schema_version') != 1:
         raise ValueError('unsupported bot config schema or field')
     from .routing import validate_rules
@@ -47,7 +48,9 @@ def load_config(path):
     if value.setdefault('capture_backend','native') not in ['native','legacy']:
         raise ValueError('invalid capture_backend')
     for key, default, low, high in [('poll_seconds',2,1,60), ('cooldown_seconds',15,0,300),
-                                    ('max_replies_per_hour',20,1,100), ('idle_check_seconds',60,10,3600)]:
+                                    ('max_replies_per_hour',20,1,100), ('idle_check_seconds',60,10,3600),
+                                    ('turn_quiet_seconds',10,0,120), ('turn_max_seconds',60,10,600),
+                                    ('images_per_model_call',4,1,16)]:
         number = value.setdefault(key,default)
         if type(number) is not int or not low <= number <= high:
             raise ValueError('invalid ' + key)
@@ -97,6 +100,10 @@ class BotService:
         self.last_health_log = None
         self.last_health_log_at = 0
         self.ownership = ownership or hashlib.sha256(str(self.root).encode()).hexdigest()
+        self.clock = time.time
+        self.recovery_unconfirmed = False
+        self.turn_path = self.root/'turn.json'
+        self.turn = json.loads(self.turn_path.read_text()) if self.turn_path.exists() else None
         self.recent_files_path=self.root/'recent-files.json'
         self.recent_files=json.loads(self.recent_files_path.read_text()) if self.recent_files_path.exists() else []
 
@@ -257,24 +264,73 @@ class BotService:
             self.advance(confirmed)
             self.health('watching',reason=ambiguous+': visible history rebaselined without reply')
             return
-        incoming = [b for b in changes if b['direction']=='inbound_visual']
-        if not incoming:
+        arrivals = []
+        for item in changes:
+            if item['direction']=='inbound_visual':
+                arrivals.append(item)
+            elif not self.own_echo(item) and (self.turn or arrivals):
+                # A person answered from the phone or desktop: this turn is handled (spec §5.9).
+                self.drop_turn('screen')
+                arrivals = []
+        if arrivals:
+            began=time.perf_counter()
+            confirmed = await capture.frame()
+            timings['confirmation_seconds']=time.perf_counter()-began
+            self.policy.check_frame(confirmed)
+            confirmed['bubbles'] = reconcile(frame['bubbles'],confirmed['bubbles'])
+            if list(map(fingerprint,frame['bubbles'])) != list(map(fingerprint,confirmed['bubbles'])):
+                self.health('waiting_for_stable_frame')
+                return
+            now = self.clock()
+            if self.turn is None:
+                self.turn = {'opened_at':now,'baseline':self.cursor,'bubbles':[]}
+                log_event('turn_opened',account_id=self.account)
+            self.turn['bubbles'] += arrivals
+            self.turn.update(last_inbound_at=now,frame=confirmed)
+            write_private(self.turn_path,self.turn)
+            log_event('incoming_candidate',count=len(arrivals),capture_seconds=timings['capture_seconds'])
+            self.advance(confirmed)
+        elif changes or self.turn is None:
             self.advance(frame)
+        if self.turn is None:
             self.health('watching')
             return
+        self.had_incoming = True
+        if not self.turn_due():
+            self.health('waiting_for_turn',pending_visual_messages=len(self.turn['bubbles']))
+            return
+        await self.process_turn(client, capture, timings)
+
+    def turn_due(self):
+        now = self.clock()
+        return (now-self.turn['last_inbound_at'] >= self.config.get('turn_quiet_seconds',10) or
+                now-self.turn['opened_at'] >= self.config.get('turn_max_seconds',60))
+
+    def drop_turn(self, source):
+        self.turn = None
+        self.turn_path.unlink(missing_ok=True)
+        log_event('already_replied',account_id=self.account,source=source)
+        self.health('watching',reason='already replied ('+source+')')
+
+    def own_echo(self, bubble):
+        """An outbound bubble matching a reply this contact's service sent in the last 10 minutes."""
+        for path in self.root.glob('send-*.json'):
+            record = json.loads(path.read_text())
+            if (record.get('reply') and time.time()-record.get('attempted_at',0) < 600
+                    and echo_matches(bubble.get('text',''),record['reply'])):
+                return True
+        return False
+
+    async def process_turn(self, client, capture, timings):
+        incoming = self.turn['bubbles']
         if self.limited():
             self.health('rate_limited',pending_visual_messages=len(incoming))
             return
-        began=time.perf_counter()
-        confirmed = await capture.frame()
-        timings['confirmation_seconds']=time.perf_counter()-began
-        self.policy.check_frame(confirmed)
-        if list(map(fingerprint,frame['bubbles'])) != list(map(fingerprint,confirmed['bubbles'])):
-            self.health('waiting_for_stable_frame')
-            return
-        self.had_incoming = True
-        log_event('incoming_candidate',count=len(incoming),capture_seconds=timings['capture_seconds'])
-        # Read history before the journal/cursor commit: a read failure must leave the batch pending.
+        confirmed = self.turn['frame']
+        log_event('turn_closed',account_id=self.account,texts=sum(b.get('kind','text')=='text' for b in incoming),
+                  images=sum(b.get('kind')=='image' for b in incoming),files=sum(b.get('kind')=='file' for b in incoming),
+                  wait_seconds=round(self.clock()-self.turn['opened_at'],1))
+        # Read history before the journal commit: a read failure must leave the turn pending.
         context = [{'role':'user' if b['direction']=='inbound_visual' else 'assistant','text':b['text']}
                    for b in confirmed['bubbles'][-12:]]
         input_ids = []
@@ -287,7 +343,7 @@ class BotService:
             except Exception as error:
                 self.history_failed(error)
                 return
-        key = self.batch_key(self.cursor,incoming)
+        key = self.batch_key(self.turn['baseline'],incoming)
         journal = self.root/('send-'+key+'.json')
         if journal.exists():
             self.paused = True
@@ -297,8 +353,9 @@ class BotService:
                   'idempotency_key':key,'input':incoming,'direction_evidence':'visual_candidate',
                   'created_at':time.time(),'platform_message_verified':False,'timings':timings}
         self.write_journal(journal,record)
-        # Persist intake before model execution; a restart never blindly repeats an uncertain attempt.
-        self.advance(confirmed)
+        # The journal now owns this turn; a restart never blindly repeats an uncertain attempt.
+        self.turn = None
+        self.turn_path.unlink(missing_ok=True)
         self.health('preparing_media',idempotency_key=key)
         try:
             began=time.perf_counter()
@@ -336,11 +393,8 @@ class BotService:
             began=time.perf_counter()
             latest = await capture.frame()
             timings['pre_send_seconds']=time.perf_counter()-began
+            # Title/profile only: new arrivals during generation become the next turn (spec §5.8).
             self.policy.check_frame(latest)
-            if list(map(fingerprint,latest['bubbles'])) != list(map(fingerprint,confirmed['bubbles'])):
-                record['status']='superseded'; self.write_journal(journal,record)
-                self.health('watching',reason='new chat activity superseded generated reply')
-                return
             if self.stop.is_set():
                 record['status']='stopped_before_send'; self.write_journal(journal,record); return
             if not self.target_allowed():

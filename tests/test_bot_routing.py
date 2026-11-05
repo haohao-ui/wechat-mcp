@@ -65,7 +65,7 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
         self.path=self.root/'config.json'
         self.config={'schema_version':1,'host':'fixture','account_id':'fixture','state_dir':str(self.root/'state'),
-            'allowlist':[target('a'),target('b')],'ignorelist':[],'poll_seconds':1}
+            'allowlist':[target('a'),target('b')],'ignorelist':[],'poll_seconds':1,'turn_quiet_seconds':0}
         self.save();self.coordinator=BotCoordinator(self.path)
 
     def save(self): self.path.write_text(json.dumps(self.config))
@@ -345,6 +345,15 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         for _ in range(3):
             await self.coordinator.sweep()
             self.assertEqual(self.visited(),['a'])
+
+    async def test_open_turn_session_stays_due(self):
+        # A chat waiting for its quiet period is revisited even without list activity.
+        state={'b':{'preview_digest':'p1','red_pixels':19}}
+        self.probe_capture(lambda:state)
+        await self.coordinator.sweep();await self.coordinator.sweep();self.visited()
+        self.coordinator.session(target('b')).turn={'bubbles':[]}
+        await self.coordinator.sweep()
+        self.assertEqual(self.visited(),['a','b'])
 
     async def test_preview_change_or_unread_badge_triggers_switch(self):
         state={'b':{'preview_digest':'p1','red_pixels':19}}
