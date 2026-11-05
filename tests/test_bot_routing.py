@@ -199,6 +199,20 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         capture.retarget.assert_awaited_once_with('b',child.root,['b'])
         self.assertEqual(self.coordinator.active_name,'b')
 
+    async def test_worker_calls_carry_manage_window_switch(self):
+        from scripts.wechat_bot.native_capture import NativeCapture
+        for flag in (True, False):
+            capture=NativeCapture('fixture',None,'a',self.root/'a',manage_window=flag)
+            sent=[]
+            class Pipe:
+                def write(self,data): sent.append(json.loads(data))
+                async def drain(self): pass
+            class Out:
+                async def readline(self): return (json.dumps({'protocol_version':1,'id':sent[-1]['id'],'ok':True,'result':{}})+'\n').encode()
+            capture.process=type('P',(),{'stdin':Pipe(),'stdout':Out()})()
+            await capture.call('sessions',names=['a'])
+            self.assertIs(sent[-1]['params']['manage_window'],flag)
+
     async def test_window_resize_by_worker_is_logged(self):
         from scripts.wechat_bot.native_capture import NativeCapture
         capture=NativeCapture('fixture',None,'a',self.root/'a')
@@ -206,6 +220,10 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         with patch('scripts.wechat_bot.service.log_event') as logged:
             await capture.frame()
         logged.assert_called_once_with('window_resized',profile='wechat-4-light',scale=2)
+        capture.call=AsyncMock(return_value={'rows':[],'window_resized':True})
+        with patch('scripts.wechat_bot.service.log_event') as logged:
+            await capture.sessions(['a'])
+        logged.assert_called_once_with('window_resized',profile=None,scale=None)
 
     async def test_native_retarget_switches_recipient_and_directory(self):
         from scripts.wechat_bot.native_capture import NativeCapture

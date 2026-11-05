@@ -81,33 +81,75 @@ func axValue<T>(_ element: AXUIElement, _ attribute: String, _ type: AXValueType
     return AXValueGetValue(raw as! AXValue, type, &value) ? value : nil
 }
 
-/// Returns the WeChat main window at the calibrated 880x640 points, resizing it once if needed.
-/// Only the AX main window is ever resized, and never while minimized or full screen; any doubt
-/// (several candidate windows, no permission, size not taking effect) is "window unavailable".
-func readyWindow() throws -> (window: [String:Any], resized: Bool) {
-    let window = try selectedWindow()
-    if (window["width"] as! Double).rounded() == 880 && (window["height"] as! Double).rounded() == 640 { return (window, false) }
-    guard AXIsProcessTrusted() else { throw Failure.invalid("unsupported_image_geometry") }
-    let app = AXUIElementCreateApplication(pid_t(window["pid"] as! Int))
+func axElement(_ owner: AXUIElement, _ attribute: String) -> AXUIElement? {
     var raw: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(app, kAXMainWindowAttribute as CFString, &raw) == .success, let main = raw,
-          CFGetTypeID(main) == AXUIElementGetTypeID() else { throw Failure.invalid("wechat_not_visible") }
-    let element = main as! AXUIElement
-    for flag in [kAXMinimizedAttribute as String, "AXFullScreen"] {
-        var state: CFTypeRef?
-        if AXUIElementCopyAttributeValue(element, flag as CFString, &state) == .success, (state as? Bool) == true {
-            throw Failure.invalid("wechat_not_visible")
-        }
+    guard AXUIElementCopyAttributeValue(owner, attribute as CFString, &raw) == .success, let value = raw,
+          CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+    return (value as! AXUIElement)
+}
+
+func axFlag(_ element: AXUIElement, _ attribute: String) -> Bool {
+    var raw: CFTypeRef?
+    return AXUIElementCopyAttributeValue(element, attribute as CFString, &raw) == .success && (raw as? Bool) == true
+}
+
+/// Un-minimizes WeChat's main window (dedicated-machine mode). Throws when there is nothing to restore.
+func restoreMinimizedWeChat() throws {
+    guard AXIsProcessTrusted(),
+          let app = NSRunningApplication.runningApplications(withBundleIdentifier:"com.tencent.xinWeChat").first else {
+        throw Failure.invalid("wechat_not_visible")
     }
-    guard let origin = axValue(element, kAXPositionAttribute as String, .cgPoint, CGPoint.zero),
+    let ax = AXUIElementCreateApplication(app.processIdentifier)
+    var raw: CFTypeRef?
+    let windows = AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute as CFString, &raw) == .success ? (raw as? [AXUIElement] ?? []) : []
+    let minimized = windows.filter { axFlag($0, kAXMinimizedAttribute as String) }
+    // Several minimized windows (e.g. an image viewer too): restore only the main one, else wait.
+    guard let target = axElement(ax, kAXMainWindowAttribute as String).flatMap({ main in minimized.first { CFEqual($0, main) } })
+            ?? (minimized.count == 1 ? minimized[0] : nil),
+          AXUIElementSetAttributeValue(target, kAXMinimizedAttribute as CFString, kCFBooleanFalse) == .success else {
+        throw Failure.invalid("wechat_not_visible")
+    }
+    Thread.sleep(forTimeInterval:0.6)
+}
+
+/// Returns the WeChat main window at the calibrated 880x640 points.
+/// manage == true (dedicated machine): restores a minimized main window and resizes it, moving it
+/// back inside its display when 880x640 would not fit. Only the AX main window is ever touched,
+/// never in full screen; any doubt (several candidates, no permission, change not taking effect)
+/// is "window unavailable" and retried next sweep. manage == false: check only.
+func readyWindow(manage: Bool) throws -> (window: [String:Any], resized: Bool) {
+    var window: [String:Any]
+    do { window = try selectedWindow() } catch Failure.invalid("wechat_not_visible") where manage {
+        try restoreMinimizedWeChat()
+        window = try selectedWindow()
+    }
+    let x = window["x"] as! Double, y = window["y"] as! Double
+    let width = window["width"] as! Double, height = window["height"] as! Double
+    if width.rounded() == 880 && height.rounded() == 640 { return (window, false) }
+    guard manage, AXIsProcessTrusted() else { throw Failure.invalid("unsupported_image_geometry") }
+    let ax = AXUIElementCreateApplication(pid_t(window["pid"] as! Int))
+    guard let element = axElement(ax, kAXMainWindowAttribute as String),
+          !axFlag(element, kAXMinimizedAttribute as String), !axFlag(element, "AXFullScreen"),
+          let origin = axValue(element, kAXPositionAttribute as String, .cgPoint, CGPoint.zero),
           let size = axValue(element, kAXSizeAttribute as String, .cgSize, CGSize.zero),
-          abs(origin.x - (window["x"] as! Double)) < 1, abs(origin.y - (window["y"] as! Double)) < 1,
-          abs(size.width - (window["width"] as! Double)) < 1, abs(size.height - (window["height"] as! Double)) < 1 else {
+          abs(origin.x - x) < 1, abs(origin.y - y) < 1, abs(size.width - width) < 1, abs(size.height - height) < 1 else {
         // The largest WeChat window is not the main window (e.g. an image viewer): do not touch it.
         throw Failure.invalid("wechat_not_visible")
     }
-    var target = CGSize(width:880, height:640)
-    guard let value = AXValueCreate(.cgSize, &target),
+    var display = CGDirectDisplayID(0), count = UInt32(0)
+    guard CGGetDisplaysWithPoint(CGPoint(x:x + width/2, y:y + height/2), 1, &display, &count) == .success, count == 1 else {
+        throw Failure.invalid("unsupported_image_geometry")
+    }
+    let bounds = CGDisplayBounds(display)
+    var target = CGPoint(x:max(bounds.minX, min(x, bounds.maxX - 880)), y:max(bounds.minY + 25, min(y, bounds.maxY - 640)))
+    if target != origin {
+        guard let position = AXValueCreate(.cgPoint, &target),
+              AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, position) == .success else {
+            throw Failure.invalid("unsupported_image_geometry")
+        }
+    }
+    var wanted = CGSize(width:880, height:640)
+    guard let value = AXValueCreate(.cgSize, &wanted),
           AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, value) == .success else {
         throw Failure.invalid("unsupported_image_geometry")
     }
@@ -182,9 +224,9 @@ final class CaptureWorker {
         return accepted.contains(cleanTitle(titles[0]))
     }
 
-    func capture(_ recipient: String, accepted: Set<String>) throws -> [String:Any] {
+    func capture(_ recipient: String, accepted: Set<String>, manage: Bool) throws -> [String:Any] {
         let began=ProcessInfo.processInfo.systemUptime
-        let (window, resized) = try readyWindow()
+        let (window, resized) = try readyWindow(manage:manage)
         let id = window["window_id"] as! UInt32
         let image = try windowImage(window)
         guard let panel = try normalizedFrame(image,window:window).image.cropping(to:CGRect(x:300,y:0,width:570,height:496)) else { throw Failure.invalid("window_capture_failed") }
@@ -222,13 +264,14 @@ final class CaptureWorker {
         let names=(params["accepted_names"] as? [String]) ?? [recipient]
         guard (1...20).contains(names.count), names.allSatisfy({ !$0.isEmpty && $0.count<=64 }) else { throw Failure.invalid("invalid_accepted_names") }
         let accepted=Set(names.map(cleanTitle))
-        if operation == "capture" { return try capture(recipient,accepted:accepted) }
+        let manage=params["manage_window"] as? Bool ?? false  // Absent (older client): check only.
+        if operation == "capture" { return try capture(recipient,accepted:accepted,manage:manage) }
         if operation == "open_session" {
             guard let target=params["target"] as? String, !target.isEmpty, target.count<=64 else { throw Failure.invalid("invalid_session_target") }
             let targets=(params["target_names"] as? [String]) ?? [target]
             guard (1...20).contains(targets.count), targets.allSatisfy({ !$0.isEmpty && $0.count<=64 }) else { throw Failure.invalid("invalid_session_target") }
             return try openSessionRow(targets,probe:sessionProbe) {
-                let window=try readyWindow().window
+                let window=try readyWindow(manage:manage).window
                 return (window,try normalizedFrame(try windowImage(window),window:window).image)
             }
         }
@@ -236,7 +279,7 @@ final class CaptureWorker {
             guard let names=params["names"] as? [String], !names.isEmpty, names.count<=50,
                   names.allSatisfy({ !$0.isEmpty && $0.count<=64 }) else { throw Failure.invalid("invalid_session_names") }
             let began=ProcessInfo.processInfo.systemUptime
-            let window=try readyWindow().window
+            let (window,resized)=try readyWindow(manage:manage)
             let image=try normalizedFrame(try windowImage(window),window:window).image
             var result=try sessionProbe.probe(image,names:names,debug:params["debug"] as? Bool == true)
             if params["debug"] as? Bool == true, let list=image.cropping(to:sessionListRect) {
@@ -245,11 +288,12 @@ final class CaptureWorker {
                 result["debug_media_id"]=id
             }
             result["capture_seconds"]=ProcessInfo.processInfo.systemUptime-began
+            if resized { result["window_resized"]=true }
             return result
         }
         if operation == "prepare_file" {
             guard let id=params["media_id"] as? String,let snapshot=params["snapshot_id"] as? String else { throw Failure.invalid("missing_file_identity") }
-            let frame=try capture(recipient,accepted:accepted)
+            let frame=try capture(recipient,accepted:accepted,manage:manage)
             guard frame["snapshot_id"] as? String==snapshot,
                   let item=(frame["bubbles"] as? [[String:Any]])?.first(where:{ $0["media_id"] as? String==id && $0["kind"] as? String=="file" }),
                   let name=item["filename"] as? String else { throw Failure.invalid("file_snapshot_changed") }
