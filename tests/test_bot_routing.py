@@ -199,6 +199,25 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         capture.retarget.assert_awaited_once_with('b',child.root,['b'])
         self.assertEqual(self.coordinator.active_name,'b')
 
+    async def test_connect_waits_out_vision_cold_start_by_time_not_attempts(self):
+        # The worker warms Vision (~30s cold on macOS 26+) before listening; a fixed attempt count
+        # of fast SSH retries gave up early. Readiness is probed without a title check.
+        from scripts.wechat_bot import native_capture
+        capture=native_capture.NativeCapture('fixture',None,'a',self.root/'a',names=['a'])
+        clock=[0.0]; ops=[]
+        async def call(op,**kw):
+            ops.append(op)
+            if clock[0] < 45: raise RuntimeError('private bot worker disconnected')
+            return {}
+        async def nap(seconds): clock[0]+=1.0
+        capture.call=call; capture.close_transport=AsyncMock()
+        with patch.object(native_capture.asyncio,'create_subprocess_exec',AsyncMock()), \
+             patch.object(native_capture.asyncio,'sleep',nap), \
+             patch.object(native_capture.time,'monotonic',lambda: clock[0]):
+            await capture.connect()
+        self.assertGreater(len(ops),20)
+        self.assertEqual(set(ops),{'sessions'})
+
     async def test_reconnect_reuses_running_worker_before_mcp_search(self):
         # A minimized window makes MCP search fail; the running worker can restore it and click the row.
         from scripts.wechat_bot.native_capture import NativeCapture

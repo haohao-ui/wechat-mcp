@@ -110,7 +110,7 @@ func restoreMinimizedWeChat() throws {
     fputs("restore minimized WeChat: \(windows.count) AX windows, \(minimized.count) minimized\n", stderr)
     // Several minimized windows (e.g. an image viewer too): restore only the main one, else wait.
     guard let target = axElement(ax, kAXMainWindowAttribute as String).flatMap({ main in minimized.first { CFEqual($0, main) } })
-            ?? (minimized.count == 1 ? minimized[0] : nil),
+            ?? (windows.count == 1 && minimized.count == 1 ? minimized[0] : nil),
           AXUIElementSetAttributeValue(target, kAXMinimizedAttribute as CFString, kCFBooleanFalse) == .success else {
         throw unavailable("no unique minimized main window or un-minimize refused")
     }
@@ -133,7 +133,12 @@ func readyWindow(manage: Bool) throws -> (window: [String:Any], resized: Bool) {
     if width.rounded() == 880 && height.rounded() == 640 { return (window, false) }
     guard manage, AXIsProcessTrusted() else { throw Failure.invalid("unsupported_image_geometry") }
     let ax = AXUIElementCreateApplication(pid_t(window["pid"] as! Int))
-    guard let element = axElement(ax, kAXMainWindowAttribute as String),
+    var listed: CFTypeRef?
+    let windows = AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute as CFString, &listed) == .success ? (listed as? [AXUIElement] ?? []) : []
+    // An image viewer or preview in front is itself the AX main window: with more than one visible
+    // WeChat window we cannot tell which is the chat window, so touch nothing and wait.
+    guard windows.filter({ !axFlag($0, kAXMinimizedAttribute as String) }).count == 1,
+          let element = axElement(ax, kAXMainWindowAttribute as String),
           !axFlag(element, kAXMinimizedAttribute as String), !axFlag(element, "AXFullScreen"),
           let origin = axValue(element, kAXPositionAttribute as String, .cgPoint, CGPoint.zero),
           let size = axValue(element, kAXSizeAttribute as String, .cgSize, CGSize.zero),

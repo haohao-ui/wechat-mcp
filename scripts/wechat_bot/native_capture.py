@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 
 from .capture import RemoteCapture
@@ -42,7 +43,7 @@ fi
         try:
             # Worker still running (e.g. reconnect after the window was minimized): it can restore the
             # window (manage_window) and click the verified row, which MCP search cannot do.
-            await self.connect(attempts=3)
+            await self.connect(seconds=3)
             self.last_switch=await self.call('open_session',target=self.recipient,target_names=self.names or [self.recipient])
             return
         except (ValueError,RuntimeError,ConnectionError,asyncio.TimeoutError):
@@ -74,20 +75,24 @@ fi
         self.directory=Path(directory)
         await self.frame()  # The native worker verifies the full title before any new media is returned.
 
-    async def connect(self, attempts=20):
-        for _ in range(attempts):
+    async def connect(self, seconds=60):
+        # Deadline, not attempt count: the worker warms Vision (~30s cold on macOS 26+) before listening.
+        deadline=time.monotonic()+seconds
+        while True:
             try:
                 self.process=await asyncio.create_subprocess_exec(
                     'ssh','-o','BatchMode=yes','-o','LogLevel=ERROR',self.host,
                     '/usr/bin/nc -U "$HOME/.wechat-rpa/bot-worker.sock"',
                     stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL,
                     limit=4*1024*1024)
-                await self.call('capture')
+                # Readiness probe without a title check, so a different open chat does not abort reuse.
+                await self.call('sessions',names=self.names or [self.recipient])
                 return
             except (RuntimeError,ConnectionError,asyncio.TimeoutError):
                 await self.close_transport()
+                if time.monotonic()>=deadline:
+                    raise RuntimeError('private GUI bot worker did not become ready')
                 await asyncio.sleep(0.2)
-        raise RuntimeError('private GUI bot worker did not become ready')
 
     async def call(self,operation,**params):
         async with self.rpc_lock:
