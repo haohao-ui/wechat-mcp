@@ -3,6 +3,7 @@ import CoreGraphics
 import ImageIO
 import CryptoKit
 import Darwin
+import ScreenCaptureKit
 
 let base = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".wechat-rpa")
 
@@ -11,6 +12,45 @@ func checkPrivate(_ path: URL, type: FileAttributeType, mode: Int) throws {
     guard info[.type] as? FileAttributeType == type,
           (info[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(),
           (info[.posixPermissions] as? NSNumber)?.intValue == mode else { throw Failure.invalid("unsafe_private_path") }
+}
+
+/// Captures one WeChat window at its native pixel scale (no shadow).
+/// macOS 14+: ScreenCaptureKit (CGWindowListCreateImage is unavailable on macOS 15+); older: CGWindowList.
+func windowImage(_ window: [String:Any]) throws -> CGImage {
+    let id = window["window_id"] as! UInt32
+    if #available(macOS 14, *) {
+        let done = DispatchSemaphore(value:0)
+        var image: CGImage?
+        var reason = "window_not_shareable"
+        SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly:true) { content, error in
+            guard let target = content?.windows.first(where: { $0.windowID == id }) else {
+                reason = error.map { "shareable_content: \($0.localizedDescription)" } ?? reason
+                done.signal(); return
+            }
+            let filter = SCContentFilter(desktopIndependentWindow:target)
+            let config = SCStreamConfiguration()
+            let scale = Double(filter.pointPixelScale)
+            config.width = Int((target.frame.width*scale).rounded())
+            config.height = Int((target.frame.height*scale).rounded())
+            config.showsCursor = false
+            config.ignoreShadowsSingleWindow = true
+            SCScreenshotManager.captureImage(contentFilter:filter, configuration:config) { captured, error in
+                image = captured
+                if let error = error { reason = "capture: \(error.localizedDescription)" }
+                done.signal()
+            }
+        }
+        guard done.wait(timeout:.now()+5) == .success, let image = image else {
+            // Typically missing Screen Recording permission; logged for the operator, retried by the bot.
+            fputs("window capture failed: \(reason)\n", stderr)
+            throw Failure.invalid("window_capture_failed")
+        }
+        return image
+    }
+    guard let image = CGWindowListCreateImage(.null,.optionIncludingWindow,id,[.boundsIgnoreFraming,.bestResolution]) else {
+        throw Failure.invalid("window_capture_failed")
+    }
+    return image
 }
 
 func selectedWindow() throws -> [String:Any] {
@@ -96,8 +136,8 @@ final class CaptureWorker {
         let began=ProcessInfo.processInfo.systemUptime
         let window = try selectedWindow()
         let id = window["window_id"] as! UInt32
-        guard let image = CGWindowListCreateImage(.null,.optionIncludingWindow,id,[.boundsIgnoreFraming,.bestResolution]),
-              let panel = try normalizedFrame(image,window:window).image.cropping(to:CGRect(x:300,y:0,width:570,height:496)) else { throw Failure.invalid("window_capture_failed") }
+        let image = try windowImage(window)
+        guard let panel = try normalizedFrame(image,window:window).image.cropping(to:CGRect(x:300,y:0,width:570,height:496)) else { throw Failure.invalid("window_capture_failed") }
         var hashInput = try canonicalBytes(panel)
         hashInput.append(try JSONSerialization.data(withJSONObject:window,options:.sortedKeys))
         let snapshot = SHA256.hash(data:hashInput).map { String(format:"%02x",$0) }.joined()
@@ -138,8 +178,7 @@ final class CaptureWorker {
             guard (1...20).contains(targets.count), targets.allSatisfy({ !$0.isEmpty && $0.count<=64 }) else { throw Failure.invalid("invalid_session_target") }
             return try openSessionRow(targets,probe:sessionProbe) {
                 let window=try selectedWindow()
-                guard let image=CGWindowListCreateImage(.null,.optionIncludingWindow,window["window_id"] as! UInt32,[.boundsIgnoreFraming,.bestResolution]) else { throw Failure.invalid("window_capture_failed") }
-                return (window,try normalizedFrame(image,window:window).image)
+                return (window,try normalizedFrame(try windowImage(window),window:window).image)
             }
         }
         if operation == "sessions" {
@@ -147,8 +186,7 @@ final class CaptureWorker {
                   names.allSatisfy({ !$0.isEmpty && $0.count<=64 }) else { throw Failure.invalid("invalid_session_names") }
             let began=ProcessInfo.processInfo.systemUptime
             let window=try selectedWindow()
-            guard let captured=CGWindowListCreateImage(.null,.optionIncludingWindow,window["window_id"] as! UInt32,[.boundsIgnoreFraming,.bestResolution]) else { throw Failure.invalid("window_capture_failed") }
-            let image=try normalizedFrame(captured,window:window).image
+            let image=try normalizedFrame(try windowImage(window),window:window).image
             var result=try sessionProbe.probe(image,names:names,debug:params["debug"] as? Bool == true)
             if params["debug"] as? Bool == true, let list=image.cropping(to:sessionListRect) {
                 let id=SHA256.hash(data:try canonicalBytes(list)).map { String(format:"%02x",$0) }.joined()
@@ -234,7 +272,6 @@ func withDesktop<T>(_ operation: () throws -> T) throws -> T {
 struct BotWorkerMain {
     static func main() {
         do {
-            if #available(macOS 15,*) { throw Failure.invalid("legacy_capture_worker_requires_macOS12_14") }
             try checkPrivate(base,type:.typeDirectory,mode:0o700)
             try checkPrivate(base.appendingPathComponent("bot-worker.enabled"),type:.typeRegular,mode:0o600)
             let ownerLock=open(base.appendingPathComponent("bot-worker.lock").path,O_CREAT|O_RDWR,0o600)
