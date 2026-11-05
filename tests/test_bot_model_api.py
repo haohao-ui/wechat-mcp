@@ -37,6 +37,17 @@ class ModelApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(meta['model'],'fixture-actual')
         self.assertNotIn('api_key_file',meta)
 
+    async def test_earlier_images_are_not_counted_as_this_turn(self):
+        # Acceptance 2026-11-05 (group): one image was sent, the reply said two — an earlier image in
+        # recent_context was counted. The prompt must say only image_count images arrived this turn.
+        from scripts.wechat_bot.reply import generate
+        with patch('scripts.wechat_bot.model_api.request_completion',return_value=self.result) as request:
+            await generate('示例联系人甲：[图片]',mode='service',model_config=self.config,chat_kind='group',
+                           context=[{'role':'customer','text':'[图片]','media':{'kind':'image','understanding':'一张截图'}}])
+        prompt=json.dumps(request.call_args.args[1]['messages'],ensure_ascii=False)
+        self.assertIn('recent_context里的图片和文件是之前发的',prompt)
+        self.assertIn('本轮收到的图片数量以image_count为准',prompt)
+
     async def test_generate_api_custom_field(self):
         def check(value):
             if not isinstance(value,list): raise ValueError('notes must be a list')
