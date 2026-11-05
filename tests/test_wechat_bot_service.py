@@ -55,6 +55,15 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.model.assert_not_awaited()
         self.assertEqual(self.calls,[])
 
+    async def test_empty_baseline_never_turns_visible_history_into_new_messages(self):
+        # Restart or theme switch captured an empty chat first (no chat open): the next frame's
+        # bubbles are old history, not arrivals, so they become the baseline without a reply.
+        self.service.advance(frame())
+        await self.cycle([self.new,self.new])
+        self.model.assert_not_awaited()
+        self.assertEqual(self.calls,[])
+        self.assertEqual(len(self.service.cursor['bubbles']),len(self.new['bubbles']))
+
     async def test_ordinary_incoming_has_no_test_prefix_and_replies_once(self):
         self.service.advance(self.old)
         after=frame(*self.new['bubbles'],bubble('你好，我是AI客服助手。','outbound_visual'))

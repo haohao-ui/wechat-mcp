@@ -176,7 +176,10 @@ class BotService:
         self.policy.check_frame(frame)
         if not await self.record(frame, capture):
             return
-        if self.cursor is None:
+        if self.cursor is None or not self.cursor['bubbles']:
+            # An empty baseline (no chat open after a restart or theme switch) anchors nothing:
+            # whatever is visible next is history. Cost: a brand-new contact's first message is
+            # only recorded; replies start from the second one.
             self.advance(frame)
             self.health('watching',historical_messages_ignored=True)
             return
