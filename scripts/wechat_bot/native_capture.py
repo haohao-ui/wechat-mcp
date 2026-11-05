@@ -141,7 +141,7 @@ fi
 
     async def scroll(self, direction, pages=1):
         # Wheel-scrolls the open chat and returns the frame captured after it.
-        if direction not in ('up','down') or not 1<=pages<=5:
+        if direction not in ('up','down') or not 1<=pages<=40:
             raise ValueError('invalid scroll request')
         return self.logged(await self.call('scroll_chat',direction=direction,pages=pages))
 

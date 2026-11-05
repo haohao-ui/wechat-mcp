@@ -258,3 +258,37 @@ class ReviewFixTests(unittest.TestCase):
         prev = [bubble('x'), image('0000000000000000')]
         cur = [bubble('x'), image('0000000000000fff'), bubble('y')]
         self.assertEqual(new_bubbles(prev, reconcile(prev, cur)), [cur[2]])
+
+
+def at_y(b, y, height=40):
+    return {**b, 'y': y, 'height': height}
+
+
+class MergePagesTests(unittest.TestCase):
+    """Calibrated 2026-11-05: one wheel step moves the chat 90pt; tall images leave empty pages."""
+
+    def test_pages_merge_by_position_across_empty_pages(self):
+        from scripts.wechat_bot.policy import merge_pages
+        a, b = bubble('a'), bubble('b')
+        i1, i2 = image('0000000000000000'), image('ffffffff00000000')
+        # Content top->bottom: a, b, i1 (247pt), i2 (247pt). Bottom page shows only i2.
+        pages = [[at_y(i2, 23, 247)],                       # bottom
+                 [at_y(i2, 113, 247)],                      # up 1
+                 [],                                        # up 2: nothing complete
+                 [at_y(i1, 26, 247)],                       # up 3
+                 [at_y(a, 40), at_y(b, 100), at_y(i1, 116, 247)]]  # up 4
+        merged = merge_pages(pages, step=90)
+        self.assertEqual([m['text'] if m.get('kind') != 'image' else m['phash'] for m in merged],
+                         ['a', 'b', i1['phash'], i2['phash']])
+
+    def test_measured_offset_overrides_nominal_step(self):
+        from scripts.wechat_bot.policy import merge_pages
+        x, y = bubble('x'), bubble('y')
+        pages = [[at_y(y, 300)], [at_y(x, 200), at_y(y, 380)]]  # actually moved 80pt
+        self.assertEqual([m['text'] for m in merge_pages(pages, step=90)], ['x', 'y'])
+
+    def test_disagreeing_pages_raise_gap(self):
+        from scripts.wechat_bot.policy import ContinuityGap, merge_pages
+        pages = [[at_y(bubble('y'), 300)], [at_y(bubble('z'), 390)]]  # 'z' sits where 'y' must be
+        with self.assertRaises(ContinuityGap):
+            merge_pages(pages, step=90)

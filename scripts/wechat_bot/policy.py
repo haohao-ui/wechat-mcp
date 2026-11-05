@@ -111,6 +111,33 @@ def new_bubbles(previous, current):
     return current[size:]
 
 
+# One scroll_chat wheel step on WeChat 4 at 880x640 (measured 2026-11-05); used when two pages share
+# no complete bubble to measure the real shift from.
+SCROLL_STEP_POINTS = 90
+
+
+def merge_pages(pages, step=SCROLL_STEP_POINTS):
+    """One top->bottom bubble list from frames captured while scrolling up (pages[0] = bottom frame).
+
+    Each page's shift is measured from bubbles it shares with the previous page, else `step` is assumed;
+    bubbles are then placed by absolute position. A different bubble where a known one must be means
+    the shift estimate is wrong: ContinuityGap."""
+    placed, offset = [], 0
+    for index, page in enumerate(pages):
+        if index:
+            deltas = sorted(new['y'] - old['y'] for old in pages[index-1] for new in page
+                            if old.get('kind') == new.get('kind') and same_bubble(old, new) and 0 < new['y'] - old['y'] < 300)
+            offset += deltas[len(deltas)//2] if deltas else step
+        for bubble in page:
+            position = bubble['y'] - offset
+            twin = next((p for p in placed if p[1]['direction'] == bubble['direction'] and abs(p[0]-position) <= 8), None)
+            if twin is None:
+                placed.append((position, bubble))
+            elif not same_bubble(twin[1], bubble):
+                raise ContinuityGap('scrolled pages disagree at one position')
+    return [bubble for _, bubble in sorted(placed, key=lambda pair: pair[0])]
+
+
 def stitch(cursor, pages):
     """New bubbles after `cursor`, joined across scrolled pages ordered oldest -> newest (last = current).
 
