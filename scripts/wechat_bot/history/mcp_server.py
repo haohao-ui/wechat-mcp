@@ -18,10 +18,10 @@ TOOLS = {
                                     {'contact_id': S, 'limit': I}, ['contact_id']),
     'history_get_history': ('get_history', '某联系人完整历史，按时间分页',
                             {'contact_id': S, **PAGE, 'limit': I, 'order': {'type': 'string', 'enum': ['asc', 'desc']}}, ['contact_id']),
-    'history_search_messages': ('search_messages', '全文搜索消息，返回命中消息及上下文消息 ID',
+    'history_search_messages': ('search_messages', '全文搜索消息（含图片/文件的模型理解要点），返回命中消息及上下文消息 ID',
                                 {'q': S, 'contact_id': S, **PAGE, 'limit': I}, ['q']),
-    'history_get_message': ('get_message', '单条消息详情（含 meta）', {'message_id': S}, ['message_id']),
-    'history_get_media': ('get_media', '附件元数据与 base64 内容（≤10MB）', {'media_id': S}, ['media_id']),
+    'history_get_message': ('get_message', '单条消息详情（含 meta；附件含来源 original/chat_thumbnail 与理解要点 understanding）', {'message_id': S}, ['message_id']),
+    'history_get_media': ('get_media', '附件元数据（来源、理解要点 understanding）与 base64 内容（≤10MB）', {'media_id': S}, ['media_id']),
 }
 
 
