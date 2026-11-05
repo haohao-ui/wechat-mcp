@@ -243,6 +243,7 @@ struct BotWorkerMain {
                 if errno==EWOULDBLOCK { return }
                 throw Failure.invalid("worker_lock_failed")
             }
+            warmUpRecognizer()  // Before listening, so the first capture is not a cold model load.
             let path=base.appendingPathComponent("bot-worker.sock").path
             var addr=try address(path)
             if FileManager.default.fileExists(atPath:path) {
