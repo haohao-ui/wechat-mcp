@@ -97,7 +97,7 @@ final class CaptureWorker {
         let window = try selectedWindow()
         let id = window["window_id"] as! UInt32
         guard let image = CGWindowListCreateImage(.null,.optionIncludingWindow,id,[.boundsIgnoreFraming,.bestResolution]),
-              let panel = image.cropping(to:CGRect(x:300,y:0,width:image.width-310,height:image.height-144)) else { throw Failure.invalid("window_capture_failed") }
+              let panel = try normalizedFrame(image,window:window).image.cropping(to:CGRect(x:300,y:0,width:570,height:496)) else { throw Failure.invalid("window_capture_failed") }
         var hashInput = try canonicalBytes(panel)
         hashInput.append(try JSONSerialization.data(withJSONObject:window,options:.sortedKeys))
         let snapshot = SHA256.hash(data:hashInput).map { String(format:"%02x",$0) }.joined()
@@ -139,7 +139,7 @@ final class CaptureWorker {
             return try openSessionRow(targets,probe:sessionProbe) {
                 let window=try selectedWindow()
                 guard let image=CGWindowListCreateImage(.null,.optionIncludingWindow,window["window_id"] as! UInt32,[.boundsIgnoreFraming,.bestResolution]) else { throw Failure.invalid("window_capture_failed") }
-                return (window,image)
+                return (window,try normalizedFrame(image,window:window).image)
             }
         }
         if operation == "sessions" {
@@ -147,7 +147,8 @@ final class CaptureWorker {
                   names.allSatisfy({ !$0.isEmpty && $0.count<=64 }) else { throw Failure.invalid("invalid_session_names") }
             let began=ProcessInfo.processInfo.systemUptime
             let window=try selectedWindow()
-            guard let image=CGWindowListCreateImage(.null,.optionIncludingWindow,window["window_id"] as! UInt32,[.boundsIgnoreFraming,.bestResolution]) else { throw Failure.invalid("window_capture_failed") }
+            guard let captured=CGWindowListCreateImage(.null,.optionIncludingWindow,window["window_id"] as! UInt32,[.boundsIgnoreFraming,.bestResolution]) else { throw Failure.invalid("window_capture_failed") }
+            let image=try normalizedFrame(captured,window:window).image
             var result=try sessionProbe.probe(image,names:names,debug:params["debug"] as? Bool == true)
             if params["debug"] as? Bool == true, let list=image.cropping(to:sessionListRect) {
                 let id=SHA256.hash(data:try canonicalBytes(list)).map { String(format:"%02x",$0) }.joined()

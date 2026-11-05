@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 FRAMES = ROOT/'tests'/'fixtures'/'frames'
 
 TOP = [('inbound_visual', 'text', '你好'), ('inbound_visual', 'text', '在吗'),
-       ('outbound_visual', 'text', 'AI客服助手'), ('inbound_visual', 'text', '你是美女吗'),
+       ('outbound_visual', 'text', '客服助手'), ('inbound_visual', 'text', '你是美女吗'),
        ('outbound_visual', 'text', '没有外貌')]
 BOTTOM = [('inbound_visual', 'text', '岗位信息更新2.13.pdf'), ('inbound_visual', 'text', '测试结束'),
           ('inbound_visual', 'text', '浅色测试')]
@@ -27,6 +27,11 @@ CASES = {
     'r1-dark-bottom': ('wechat-4-dark', 1, '示例联系人甲', BOTTOM),
     'r1-light-top': ('wechat-4-light', 1, '示例联系人甲', TOP),
     'r1-light-bottom': ('wechat-4-light', 1, '示例联系人甲', BOTTOM),
+    # Retina (2x) captures of the same chat on macOS 27.2; the window JSON stays in 880x640 points.
+    'retina-dark-top': ('wechat-4-dark', 2, '示例联系人甲', TOP),
+    'retina-light-top': ('wechat-4-light', 2, '示例联系人甲', TOP),
+    'retina-dark-bottom': ('wechat-4-dark', 2, '示例联系人甲', BOTTOM+[('inbound_visual', 'text', '你好')]),
+    'retina-light-bottom': ('wechat-4-light', 2, '示例联系人甲', BOTTOM+[('inbound_visual', 'text', '你好')]),
 }
 
 

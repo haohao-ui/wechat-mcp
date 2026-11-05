@@ -88,12 +88,31 @@ func detectTheme(_ pixels: [UInt8], count: Int) throws -> ThemeProfile {
     throw Failure.invalid("uncalibrated_theme")
 }
 
-func analyzeFrame(_ full: CGImage, window: [String:Any], mediaRoot: URL? = nil, recipient: String? = nil) throws -> [String:Any] {
+/// Maps a 1x or Retina (2x) capture of the 880x640-point window onto the calibrated 1x pixel grid.
+/// All layout constants and colour rules are defined on that grid; the original stays available
+/// for full-resolution media crops.
+func normalizedFrame(_ captured: CGImage, window: [String:Any]) throws -> (image: CGImage, scale: Int) {
     guard let pointWidth = window["width"] as? Double, let pointHeight = window["height"] as? Double,
           window["on_screen"] as? Bool == true,
-          full.width == 880, full.height == 640,
-          Double(full.width) == pointWidth.rounded(), Double(full.height) == pointHeight.rounded(),
-          let title = full.cropping(to:CGRect(x:250,y:0,width:full.width-260,height:50)),
+          pointWidth.rounded() == 880, pointHeight.rounded() == 640,
+          let scale = [1,2].first(where: { captured.width == 880*$0 && captured.height == 640*$0 }) else {
+        throw Failure.invalid("unsupported_image_geometry")
+    }
+    if scale == 1 { return (captured, 1) }
+    guard let context = CGContext(data:nil,width:880,height:640,bitsPerComponent:8,bytesPerRow:0,
+            space:CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else {
+        throw Failure.invalid("bitmap_failed")
+    }
+    context.interpolationQuality = .high
+    context.draw(captured,in:CGRect(x:0,y:0,width:880,height:640))
+    guard let image = context.makeImage() else { throw Failure.invalid("bitmap_failed") }
+    return (image, scale)
+}
+
+func analyzeFrame(_ captured: CGImage, window: [String:Any], mediaRoot: URL? = nil, recipient: String? = nil) throws -> [String:Any] {
+    let (full, scale) = try normalizedFrame(captured, window:window)
+    guard let title = full.cropping(to:CGRect(x:250,y:0,width:full.width-260,height:50)),
           // Ends at the input separator (y=496): a fully scrolled last bubble keeps ~8px above it.
           let chat = full.cropping(to:CGRect(x:315,y:60,width:full.width-325,height:full.height-204)) else {
         throw Failure.invalid("unsupported_image_geometry")
@@ -202,7 +221,9 @@ func analyzeFrame(_ full: CGImage, window: [String:Any], mediaRoot: URL? = nil, 
         if isImage,let directory=mediaRoot {
             let path=directory.appendingPathComponent(digest+".png")
             if !FileManager.default.fileExists(atPath:path.path) {
-                guard let cropped=chat.cropping(to:CGRect(x:box.x,y:box.y,width:box.width,height:box.height)),
+                // Crop media from the original capture so Retina images keep their full resolution.
+                guard let cropped=captured.cropping(to:CGRect(x:(315+box.x)*scale,y:(60+box.y)*scale,
+                                                              width:box.width*scale,height:box.height*scale)),
                       let destination=CGImageDestinationCreateWithURL(path as CFURL,"public.png" as CFString,1,nil) else { throw Failure.invalid("media_crop_failed") }
                 CGImageDestinationAddImage(destination,cropped,nil)
                 guard CGImageDestinationFinalize(destination) else { throw Failure.invalid("media_write_failed") }
@@ -213,9 +234,9 @@ func analyzeFrame(_ full: CGImage, window: [String:Any], mediaRoot: URL? = nil, 
         bubbles.append(item)
     }
     bubbles.sort { ($0["y"] as! Int)<($1["y"] as! Int) }
-    let result: [String:Any] = ["profile":theme.name,"scale":1,"title_lines":titleNames,
+    let result: [String:Any] = ["profile":theme.name,"scale":scale,"title_lines":titleNames,
         "bubbles":bubbles,"platform_message_verified":false,"sender_verified":false,
-        "width":full.width,"height":full.height,"clipped_bubble":clippedBubble]
+        "width":full.width,"height":full.height,"captured_width":captured.width,"clipped_bubble":clippedBubble]
     return result
 }
 
