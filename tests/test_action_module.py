@@ -152,6 +152,13 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(out['error'], 'user_input_detected')
         self.assertEqual(self.kinds(out)[-2:], ['left_down', 'left_up'])
 
+    def test_pointer_moved_between_actions_is_not_user_input(self):
+        out = self.scenario('moved_between_actions')
+        self.assertIsNone(out['error'])
+        self.assertEqual([e['type'] for e in out['events']].count('left_down'), 2)
+        second = [e for e in out['events'] if e['type'] == 'moved'][-1]
+        self.assertTrue(200 <= second['x'] <= 280 and 200 <= second['y'] <= 230, second)
+
     def test_instant_profile_single_move(self):
         out = self.scenario('instant')
         self.assertIsNone(out['error'])

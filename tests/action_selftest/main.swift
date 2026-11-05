@@ -112,6 +112,18 @@ func execScenario(_ name: String, _ seed: UInt64) -> [String:Any] {
     case "scroll": rect = CGRect(x:315, y:60, width:565, height:436)
     default: break
     }
+    if name == "moved_between_actions" {
+        // Acceptance 2026-11-05: a pointer moved between two actions (not during one) was wrongly
+        // reported as user input; only movement during an action counts.
+        let first = Actions(sink:sink, profile:profile, seed:seed, screens:screens)
+        var failure: Any = NSNull()
+        do {
+            try first.click(rect)
+            sink.position = CGPoint(x:900, y:700)
+            try first.click(CGRect(x:200, y:200, width:80, height:30))
+        } catch { failure = String(describing:error) }
+        return ["events":sink.events, "error":failure, "pressed":NSNull(), "region":rectJSON(reachableRegion(rect, screen:screens[0]))]
+    }
     let actions = Actions(sink:sink, profile:profile, seed:seed, screens:screens)
     var failure: Any = NSNull()
     var pressed: Any = NSNull()
