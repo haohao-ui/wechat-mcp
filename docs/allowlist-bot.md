@@ -50,7 +50,7 @@ python3 -m scripts.wechat_bot.control start
 
 - **一轮一回**：客户最后一条消息后安静 `turn_quiet_seconds`（默认 10，0..120）秒，或一轮已满 `turn_max_seconds`（默认 60，10..600）秒，就把这一轮所有文字、图片、文件合成一批回复一条。轮次保存在会话目录的 `turn.json`，重启后继续计时。日志 `turn_opened` / `turn_closed`。
 - **图片识别**：图片按尺寸 + 感知哈希（`phash`）识别，加载前后视为同一张；同尺寸的不同截图仍是不同消息。高图片把旧消息挤出屏幕时向上翻页找回位置（`continuity_gap_recovered`），确认翻回底部后再继续；找不回才重建基线。
-- **取件**：图片优先右键另存为原图，失败退回聊天缩略图（`image_original_unavailable`）；文件保存原件并提取文字。每项挂到历史消息下。打不开的项（下载失败、超过 10MB、格式不支持、提取为空、内容太多）记 `media_failed`，回复照常，并在回复里点名请客户重发。
+- **取件**：右键菜单由屏幕文字识别定位"另存为"（微信 4 的菜单不在辅助功能树里），保存名唯一（`wxbot-xxxx`）并核对文件名框后回车，存好后移入 worker 私有目录，失败自动按 Esc 关闭弹窗。图片优先原图，失败退回聊天缩略图（`image_original_unavailable`，`detail` 为 worker 错误代码）；屏幕外的图片使用翻页截下的缩略图；文件卡片显示上传中时继续等待；文件保存原件并提取文字。每项挂到历史消息下。打不开的项（下载失败、超过 10MB、格式不支持、提取为空、内容太多）记 `media_failed`，回复照常，并在回复里点名请客户重发。
 - **分批理解**：图片多于 `images_per_model_call`（默认 4，1..16）张时，先分批让模型逐张写要点（`model_batch`），要点存入历史库 `media.understanding`，最后一次调用只带要点生成一条回复。某批失败时那几张按打不开处理；最后生成失败仍暂停复核。
 - **发送前确认**：历史库或屏幕显示这一轮之后我方已有回复（人工手动回复或已发出的 Bot 回复）时不发送，记 `already_replied`（`source`：`screen`/`history`/`journal`），人工回过的这一轮 Bot 不再补充。
 - **生成期间的新消息**：这一轮的回复照常发出，新消息归入下一轮。发送期间到达的新入站候选不会随发送后快照一起被提前推进游标。重启发现未完成的模型/发送阶段会暂停等待复核。
@@ -158,7 +158,7 @@ tail -F "$HOME/Library/Application Support/WeChatRPABot/logs/stdout.log"
 设计：`docs/superpowers/specs/2026-11-05-conversation-history-design.md`。
 
 - **存储**：`<state_dir>/history/history.sqlite3`（SQLite WAL，0600）；附件 `<state_dir>/history/media/`，按内容 SHA-256 命名。永久保留，无删除功能。
-- **记录内容**：Bot 看到的每条可见消息，按联系人追加。`sender` 为 `customer`（客户）/ `bot`（Bot 自动回复，关联发送状态与回显）/ `self_other`（我方人工或无法区分）；`capture` 标明来源：`live`、`baseline`（首次可见历史）、`rebaseline_gap`、`ambiguous`（重复消息条数不确定）、`imported`（旧发送流水）。图片保存聊天缩略图；文件原件在没有待回复消息时排队下载，已滚出屏幕的标记为 `gone`。
+- **记录内容**：Bot 看到的每条可见消息，按联系人追加。`sender` 为 `customer`（客户）/ `bot`（Bot 自动回复，关联发送状态与回显）/ `self_other`（我方人工或无法区分）；`capture` 标明来源：`live`、`baseline`（首次可见历史）、`rebaseline_gap`、`ambiguous`（重复消息条数不确定）、`imported`（旧发送流水）。图片在出现时先存聊天缩略图，回复时另存为的原图（`source=original`）和模型理解要点（`media.understanding`，迁移 3）也挂到同一条消息；文件在回复时另存为原件，没有回复的文件在空闲时排队下载，已滚出屏幕的标记为 `gone`。只读接口（HTTP、MCP）返回附件的 `source` 与 `understanding`，搜索也匹配理解要点。
 - **模型上下文**：该联系人最近 `context_messages` 条（默认 5，0..100）+ 本批消息。
 - **会话目录**：`state_dir/sessions/<contact_id>/`。从旧版本升级先 `control stop`，再运行 `python3 -m scripts.wechat_bot.control migrate-history`；存在旧哈希目录时 Bot 拒绝启动。
 

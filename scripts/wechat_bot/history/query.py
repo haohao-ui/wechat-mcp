@@ -39,7 +39,8 @@ def check_limit(limit, kind):
 MESSAGE_SELECT = (
     "SELECT m.rowid AS rid, m.message_id, m.contact_id, m.seq, m.direction, m.sender, m.kind, m.text, "
     "m.observed_at, m.capture, m.meta, m.send_key, s.status AS send_status, s.echo_observed, "
-    "m.media_id, md.kind AS media_kind, md.filename AS media_filename "
+    "m.media_id, md.kind AS media_kind, md.filename AS media_filename, md.source AS media_source, "
+    "md.understanding AS media_understanding "
     "FROM messages m LEFT JOIN sends s ON s.send_key=m.send_key LEFT JOIN media md ON md.media_id=m.media_id ")
 
 
@@ -115,7 +116,8 @@ class HistoryQuery:
                 'observed_at': row['observed_at'], 'capture': row['capture'],
                 'send': ({'send_key': row['send_key'], 'status': row['send_status'], 'echo_observed': bool(row['echo_observed'])}
                          if row['send_key'] else None),
-                'media': ({'media_id': row['media_id'], 'kind': row['media_kind'], 'filename': row['media_filename']}
+                'media': ({'media_id': row['media_id'], 'kind': row['media_kind'], 'filename': row['media_filename'],
+                           'source': row['media_source'], 'understanding': row['media_understanding']}
                           if row['media_id'] else None)}
         if with_meta:
             item['meta'] = json.loads(row['meta'] or '{}')
@@ -177,13 +179,16 @@ class HistoryQuery:
         q = q.strip()
         family = self._family(contact_id)[1] if contact_id else [r[0] for r in self.conn.execute('SELECT contact_id FROM contacts')]
         where, params = self._range(family, since, until, cursor, 'desc')
+        like = '%' + q.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+        # Images and files are also found by what the model understood from them (media.understanding).
+        understood = " OR md.understanding LIKE ? ESCAPE '\\'"
         if len(q) >= 3:
             # Trigram FTS needs >=3 characters; the query is passed as one quoted phrase.
-            where += ' AND m.rowid IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)'
-            params.append('"' + q.replace('"', '""') + '"')
+            where += ' AND (m.rowid IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)' + understood + ')'
+            params += ['"' + q.replace('"', '""') + '"', like]
         else:
-            where += " AND m.text LIKE ? ESCAPE '\\'"
-            params.append('%' + q.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%')
+            where += " AND (m.text LIKE ? ESCAPE '\\'" + understood + ")"
+            params += [like, like]
         return self._page(MESSAGE_SELECT + f'WHERE {where} ORDER BY m.rowid DESC LIMIT ?',
                           params, limit, 'desc', with_context=True)
 
@@ -202,4 +207,5 @@ class HistoryQuery:
         if root not in path.parents or not path.is_file():
             raise QueryError('not_found', 'media file missing')
         return ({'media_id': row['media_id'], 'kind': row['kind'], 'filename': row['filename'],
-                 'extension': row['extension'], 'size': row['size'], 'source': row['source']}, path)
+                 'extension': row['extension'], 'size': row['size'], 'source': row['source'],
+                 'understanding': row['understanding'], 'understood_at': row['understood_at']}, path)

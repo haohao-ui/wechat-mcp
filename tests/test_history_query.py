@@ -129,6 +129,22 @@ class QueryTests(unittest.TestCase):
         second = self.q.list_contacts(limit=1, cursor=first['next_cursor'])
         self.assertNotEqual(first['items'][0]['contact_id'], second['items'][0]['contact_id'])
 
+    def test_media_understanding_is_exposed_and_searchable(self):
+        # Media-turns: what the model understood from an image is part of the record agents read.
+        mid = self.q.get_recent_messages(self.c)['items'][0]['message_id']
+        src = Path(self.temp.name)/'q.png'
+        src.write_bytes(b'img2')
+        media_id = self.writer.attach_media(mid, src, kind='image', filename=None, source='original')
+        self.writer.set_understanding(media_id, '顺丰快递面单，单号SF123')
+        message = self.q.get_message(mid)
+        self.assertEqual(message['media']['understanding'], '顺丰快递面单，单号SF123')
+        self.assertEqual(message['media']['source'], 'original')
+        info, _ = self.q.get_media(media_id)
+        self.assertEqual(info['understanding'], '顺丰快递面单，单号SF123')
+        hits = self.q.search_messages('快递面单', contact_id=self.c)['items']
+        self.assertEqual([h['message_id'] for h in hits], [mid])
+        self.assertEqual([h['message_id'] for h in self.q.search_messages('SF', contact_id=self.c)['items']], [mid])
+
     def test_get_message_and_media(self):
         mid = self.q.get_recent_messages(self.c)['items'][0]['message_id']
         self.assertIn('meta', self.q.get_message(mid))
