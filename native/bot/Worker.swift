@@ -191,6 +191,67 @@ func writePNG(_ image: CGImage, path: URL) throws {
     try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:path.path)
 }
 
+func pngData(_ image: CGImage) throws -> Data {
+    let data = NSMutableData()
+    guard let dest = CGImageDestinationCreateWithData(data as CFMutableData, "public.png" as CFString, 1, nil) else {
+        throw Failure.invalid("png_failed")
+    }
+    CGImageDestinationAddImage(dest, image, nil)
+    guard CGImageDestinationFinalize(dest) else {
+        throw Failure.invalid("png_failed")
+    }
+    return data as Data
+}
+
+func resolveCurrentLayoutPath() throws -> String {
+    let env = ProcessInfo.processInfo.environment
+    if let explicit = env["WECHAT_LAYOUT"]?.trimmingCharacters(in: .whitespaces), !explicit.isEmpty {
+        return explicit
+    }
+    guard let ver = wechatAppVersion() else {
+        throw Failure.invalid("layout_missing")
+    }
+    let layoutDir = env["WECHAT_LAYOUT_DIR"] ?? (NSHomeDirectory() + "/.wechat-rpa/layout")
+    guard let found = WechatLayout.path(forVersion: ver, directory: layoutDir) else {
+        throw Failure.invalid("layout_missing")
+    }
+    return found
+}
+
+func drawAnnotatedLayout(_ image: CGImage, scale: Int, layout: WechatLayout) throws -> CGImage {
+    let width = image.width
+    let height = image.height
+    guard let ctx = CGContext(
+        data: nil,
+        width: width,
+        height: height,
+        bitsPerComponent: 8,
+        bytesPerRow: 0,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+    ) else {
+        throw Failure.invalid("bitmap_failed")
+    }
+    ctx.translateBy(x: 0, y: CGFloat(height))
+    ctx.scaleBy(x: 1.0, y: -1.0)
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+    ctx.setLineWidth(CGFloat(max(2, 2 * scale)))
+    ctx.setStrokeColor(red: 1.0, green: 0.0, blue: 0.0, alpha: 0.9)
+    for (_, rect) in layout.regions {
+        let box = CGRect(
+            x: rect.x * Double(scale),
+            y: rect.y * Double(scale),
+            width: rect.w * Double(scale),
+            height: rect.h * Double(scale)
+        )
+        ctx.stroke(box)
+    }
+    guard let annotated = ctx.makeImage() else {
+        throw Failure.invalid("bitmap_failed")
+    }
+    return annotated
+}
+
 final class CaptureWorker {
     var cachedID = ""
     var cached: [String:Any] = [:]
@@ -268,8 +329,46 @@ final class CaptureWorker {
     func request(_ request: [String:Any]) throws -> [String:Any] {
         guard request["protocol_version"] as? Int == 1,
               let operation=request["operation"] as? String,
-              let params=request["params"] as? [String:Any],
-              let recipient=params["recipient"] as? String,!recipient.isEmpty else { throw Failure.invalid("invalid_request") }
+              let params=request["params"] as? [String:Any] else { throw Failure.invalid("invalid_request") }
+        if operation == "calibrate" {
+            guard let ver = wechatAppVersion() else {
+                throw Failure.invalid("layout_missing")
+            }
+            let layoutPath = try resolveCurrentLayoutPath()
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: layoutPath)),
+                  let layoutObj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw Failure.invalid("layout_missing")
+            }
+            let layout = try currentLayout()
+
+            let (window, _) = try readyWindow(manage: false)
+            let rawImage = try windowImage(window)
+            let normalized = try normalizedFrame(rawImage, window: window)
+            let frame = normalized.image
+            let scale = normalized.scale
+            let report = verifyAnchors(frame, scale: scale, layout: layout, tolerance: 1000)
+            let theme = report.theme ?? detectTheme(frame, scale: scale, layout: layout)
+            let measured = report.measured
+
+            let annotated = try drawAnnotatedLayout(frame, scale: scale, layout: layout)
+            let pngBytes = try pngData(annotated)
+            let base64 = pngBytes.base64EncodedString()
+
+            var result: [String: Any] = [
+                "wechat_version": ver,
+                "layout_path": layoutPath,
+                "layout": layoutObj,
+                "measured": measured,
+                "window": window,
+                "scale": scale,
+                "annotated_png_base64": base64
+            ]
+            if let theme = theme {
+                result["theme"] = theme
+            }
+            return result
+        }
+        guard let recipient=params["recipient"] as? String,!recipient.isEmpty else { throw Failure.invalid("invalid_request") }
         // Exact match against the contact's configured name and aliases (OCR may drop emoji/symbols).
         let names=(params["accepted_names"] as? [String]) ?? [recipient]
         guard (1...20).contains(names.count), names.allSatisfy({ !$0.isEmpty && $0.count<=64 }) else { throw Failure.invalid("invalid_accepted_names") }
