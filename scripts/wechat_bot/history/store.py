@@ -320,12 +320,15 @@ class HistoryStore:
 
     # Media ----------------------------------------------------------------
 
-    MAX_MEDIA = 10*1024*1024
+    MAX_MEDIA = 50*1024*1024
 
-    def attach_media(self, message_id, source_path, *, kind, filename, source):
+    def attach_media(self, message_id, source_path, *, kind, filename, source, max_bytes=None):
+        limit = self.MAX_MEDIA if max_bytes is None else int(max_bytes)
         data = Path(source_path).read_bytes()
-        if len(data) > self.MAX_MEDIA:
-            raise ValueError('media larger than 10MB')
+        if len(data) > limit:
+            mb = limit // (1024 * 1024)
+            unit = f'{mb}MB' if limit % (1024 * 1024) == 0 else f'{limit} bytes'
+            raise ValueError(f'media larger than {unit}')
         digest = hashlib.sha256(data).hexdigest()
         extension = (Path(filename or source_path).suffix.lstrip('.') or 'bin').lower()[:10]
         directory = private_directory(private_directory(self.root/'media')/digest[:2])

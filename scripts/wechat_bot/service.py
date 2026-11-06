@@ -61,7 +61,7 @@ def load_config(path):
     value = json.loads(Path(path).read_text())
     allowed = {'schema_version', 'host', 'account_id', 'allowlist', 'state_dir', 'poll_seconds',
                'cooldown_seconds', 'max_replies_per_hour','capture_backend','model_config','ignorelist','idle_check_seconds','context_messages','history_http','manage_window',
-               'turn_quiet_seconds','turn_max_seconds','images_per_model_call'}
+               'turn_quiet_seconds','turn_max_seconds','images_per_model_call','max_attachment_mb'}
     if set(value)-allowed or value.get('schema_version') != 1:
         raise ValueError('unsupported bot config schema or field')
     from .routing import validate_rules
@@ -78,7 +78,7 @@ def load_config(path):
     for key, default, low, high in [('poll_seconds',2,1,60), ('cooldown_seconds',15,0,300),
                                     ('max_replies_per_hour',20,1,100), ('idle_check_seconds',60,10,3600),
                                     ('turn_quiet_seconds',10,0,120), ('turn_max_seconds',60,10,600),
-                                    ('images_per_model_call',4,1,16)]:
+                                    ('images_per_model_call',4,1,16), ('max_attachment_mb',50,1,200)]:
         number = value.setdefault(key,default)
         if type(number) is not int or not low <= number <= high:
             raise ValueError('invalid ' + key)
@@ -546,7 +546,8 @@ class BotService:
                                                   image_count=len(images),earlier_images=earlier,
                                                   files=[model_view(f) for f in files],notes=notes,failed=[{k:f[k] for k in ('label','kind','reason') if k in f} for f in failed],
                                                   chat_kind='group' if self.group else 'private',
-                                                  metadata=model,model_config=self.config.get('model_config')))
+                                                  metadata=model,model_config=self.config.get('model_config'),
+                                                  max_attachment_mb=self.config.get('max_attachment_mb',50)))
             reply = ensure_unreadable_named(reply,failed)
             timings['model_seconds']=model.get('seconds')
             log_event('model_completed',**model)
@@ -658,7 +659,10 @@ class BotService:
                                   '/usr/bin/nc -U "$HOME/.wechat-rpa/worker.sock"'],
                                  {'platform':'wechat','account_id':self.account})
                     capture_class=NativeCapture if self.config.get('capture_backend','native')=='native' else RemoteCapture
-                    capture = capture_class(self.config['host'],client,self.recipient,self.root,self.ownership)
+                    extra = {}
+                    if capture_class is NativeCapture:
+                        extra['max_bytes'] = self.config.get('max_attachment_mb', 50) * 1024 * 1024
+                    capture = capture_class(self.config['host'],client,self.recipient,self.root,self.ownership,**extra)
                     try:
                         self.health('connecting')
                         await client.start()
