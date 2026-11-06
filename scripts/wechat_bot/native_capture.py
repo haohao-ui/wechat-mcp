@@ -194,6 +194,10 @@ fi
         # Read-only probe of the left session list; only allowlisted rows are returned.
         return self.logged(await self.call('sessions',names=list(names),debug=debug))
 
+    async def calibrate(self):
+        # Read-only window capture and anchor calibration; never clicks, scrolls, or types.
+        return self.logged(await self.call('calibrate'))
+
     async def download(self,media_id,kind='image'):
         if len(media_id)!=64 or any(x not in '0123456789abcdef' for x in media_id):
             raise ValueError('invalid media ID')
