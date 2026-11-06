@@ -58,7 +58,7 @@ if [ $WORKER -eq 1 ]; then
   remote "build and install wechat_bot_worker + wechat_click" '
     cd "$HOME/.wechat-rpa/src"
     swiftc -O -target x86_64-apple-macos12 -parse-as-library -D BOT_WORKER native/wechat_bubbles.swift native/common/*.swift native/eyes/*.swift native/action/*.swift native/bot/*.swift -o /tmp/wechat_bot_worker.$TS
-    swiftc -O -target x86_64-apple-macos12 native/click/main.swift native/common/*.swift native/action/*.swift -o /tmp/wechat_click.$TS
+    swiftc -O -target x86_64-apple-macos12 native/click/*.swift native/common/*.swift native/action/*.swift -o /tmp/wechat_click.$TS
     for name in wechat_bot_worker wechat_click; do
       dst="$HOME/.wechat-rpa/bin/$name"
       [ -f "$dst" ] && cp -p "$dst" "$dst.before-$TS"

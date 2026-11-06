@@ -4,6 +4,7 @@ A small Swift self-test program (tests/action_selftest/main.swift) samples thous
 plans and prints JSON; nothing here posts real mouse events.
 """
 import json
+import os
 from pathlib import Path
 import platform
 import shutil
@@ -213,7 +214,8 @@ class WechatClickCliTests(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.cli = Path(cls.tmp.name)/'wechat_click'
         sources = sorted(str(p) for p in (ROOT/'native'/'action').glob('*.swift'))
-        subprocess.run(['swiftc', str(ROOT/'native'/'click'/'main.swift'), *sources, '-o', str(cls.cli)],
+        click_sources = sorted(str(p) for p in (ROOT/'native'/'click').glob('*.swift'))
+        subprocess.run(['swiftc', *click_sources, *sources, '-o', str(cls.cli)],
                        check=True, capture_output=True)
 
     @classmethod
@@ -270,3 +272,48 @@ class WechatClickCliTests(unittest.TestCase):
         for args in (['500'], ['a', 'b'], ['500', '400', '-3', '10'], ['500', '400', '10']):
             run, _ = self.plan(*args)
             self.assertNotEqual(run.returncode, 0, args)
+
+    def test_input_text_plan_replaces_then_reads_back(self):
+        run = subprocess.run([str(self.cli), '--plan-only', 'input-text', '500', '600'], input='你好\n第二行',
+                             capture_output=True, text=True, timeout=30)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        out = json.loads(run.stdout)
+        downs = [e['code'] for e in out['events'] if e['type'] == 'key_down' and e['code'] != 55]
+        self.assertEqual(downs, [0, 9, 0, 8])          # ⌘A ⌘V ⌘A ⌘C, no Return, no Delete
+        self.assertEqual(out['events'][0]['type'], 'moved')  # click first
+        self.assertEqual([p['op'] for p in out['pasteboard']], ['save', 'write_text', 'write_sentinel', 'read', 'restore'])
+
+    def test_input_text_mismatch_clears_and_exits_4_without_text(self):
+        env = dict(os.environ, WECHAT_PLAN_READBACK='mismatch')
+        run = subprocess.run([str(self.cli), '--plan-only', 'input-text', '500', '600'], input='秘密正文',
+                             capture_output=True, text=True, timeout=30, env=env)
+        self.assertEqual(run.returncode, 4)
+        self.assertIn('input_readback_mismatch', run.stderr)
+        self.assertNotIn('秘密正文', run.stderr)
+        out = json.loads(run.stdout)
+        downs = [e['code'] for e in out['events'] if e['type'] == 'key_down' and e['code'] != 55]
+        self.assertEqual(downs[-2:], [0, 51])          # ⌘A ⌫ at the end
+        self.assertEqual([p['op'] for p in out['pasteboard']].count('restore'), 1)
+
+    def test_input_text_sentinel_reports_copy_missed(self):
+        env = dict(os.environ, WECHAT_PLAN_READBACK='sentinel')
+        run = subprocess.run([str(self.cli), '--plan-only', 'input-text', '500', '600'], input='你好',
+                             capture_output=True, text=True, timeout=30, env=env)
+        self.assertEqual(run.returncode, 4)
+        self.assertIn('复制未取到输入框内容，应为 2 字', run.stderr)
+
+    def test_input_text_rejects_empty_or_huge_body(self):
+        for body in ('', 'x' * 16385):
+            run = subprocess.run([str(self.cli), '--plan-only', 'input-text', '500', '600'], input=body,
+                                 capture_output=True, text=True, timeout=30)
+            self.assertEqual(run.returncode, 1, len(body))
+
+    def test_clear_input_plan(self):
+        run, out = self.plan('clear-input')
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual([e['code'] for e in out['events'] if e['type'] == 'key_down' and e['code'] != 55], [0, 51])
+
+    def test_new_key_combos(self):
+        self.assertEqual(self.keys('delete'), [('key_down', 51, False), ('key_up', 51, False)])
+        self.assertEqual(self.keys('escape'), [('key_down', 53, False), ('key_up', 53, False)])
+        self.assertEqual(self.keys('cmd+1')[1], ('key_down', 18, True))
