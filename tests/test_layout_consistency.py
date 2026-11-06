@@ -109,3 +109,12 @@ class CachedCaptureGateTests(unittest.TestCase):
         body = worker[worker.index('func capture(_ recipient: String'):]
         body = body[:body.index('let reused')]
         self.assertIn('checkAnchors(image', body)
+
+
+class SessionListScopeTests(unittest.TestCase):
+    def test_row_operations_check_only_session_list_anchors(self):
+        worker = (ROOT/'native'/'bot'/'Worker.swift').read_text()
+        for op in ('sessions', 'open_session'):
+            branch = worker[worker.index(f'if operation == "{op}"'):]
+            branch = branch[:branch.index('\n        }\n')]
+            self.assertIn('checkedScreen(window, regions: ["session_list"])', branch, op)

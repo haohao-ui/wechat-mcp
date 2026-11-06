@@ -56,10 +56,14 @@ struct AnchorsMain {
         var patchParams: (x: Double, y: Double, w: Double, h: Double, r: Double, g: Double, b: Double)? = nil
 
         var measureOnly = false
+        var regionScope: Set<String>? = nil
         var i = 3
         while i < args.count {
             let opt = args[i]
-            if opt == "--measure" {
+            if opt == "--regions" && i + 1 < args.count {
+                regionScope = Set(args[i + 1].split(separator: ",").map(String.init))
+                i += 2
+            } else if opt == "--measure" {
                 measureOnly = true
                 i += 1
             } else if opt == "--shift" && i + 1 < args.count {
@@ -136,7 +140,7 @@ struct AnchorsMain {
                let text = String(data: data, encoding: .utf8) { print(text); return 0 }
             return 1
         }
-        let report = verifyAnchors(finalImage, scale: scale, layout: layout)
+        let report = verifyAnchors(finalImage, scale: scale, layout: layout, regions: regionScope)
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
