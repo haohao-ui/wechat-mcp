@@ -3,10 +3,12 @@ import contextlib
 import io
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from scripts.wechat_bot.coordinator import BotCoordinator, RECALIBRATION_LIMIT
 from scripts.wechat_bot import control
@@ -174,3 +176,126 @@ class RecalibrationTests(unittest.IsolatedAsyncioTestCase):
         res_norm = json.loads(out_norm.getvalue())
         self.assertFalse(res_norm['needs_recalibration'])
         self.assertEqual(err_norm.getvalue(), '')
+
+    async def test_mismatch_keeps_worker_connection(self):
+        child = self.coordinator.session(target('a'))
+        err_msg = 'private visual operation failed: invalid("layout_mismatch:input_divider")'
+        self.coordinator.connect = AsyncMock()
+        child.cycle = AsyncMock(side_effect=ValueError(err_msg))
+        self.coordinator.capture = MagicMock()
+        self.coordinator.close_connection = AsyncMock()
+
+        await self.coordinator.visit(target('a'))
+        self.coordinator.close_connection.assert_not_called()
+
+    async def test_serve_calibration_writes_candidate_via_live_capture(self):
+        worker_result = {
+            'wechat_version': '4.1.15',
+            'layout_path': '/path/to/layout',
+            'layout': {
+                'schema': 1,
+                'window': {'width': 800, 'height': 640},
+                'regions': {
+                    'session_list': {'x': 0, 'y': 0, 'w': 250, 'h': 640},
+                    'title': {'x': 250, 'y': 0, 'w': 550, 'h': 60},
+                    'chat': {'x': 250, 'y': 60, 'w': 550, 'h': 436},
+                    'input': {'x': 250, 'y': 496, 'w': 550, 'h': 144},
+                },
+                'scroll': {'points_per_tick': 20, 'lines_per_tick': 3},
+                'anchors': []
+            },
+            'measured': {'input_divider': 500.0},
+        }
+        fake_remote = MagicMock(return_value=subprocess.CompletedProcess([], 0, b'', b''))
+        fake_capture = MagicMock()
+        fake_capture.call = AsyncMock(return_value=worker_result)
+        self.coordinator.capture = fake_capture
+
+        req_file = self.coordinator.root / 'calibrate-request.json'
+        res_file = self.coordinator.root / 'calibrate-result.json'
+        req_file.write_text(json.dumps({'id': 'req123', 'action': 'calibrate', 'created_at': time.time()}))
+
+        with patch('scripts.wechat_bot.control.default_remote_runner', fake_remote):
+            await self.coordinator.serve_calibration()
+
+        self.assertFalse(req_file.exists())
+        self.assertTrue(res_file.exists())
+        res = json.loads(res_file.read_text())
+        self.assertEqual(res['id'], 'req123')
+        self.assertTrue(res['ok'])
+        fake_capture.call.assert_awaited_once_with('calibrate')
+
+    async def test_serve_accept_uses_live_version(self):
+        candidate_data = {
+            'schema': 1,
+            'wechat_version': '4.1.15',
+            'window': {'width': 800, 'height': 640},
+            'regions': {
+                'session_list': {'x': 0, 'y': 0, 'w': 250, 'h': 640},
+                'title': {'x': 250, 'y': 0, 'w': 550, 'h': 60},
+                'chat': {'x': 250, 'y': 60, 'w': 550, 'h': 436},
+                'input': {'x': 250, 'y': 496, 'w': 550, 'h': 144},
+            },
+            'scroll': {'points_per_tick': 20, 'lines_per_tick': 3},
+            'anchors': []
+        }
+        worker_result = {
+            'wechat_version': '4.1.15',
+            'layout': candidate_data,
+        }
+        def fake_runner(host, command, input_data=None):
+            if 'cat ' in command:
+                return subprocess.CompletedProcess([], 0, json.dumps(candidate_data).encode('utf-8'), b'')
+            return subprocess.CompletedProcess([], 0, b'', b'')
+
+        fake_capture = MagicMock()
+        fake_capture.call = AsyncMock(return_value=worker_result)
+        self.coordinator.capture = fake_capture
+
+        req_file = self.coordinator.root / 'calibrate-request.json'
+        res_file = self.coordinator.root / 'calibrate-result.json'
+        req_file.write_text(json.dumps({'id': 'req_accept_1', 'action': 'accept', 'created_at': time.time()}))
+
+        with patch('scripts.wechat_bot.control.default_remote_runner', fake_runner):
+            await self.coordinator.serve_calibration()
+
+        self.assertFalse(req_file.exists())
+        self.assertTrue(res_file.exists())
+        res = json.loads(res_file.read_text())
+        self.assertEqual(res['id'], 'req_accept_1')
+        self.assertTrue(res['ok'])
+        self.assertTrue(res['result']['accepted'])
+        fake_capture.call.assert_awaited_once_with('calibrate')
+
+    async def test_request_without_connection_reports_worker_not_connected(self):
+        self.coordinator.capture = None
+        req_file = self.coordinator.root / 'calibrate-request.json'
+        res_file = self.coordinator.root / 'calibrate-result.json'
+        req_file.write_text(json.dumps({'id': 'req_noconn', 'action': 'calibrate', 'created_at': time.time()}))
+
+        await self.coordinator.serve_calibration()
+
+        self.assertFalse(req_file.exists())
+        self.assertTrue(res_file.exists())
+        res = json.loads(res_file.read_text())
+        self.assertEqual(res['id'], 'req_noconn')
+        self.assertFalse(res['ok'])
+        self.assertEqual(res['error'], 'worker_not_connected')
+
+    async def test_stale_request_expires(self):
+        fake_capture = MagicMock()
+        fake_capture.call = AsyncMock()
+        self.coordinator.capture = fake_capture
+        req_file = self.coordinator.root / 'calibrate-request.json'
+        res_file = self.coordinator.root / 'calibrate-result.json'
+        req_file.write_text(json.dumps({'id': 'req_stale', 'action': 'calibrate', 'created_at': time.time() - 601}))
+
+        await self.coordinator.serve_calibration()
+
+        self.assertFalse(req_file.exists())
+        self.assertTrue(res_file.exists())
+        res = json.loads(res_file.read_text())
+        self.assertEqual(res['id'], 'req_stale')
+        self.assertFalse(res['ok'])
+        self.assertEqual(res['error'], 'expired')
+        fake_capture.call.assert_not_called()

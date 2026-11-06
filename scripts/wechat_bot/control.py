@@ -143,6 +143,7 @@ def main(argv=None):
     cal.add_argument('--accept', action='store_true', help='Accept candidate layout after validation')
     cal.add_argument('--config', default=default_config)
     cal.add_argument('--layout-dir', default=None, help='Layout directory override')
+    cal.add_argument('--timeout', type=float, default=120, help='Timeout in seconds')
     sub.add_parser('history-http').add_argument('command',choices=['install','start','stop','status'])
     args=parser.parse_args(argv)
     base,config_path,plist_path=locations()
@@ -483,30 +484,66 @@ def calibrate_accept(host=None, layout_dir=None, config=None, worker_func=None, 
 
 
 def calibrate_command(args, remote_runner=None, worker_func=None):
-    layout_dir = getattr(args, 'layout_dir', None) or REMOTE_LAYOUT_DIR
-    config_path = Path(getattr(args, 'config', locations()[1]))
+    if not loaded():
+        sys.stderr.write('机器人未运行：请先 control start\n')
+        raise SystemExit(1)
+
+    base, default_config_path, _ = locations()
+    config_path = Path(getattr(args, 'config', default_config_path))
     config = load_config(config_path) if config_path.exists() else {}
-    if loaded():
-        sys.stderr.write('机器人正在运行：请先 control stop，再运行 calibrate\n')
-        raise SystemExit(1)
-    host = require_host(config)
-
-    if getattr(args, 'accept', False):
-        try:
-            res = calibrate_accept(host=host, layout_dir=layout_dir, config=config, worker_func=worker_func, remote_runner=remote_runner)
-            print(json.dumps(res, ensure_ascii=False))
-            return
-        except Exception as e:
-            sys.stderr.write(f'calibrate accept failed: {e}\n')
-            raise SystemExit(1)
-
+    state_dir = Path(config.get('state_dir', base / 'state'))
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
-        diffs, missing, candidate = run_calibrate(config=config, host=host, layout_dir=layout_dir, remote_runner=remote_runner, worker_func=worker_func)
-    except Exception as e:
-        sys.stderr.write(f'calibrate failed: {e}\n')
+        state_dir.chmod(0o700)
+    except OSError:
+        pass
+
+    import secrets
+    req_id = secrets.token_hex(16)
+    action = 'accept' if getattr(args, 'accept', False) else 'calibrate'
+    req_file = state_dir / 'calibrate-request.json'
+    res_file = state_dir / 'calibrate-result.json'
+
+    req_data = {
+        'id': req_id,
+        'action': action,
+        'created_at': time.time(),
+    }
+    write_private(req_file, req_data)
+
+    timeout = getattr(args, 'timeout', 120)
+    if not isinstance(timeout, (int, float)):
+        timeout = 120
+    deadline = time.monotonic() + float(timeout)
+    result_data = None
+    while time.monotonic() < deadline:
+        if res_file.exists():
+            try:
+                data = json.loads(res_file.read_text())
+                if data.get('id') == req_id:
+                    result_data = data
+                    break
+            except Exception:
+                pass
+        time.sleep(0.05)
+
+    if result_data is None:
+        sys.stderr.write('calibrate timed out waiting for bot\n')
         raise SystemExit(1)
 
-    version = candidate.get('wechat_version')
+    if not result_data.get('ok'):
+        err = result_data.get('error', 'unknown error')
+        prefix = 'calibrate accept failed' if action == 'accept' else 'calibrate failed'
+        sys.stderr.write(f'{prefix}: {err}\n')
+        raise SystemExit(1)
+
+    res = result_data.get('result', {})
+    if action == 'accept':
+        print(json.dumps(res, ensure_ascii=False))
+        return
+
+    diffs = res.get('differences', [])
+    missing = res.get('missing', [])
     if diffs:
         sys.stdout.write("Differences from current layout:\n")
         for d in diffs:
@@ -519,13 +556,7 @@ def calibrate_command(args, remote_runner=None, worker_func=None):
         for m in missing:
             sys.stdout.write(f"  {m}\n")
 
-    result = {
-        'candidate_json': f"{layout_dir}/candidate-wechat-{version}.json",
-        'candidate_png': f"{layout_dir}/candidate-wechat-{version}.png",
-        'differences': diffs,
-        'missing': missing
-    }
-    print(json.dumps(result, ensure_ascii=False))
+    print(json.dumps(res, ensure_ascii=False))
 
 
 if __name__=='__main__': main()
