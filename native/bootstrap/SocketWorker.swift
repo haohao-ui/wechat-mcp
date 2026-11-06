@@ -14,6 +14,15 @@ final class SocketWorker {
     private var listener: Int32 = -1
     private var child: Process?
     private var socketPath: String?
+    private var restartPolicy = RestartPolicy()
+    private var manualTerminatedPIDs = Set<Int32>()
+    private var _status: WorkerStatus = .stopped(reason: "服务未启动")
+
+    var status: WorkerStatus {
+        lock.lock()
+        defer { lock.unlock() }
+        return _status
+    }
 
     private func address(_ path: String) throws -> sockaddr_un {
         var value = sockaddr_un()
@@ -97,6 +106,9 @@ final class SocketWorker {
         }
         listener = fd
         socketPath = path
+        if case .stopped = _status {
+            _status = .stopped(reason: "等待客户端连接")
+        }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             self?.acceptClients(fd: fd, helpers: helpers, directory: directory)
         }
@@ -112,8 +124,25 @@ final class SocketWorker {
             var uid: uid_t = 0
             var gid: gid_t = 0
             guard getpeereid(client, &uid, &gid) == 0, uid == geteuid() else { close(client); continue }
+
             lock.lock()
+            // 如果退避冷却中，暂不接受
+            if case .restarting(let at) = _status {
+                if Date() < at {
+                    lock.unlock()
+                    close(client)
+                    continue
+                } else {
+                    _status = .stopped(reason: "等待客户端连接")
+                }
+            }
+            if case .stopped(let reason) = _status, reason.contains("上限") {
+                lock.unlock()
+                close(client)
+                continue
+            }
             if child != nil { lock.unlock(); close(client); continue }
+
             let handle = FileHandle(fileDescriptor: client, closeOnDealloc: true)
             let process = Process()
             process.executableURL = helpers.appendingPathComponent("wechat-mcp")
@@ -129,17 +158,100 @@ final class SocketWorker {
             process.terminationHandler = { [weak self] finished in
                 handle.closeFile()
                 guard let self = self else { return }
-                self.lock.lock()
-                if self.child === finished { self.child = nil }
-                self.lock.unlock()
+                self.handleChildTermination(finished)
             }
             do {
                 try process.run()
                 child = process
+                _status = .running(pid: process.processIdentifier)
             } catch {
                 handle.closeFile()
+                _status = .stopped(reason: "启动桌面服务失败: \(error.localizedDescription)")
             }
             lock.unlock()
+        }
+    }
+
+    private func handleChildTermination(_ finished: Process) {
+        let pid = finished.processIdentifier
+        let status = finished.terminationStatus
+        let reason = finished.terminationReason
+
+        logExit(pid: pid, status: status, reason: reason)
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        if child === finished {
+            child = nil
+        }
+
+        if manualTerminatedPIDs.remove(pid) != nil {
+            if listener >= 0 {
+                _status = .stopped(reason: "等待客户端连接")
+            } else {
+                _status = .stopped(reason: "服务未启动")
+            }
+            return
+        }
+
+        let decision = restartPolicy.recordExit(at: Date())
+        switch decision {
+        case .giveUp:
+            _status = .stopped(reason: "连续崩溃达到上限（1小时内5次），已停止自动重启")
+        case .restart(let after):
+            let restartAt = Date().addingTimeInterval(after)
+            _status = .restarting(at: restartAt)
+            DispatchQueue.global().asyncAfter(deadline: .now() + after) { [weak self] in
+                guard let self = self else { return }
+                self.lock.lock()
+                defer { self.lock.unlock() }
+                if case .restarting(let at) = self._status, at == restartAt {
+                    self._status = .stopped(reason: "等待客户端连接")
+                }
+            }
+        }
+    }
+
+    private func logExit(pid: Int32, status: Int32, reason: Process.TerminationReason) {
+        let logDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".wechat-rpa/logs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        let logFile = logDir.appendingPathComponent("host.log")
+        let df = ISO8601DateFormatter()
+        let reasonStr = reason == .exit ? "exit" : "uncaughtSignal"
+        let line = "\(df.string(from: Date())) [host] worker child pid=\(pid) exited with code=\(status), reason=\(reasonStr)\n"
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: logFile.path) {
+                if let handle = try? FileHandle(forWritingTo: logFile) {
+                    handle.seekToEndOfFile()
+                    handle.write(data)
+                    try? handle.close()
+                }
+            } else {
+                try? data.write(to: logFile, options: .atomic)
+                try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: logFile.path)
+            }
+        }
+    }
+
+    func restartChild() {
+        lock.lock()
+        restartPolicy.reset()
+        let running = child
+        if let pid = running?.processIdentifier {
+            manualTerminatedPIDs.insert(pid)
+        }
+        child = nil
+        if listener >= 0 {
+            _status = .stopped(reason: "等待客户端连接")
+        } else {
+            _status = .stopped(reason: "服务未启动")
+        }
+        lock.unlock()
+        if running?.isRunning == true {
+            running?.terminate()
         }
     }
 
@@ -151,6 +263,7 @@ final class SocketWorker {
         child = nil
         let path = socketPath
         socketPath = nil
+        _status = .stopped(reason: "服务已停止")
         lock.unlock()
         if fd >= 0 { shutdown(fd, SHUT_RDWR); close(fd) }
         if running?.isRunning == true { running?.terminate() }
