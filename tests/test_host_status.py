@@ -313,6 +313,244 @@ class HostStatusTests(unittest.TestCase):
         self.assertNotIn('mock_sensitive_text', diag_text)
         self.assertNotIn('secret', diag_text.lower())
 
+    def test_config_allowlist_preserves_group_and_ignorelist_deep_equal(self):
+        """Review 1: 保存不能把 group 变 private，必须 deep-equal 保留原结构；空字段能清空；ignorelist 也一同保存。"""
+        with tempfile.TemporaryDirectory() as td:
+            target_path = Path(td) / "config.json"
+            original_config = {
+                "schema_version": 1,
+                "account_id": "test_bot",
+                "allowlist": [
+                    {"recipient": "客服群1", "kind": "group", "aliases": ["客服群别名"]},
+                    {"recipient": "用户张三", "kind": "private"}
+                ],
+                "ignorelist": [
+                    {"recipient": "黑名单群", "kind": "group"}
+                ],
+                "max_attachment_mb": 50,
+                "manage_window": True
+            }
+            target_path.write_text(json.dumps(original_config))
+
+            # 1. 没有任何修改时保存，allowlist 和 ignorelist 必须完全 deep-equal
+            payload_unchanged = {
+                'op': 'update_and_save_form',
+                'target_path': str(target_path),
+                'original_config': original_config,
+                'form_inputs': {
+                    'allowlist_rows': [
+                        {'recipient': '客服群1', 'kind': 'group'},
+                        {'recipient': '用户张三', 'kind': 'private'}
+                    ],
+                    'ignorelist_rows': [
+                        {'recipient': '黑名单群', 'kind': 'group'}
+                    ]
+                },
+                'simulated_check_result': {'ok': True}
+            }
+            res = self.run_config_action(payload_unchanged)
+            self.assertTrue(res['ok'], res.get('error'))
+            saved = json.loads(target_path.read_text())
+            self.assertEqual(saved['allowlist'], original_config['allowlist'])
+            self.assertEqual(saved['ignorelist'], original_config['ignorelist'])
+
+            # 2. 清空 ignorelist
+            payload_empty_ignore = {
+                'op': 'update_and_save_form',
+                'target_path': str(target_path),
+                'original_config': saved,
+                'form_inputs': {
+                    'allowlist_rows': [
+                        {'recipient': '用户张三', 'kind': 'private'}
+                    ],
+                    'ignorelist_rows': []
+                },
+                'simulated_check_result': {'ok': True}
+            }
+            res2 = self.run_config_action(payload_empty_ignore)
+            self.assertTrue(res2['ok'], res2.get('error'))
+            saved2 = json.loads(target_path.read_text())
+            self.assertEqual(saved2['ignorelist'], [])
+            self.assertEqual(len(saved2['allowlist']), 1)
+
+    def test_config_integer_fields_strictly_validated(self):
+        """Review 2: 浮点数如 '15.5' 或非数字必须在保存前拒绝并在表单报错；合法的保存为真实 JSON int。"""
+        with tempfile.TemporaryDirectory() as td:
+            target_path = Path(td) / "config.json"
+            original_config = {
+                "schema_version": 1,
+                "account_id": "test_bot",
+                "cooldown_seconds": 15,
+                "turn_quiet_seconds": 2,
+                "turn_max_seconds": 180,
+                "max_attachment_mb": 50,
+                "max_replies_per_hour": 100,
+                "context_messages": 10
+            }
+            target_path.write_text(json.dumps(original_config))
+
+            # 1. 输入 '15.5' -> 必须报错拒绝，且不修改 target
+            payload_float = {
+                'op': 'update_and_save_form',
+                'target_path': str(target_path),
+                'original_config': original_config,
+                'form_inputs': {
+                    'cooldown_seconds': '15.5'
+                },
+                'simulated_check_result': {'ok': True}
+            }
+            res_float = self.run_config_action(payload_float)
+            self.assertFalse(res_float['ok'])
+            self.assertIn('整数', res_float['error'])
+            self.assertEqual(target_path.read_text(), json.dumps(original_config))
+
+            # 2. 输入 'abc' -> 必须报错拒绝
+            payload_str = {
+                'op': 'update_and_save_form',
+                'target_path': str(target_path),
+                'original_config': original_config,
+                'form_inputs': {
+                    'max_replies_per_hour': 'abc'
+                },
+                'simulated_check_result': {'ok': True}
+            }
+            res_str = self.run_config_action(payload_str)
+            self.assertFalse(res_str['ok'])
+            self.assertIn('整数', res_str['error'])
+
+            # 3. 输入合法整数字符串 '20' -> 保存为真实 int
+            payload_valid = {
+                'op': 'update_and_save_form',
+                'target_path': str(target_path),
+                'original_config': original_config,
+                'form_inputs': {
+                    'cooldown_seconds': '20',
+                    'turn_quiet_seconds': '3',
+                    'turn_max_seconds': '200',
+                    'max_attachment_mb': '60',
+                    'max_replies_per_hour': '120',
+                    'context_messages': '15'
+                },
+                'simulated_check_result': {'ok': True}
+            }
+            res_valid = self.run_config_action(payload_valid)
+            self.assertTrue(res_valid['ok'])
+            saved = json.loads(target_path.read_text())
+            for field in ['cooldown_seconds', 'turn_quiet_seconds', 'turn_max_seconds',
+                          'max_attachment_mb', 'max_replies_per_hour', 'context_messages']:
+                val = saved[field]
+                self.assertIs(type(val), int, f"{field} must be a real int, got {type(val)}")
+
+    def test_config_save_preserves_untouched_keys_deep_equal(self):
+        """Review 3: 保存时必须 deep-equal 保留所有表单未展示的 keys。"""
+        with tempfile.TemporaryDirectory() as td:
+            target_path = Path(td) / "config.json"
+            original_config = {
+                "schema_version": 1,
+                "host": "local",
+                "state_dir": "/custom/state/dir",
+                "account_id": "test_bot_99",
+                "model_config": {
+                    "backend": "deepseek",
+                    "model": "deepseek-chat",
+                    "api_key": "custom_key",
+                    "temperature": 0.3
+                },
+                "capture_backend": "native",
+                "poll_seconds": 3,
+                "idle_check_seconds": 10,
+                "max_attachment_mb": 50,
+                "cooldown_seconds": 15
+            }
+            target_path.write_text(json.dumps(original_config))
+
+            payload = {
+                'op': 'update_and_save_form',
+                'target_path': str(target_path),
+                'original_config': original_config,
+                'form_inputs': {
+                    'max_attachment_mb': '75'
+                },
+                'simulated_check_result': {'ok': True}
+            }
+            res = self.run_config_action(payload)
+            self.assertTrue(res['ok'])
+            saved = json.loads(target_path.read_text())
+
+            untouched_keys = ["schema_version", "host", "state_dir", "account_id",
+                              "model_config", "capture_backend", "poll_seconds", "idle_check_seconds"]
+            for k in untouched_keys:
+                self.assertEqual(saved[k], original_config[k], f"Key {k} was unexpectedly modified")
+
+    def test_config_save_fails_if_backup_fails_without_modifying_target(self):
+        """Review 4: 备份失败时中止保存并显示错误，绝不能无备份替换目标文件。"""
+        with tempfile.TemporaryDirectory() as td:
+            target_path = Path(td) / "config.json"
+            original_content = json.dumps({"schema_version": 1, "account_id": "orig"})
+            target_path.write_text(original_content)
+
+            payload = {
+                'op': 'save_config',
+                'target_path': str(target_path),
+                'new_config': {"schema_version": 1, "account_id": "replaced"},
+                'simulated_backup_failure': True,
+                'simulated_check_result': {'ok': True}
+            }
+            res = self.run_config_action(payload)
+            self.assertFalse(res['ok'])
+            self.assertIn('备份', res['error'])
+            # 目标文件内容不得改变
+            self.assertEqual(target_path.read_text(), original_content)
+
+    def test_config_temp_file_secure_permissions_and_directory(self):
+        """Review 5: 临时文件必须位于 0700 专有安全目录下，权限必须为 0600。"""
+        payload = {
+            'op': 'check_temp_security',
+            'test_data': json.dumps({"test": "secret_key_123"})
+        }
+        res = self.run_config_action(payload)
+        self.assertTrue(res['ok'])
+        self.assertEqual(res['dir_permissions'], 0o700)
+        self.assertEqual(res['file_permissions'], 0o600)
+        self.assertFalse(res['in_shared_tmp_root'], "Must not be directly in /tmp root")
+
+    def test_restore_wechat_window_pure_logic(self):
+        """Review 6: restoreWechatWindow 的纯函数规则：有多个非最小化窗口时拒绝；仅1个时clamp坐标且尺寸为 880x640。"""
+        display = {'minX': 0, 'minY': 0, 'maxX': 1920, 'maxY': 1080}
+
+        # 1. 微信有多个非最小化窗口 -> 拒绝
+        windows_multi = [
+            {'is_minimized': False, 'is_fullscreen': False, 'x': 100, 'y': 100, 'width': 880, 'height': 640},
+            {'is_minimized': False, 'is_fullscreen': False, 'x': 200, 'y': 200, 'width': 360, 'height': 124}
+        ]
+        res_multi = self.run_config_action({
+            'op': 'decide_window_adjustment',
+            'windows': windows_multi,
+            'main_window': windows_multi[0],
+            'display': display
+        })
+        self.assertEqual(res_multi['status'], 'rejected')
+        self.assertIn('微信有多个窗口，请先关闭其他窗口', res_multi['message'])
+
+        # 2. 1个非最小化窗口 + 1个最小化窗口 -> 允许，且使用 main_window
+        windows_one_min = [
+            {'is_minimized': False, 'is_fullscreen': False, 'x': 2000, 'y': 10, 'width': 800, 'height': 600},
+            {'is_minimized': True, 'is_fullscreen': False, 'x': 0, 'y': 0, 'width': 360, 'height': 124}
+        ]
+        res_ok = self.run_config_action({
+            'op': 'decide_window_adjustment',
+            'windows': windows_one_min,
+            'main_window': windows_one_min[0],
+            'display': display
+        })
+        self.assertEqual(res_ok['status'], 'adjust')
+        # clamp: x <= 1920 - 880 = 1040, y >= 0 + 25 = 25
+        self.assertEqual(res_ok['target_origin']['x'], 1040)
+        self.assertEqual(res_ok['target_origin']['y'], 25)
+        self.assertEqual(res_ok['target_size']['width'], 880)
+        self.assertEqual(res_ok['target_size']['height'], 640)
+
+
 
 if __name__ == '__main__':
     unittest.main()

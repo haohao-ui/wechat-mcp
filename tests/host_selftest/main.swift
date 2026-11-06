@@ -120,6 +120,7 @@ func run() -> Int32 {
                 let simCheck = dict["simulated_check_result"] as? [String: Any] ?? [:]
                 let simOk = simCheck["ok"] as? Bool ?? true
                 let simErr = simCheck["error"] as? String
+                let simBackupFail = dict["simulated_backup_failure"] as? Bool ?? false
 
                 var didReload = false
                 do {
@@ -129,6 +130,9 @@ func run() -> Int32 {
                         checker: { _ in
                             return (simOk, simErr)
                         },
+                        backupHandler: simBackupFail ? { _, _ in
+                            throw NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: "模拟备份失败"])
+                        } : nil,
                         reloader: {
                             didReload = true
                         }
@@ -141,6 +145,120 @@ func run() -> Int32 {
                     }
                 } catch {
                     let resp: [String: Any] = ["ok": false, "error": error.localizedDescription]
+                    let out = try JSONSerialization.data(withJSONObject: resp, options: [.sortedKeys])
+                    if let s = String(data: out, encoding: .utf8) {
+                        print(s)
+                        return 0
+                    }
+                }
+            } else if op == "update_and_save_form" {
+                let targetPathStr = dict["target_path"] as? String ?? ""
+                let targetURL = URL(fileURLWithPath: targetPathStr)
+                let originalConfig = dict["original_config"] as? [String: Any] ?? [:]
+                let formInputs = dict["form_inputs"] as? [String: Any] ?? [:]
+
+                let simCheck = dict["simulated_check_result"] as? [String: Any] ?? [:]
+                let simOk = simCheck["ok"] as? Bool ?? true
+                let simErr = simCheck["error"] as? String
+
+                do {
+                    let updated = try ConfigFormLogic.buildUpdatedConfig(original: originalConfig, formInputs: formInputs)
+                    let updatedData = try JSONSerialization.data(withJSONObject: updated, options: [.prettyPrinted])
+                    try ConfigFormLogic.saveConfig(
+                        targetPath: targetURL,
+                        newConfigData: updatedData,
+                        checker: { _ in
+                            return (simOk, simErr)
+                        }
+                    )
+                    let resp: [String: Any] = ["ok": true]
+                    let out = try JSONSerialization.data(withJSONObject: resp, options: [.sortedKeys])
+                    if let s = String(data: out, encoding: .utf8) {
+                        print(s)
+                        return 0
+                    }
+                } catch {
+                    let resp: [String: Any] = ["ok": false, "error": error.localizedDescription]
+                    let out = try JSONSerialization.data(withJSONObject: resp, options: [.sortedKeys])
+                    if let s = String(data: out, encoding: .utf8) {
+                        print(s)
+                        return 0
+                    }
+                }
+            } else if op == "check_temp_security" {
+                do {
+                    let dir = try ConfigFormLogic.getSecureTempDirectory()
+                    let attrs = try FileManager.default.attributesOfItem(atPath: dir.path)
+                    let dirPerm = (attrs[.posixPermissions] as? NSNumber)?.intValue ?? 0
+
+                    let testFile = dir.appendingPathComponent("test-sec-\(UUID().uuidString).json")
+                    let testData = (dict["test_data"] as? String ?? "{}").data(using: .utf8)!
+                    try testData.write(to: testFile, options: .atomic)
+                    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: testFile.path)
+                    let fileAttrs = try FileManager.default.attributesOfItem(atPath: testFile.path)
+                    let filePerm = (fileAttrs[.posixPermissions] as? NSNumber)?.intValue ?? 0
+                    try? FileManager.default.removeItem(at: testFile)
+
+                    let inSharedTmp = dir.path == "/tmp" || dir.path == "/var/tmp"
+
+                    let resp: [String: Any] = [
+                        "ok": true,
+                        "dir_permissions": dirPerm,
+                        "file_permissions": filePerm,
+                        "in_shared_tmp_root": inSharedTmp
+                    ]
+                    let out = try JSONSerialization.data(withJSONObject: resp, options: [.sortedKeys])
+                    if let s = String(data: out, encoding: .utf8) {
+                        print(s)
+                        return 0
+                    }
+                } catch {
+                    let resp: [String: Any] = ["ok": false, "error": error.localizedDescription]
+                    let out = try JSONSerialization.data(withJSONObject: resp, options: [.sortedKeys])
+                    if let s = String(data: out, encoding: .utf8) {
+                        print(s)
+                        return 0
+                    }
+                }
+            } else if op == "decide_window_adjustment" {
+                let winsDicts = dict["windows"] as? [[String: Any]] ?? []
+                let mainDict = dict["main_window"] as? [String: Any]
+                let dispDict = dict["display"] as? [String: Any] ?? [:]
+
+                func parseCandidate(_ d: [String: Any]) -> WindowCandidate {
+                    let isMin = d["is_minimized"] as? Bool ?? false
+                    let isFull = d["is_fullscreen"] as? Bool ?? false
+                    let x = d["x"] as? Double ?? 0
+                    let y = d["y"] as? Double ?? 0
+                    let w = d["width"] as? Double ?? 880
+                    let h = d["height"] as? Double ?? 640
+                    return WindowCandidate(isMinimized: isMin, isFullScreen: isFull, frame: CGRect(x: x, y: y, width: w, height: h))
+                }
+
+                let candidates = winsDicts.map { parseCandidate($0) }
+                let mainCandidate = mainDict != nil ? parseCandidate(mainDict!) : nil
+
+                let minX = dispDict["minX"] as? Double ?? 0
+                let minY = dispDict["minY"] as? Double ?? 0
+                let maxX = dispDict["maxX"] as? Double ?? 1920
+                let maxY = dispDict["maxY"] as? Double ?? 1080
+                let dispBounds = CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+
+                let decision = decideWindowAdjustment(windows: candidates, mainWindow: mainCandidate, displayBounds: dispBounds)
+                switch decision {
+                case .rejected(let msg):
+                    let resp: [String: Any] = ["status": "rejected", "message": msg]
+                    let out = try JSONSerialization.data(withJSONObject: resp, options: [.sortedKeys])
+                    if let s = String(data: out, encoding: .utf8) {
+                        print(s)
+                        return 0
+                    }
+                case .adjust(let origin, let size):
+                    let resp: [String: Any] = [
+                        "status": "adjust",
+                        "target_origin": ["x": origin.x, "y": origin.y],
+                        "target_size": ["width": size.width, "height": size.height]
+                    ]
                     let out = try JSONSerialization.data(withJSONObject: resp, options: [.sortedKeys])
                     if let s = String(data: out, encoding: .utf8) {
                         print(s)
