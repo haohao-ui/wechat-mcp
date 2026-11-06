@@ -1,9 +1,9 @@
 //! Native visual navigation verifies the search query and an exact result before clicking.
 use super::{
     NameColumnMatch, OcrItem, SessionScreenshot, Snapshot, WechatWindow, WindowRect, clipboard,
-    ensure_native_snapshot_current, get_ocr_binary_path, longest_cjk_run, match_name_column,
-    mouse_click, native_items, normalize_chat_name, query_wechat_window, run_applescript,
-    verify_chat_title, verify_title_items,
+    ensure_native_snapshot_current, get_ocr_binary_path, key_press, longest_cjk_run, match_name_column,
+    mouse_click, native_items, normalize_chat_name, query_wechat_window, verify_chat_title,
+    verify_title_items,
 };
 use crate::desktop::{protocol::Region, runtime};
 use anyhow::{Context, Result, bail};
@@ -103,15 +103,8 @@ pub(super) async fn open_legacy_search(recipient: &str, window: &WechatWindow) -
     .await?;
     let mut guard = clipboard::ClipboardGuard::replace(recipient).await?;
     let result = async {
-        run_applescript(
-            r#"tell application "System Events"
-            tell process "WeChat"
-                keystroke "a" using {command down}
-                keystroke "v" using {command down}
-            end tell
-        end tell"#,
-        )
-        .await?;
+        key_press("cmd+a").await?;
+        key_press("cmd+v").await?;
         tokio::time::sleep(Duration::from_millis(700)).await;
         let query = legacy_region(search, "search").await?;
         if !query
@@ -231,15 +224,8 @@ pub(super) async fn open_if_native(recipient: &str) -> Result<bool> {
     .await?;
     let mut guard = clipboard::ClipboardGuard::replace(recipient).await?;
     let operation = async {
-        run_applescript(
-            r#"tell application "System Events"
-            tell process "WeChat"
-                keystroke "a" using {command down}
-                keystroke "v" using {command down}
-            end tell
-        end tell"#,
-        )
-        .await?;
+        key_press("cmd+a").await?;
+        key_press("cmd+v").await?;
         tokio::time::sleep(Duration::from_millis(700)).await;
         let query = runtime::shared()
             .snapshot(Region::Search, false)
