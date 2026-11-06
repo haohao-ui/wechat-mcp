@@ -14,6 +14,7 @@ import time
 
 from scripts.agent_bridge.codex import private_directory, write_private
 from .service import load_config
+from .transport import remote_argv
 
 LABEL='local.wechat-rpa.bot'
 
@@ -139,6 +140,12 @@ def main(argv=None):
     install.add_argument('--recipient',required=True)
     install.add_argument('--allow-replies',action='store_true',required=True)
     for action in ['status','start','stop']: sub.add_parser(action)
+    chk = sub.add_parser('config-check')
+    chk.add_argument('path')
+    p_pause = sub.add_parser('pause')
+    p_pause.add_argument('--config', default=default_config)
+    p_resume = sub.add_parser('resume')
+    p_resume.add_argument('--config', default=default_config)
     cal = sub.add_parser('calibrate')
     cal.add_argument('--accept', action='store_true', help='Accept candidate layout after validation')
     cal.add_argument('--config', default=default_config)
@@ -147,6 +154,28 @@ def main(argv=None):
     sub.add_parser('history-http').add_argument('command',choices=['install','start','stop','status'])
     args=parser.parse_args(argv)
     base,config_path,plist_path=locations()
+    if args.action == 'config-check':
+        try:
+            load_config(args.path)
+            print(json.dumps({'ok': True}))
+            return
+        except Exception as error:
+            print(json.dumps({'ok': False, 'error': str(error)}))
+            raise SystemExit(2)
+    if args.action == 'pause':
+        config_file = Path(getattr(args, 'config', config_path))
+        state_dir = Path(load_config(config_file)['state_dir']) if config_file.exists() else base / 'state'
+        pause_file = state_dir / 'admin-pause.json'
+        write_private(pause_file, {'paused': True, 'at': time.time()})
+        print(json.dumps({'status': 'paused', 'file': str(pause_file)}))
+        return
+    if args.action == 'resume':
+        config_file = Path(getattr(args, 'config', config_path))
+        state_dir = Path(load_config(config_file)['state_dir']) if config_file.exists() else base / 'state'
+        pause_file = state_dir / 'admin-pause.json'
+        pause_file.unlink(missing_ok=True)
+        print(json.dumps({'status': 'resumed'}))
+        return
     if args.action in ('migrate-history','history-status','merge-contact','unmerge-contact','history-backup'):
         return history_command(args)
     if args.action=='history-http':
@@ -253,7 +282,7 @@ def check_remote(proc, what):
 
 
 def default_remote_runner(host, command, input_data=None):
-    cmd = ['ssh', '-o', 'BatchMode=yes', '-o', 'LogLevel=ERROR', host, command]
+    cmd = remote_argv(host, command)
     return subprocess.run(cmd, input=input_data, capture_output=True, check=True)
 
 
