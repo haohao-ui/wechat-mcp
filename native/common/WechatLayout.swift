@@ -323,3 +323,28 @@ struct VersionMemo {
         return nil
     }
 }
+
+/// The `.app` bundle holding an executable (".../WeChat.app/Contents/MacOS/WeChat" -> ".../WeChat.app").
+func appBundlePath(executable: String) -> String? {
+    guard let range = executable.range(of: ".app/Contents/MacOS/", options: .backwards) else { return nil }
+    return String(executable[..<range.lowerBound]) + ".app"
+}
+
+/// CFBundleShortVersionString read straight from the bundle's Info.plist (no LaunchServices cache).
+func bundleShortVersion(_ bundlePath: String) -> String? {
+    guard let info = NSDictionary(contentsOfFile: bundlePath + "/Contents/Info.plist"),
+          let version = info["CFBundleShortVersionString"] as? String, !version.isEmpty else { return nil }
+    return version
+}
+
+/// A process's executable path via sysctl KERN_PROCARGS2 (layout: Int32 argc, then the exec path).
+func executablePath(_ pid: Int32) -> String? {
+    var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+    var size = 0
+    guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }
+    var buffer = [UInt8](repeating: 0, count: size)
+    guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0 else { return nil }
+    let start = MemoryLayout<Int32>.size
+    guard let end = buffer[start..<size].firstIndex(of: 0), end > start else { return nil }
+    return String(decoding: buffer[start..<end], as: UTF8.self)
+}

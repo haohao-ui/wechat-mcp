@@ -127,6 +127,25 @@ class CommonLayoutTests(unittest.TestCase):
         res = self.run_cli('memo', 'none', '100:-')
         self.assertEqual(res['resolved'], [None, None])
 
+    def test_version_read_from_the_process_executable(self):
+        # Acceptance 2026-11-06: a long-running worker logged "wechat not among running applications"
+        # while WeChat was up. The version now comes from the window owner's executable path.
+        app = Path(self.tmp.name)/'Apps'/'WeChat.app'
+        (app/'Contents'/'MacOS').mkdir(parents=True)
+        import plistlib
+        (app/'Contents'/'Info.plist').write_bytes(plistlib.dumps({'CFBundleShortVersionString': '4.1.15'}))
+        res = self.run_cli('bundle', str(app/'Contents'/'MacOS'/'WeChat'))
+        self.assertEqual(res, {'bundle': str(app), 'version': '4.1.15'})
+
+    def test_executable_path_of_a_live_process(self):
+        # sysctl KERN_PROCARGS2 works on the macOS 12 SDK (proc_pidpath is not exposed there).
+        res = self.run_cli('exe')
+        self.assertEqual(Path(res['path']).resolve(), Path(self.cli).resolve())
+
+    def test_executable_outside_an_app_has_no_version(self):
+        res = self.run_cli('bundle', '/usr/bin/true')
+        self.assertEqual(res, {'bundle': None, 'version': None})
+
     def test_version_fallback_picks_nearest_lower(self):
         with tempfile.TemporaryDirectory() as tdir:
             p = Path(tdir)
