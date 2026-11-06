@@ -17,10 +17,10 @@ func checkPrivate(_ path: URL, type: FileAttributeType, mode: Int) throws {
 /// Captures one WeChat window at its native pixel scale (no shadow).
 /// macOS 14+: ScreenCaptureKit (CGWindowListCreateImage is unavailable on macOS 15+); older: CGWindowList.
 /// The window normalised to points, after the screen check passed.
-func checkedScreen(_ window: [String:Any]) throws -> CGImage {
+func checkedScreen(_ window: [String:Any], regions: Set<String>? = nil) throws -> CGImage {
     let raw = try windowImage(window)
     let (image, scale) = try normalizedFrame(raw, window: window)
-    _ = try checkAnchors(raw, scale: scale, layout: try currentLayout())
+    _ = try checkAnchors(raw, scale: scale, layout: try currentLayout(), regions: regions)
     return image
 }
 
@@ -450,7 +450,7 @@ final class CaptureWorker {
             return try openSessionRow(targets,probe:sessionProbe) {
                 let window=try readyWindow(manage:manage).window
                 try screenGate(window)
-                return (window,try checkedScreen(window))
+                return (window,try checkedScreen(window, regions: ["session_list"]))
             }
         }
         if operation == "sessions" {
@@ -459,7 +459,7 @@ final class CaptureWorker {
             let began=ProcessInfo.processInfo.systemUptime
             let (window,resized)=try readyWindow(manage:manage)
             try screenGate(window)
-            let image=try checkedScreen(window)
+            let image=try checkedScreen(window, regions: ["session_list"])
             var result=try sessionProbe.probe(image,names:names,debug:params["debug"] as? Bool == true)
             let layout=try currentLayout()
             let sessionListRect=try layoutRegion(layout, "session_list")

@@ -397,8 +397,8 @@ func fileNameLine(_ line: String) -> String? {
 /// Stage C screen check on the raw capture at its own scale; throws instead of letting anything read
 /// or click a screen that does not match the map. An unknown appearance keeps its own code (a known
 /// wait, e.g. a theme switch); everything else is `layout_mismatch:<failed anchors>`.
-func checkAnchors(_ captured: CGImage, scale: Int, layout: WechatLayout) throws -> AnchorReport {
-    let report = verifyAnchors(captured, scale: scale, layout: layout)
+func checkAnchors(_ captured: CGImage, scale: Int, layout: WechatLayout, regions: Set<String>? = nil) throws -> AnchorReport {
+    let report = verifyAnchors(captured, scale: scale, layout: layout, regions: regions)
     if report.failures.contains("theme") { throw Failure.invalid("uncalibrated_theme") }
     guard report.passed else { throw Failure.invalid("layout_mismatch:"+report.failures.joined(separator:",")) }
     return report

@@ -237,7 +237,9 @@ public func textPresent(_ image: CGImage, scale: Int, in rect: WindowRect) -> Bo
 }
 
 /// Verifies layout anchors against the normalized window frame.
-public func verifyAnchors(_ image: CGImage, scale: Int, layout: WechatLayout, tolerance: Double = 3) -> AnchorReport {
+/// `regions` limits the check to anchors on those regions (the theme is always checked): clicking a
+/// session-list row needs only the list to match, which it does even with no chat open.
+public func verifyAnchors(_ image: CGImage, scale: Int, layout: WechatLayout, tolerance: Double = 3, regions: Set<String>? = nil) -> AnchorReport {
     var failures: [String] = []
     var measured: [String: Double] = [:]
 
@@ -248,7 +250,7 @@ public func verifyAnchors(_ image: CGImage, scale: Int, layout: WechatLayout, to
     }
 
     // 2. Check each anchor
-    for anchor in layout.anchors {
+    for anchor in layout.anchors where regions?.contains(anchor.region) ?? true {
         guard let region = layout.regions[anchor.region] else {
             failures.append(anchor.name)
             continue

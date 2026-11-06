@@ -66,3 +66,18 @@ class HiddenRowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(health['state'], 'waiting_for_wechat_window')
         self.assertFalse(child.paused)
         self.coordinator.close_connection.assert_not_called()
+
+
+class NoChatOpenTests(HiddenRowTests):
+    async def test_mismatch_forgets_the_open_chat_so_a_row_click_reopens_it(self):
+        # Acceptance 2026-11-06: with no chat selected the bot kept reading "the active chat" (blank pane,
+        # mismatch) and never clicked a row. Forgetting it makes the next visit open the chat by its row.
+        child = self.coordinator.session(target('a'))
+        self.coordinator.active_name = 'a'
+        self.coordinator.capture = MagicMock()
+        self.coordinator.connect = AsyncMock()
+        self.coordinator.close_connection = AsyncMock()
+        child.cycle = AsyncMock(side_effect=ValueError('private visual operation failed: invalid("layout_mismatch:input_divider")'))
+        await self.coordinator.visit(target('a'))
+        self.assertIsNone(self.coordinator.active_name)
+        self.coordinator.close_connection.assert_not_called()

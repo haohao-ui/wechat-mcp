@@ -256,6 +256,9 @@ class BotCoordinator:
                     await self.close_connection()
                     return
             if not child.paused and 'invalid("layout_mismatch' in str(error):
+                # The chat pane may simply be empty (no chat selected): forget the open chat so the next
+                # visit reopens it with a row click, which needs only the session list to match.
+                self.active_name=None
                 self.layout_mismatches=getattr(self,'layout_mismatches',0)+1
                 failures=extract_mismatch_failures(error)
                 state='needs_recalibration' if self.layout_mismatches>=RECALIBRATION_LIMIT else 'waiting_for_wechat_window'

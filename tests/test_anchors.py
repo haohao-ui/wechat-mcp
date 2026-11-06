@@ -98,6 +98,20 @@ class AnchorVerificationTests(unittest.TestCase):
                     self.assertEqual(out['measured']['input_divider'], 496)
                     self.assertAlmostEqual(out['measured']['list_border'], 300, delta=1)
 
+    def test_no_chat_open_blocks_reading_but_not_the_session_list(self):
+        # Acceptance 2026-11-06: with no chat selected (blank right pane, no input box) every check
+        # failed, so the bot never clicked a row to open a chat again and reported needs_recalibration.
+        full = self.run_anchors('r1-light-no-chat')
+        self.assertFalse(full['passed'])
+        self.assertIn('input_divider', full['failures'])
+        listed = self.run_anchors('r1-light-no-chat', ['--regions', 'session_list'])
+        self.assertTrue(listed['passed'], listed)
+        self.assertEqual(listed['theme'], 'wechat-4-light')
+
+    def test_session_list_scope_still_catches_a_moved_list(self):
+        listed = self.run_anchors('r1-light-bottom', ['--regions', 'session_list', '--shift', '30,0'])
+        self.assertIn('list_border', listed['failures'])
+
     def test_all_fixtures_pass(self):
         for name, expected_theme in FIXTURES.items():
             with self.subTest(name=name):
