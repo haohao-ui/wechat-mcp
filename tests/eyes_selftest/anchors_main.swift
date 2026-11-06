@@ -55,10 +55,14 @@ struct AnchorsMain {
         var blankRegion: String? = nil
         var patchParams: (x: Double, y: Double, w: Double, h: Double, r: Double, g: Double, b: Double)? = nil
 
+        var measureOnly = false
         var i = 3
         while i < args.count {
             let opt = args[i]
-            if opt == "--shift" && i + 1 < args.count {
+            if opt == "--measure" {
+                measureOnly = true
+                i += 1
+            } else if opt == "--shift" && i + 1 < args.count {
                 let parts = args[i + 1].split(separator: ",").compactMap { Double($0) }
                 if parts.count == 2 {
                     shiftDx = parts[0]
@@ -126,6 +130,12 @@ struct AnchorsMain {
             return 1
         }
 
+        if measureOnly {
+            let measured = measureAnchors(finalImage, scale: scale, layout: layout)
+            if let data = try? JSONSerialization.data(withJSONObject: ["measured": measured], options: [.sortedKeys]),
+               let text = String(data: data, encoding: .utf8) { print(text); return 0 }
+            return 1
+        }
         let report = verifyAnchors(finalImage, scale: scale, layout: layout)
         do {
             let encoder = JSONEncoder()

@@ -77,6 +77,26 @@ class AnchorVerificationTests(unittest.TestCase):
             raise AssertionError(f"CLI error (code {proc.returncode}):\nSTDERR: {proc.stderr}\nSTDOUT: {proc.stdout}")
         return json.loads(proc.stdout)
 
+    def test_measure_finds_real_edges_far_from_a_wrong_map(self):
+        # Stage C drill 2026-11-06: calibrate searched only +/-12 points around the map's edge, so a map
+        # 30 points off measured nothing. Re-measuring must search widely and find the real edges.
+        import tempfile
+        layout = json.loads(LAYOUT.read_text())
+        for r in ('chat', 'chat_content'):
+            layout['regions'][r]['h'] -= 30
+        layout['regions']['input']['y'] -= 30; layout['regions']['input']['h'] += 30
+        layout['regions']['session_list']['w'] -= 40
+        with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as handle:
+            json.dump(layout, handle)
+        wrong = handle.name
+        for name in ('r1-dark-top', 'r1-light-bottom', 'retina-dark-bottom', 'retina-light-top', 'r1-light-xls-card'):
+            for path in (str(LAYOUT), wrong):
+                with self.subTest(name=name, layout=path):
+                    cmd = [str(self.cli), str(FRAMES / f'{name}.png'), path, '--measure']
+                    out = json.loads(subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=True).stdout)
+                    self.assertAlmostEqual(out['measured']['input_divider'], 496, delta=1)
+                    self.assertAlmostEqual(out['measured']['list_border'], 300, delta=1)
+
     def test_all_fixtures_pass(self):
         for name, expected_theme in FIXTURES.items():
             with self.subTest(name=name):
