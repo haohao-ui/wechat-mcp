@@ -3,10 +3,32 @@ import ApplicationServices
 
 // wechat_click <x> <y> [<width> <height>]  — clicks inside the control centred on (x, y), screen points.
 // Without a size the control is a 12×12 square. --plan-only prints the planned events and posts nothing.
-// Movement, press and checks come from the shared action module (native/action).
+// wechat_click key <cmd+v|cmd+a|cmd+c|return> — presses keys, only while WeChat is the frontmost app.
+// Movement, press, keys and checks come from the shared action module (native/action).
 var arguments = Array(CommandLine.arguments.dropFirst())
 let planOnly = arguments.first == "--plan-only"
 if planOnly { arguments.removeFirst() }
+
+if arguments.first == "key" {
+    guard arguments.count == 2, Actions.keyCombos[arguments[1]] != nil else {
+        fputs("wechat_click: unsupported_key\n", stderr); exit(1)
+    }
+    if planOnly {
+        let sink = PlanSink()
+        do { try Actions(sink: sink).key(arguments[1]) } catch { fputs("wechat_click: \(error)\n", stderr); exit(1) }
+        print(String(decoding: try! JSONSerialization.data(withJSONObject: ["events": sink.events]), as: UTF8.self))
+        exit(0)
+    }
+    guard AXIsProcessTrusted() else {
+        fputs("wechat_click: accessibility_permission_missing_for_executing_process\n", stderr); exit(1)
+    }
+    // Keys go to whatever app is in front: never type unless it is WeChat.
+    guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.tencent.xinWeChat" else {
+        fputs("wechat_click: frontmost_not_wechat\n", stderr); exit(3)
+    }
+    do { try Actions().key(arguments[1]) } catch { fputs("wechat_click: \(error)\n", stderr); exit(1) }
+    exit(0)
+}
 guard arguments.count == 2 || arguments.count == 4 else { exit(1) }
 let numbers = arguments.compactMap(Double.init)
 guard numbers.count == arguments.count, numbers.allSatisfy({ $0.isFinite }) else { exit(1) }
@@ -26,6 +48,9 @@ final class PlanSink: EventSink {
         position = point
     }
     func scroll(lines: Int32, at point: CGPoint) throws {}
+    func key(_ code: CGKeyCode, down: Bool, command: Bool) throws {
+        events.append(["type": down ? "key_down" : "key_up", "code": Int(code), "cmd": command])
+    }
     func sleep(_ seconds: Double) {}
 }
 

@@ -7,6 +7,8 @@ protocol EventSink {
     func cursor() -> CGPoint
     func post(_ type: CGEventType, at point: CGPoint, button: CGMouseButton) throws
     func scroll(lines: Int32, at point: CGPoint) throws
+    /// One key transition; `command` is the Command modifier state carried by the event.
+    func key(_ code: CGKeyCode, down: Bool, command: Bool) throws
     func sleep(_ seconds: Double)
 }
 
@@ -36,6 +38,13 @@ struct SystemEventSink: EventSink {
         }
         wheel.location = point
         wheel.post(tap:.cghidEventTap)
+    }
+    func key(_ code: CGKeyCode, down: Bool, command: Bool) throws {
+        guard let event = CGEvent(keyboardEventSource:nil, virtualKey:code, keyDown:down) else {
+            throw ActionError.eventFailed
+        }
+        event.flags = command ? .maskCommand : []
+        event.post(tap:.cghidEventTap)
     }
     func sleep(_ seconds: Double) { if seconds > 0 { Thread.sleep(forTimeInterval:seconds) } }
 }

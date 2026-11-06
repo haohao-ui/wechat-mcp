@@ -54,6 +54,25 @@ fn get_click_binary_path() -> std::path::PathBuf {
 }
 
 /// 调用原生工具或 macOS 原生 CoreGraphics 发送鼠标单击事件
+/// Presses a key combination through the click helper (cmd+v, cmd+a, cmd+c, return).
+pub async fn key_press(combo: &str) -> Result<()> {
+    key_press_with(&get_click_binary_path(), combo).await
+}
+
+async fn key_press_with(click_bin: &std::path::Path, combo: &str) -> Result<()> {
+    let output = Command::new(click_bin)
+        .kill_on_drop(true)
+        .args(["key", combo])
+        .output()
+        .await
+        .with_context(|| format!("执行 wechat_click key {combo} 失败"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!("wechat_click key {combo} 退出状态异常: {:?}: {stderr}", output.status.code());
+    }
+    Ok(())
+}
+
 pub async fn mouse_click(x: f64, y: f64) -> Result<()> {
     crate::desktop::overlay::click(x, y, false).await;
     let click_bin = get_click_binary_path();
@@ -599,31 +618,24 @@ pub async fn send_message(recipient: &str, message: &str) -> Result<(), SendErro
         .await
         .map_err(SendError::NotSent)?;
 
-    let paste_script = r#"
+    // Only brings WeChat to the front; the keys themselves go through the click helper, which
+    // refuses to press anything unless WeChat is frontmost.
+    let front_script = r#"
         tell application "System Events"
-            tell process "WeChat"
-                set frontmost to true
-                keystroke "v" using {command down}
-                delay 0.3
-            end tell
+            tell process "WeChat" to set frontmost to true
         end tell
     "#;
 
     let prepare_result = async {
-        run_applescript(paste_script).await?;
+        run_applescript(front_script).await?;
+        key_press("cmd+v").await?;
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
         // A sentinel prevents a failed Copy from being mistaken for a matching clipboard.
         let sentinel = format!("wechat-readback-{}", uuid::Uuid::new_v4());
         clipboard::set_clipboard(&sentinel).await?;
-        run_applescript(
-            r#"tell application "System Events"
-            tell process "WeChat"
-                keystroke "a" using {command down}
-                keystroke "c" using {command down}
-                delay 0.15
-            end tell
-        end tell"#,
-        )
-        .await?;
+        key_press("cmd+a").await?;
+        key_press("cmd+c").await?;
+        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
         let actual = clipboard::get_clipboard()
             .await?
             .context("发送前无法读取输入框正文，未触发发送")?;
@@ -643,12 +655,7 @@ pub async fn send_message(recipient: &str, message: &str) -> Result<(), SendErro
         return Err(SendError::NotSent(err));
     }
 
-    let enter_result = run_applescript(
-        r#"tell application "System Events"
-        tell process "WeChat" to key code 36
-    end tell"#,
-    )
-    .await;
+    let enter_result = key_press("return").await;
 
     // 4. 恢复原剪贴板
     let restore_result = clipboard_guard.restore().await;
@@ -2322,6 +2329,32 @@ mod send_safety_tests {
             longest_cjk_run(noisy),
             "常德长沙拼车微信交流一群"
         ));
+    }
+
+    #[tokio::test]
+    async fn key_press_runs_click_helper_key_command_and_reports_stderr() {
+        // Device 2026-11-07: System Events keystrokes no longer reached WeChat; keys go through
+        // the same helper (and event path) as clicks.
+        let dir = std::env::temp_dir().join(format!("fake_keys_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("args.log");
+        let ok = dir.join("ok.sh");
+        let refuse = dir.join("refuse.sh");
+        std::fs::write(&ok, format!("#!/bin/sh\necho \"$@\" >> '{}'\n", log.display())).unwrap();
+        std::fs::write(&refuse, "#!/bin/sh\necho 'wechat_click: frontmost_not_wechat' >&2\nexit 3\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for f in [&ok, &refuse] {
+                std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        key_press_with(&ok, "cmd+v").await.unwrap();
+        key_press_with(&ok, "return").await.unwrap();
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "key cmd+v\nkey return\n");
+        let err = key_press_with(&refuse, "cmd+a").await.unwrap_err().to_string();
+        assert!(err.contains("frontmost_not_wechat"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
