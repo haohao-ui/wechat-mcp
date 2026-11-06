@@ -221,6 +221,17 @@ class MessageTests(StoreBase):
         self.store.update_send('k', 'triggered')
         self.assertTrue(self.store.replied_after(self.c, ids))
 
+    def test_replied_after_ignores_own_send_and_not_sent(self):
+        """A retry's pre-send check must not take its own earlier attempt for somebody's reply."""
+        self.store.record_frame(self.c, fr(bub('在吗')))
+        ids = [m for m, in self.store.conn.execute("select message_id from messages where text='在吗'")]
+        self.store.record_bot_reply(self.c, 'k', '在的', 'generated', {}, ids)
+        self.store.update_send('k', 'attempting')
+        self.assertTrue(self.store.replied_after(self.c, ids))
+        self.assertFalse(self.store.replied_after(self.c, ids, exclude_send_key='k'))
+        self.store.update_send('k', 'not_sent')  # never went out: no reply to anybody
+        self.assertFalse(self.store.replied_after(self.c, ids))
+
     def test_old_or_imported_reply_is_not_echo_target(self):
         self.store.record_frame(self.c, fr(bub('问')))
         self.store.record_bot_reply(self.c, 'old', '好的，稍等', 'triggered', {}, [])
