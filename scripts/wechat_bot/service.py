@@ -636,7 +636,7 @@ class BotService:
                 return res, rec, s_err
 
             def is_not_sent(err, rec):
-                if rec and rec.get('status') == 'not_sent':
+                if rec and (rec.get('delivery') == 'not_sent' or rec.get('status') == 'not_sent'):
                     return True
                 err_msg = str(err) if err else ''
                 return '未触发发送' in err_msg or 'not_sent' in err_msg
