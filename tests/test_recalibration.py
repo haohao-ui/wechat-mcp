@@ -87,6 +87,20 @@ class RecalibrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(health['failures'], ['input_divider', 'title_text'])
         self.assertEqual(health['attempt'], 5)
 
+    async def test_success_clears_recalibration_on_idle_sessions(self):
+        # Drill 2026-11-06: after --accept two chats recovered, but an idle one (never visited without
+        # new messages) kept needs_recalibration, so control status kept the alarm on.
+        child_a = self.coordinator.session(target('a'))
+        child_b = self.coordinator.session(target('b'))
+        self.coordinator.connect = AsyncMock(side_effect=ValueError('private visual operation failed: invalid("layout_mismatch:input_divider")'))
+        for _ in range(5):
+            await self.coordinator.visit(target('a'))
+        self.assertEqual(json.loads((child_a.root/'health.json').read_text())['state'], 'needs_recalibration')
+        self.coordinator.connect = AsyncMock()
+        child_b.cycle = AsyncMock()
+        await self.coordinator.visit(target('b'))
+        self.assertEqual(json.loads((child_a.root/'health.json').read_text())['state'], 'watching')
+
     async def test_success_resets_counter(self):
         child_a = self.coordinator.session(target('a'))
         child_b = self.coordinator.session(target('b'))

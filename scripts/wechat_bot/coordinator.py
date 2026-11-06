@@ -210,6 +210,16 @@ class BotCoordinator:
         await self.capture.start()
         self.active_name=child.recipient
 
+    def clear_layout_waits(self, verified):
+        """The screen matches the map again: idle chats (not visited until a message arrives) leave
+        their layout-mismatch wait too, so status stops reporting needs_recalibration."""
+        for other in self.sessions.values():
+            if other is verified or other.paused: continue
+            try: state=json.loads((other.root/'health.json').read_text())
+            except (OSError,ValueError): continue
+            if state.get('state')=='needs_recalibration' or 'layout_mismatch' in str(state.get('reason','')):
+                other.health('watching',reason='layout verified on another chat')
+
     async def visit(self, target):
         child=self.session(target)
         verdict=decision(self.rules(),child.recipient)
@@ -229,6 +239,7 @@ class BotCoordinator:
             if self.stop.is_set() or not child.target_allowed(): return
             await child.cycle(self.client,self.capture)
             child.title_mismatches=0
+            if self.layout_mismatches: self.clear_layout_waits(child)
             self.layout_mismatches=0
             if child.cursor is not None and marker.exists(): marker.unlink()
         except ValueError as error:
