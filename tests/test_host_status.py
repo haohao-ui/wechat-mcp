@@ -550,6 +550,41 @@ class HostStatusTests(unittest.TestCase):
         self.assertEqual(res_ok['target_size']['width'], 880)
         self.assertEqual(res_ok['target_size']['height'], 640)
 
+    def test_status_desktop_service_idle_is_green(self):
+        """两次连接之间桌面服务处于空闲（套接字在监听），应为绿色而不是红色。"""
+        inp = self._default_input()
+        inp['desktop_service'] = {'socket_exists': True, 'status': 'idle'}
+        item = {i['key']: i for i in self.run_status_eval(inp)}['desktop_service']
+        self.assertEqual(item['level'], 'green')
+        self.assertIn('空闲', item['reason'])
+
+    def test_status_desktop_service_idle_without_socket_is_red(self):
+        inp = self._default_input()
+        inp['desktop_service'] = {'socket_exists': False, 'status': 'idle'}
+        item = {i['key']: i for i in self.run_status_eval(inp)}['desktop_service']
+        self.assertEqual(item['level'], 'red')
+
+    def test_mask_config_key_file_counts_as_configured(self):
+        res = self.run_config_action({'op': 'mask_config', 'config': {
+            'model_config': {'backend': 'openai-compatible', 'model': 'm', 'api_key_file': '/x/model.key'}}})
+        self.assertEqual(res['api_key_status'], '已配置')
+        self.assertNotIn('/x/model.key', json.dumps(res))
+
+    def test_form_empty_integer_fields_keep_original_or_default(self):
+        """空着的整数项不报错：原配置里有就保留原值，没有就不写入（由机器人使用默认值）。"""
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / 'config.json'
+            original = {'schema_version': 1, 'account_id': 'a', 'cooldown_seconds': 3}
+            target.write_text(json.dumps(original))
+            res = self.run_config_action({
+                'op': 'update_and_save_form', 'target_path': str(target), 'original_config': original,
+                'form_inputs': {'cooldown_seconds': '', 'max_attachment_mb': '  ', 'max_replies_per_hour': '20'},
+                'simulated_check_result': {'ok': True}})
+            self.assertTrue(res['ok'], res)
+            saved = json.loads(target.read_text())
+            self.assertEqual(saved['cooldown_seconds'], 3)
+            self.assertNotIn('max_attachment_mb', saved)
+            self.assertEqual(saved['max_replies_per_hour'], 20)
 
 
 if __name__ == '__main__':

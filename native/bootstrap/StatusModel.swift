@@ -285,6 +285,8 @@ public func evaluate(_ s: StatusInput) -> [StatusItem] {
     if s.desktopService.status == "running" && s.desktopService.socketExists {
         let pidStr = s.desktopService.pid != nil ? " (PID: \(s.desktopService.pid!))" : ""
         svcItem = StatusItem(key: "desktop_service", level: .green, reason: "桌面服务运行中\(pidStr)", fix: nil)
+    } else if s.desktopService.status == "idle" && s.desktopService.socketExists {
+        svcItem = StatusItem(key: "desktop_service", level: .green, reason: "桌面服务空闲，等待连接", fix: nil)
     } else if s.desktopService.status == "restarting" {
         svcItem = StatusItem(key: "desktop_service", level: .yellow, reason: "桌面服务正在退避重试", fix: "等待自动重试或点击重启服务")
     } else {

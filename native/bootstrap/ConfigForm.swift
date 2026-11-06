@@ -52,6 +52,9 @@ public struct ConfigFormLogic {
             if let keyEnv = mc["api_key_env"] as? String, !keyEnv.isEmpty {
                 hasKey = true
             }
+            if let keyFile = mc["api_key_file"] as? String, !keyFile.isEmpty {
+                hasKey = true
+            }
         }
 
         masked["model_backend"] = modelBackend
@@ -198,6 +201,8 @@ public struct ConfigFormLogic {
         for field in intFieldNames {
             if let val = formInputs[field] {
                 if let str = val as? String {
+                    // Empty: keep the original value, or leave the key out so the bot uses its default.
+                    if str.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
                     let intVal = try parseIntStrict(field: field, value: str)
                     updated[field] = intVal
                 } else if let intVal = val as? Int {

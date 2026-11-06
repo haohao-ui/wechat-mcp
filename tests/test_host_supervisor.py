@@ -71,8 +71,8 @@ class HostSupervisorLogicTests(unittest.TestCase):
         res = self.run_child_exit_events(clean_events)
         self.assertFalse(res['is_given_up'], "Host must NOT give up on clean client disconnects")
         self.assertTrue(res['accepting_connections'], "Host must keep accepting connections after clean disconnects")
-        self.assertEqual(res['status']['state'], 'stopped')
-        self.assertEqual(res['status']['reason'], '等待客户端连接')
+        # Between per-connection children the service is idle (listening), not stopped.
+        self.assertEqual(res['status']['state'], 'idle')
 
         # 2. Five abnormal exits (status != 0 or uncaught signal) trigger giveUp
         abnormal_events = [

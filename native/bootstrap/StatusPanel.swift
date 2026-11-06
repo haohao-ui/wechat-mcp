@@ -138,13 +138,24 @@ public final class StatusPanelController: NSViewController {
     }
 
     @objc private func requestScreen() {
-        _ = CGRequestScreenCaptureAccess()
+        // macOS shows the system prompt only once per app; afterwards open the settings pane directly.
+        if !CGRequestScreenCaptureAccess() {
+            openPrivacyPane("Privacy_ScreenCapture")
+        }
         refresh()
     }
 
     @objc private func requestAccessibility() {
-        _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
+        if !AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary) {
+            openPrivacyPane("Privacy_Accessibility")
+        }
         refresh()
+    }
+
+    private func openPrivacyPane(_ anchor: String) {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)") {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     private func setupStatusSection(inside box: NSBox) {
@@ -288,6 +299,15 @@ public final class StatusPanelController: NSViewController {
         footerRow.spacing = 10
         stack.addArrangedSubview(footerRow)
 
+        // Empty fields keep the bot's own defaults (scripts/wechat_bot/service.py load_config).
+        let defaults: [(NSTextField, String)] = [
+            (maxAttachmentField, "50"), (maxRepliesField, "20"), (cooldownField, "15"),
+            (quietSecField, "10"), (maxSecField, "60"), (contextMsgField, "5")
+        ]
+        for (field, value) in defaults { field.placeholderString = "留空使用默认值 \(value)" }
+        ignorelistField.placeholderString = "每行一个：名称, private 或 group"
+        setConfigFormEnabled(false)
+
         embed(stack, in: box)
     }
 
@@ -357,6 +377,8 @@ public final class StatusPanelController: NSViewController {
         case .stopped(let reason):
             svcStatus = "stopped"
             stoppedReason = reason
+        case .idle:
+            svcStatus = "idle"
         }
         let sockPath = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".wechat-rpa/worker.sock").path
@@ -478,10 +500,23 @@ public final class StatusPanelController: NSViewController {
         guard FileManager.default.fileExists(atPath: url.path),
               let data = try? Data(contentsOf: url),
               let json = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
+            setConfigFormEnabled(false)
+            configErrorLabel.stringValue = "未找到机器人配置文件（\(url.path)），无法保存"
             return
         }
         self.rawConfigDict = json
         populateConfigUI(json)
+        setConfigFormEnabled(true)
+        configErrorLabel.stringValue = ""
+    }
+
+    private func setConfigFormEnabled(_ enabled: Bool) {
+        for field in [allowlistField, ignorelistField, maxAttachmentField, maxRepliesField,
+                      cooldownField, quietSecField, maxSecField, contextMsgField] {
+            field.isEnabled = enabled
+        }
+        manageWindowCheck.isEnabled = enabled
+        configSaveButton.isEnabled = enabled
     }
 
     private func populateConfigUI(_ raw: [String: Any]) {
@@ -522,9 +557,9 @@ public final class StatusPanelController: NSViewController {
         if let cm = editable["context_messages"] {
             contextMsgField.stringValue = "\(cm)"
         }
-        if let mw = editable["manage_window"] as? Bool {
-            manageWindowCheck.state = mw ? .on : .off
-        }
+        // The bot defaults manage_window to true when the key is absent.
+        let mw = editable["manage_window"] as? Bool ?? true
+        manageWindowCheck.state = mw ? .on : .off
     }
 
     private func formatListOrString(_ val: Any) -> String {

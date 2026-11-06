@@ -36,6 +36,8 @@ public enum WorkerStatus: Equatable {
     case running(pid: Int32)
     case restarting(at: Date)
     case stopped(reason: String)
+    /// Listening on the socket between per-connection children: healthy, not stopped.
+    case idle
 }
 
 public struct ChildExitHandler {
@@ -56,7 +58,7 @@ public struct ChildExitHandler {
 
     public mutating func markReadyToAccept() {
         if !gaveUp {
-            status = .stopped(reason: "等待客户端连接")
+            status = .idle
         }
     }
 
@@ -71,7 +73,7 @@ public struct ChildExitHandler {
         if !isAbnormal {
             // 正常退出（reason == .exit 且 status == 0）：
             // 不记录到 RestartPolicy，状态重置为等待客户端连接
-            status = .stopped(reason: "等待客户端连接")
+            status = .idle
             return nil
         }
 
@@ -89,6 +91,6 @@ public struct ChildExitHandler {
     public mutating func reset() {
         restartPolicy.reset()
         gaveUp = false
-        status = .stopped(reason: "等待客户端连接")
+        status = .idle
     }
 }

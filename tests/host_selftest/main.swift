@@ -76,6 +76,8 @@ func run() -> Int32 {
                 statusDict = ["state": "restarting", "at": at.timeIntervalSince1970]
             case .stopped(let reason):
                 statusDict = ["state": "stopped", "reason": reason]
+            case .idle:
+                statusDict = ["state": "idle"]
             }
 
             let response: [String: Any] = [
