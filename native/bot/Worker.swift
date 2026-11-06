@@ -350,7 +350,10 @@ final class CaptureWorker {
         try screenGate(window)
         let id = window["window_id"] as! UInt32
         let image = try windowImage(window)
-        guard let panel = try normalizedFrame(image,window:window).image.cropping(to:CGRect(x:300,y:0,width:570,height:496)) else { throw Failure.invalid("window_capture_failed") }
+        let normalized = try normalizedFrame(image,window:window)
+        // Every poll, cached or not: a cached analysis was made under the map current at that time.
+        _ = try checkAnchors(image, scale: normalized.scale, layout: try currentLayout())
+        guard let panel = normalized.image.cropping(to:CGRect(x:300,y:0,width:570,height:496)) else { throw Failure.invalid("window_capture_failed") }
         var hashInput = try canonicalBytes(panel)
         hashInput.append(try JSONSerialization.data(withJSONObject:window,options:.sortedKeys))
         let snapshot = SHA256.hash(data:hashInput).map { String(format:"%02x",$0) }.joined()

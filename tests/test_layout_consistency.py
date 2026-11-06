@@ -99,3 +99,13 @@ class AnchorGateTests(unittest.TestCase):
             branch = worker[worker.index(target):]
             branch = branch[:branch.index('\n        }\n')]
             self.assertIn('screenGate(', branch, f'{op} must call screenGate')
+
+
+class CachedCaptureGateTests(unittest.TestCase):
+    def test_capture_checks_anchors_before_reusing_a_cached_frame(self):
+        # Stage C drill 2026-11-06: an unchanged chat reused the analysis made under the old map, so a
+        # map that no longer matched the screen went unnoticed until a title check failed.
+        worker = (ROOT/'native'/'bot'/'Worker.swift').read_text()
+        body = worker[worker.index('func capture(_ recipient: String'):]
+        body = body[:body.index('let reused')]
+        self.assertIn('checkAnchors(image', body)
