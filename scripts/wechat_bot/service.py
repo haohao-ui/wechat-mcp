@@ -540,7 +540,7 @@ class BotService:
             notes,model_images,earlier=await self.understand_images(text,images,failed,context)
             reply = validate_reply(await generate(text,mode='service',context=context,images=model_images,
                                                   image_count=len(images),earlier_images=earlier,
-                                                  files=[model_view(f) for f in files],notes=notes,failed=[f['label'] for f in failed],
+                                                  files=[model_view(f) for f in files],notes=notes,failed=[{k:f[k] for k in ('label','kind','reason') if k in f} for f in failed],
                                                   chat_kind='group' if self.group else 'private',
                                                   metadata=model,model_config=self.config.get('model_config')))
             reply = ensure_unreadable_named(reply,failed)
