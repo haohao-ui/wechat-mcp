@@ -1,182 +1,122 @@
 #!/usr/bin/env bash
+# Deploy to the dedicated WeChat Mac.
+# Usage: scripts/deploy_host.sh <ssh-host> [--app] [--worker] [--mcp] [--bot] [--yes]
+#   No part flags = all parts. Without --yes nothing runs: every step is only printed (dry-run).
+#   --app     build 微信客服助手.app on the target, ad-hoc sign it, install the LaunchAgent, and retire WeChat RPA Test.app
+#   --worker  build wechat_bot_worker and wechat_click on the target
+#   --mcp     cross-build wechat-mcp here (x86_64, macOS 12) and copy it
+#   --bot     copy scripts/ to ~/.wechat-rpa/bot/scripts (the bot's own launchd is set up by the migration step)
+# Every replaced file is backed up as <name>.before-<timestamp>. Processes are never killed:
+# helpers start per connection and pick up the new binaries on the next connect; the app restarts via launchctl.
 set -euo pipefail
+cd "$(dirname "$0")/.."
 
-# Deploy 微信客服助手 host app, worker binaries, and bot to target Mac.
-# Usage: scripts/deploy_host.sh <host> [--app] [--worker] [--bot] [--yes]
-
-if [ $# -lt 1 ] || [[ "$1" == --* ]]; then
-  echo "Usage: $0 <host> [--app] [--worker] [--bot] [--yes]" >&2
-  exit 1
-fi
-
-HOST="$1"
-shift
-
-DEPLOY_APP=0
-DEPLOY_WORKER=0
-DEPLOY_BOT=0
-DRY_RUN=1
-
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --app)
-      DEPLOY_APP=1
-      ;;
-    --worker)
-      DEPLOY_WORKER=1
-      ;;
-    --bot)
-      DEPLOY_BOT=1
-      ;;
-    --yes)
-      DRY_RUN=0
-      ;;
-    *)
-      echo "Unknown option: $1" >&2
-      echo "Usage: $0 <host> [--app] [--worker] [--bot] [--yes]" >&2
-      exit 1
-      ;;
+usage() { echo "Usage: $0 <ssh-host> [--app] [--worker] [--mcp] [--bot] [--yes]" >&2; exit 2; }
+[ $# -ge 1 ] || usage
+HOST=$1; shift
+APP=0; WORKER=0; MCP=0; BOT=0; YES=0
+for arg in "$@"; do
+  case "$arg" in
+    --app) APP=1 ;; --worker) WORKER=1 ;; --mcp) MCP=1 ;; --bot) BOT=1 ;; --yes) YES=1 ;;
+    *) usage ;;
   esac
-  shift
 done
+if [ $((APP+WORKER+MCP+BOT)) -eq 0 ]; then APP=1; WORKER=1; MCP=1; BOT=1; fi
+case "$HOST" in -*|*" "*) usage ;; esac
+TS=$(date +%s)
 
-# If none of the component flags were specified, deploy all three by default.
-if [ "$DEPLOY_APP" -eq 0 ] && [ "$DEPLOY_WORKER" -eq 0 ] && [ "$DEPLOY_BOT" -eq 0 ]; then
-  DEPLOY_APP=1
-  DEPLOY_WORKER=1
-  DEPLOY_BOT=1
+# remote <description> <script>: the script runs in the remote login shell (remote $HOME, remote $UID).
+remote() {
+  echo "--- $1"
+  if [ $YES -eq 1 ]; then ssh -o BatchMode=yes -o LogLevel=ERROR "$HOST" "bash -s" <<<"set -euo pipefail; TS=$TS; $2"
+  else printf '[dry-run] ssh %s <<EOF\n%s\nEOF\n' "$HOST" "$2"; fi
+}
+# local_step <description> <command...>
+local_step() {
+  echo "--- $1"
+  if [ $YES -eq 1 ]; then "${@:2}"; else echo "[dry-run] ${*:2}"; fi
+}
+
+echo "=== deploy to $HOST ($([ $YES -eq 1 ] && echo live || echo dry-run)) app=$APP worker=$WORKER mcp=$MCP bot=$BOT ==="
+
+if [ $APP -eq 1 ] || [ $WORKER -eq 1 ]; then
+  # A fresh source tree on the target; the calibrated layout maps in ~/.wechat-rpa/layout are never touched.
+  SRC_TAR=$(mktemp -t wechat-src)
+  local_step "pack native sources" tar czf "$SRC_TAR" native/bootstrap native/common native/eyes native/action native/bot native/click native/wechat_bubbles.swift
+  echo "--- upload sources"
+  if [ $YES -eq 1 ]; then
+    ssh -o BatchMode=yes -o LogLevel=ERROR "$HOST" 'rm -rf "$HOME/.wechat-rpa/src.new" && mkdir -p "$HOME/.wechat-rpa/src.new" && tar xzf - -C "$HOME/.wechat-rpa/src.new"' < "$SRC_TAR"
+    rm -f "$SRC_TAR"
+  else echo "[dry-run] ssh $HOST 'tar xzf - -C ~/.wechat-rpa/src.new' < $SRC_TAR"; rm -f "$SRC_TAR"; fi
+  remote "swap source tree" '
+    cd "$HOME/.wechat-rpa"
+    [ -d src ] && mv src "src.before-$TS"
+    mv src.new src'
 fi
 
-TIMESTAMP=$(date +%Y%m%d%H%M%S)
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-run_cmd() {
-  if [ "$DRY_RUN" -eq 1 ]; then
-    echo "[dry-run] $*"
-  else
-    "$@"
-  fi
-}
-
-remote_sh() {
-  local cmd="$1"
-  if [ "$DRY_RUN" -eq 1 ]; then
-    echo "[dry-run] ssh -o BatchMode=yes $HOST \"$cmd\""
-  else
-    ssh -o BatchMode=yes "$HOST" "$cmd"
-  fi
-}
-
-remote_copy() {
-  local src="$1"
-  local dst="$2"
-  if [ "$DRY_RUN" -eq 1 ]; then
-    echo "[dry-run] scp -r -q $src $HOST:$dst"
-  else
-    scp -r -q "$src" "$HOST:$dst"
-  fi
-}
-
-echo "=== Deploying to host: $HOST (dry-run: $([ "$DRY_RUN" -eq 1 ] && echo "YES" || echo "NO")) ==="
-
-if [ "$DEPLOY_APP" -eq 1 ]; then
-  echo "--- Step: Deploy Host App (微信客服助手.app) ---"
-  # 1. 首次部署时把旧 App 移至 ~/Applications/.old/
-  remote_sh '
-    mkdir -p "$HOME/Applications/.old"
-    if [ -d "$HOME/Applications/WeChat RPA Test.app" ]; then
-      echo "Archiving legacy WeChat RPA Test.app..."
-      mv "$HOME/Applications/WeChat RPA Test.app" "$HOME/Applications/.old/WeChat RPA Test.app.'$TIMESTAMP'"
-    fi
-  '
-
-  # 2. 上传源代码并在远端编译
-  remote_sh 'mkdir -p "$HOME/.wechat-rpa/src/native/bootstrap"'
-  remote_copy "$ROOT_DIR/native/bootstrap/"* "$HOME/.wechat-rpa/src/native/bootstrap/"
-
-  # 远端编译与组装 App bundle
-  remote_sh '
+if [ $WORKER -eq 1 ]; then
+  remote "build and install wechat_bot_worker + wechat_click" '
     cd "$HOME/.wechat-rpa/src"
-    echo "Compiling host binary with swiftc on target Mac..."
-    swiftc -O -target x86_64-apple-macos12 \
-      native/bootstrap/Supervisor.swift \
-      native/bootstrap/Probe.swift \
-      native/bootstrap/SocketWorker.swift \
-      native/bootstrap/main.swift \
-      -o wechat-cs-host
+    swiftc -O -target x86_64-apple-macos12 -parse-as-library -D BOT_WORKER native/wechat_bubbles.swift native/common/*.swift native/eyes/*.swift native/action/*.swift native/bot/*.swift -o /tmp/wechat_bot_worker.$TS
+    swiftc -O -target x86_64-apple-macos12 native/click/main.swift native/common/*.swift native/action/*.swift -o /tmp/wechat_click.$TS
+    for name in wechat_bot_worker wechat_click; do
+      dst="$HOME/.wechat-rpa/bin/$name"
+      [ -f "$dst" ] && cp -p "$dst" "$dst.before-$TS"
+      install -m 0755 "/tmp/$name.$TS" "$dst"; rm -f "/tmp/$name.$TS"
+    done
+    echo "worker and click installed; a running worker keeps its old binary until its connection ends"'
+fi
 
-    APP_DIR="$HOME/Applications/微信客服助手.app"
-    if [ -d "$APP_DIR" ]; then
-      echo "Backing up existing 微信客服助手.app..."
-      cp -R "$APP_DIR" "$APP_DIR.before-'$TIMESTAMP'"
-    fi
+if [ $MCP -eq 1 ]; then
+  local_step "cross-build wechat-mcp for x86_64 macOS 12" env MACOSX_DEPLOYMENT_TARGET=12.0 cargo build --release --locked --target x86_64-apple-darwin
+  remote "back up wechat-mcp" '
+    dst="$HOME/.wechat-rpa/bin/wechat-mcp"; [ -f "$dst" ] && cp -p "$dst" "$dst.before-$TS"; true'
+  echo "--- upload wechat-mcp"
+  if [ $YES -eq 1 ]; then
+    ssh -o BatchMode=yes -o LogLevel=ERROR "$HOST" 'cat > "$HOME/.wechat-rpa/bin/wechat-mcp.new" && chmod 0755 "$HOME/.wechat-rpa/bin/wechat-mcp.new" && mv "$HOME/.wechat-rpa/bin/wechat-mcp.new" "$HOME/.wechat-rpa/bin/wechat-mcp"' < target/x86_64-apple-darwin/release/wechat-mcp
+  else echo "[dry-run] ssh $HOST 'cat > ~/.wechat-rpa/bin/wechat-mcp' < target/x86_64-apple-darwin/release/wechat-mcp"; fi
+fi
 
-    mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
-    mv wechat-cs-host "$APP_DIR/Contents/MacOS/wechat-cs-host"
-    chmod 0755 "$APP_DIR/Contents/MacOS/wechat-cs-host"
-    cp native/bootstrap/Info.plist "$APP_DIR/Contents/Info.plist"
-    cp native/bootstrap/gateway.test.json "$APP_DIR/Contents/Resources/gateway.test.json"
-  '
-
-  # 3. 安装与配置 LaunchAgent
-  remote_sh '
-    PLIST_DST="$HOME/Library/LaunchAgents/local.wechat-mcp.host.plist"
-    if [ -f "$PLIST_DST" ]; then
-      cp "$PLIST_DST" "$PLIST_DST.before-'$TIMESTAMP'"
-    fi
-    mkdir -p "$HOME/Library/LaunchAgents" "$HOME/.wechat-rpa/logs"
-    chmod 0700 "$HOME/.wechat-rpa/logs"
-
-    sed "s|__HOME__|$HOME|g" "$HOME/.wechat-rpa/src/native/bootstrap/local.wechat-mcp.host.plist" > "$PLIST_DST"
-    chmod 0600 "$PLIST_DST"
-
-    # 重新加载服务
+if [ $APP -eq 1 ]; then
+  remote "build, sign and install 微信客服助手.app" '
+    cd "$HOME/.wechat-rpa/src"
+    swiftc -O -target x86_64-apple-macos12 native/bootstrap/*.swift native/eyes/Screens.swift -o /tmp/wechat-cs-host.$TS
+    APP="$HOME/Applications/微信客服助手.app"
+    [ -d "$APP" ] && cp -R "$APP" "$HOME/Applications/.old-微信客服助手.app.before-$TS"
+    mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+    install -m 0755 "/tmp/wechat-cs-host.$TS" "$APP/Contents/MacOS/wechat-cs-host"; rm -f "/tmp/wechat-cs-host.$TS"
+    cp native/bootstrap/Info.plist "$APP/Contents/Info.plist"
+    cp native/bootstrap/gateway.test.json "$APP/Contents/Resources/gateway.test.json"
+    codesign --force --sign - "$APP"'
+  remote "retire WeChat RPA Test.app (quit it, keep a copy in ~/Applications/.old)" '
+    OLD="$HOME/Applications/WeChat RPA Test.app"
+    if [ -d "$OLD" ]; then
+      osascript -e "tell application id \"local.wechat-mcp.desktop-probe\" to quit" || true
+      for i in $(seq 1 20); do pgrep -f "WeChat RPA Test.app/Contents/MacOS" >/dev/null || break; sleep 0.5; done
+      if pgrep -f "WeChat RPA Test.app/Contents/MacOS" >/dev/null; then echo "WeChat RPA Test is still running; quit it by hand and re-run" >&2; exit 1; fi
+      mkdir -p "$HOME/Applications/.old"; mv "$OLD" "$HOME/Applications/.old/WeChat RPA Test.app.$TS"
+    fi'
+  remote "install and start the LaunchAgent" '
+    PLIST="$HOME/Library/LaunchAgents/local.wechat-mcp.host.plist"
+    mkdir -p "$HOME/Library/LaunchAgents" "$HOME/.wechat-rpa/logs"; chmod 0700 "$HOME/.wechat-rpa/logs"
+    [ -f "$PLIST" ] && cp -p "$PLIST" "$PLIST.before-$TS"
+    sed "s|__HOME__|$HOME|g" "$HOME/.wechat-rpa/src/native/bootstrap/local.wechat-mcp.host.plist" > "$PLIST"; chmod 0600 "$PLIST"
+    plutil -lint "$PLIST"
     launchctl bootout "gui/$UID/local.wechat-mcp.host" 2>/dev/null || true
-    launchctl bootstrap "gui/$UID" "$PLIST_DST"
-    launchctl kickstart -k "gui/$UID/local.wechat-mcp.host"
-  '
+    launchctl bootstrap "gui/$UID" "$PLIST"
+    echo "now grant Screen Recording and Accessibility to 微信客服助手 in System Settings, then press 刷新检查"'
 fi
 
-if [ "$DEPLOY_WORKER" -eq 1 ]; then
-  echo "--- Step: Deploy Worker Binaries ---"
-  remote_sh '
-    mkdir -p "$HOME/.wechat-rpa/bin"
-    chmod 0700 "$HOME/.wechat-rpa"
-  '
-  # 如果本地有 bin 文件则同步，并先备份旧文件
-  if [ -d "$ROOT_DIR/bin" ]; then
-    remote_sh '
-      for f in "$HOME/.wechat-rpa/bin/"*; do
-        if [ -f "$f" ]; then
-          cp "$f" "$f.before-'$TIMESTAMP'"
-        fi
-      done
-    '
-    remote_copy "$ROOT_DIR/bin/"* "$HOME/.wechat-rpa/bin/"
-    remote_sh 'chmod 0755 "$HOME/.wechat-rpa/bin/"*'
-  fi
-  # 重启桌面服务宿主以加载最新 worker
-  remote_sh '
-    launchctl kickstart -k "gui/$UID/local.wechat-mcp.host" 2>/dev/null || true
-  '
+if [ $BOT -eq 1 ]; then
+  BOT_TAR=$(mktemp -t wechat-bot)
+  local_step "pack bot scripts" tar czf "$BOT_TAR" --exclude __pycache__ scripts
+  remote "back up bot scripts" '
+    BOT="$HOME/.wechat-rpa/bot"; mkdir -p "$BOT"; chmod 0700 "$BOT"
+    [ -d "$BOT/scripts" ] && mv "$BOT/scripts" "$BOT/scripts.before-$TS"; true'
+  echo "--- upload bot scripts"
+  if [ $YES -eq 1 ]; then
+    ssh -o BatchMode=yes -o LogLevel=ERROR "$HOST" 'tar xzf - -C "$HOME/.wechat-rpa/bot"' < "$BOT_TAR"; rm -f "$BOT_TAR"
+  else echo "[dry-run] ssh $HOST 'tar xzf - -C ~/.wechat-rpa/bot' < $BOT_TAR"; rm -f "$BOT_TAR"; fi
 fi
 
-if [ "$DEPLOY_BOT" -eq 1 ]; then
-  echo "--- Step: Deploy Bot Scripts & Launchd ---"
-  remote_sh '
-    BOT_DIR="$HOME/.wechat-rpa/bot"
-    if [ -d "$BOT_DIR/scripts" ]; then
-      echo "Backing up existing bot scripts..."
-      cp -R "$BOT_DIR/scripts" "$BOT_DIR/scripts.before-'$TIMESTAMP'"
-    fi
-    mkdir -p "$BOT_DIR"
-  '
-  remote_copy "$ROOT_DIR/scripts" "$HOME/.wechat-rpa/bot/"
-
-  remote_sh '
-    # 重启机器人 launchd
-    launchctl kickstart -k "gui/$UID/local.wechat-rpa.bot" 2>/dev/null || true
-  '
-fi
-
-echo "=== Deployment $([ "$DRY_RUN" -eq 1 ] && echo "dry-run completed" || echo "succeeded") ==="
+echo "=== $([ $YES -eq 1 ] && echo done || echo 'dry-run finished; add --yes to run') ==="
