@@ -3,9 +3,17 @@ use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
+/// pbcopy/pbpaste decode and encode text by the locale. Started from launchd or Finder the process has
+/// no LANG, they fall back to MacRoman and Chinese turns into garbage, so UTF-8 is always set here.
+fn pasteboard_command(program: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    command.env("LANG", "en_US.UTF-8").env("LC_ALL", "en_US.UTF-8");
+    command
+}
+
 /// 获取当前系统剪贴板文本内容
 pub async fn get_clipboard() -> Result<Option<String>> {
-    let output = Command::new("pbpaste")
+    let output = Command::from(pasteboard_command("pbpaste"))
         .kill_on_drop(true)
         .output()
         .await
@@ -21,7 +29,7 @@ pub async fn get_clipboard() -> Result<Option<String>> {
 
 /// 将文本写入系统剪贴板
 pub async fn set_clipboard(content: &str) -> Result<()> {
-    let mut child = Command::new("pbcopy")
+    let mut child = Command::from(pasteboard_command("pbcopy"))
         .kill_on_drop(true)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -81,7 +89,7 @@ impl Drop for ClipboardGuard {
         // Drop 无法 await；必须在释放桌面锁之前完成尽力恢复。
         let result = (|| -> Result<()> {
             use std::io::Write;
-            let mut child = std::process::Command::new("pbcopy")
+            let mut child = pasteboard_command("pbcopy")
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -105,6 +113,31 @@ impl Drop for ClipboardGuard {
         })();
         if let Err(error) = result {
             tracing::warn!("恢复原剪贴板兜底失败: {error:#}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pasteboard_tools_always_run_with_utf8_locale() {
+        // Device 2026-11-07: launched from launchd/Finder, wechat-mcp had no LANG; pbcopy then read the
+        // reply as MacRoman and WeChat received garbled text (and the user's clipboard was mangled).
+        for program in ["pbcopy", "pbpaste"] {
+            let command = pasteboard_command(program);
+            let envs: Vec<(String, String)> = command
+                .get_envs()
+                .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v.and_then(|v| v.to_str())?.to_string())))
+                .collect();
+            for key in ["LANG", "LC_ALL"] {
+                assert!(
+                    envs.contains(&(key.to_string(), "en_US.UTF-8".to_string())),
+                    "{program} {key}: {envs:?}"
+                );
+            }
+            assert_eq!(command.get_program(), program);
         }
     }
 }
