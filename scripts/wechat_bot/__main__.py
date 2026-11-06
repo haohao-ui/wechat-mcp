@@ -9,13 +9,13 @@ from scripts.agent_bridge.mcp import MCP
 from .capture import RemoteCapture
 from .policy import Policy, fingerprint, validate_reply, echo_matches
 from .reply import generate
+from .transport import remote_argv
 
 
 async def run(args):
     root = private_directory(args.state)
     policy = Policy(args.account, args.recipient, args.trigger)
-    command = ['ssh', '-o', 'BatchMode=yes', '-o', 'LogLevel=ERROR', args.host,
-               '/usr/bin/nc -U "$HOME/.wechat-rpa/worker.sock"']
+    command = remote_argv(args.host, '/usr/bin/nc -U "$HOME/.wechat-rpa/worker.sock"')
     client = MCP(command, {'platform': 'wechat', 'account_id': args.account})
     capture = RemoteCapture(args.host, client, args.recipient, root)
     try:

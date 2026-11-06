@@ -16,6 +16,7 @@ from .history.names import candidate_names
 from .history.store import HistoryStore
 from .routing import decision, match_entry
 from .service import BotService, load_config, log_event
+from .transport import remote_argv
 
 
 # A real unread badge adds a filled red circle (well over 20 px) on top of the avatar's own red.
@@ -196,8 +197,7 @@ class BotCoordinator:
             return
         await self.close_capture()
         if not self.client:
-            self.client=MCP(['ssh','-o','BatchMode=yes','-o','LogLevel=ERROR',self.config['host'],
-                '/usr/bin/nc -U "$HOME/.wechat-rpa/worker.sock"'],
+            self.client=MCP(remote_argv(self.config['host'], '/usr/bin/nc -U "$HOME/.wechat-rpa/worker.sock"'),
                 {'platform':'wechat','account_id':self.config['account_id']})
             await self.client.start()
             status=await self.client.tool('get_listener_status')
@@ -395,6 +395,10 @@ class BotCoordinator:
         return due
 
     async def sweep(self):
+        admin_pause = self.root / 'admin-pause.json'
+        if admin_pause.exists():
+            self.health('paused', reason='admin_pause')
+            return
         rules=self.rules()
         targets=rules['allowlist']
         # Removed contacts are also disabled, so restoring them cannot replay the excluded interval.

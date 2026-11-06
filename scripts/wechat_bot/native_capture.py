@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from .capture import RemoteCapture
+from .transport import remote_argv
 
 
 # Combined extracted document content given to the model in one reply.
@@ -151,8 +152,7 @@ fi
         while True:
             try:
                 self.process=await asyncio.create_subprocess_exec(
-                    'ssh','-o','BatchMode=yes','-o','LogLevel=ERROR',self.host,
-                    '/usr/bin/nc -U "$HOME/.wechat-rpa/bot-worker.sock"',
+                    *remote_argv(self.host, '/usr/bin/nc -U "$HOME/.wechat-rpa/bot-worker.sock"'),
                     stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL,
                     limit=4*1024*1024)
                 # Readiness probe without a title check, so a different open chat does not abort reuse.
