@@ -240,6 +240,17 @@ def validate_version_string(version):
     return bool(VERSION_RE.match(version.strip()))
 
 
+# Relative to the remote home (ssh starts there); a quoted "~" would not expand.
+REMOTE_LAYOUT_DIR = '.wechat-rpa/layout'
+# Read-only readiness probe name: the session list returns no rows for it.
+CALIBRATE_PROBE = 'calibrate-probe'
+
+
+def check_remote(proc, what):
+    if proc.returncode != 0:
+        raise RuntimeError(f'remote write failed ({what}): ' + (proc.stderr or b'').decode('utf-8', 'replace')[:200])
+
+
 def default_remote_runner(host, command, input_data=None):
     cmd = ['ssh', '-o', 'BatchMode=yes', '-o', 'LogLevel=ERROR', host, command]
     return subprocess.run(cmd, input=input_data, capture_output=True, check=True)
@@ -341,14 +352,19 @@ def derive_candidate_fields(base_layout, measured):
     return diffs, missing, candidate
 
 
+def require_host(config, host=None):
+    host = host or (config or {}).get('host')
+    if not host:
+        raise ValueError('config has no WeChat host; calibrate never guesses one')
+    return host
+
+
 def run_worker_calibrate(config=None, host=None):
-    if config:
-        host = config.get('host', host or '127.0.0.1')
-    host = host or '127.0.0.1'
+    host = require_host(config, host)
     from .native_capture import NativeCapture
     import asyncio
     async def _run():
-        capture = NativeCapture(host, None, '', Path.home() / '.wechat-rpa', '0'*64)
+        capture = NativeCapture(host, None, CALIBRATE_PROBE, Path.home() / '.wechat-rpa', '0'*64, names=[CALIBRATE_PROBE])
         await capture.connect()
         try:
             return await capture.calibrate()
@@ -361,9 +377,9 @@ def run_calibrate(config=None, worker_result=None, host=None, layout_dir=None, r
     if remote_runner is None:
         remote_runner = default_remote_runner
     if layout_dir is None:
-        layout_dir = '~/.wechat-rpa/layout'
+        layout_dir = REMOTE_LAYOUT_DIR
     if host is None:
-        host = (config or {}).get('host', '127.0.0.1')
+        host = require_host(config)
 
     if worker_result is None:
         if worker_func:
@@ -391,12 +407,12 @@ def run_calibrate(config=None, worker_result=None, host=None, layout_dir=None, r
 
     json_bytes = json.dumps(candidate, indent=2, ensure_ascii=False).encode('utf-8') + b'\n'
     cmd_json = f"umask 077 && mkdir -p {shlex.quote(layout_dir)} && cat > {shlex.quote(cand_json_path)} && chmod 600 {shlex.quote(cand_json_path)}"
-    remote_runner(host, cmd_json, input_data=json_bytes)
+    check_remote(remote_runner(host, cmd_json, input_data=json_bytes), 'candidate json')
 
     if 'annotated_png_base64' in worker_result and worker_result['annotated_png_base64']:
         raw_png = base64.b64decode(worker_result['annotated_png_base64'])
         cmd_png = f"umask 077 && mkdir -p {shlex.quote(layout_dir)} && cat > {shlex.quote(cand_png_path)} && chmod 600 {shlex.quote(cand_png_path)}"
-        remote_runner(host, cmd_png, input_data=raw_png)
+        check_remote(remote_runner(host, cmd_png, input_data=raw_png), 'candidate png')
 
     return diffs, missing, candidate
 
@@ -405,9 +421,9 @@ def calibrate_accept(host=None, layout_dir=None, config=None, worker_func=None, 
     if remote_runner is None:
         remote_runner = default_remote_runner
     if layout_dir is None:
-        layout_dir = '~/.wechat-rpa/layout'
+        layout_dir = REMOTE_LAYOUT_DIR
     if host is None:
-        host = (config or {}).get('host', '127.0.0.1')
+        host = require_host(config)
 
     # 1. 调 worker calibrate 获取当前运行状态
     if worker_func:
@@ -467,10 +483,13 @@ def calibrate_accept(host=None, layout_dir=None, config=None, worker_func=None, 
 
 
 def calibrate_command(args, remote_runner=None, worker_func=None):
-    layout_dir = getattr(args, 'layout_dir', None) or '~/.wechat-rpa/layout'
+    layout_dir = getattr(args, 'layout_dir', None) or REMOTE_LAYOUT_DIR
     config_path = Path(getattr(args, 'config', locations()[1]))
     config = load_config(config_path) if config_path.exists() else {}
-    host = config.get('host', '127.0.0.1')
+    if loaded():
+        sys.stderr.write('机器人正在运行：请先 control stop，再运行 calibrate\n')
+        raise SystemExit(1)
+    host = require_host(config)
 
     if getattr(args, 'accept', False):
         try:

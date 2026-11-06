@@ -273,12 +273,14 @@ class CalibrateTests(unittest.TestCase):
             'annotated_png_base64': base64.b64encode(b'png').decode('ascii'),
         }
         with patch('scripts.wechat_bot.control.default_remote_runner', fake_remote), \
-             patch('scripts.wechat_bot.control.run_worker_calibrate', return_value=worker_result):
+             patch('scripts.wechat_bot.control.run_worker_calibrate', return_value=worker_result), \
+             patch('scripts.wechat_bot.control.loaded', return_value=False), \
+             patch('scripts.wechat_bot.control.load_config', return_value={'host': 'wechat-mac'}):
             import io
             from contextlib import redirect_stdout
             out = io.StringIO()
             with redirect_stdout(out):
-                control.main(['calibrate', '--layout-dir', '~/.wechat-rpa/layout'])
+                control.main(['calibrate', '--config', __file__, '--layout-dir', '~/.wechat-rpa/layout'])
             res = json.loads(out.getvalue().splitlines()[-1])
             self.assertIn('candidate_json', res)
             self.assertEqual(len(res['differences']), 4)
@@ -296,12 +298,14 @@ class CalibrateTests(unittest.TestCase):
             'layout': self.base_layout,
         }
         with patch('scripts.wechat_bot.control.default_remote_runner', fake_remote), \
-             patch('scripts.wechat_bot.control.run_worker_calibrate', return_value=worker_result):
+             patch('scripts.wechat_bot.control.run_worker_calibrate', return_value=worker_result), \
+             patch('scripts.wechat_bot.control.loaded', return_value=False), \
+             patch('scripts.wechat_bot.control.load_config', return_value={'host': 'wechat-mac'}):
             import io
             from contextlib import redirect_stdout
             out = io.StringIO()
             with redirect_stdout(out):
-                control.main(['calibrate', '--accept', '--layout-dir', '~/.wechat-rpa/layout'])
+                control.main(['calibrate', '--accept', '--config', __file__, '--layout-dir', '~/.wechat-rpa/layout'])
             res = json.loads(out.getvalue().strip())
             self.assertTrue(res.get('accepted'))
             self.assertEqual(res.get('version'), self.version)
@@ -333,3 +337,83 @@ class CalibrateTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RealShellRemote:
+    """Runs remote commands with bash in a fake home, the way ssh runs them in the remote home."""
+    def __init__(self, home):
+        self.home = Path(home)
+        self.commands = []
+
+    def __call__(self, host, command, input_data=None):
+        self.commands.append(command)
+        return subprocess.run(['bash', '-c', command], cwd=self.home, input=input_data, capture_output=True,
+                              env={'HOME': str(self.home), 'PATH': '/usr/bin:/bin'})
+
+
+class CalibrateOnDeviceTests(unittest.TestCase):
+    """Integration review of C4: defaults must work through a real shell on the WeChat Mac."""
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        layout = json.loads(DEFAULT_LAYOUT_PATH.read_text())
+        self.layout_dir = self.home / '.wechat-rpa' / 'layout'
+        self.layout_dir.mkdir(parents=True)
+        (self.layout_dir / 'wechat-4.1.15.json').write_text(json.dumps(layout))
+        self.worker = {'wechat_version': '4.1.15', 'layout': layout, 'layout_path': 'x',
+                       'measured': {'input_divider': 500, 'list_border': 300}, 'scale': 1,
+                       'annotated_png_base64': base64.b64encode(b'png').decode()}
+        self.remote = RealShellRemote(self.home)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_default_paths_land_in_remote_home(self):
+        control.run_calibrate(config={'host': 'wechat-mac'}, worker_result=self.worker, remote_runner=self.remote)
+        candidate = self.layout_dir / 'candidate-wechat-4.1.15.json'
+        self.assertTrue(candidate.exists(), self.remote.commands)
+        self.assertEqual(json.loads(candidate.read_text())['regions']['input']['y'], 500)
+        self.assertEqual(candidate.stat().st_mode & 0o777, 0o600)
+        self.assertFalse((self.home / '~').exists())
+
+    def test_accept_with_defaults_backs_up_then_replaces(self):
+        control.run_calibrate(config={'host': 'wechat-mac'}, worker_result=self.worker, remote_runner=self.remote)
+        result = control.calibrate_accept(config={'host': 'wechat-mac'}, worker_func=lambda: self.worker,
+                                          remote_runner=self.remote)
+        self.assertTrue(result['accepted'])
+        active = json.loads((self.layout_dir / 'wechat-4.1.15.json').read_text())
+        self.assertEqual(active['regions']['input']['y'], 500)
+        backups = list(self.layout_dir.glob('wechat-4.1.15.json.bak-*'))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(json.loads(backups[0].read_text())['regions']['input']['y'], 496)
+
+    def test_missing_host_is_refused(self):
+        with self.assertRaises(ValueError):
+            control.run_calibrate(config={}, worker_result=self.worker, remote_runner=self.remote)
+        self.assertEqual(self.remote.commands, [])
+
+    def test_failed_remote_write_raises(self):
+        failing = lambda host, command, input_data=None: subprocess.CompletedProcess(command, 1, b'', b'denied')
+        with self.assertRaises(RuntimeError):
+            control.run_calibrate(config={'host': 'wechat-mac'}, worker_result=self.worker, remote_runner=failing)
+
+    def test_worker_probe_names_a_recipient(self):
+        seen = {}
+        class FakeCapture:
+            def __init__(self, host, client, recipient, *args, names=None, **kwargs):
+                seen.update(host=host, recipient=recipient, names=names)
+            async def connect(self): pass
+            async def calibrate(self): return {'ok': True}
+            async def close_transport(self): pass
+        with patch('scripts.wechat_bot.native_capture.NativeCapture', FakeCapture):
+            control.run_worker_calibrate(config={'host': 'wechat-mac'})
+        self.assertEqual(seen['host'], 'wechat-mac')
+        self.assertTrue(seen['recipient'])
+
+    def test_calibrate_refuses_while_bot_running(self):
+        args = MagicMock(accept=False, layout_dir=None, config=str(self.home / 'none.json'))
+        with patch('scripts.wechat_bot.control.loaded', return_value=True):
+            with self.assertRaises(SystemExit):
+                control.calibrate_command(args, remote_runner=self.remote, worker_func=lambda: self.worker)
+        self.assertEqual(self.remote.commands, [])
