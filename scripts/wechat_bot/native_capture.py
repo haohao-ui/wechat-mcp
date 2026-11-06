@@ -30,7 +30,8 @@ def layout_unavailable(error):
 
 
 def must_wait(error):
-    return action_interrupted(error) or layout_unavailable(error)
+    # A WeChat menu, save panel or second window is open: wait, never fall back to MCP navigation.
+    return action_interrupted(error) or layout_unavailable(error) or 'invalid("screen_not_main' in str(error)
 
 
 def worker_code(error):
