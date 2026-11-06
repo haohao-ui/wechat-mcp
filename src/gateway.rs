@@ -292,17 +292,43 @@ impl Gateway {
                     return Ok(json!({"account":key,"data":receipt}));
                 }
                 Err(error) => {
-                    self.store
-                        .finish_send(
-                            key,
-                            send_id.clone(),
-                            json!({"error":format!("{error:#}"),"delivery":"unknown"}),
-                            "unknown",
-                        )
-                        .await?;
-                    bail!(
-                        "发送尝试 {send_id} 结果未知，已持久记录；请使用 get_send_status 核对。错误: {error:#}"
-                    );
+                    let is_not_sent = if let Some(send_err) = error.downcast_ref::<crate::wechat::SendError>() {
+                        matches!(send_err, crate::wechat::SendError::NotSent(_))
+                    } else if let Some(send_err) = error.root_cause().downcast_ref::<crate::wechat::SendError>() {
+                        matches!(send_err, crate::wechat::SendError::NotSent(_))
+                    } else {
+                        format!("{error:#}").contains("未触发发送")
+                    };
+
+                    if is_not_sent {
+                        let err_text = format!("{error:#}");
+                        let marked_err = if err_text.contains("未触发发送") {
+                            err_text
+                        } else {
+                            format!("未触发发送: {err_text}")
+                        };
+                        self.store
+                            .finish_send(
+                                key,
+                                send_id.clone(),
+                                json!({"error": marked_err, "delivery": "not_sent"}),
+                                "unknown",
+                            )
+                            .await?;
+                        bail!("发送尝试 {send_id} 未触发发送: {marked_err}");
+                    } else {
+                        self.store
+                            .finish_send(
+                                key,
+                                send_id.clone(),
+                                json!({"error":format!("{error:#}"),"delivery":"unknown"}),
+                                "unknown",
+                            )
+                            .await?;
+                        bail!(
+                            "发送尝试 {send_id} 结果未知，已持久记录；请使用 get_send_status 核对。错误: {error:#}"
+                        );
+                    }
                 }
             }
         }
@@ -625,5 +651,399 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn failure_injected_at_click_records_not_sent() {
+        let store = Store::memory();
+        let desktop = Arc::new(tokio::sync::Mutex::new(()));
+        let adapter = Arc::new(crate::adapters::WechatDesktop::new("work".into(), desktop));
+        let mut accounts = AccountRegistry::default();
+        accounts.register(adapter).unwrap();
+        let gateway = Gateway {
+            accounts,
+            store: store.clone(),
+            listeners: Listeners::default(),
+            legacy_tools: false,
+        };
+
+        crate::wechat::with_test_send_fault(
+            crate::wechat::SendFault::Click(Some("accessibility_permission_missing_for_executing_process")),
+            async {
+                let response = gateway
+                    .call(
+                        "send_message",
+                        json!({
+                            "platform": "wechat",
+                            "account_id": "work",
+                            "recipient": "test_user",
+                            "message": "hello",
+                            "idempotency_key": "fail-click-1"
+                        }),
+                    )
+                    .await;
+                assert_eq!(response["isError"], true);
+                let err_text = response["content"][0]["text"].as_str().unwrap();
+                assert!(
+                    err_text.contains("未触发发送"),
+                    "error text must contain marker: {err_text}"
+                );
+                assert!(err_text.contains("accessibility_permission_missing_for_executing_process"));
+
+                let check = gateway
+                    .call(
+                        "get_send_status",
+                        json!({
+                            "platform": "wechat",
+                            "account_id": "work",
+                            "idempotency_key": "fail-click-1"
+                        }),
+                    )
+                    .await;
+                assert_eq!(check["isError"], false);
+                let send_record = &check["structuredContent"]["data"];
+                assert_eq!(send_record["status"], "unknown");
+                assert_eq!(send_record["delivery"], "not_sent");
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn legacy_schema_version_2_records_not_sent_without_check_violation() {
+        let db_path = std::env::temp_dir().join(format!("legacy_v2_{}.db", uuid::Uuid::new_v4()));
+        let store = Store::open(&db_path).unwrap();
+
+        // 验证数据库是由 001+002 初始化且处于 user_version 2
+        let version: i64 = store
+            .run(|conn| Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?))
+            .await
+            .unwrap();
+        assert_eq!(version, 2);
+
+        let desktop = Arc::new(tokio::sync::Mutex::new(()));
+        let adapter = Arc::new(crate::adapters::WechatDesktop::new("work".into(), desktop));
+        let mut accounts = AccountRegistry::default();
+        accounts.register(adapter).unwrap();
+        let gateway = Gateway {
+            accounts,
+            store: store.clone(),
+            listeners: Listeners::default(),
+            legacy_tools: false,
+        };
+
+        crate::wechat::with_test_send_fault(
+            crate::wechat::SendFault::Click(Some("accessibility_permission_missing_for_executing_process")),
+            async {
+                let response = gateway
+                    .call(
+                        "send_message",
+                        json!({
+                            "platform": "wechat",
+                            "account_id": "work",
+                            "recipient": "test_user",
+                            "message": "hello",
+                            "idempotency_key": "legacy-not-sent-1"
+                        }),
+                    )
+                    .await;
+                assert_eq!(response["isError"], true);
+                let err_text = response["content"][0]["text"].as_str().unwrap();
+                assert!(err_text.contains("未触发发送"));
+
+                // 验证 get_send_status 报告 delivery 为 not_sent，且未触发任何 CHECK 约束错误
+                let check = gateway
+                    .call(
+                        "get_send_status",
+                        json!({
+                            "platform": "wechat",
+                            "account_id": "work",
+                            "idempotency_key": "legacy-not-sent-1"
+                        }),
+                    )
+                    .await;
+                assert_eq!(check["isError"], false);
+                let send_record = &check["structuredContent"]["data"];
+                assert_eq!(send_record["status"], "unknown");
+                assert_eq!(send_record["delivery"], "not_sent");
+            },
+        )
+        .await;
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn failure_injected_after_enter_records_unknown() {
+        let store = Store::memory();
+        let desktop = Arc::new(tokio::sync::Mutex::new(()));
+        let adapter = Arc::new(crate::adapters::WechatDesktop::new("work".into(), desktop));
+        let mut accounts = AccountRegistry::default();
+        accounts.register(adapter).unwrap();
+        let gateway = Gateway {
+            accounts,
+            store: store.clone(),
+            listeners: Listeners::default(),
+            legacy_tools: false,
+        };
+
+        crate::wechat::with_test_send_fault(
+            crate::wechat::SendFault::AfterEnter(Some("applescript execution failed after enter")),
+            async {
+                let response = gateway
+                    .call(
+                        "send_message",
+                        json!({
+                            "platform": "wechat",
+                            "account_id": "work",
+                            "recipient": "test_user",
+                            "message": "hello",
+                            "idempotency_key": "fail-enter-1"
+                        }),
+                    )
+                    .await;
+                assert_eq!(response["isError"], true);
+                let err_text = response["content"][0]["text"].as_str().unwrap();
+                assert!(
+                    err_text.contains("结果未知"),
+                    "error text must contain 结果未知: {err_text}"
+                );
+                assert!(!err_text.contains("未触发发送"));
+
+                let check = gateway
+                    .call(
+                        "get_send_status",
+                        json!({
+                            "platform": "wechat",
+                            "account_id": "work",
+                            "idempotency_key": "fail-enter-1"
+                        }),
+                    )
+                    .await;
+                assert_eq!(check["isError"], false);
+                let send_record = &check["structuredContent"]["data"];
+                assert_eq!(send_record["status"], "unknown");
+                assert_eq!(send_record["delivery"], "unknown");
+            },
+        )
+        .await;
+    }
+
+    struct SequenceAdapter {
+        account: AccountDescriptor,
+        calls: AtomicUsize,
+        responses: std::sync::Mutex<Vec<Result<Value, String>>>,
+    }
+
+    impl SequenceAdapter {
+        fn new(platform: &str, account_id: &str, responses: Vec<Result<Value, String>>) -> Arc<Self> {
+            Arc::new(Self {
+                account: AccountDescriptor {
+                    key: AccountKey {
+                        platform: platform.into(),
+                        account_id: account_id.into(),
+                    },
+                    adapter: "test".into(),
+                    binding_id: "test:seq".into(),
+                    identity_verified: true,
+                    capabilities: Capabilities {
+                        send_text: true,
+                        visible_conversations: true,
+                        visible_messages: true,
+                        full_history: false,
+                        delivery_receipts: false,
+                        background_events: false,
+                        background_observations: true,
+                        source: "test".into(),
+                    },
+                },
+                calls: AtomicUsize::new(0),
+                responses: std::sync::Mutex::new(responses),
+            })
+        }
+    }
+
+    impl MessageAdapter for SequenceAdapter {
+        fn account(&self) -> &AccountDescriptor {
+            &self.account
+        }
+        fn execute(&self, _: Operation) -> AdapterFuture<'_> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let mut guard = self.responses.lock().unwrap();
+                if guard.is_empty() {
+                    Ok(json!({"account": self.account.key, "data": {"status": "triggered"}}))
+                } else {
+                    let resp = guard.remove(0);
+                    match resp {
+                        Ok(v) => Ok(v),
+                        Err(err_msg) => {
+                            if err_msg.contains("未触发发送") {
+                                Err(crate::wechat::SendError::NotSent(anyhow::anyhow!("{err_msg}")).into())
+                            } else {
+                                Err(anyhow::anyhow!("{err_msg}"))
+                            }
+                        }
+                    }
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn not_sent_then_same_key_again_dispatches_twice() {
+        let store = Store::memory();
+        let adapter = SequenceAdapter::new(
+            "wechat",
+            "work",
+            vec![
+                Err("未触发发送: click failed".into()),
+                Ok(json!({"account": {"platform": "wechat", "account_id": "work"}, "data": {"status": "triggered"}})),
+            ],
+        );
+        let mut accounts = AccountRegistry::default();
+        accounts.register(adapter.clone()).unwrap();
+        let gateway = Gateway {
+            accounts,
+            store,
+            listeners: Listeners::default(),
+            legacy_tools: false,
+        };
+
+        // 第 1 次发送：失败，记录 not_sent
+        let resp1 = gateway
+            .call(
+                "send_message",
+                json!({
+                    "platform": "wechat",
+                    "account_id": "work",
+                    "recipient": "user1",
+                    "message": "hello",
+                    "idempotency_key": "key-retry-dispatch"
+                }),
+            )
+            .await;
+        assert_eq!(resp1["isError"], true);
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+
+        // 第 2 次相同 key：重新 dispatch，调用 adapter 第二次
+        let resp2 = gateway
+            .call(
+                "send_message",
+                json!({
+                    "platform": "wechat",
+                    "account_id": "work",
+                    "recipient": "user1",
+                    "message": "hello",
+                    "idempotency_key": "key-retry-dispatch"
+                }),
+            )
+            .await;
+        assert_eq!(resp2["isError"], false);
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 2);
+        assert_ne!(resp2["structuredContent"]["data"]["replayed"], true);
+        assert_eq!(resp2["structuredContent"]["data"]["status"], "triggered");
+    }
+
+    #[tokio::test]
+    async fn unknown_without_not_sent_delivery_then_same_key_again_replays() {
+        let store = Store::memory();
+        let adapter = SequenceAdapter::new(
+            "wechat",
+            "work",
+            vec![Err("timeout error".into())],
+        );
+        let mut accounts = AccountRegistry::default();
+        accounts.register(adapter.clone()).unwrap();
+        let gateway = Gateway {
+            accounts,
+            store,
+            listeners: Listeners::default(),
+            legacy_tools: false,
+        };
+
+        // 第 1 次发送：失败，记录 unknown (delivery 不是 not_sent)
+        let resp1 = gateway
+            .call(
+                "send_message",
+                json!({
+                    "platform": "wechat",
+                    "account_id": "work",
+                    "recipient": "user1",
+                    "message": "hello",
+                    "idempotency_key": "key-unknown-replay"
+                }),
+            )
+            .await;
+        assert_eq!(resp1["isError"], true);
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+
+        // 第 2 次相同 key：replay，不再调用 adapter
+        let resp2 = gateway
+            .call(
+                "send_message",
+                json!({
+                    "platform": "wechat",
+                    "account_id": "work",
+                    "recipient": "user1",
+                    "message": "hello",
+                    "idempotency_key": "key-unknown-replay"
+                }),
+            )
+            .await;
+        assert_eq!(resp2["isError"], false);
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(resp2["structuredContent"]["data"]["replayed"], true);
+    }
+
+    #[tokio::test]
+    async fn triggered_then_same_key_again_replays() {
+        let store = Store::memory();
+        let adapter = SequenceAdapter::new(
+            "wechat",
+            "work",
+            vec![Ok(json!({"account": {"platform": "wechat", "account_id": "work"}, "data": {"status": "triggered"}}))],
+        );
+        let mut accounts = AccountRegistry::default();
+        accounts.register(adapter.clone()).unwrap();
+        let gateway = Gateway {
+            accounts,
+            store,
+            listeners: Listeners::default(),
+            legacy_tools: false,
+        };
+
+        // 第 1 次发送：成功 triggered
+        let resp1 = gateway
+            .call(
+                "send_message",
+                json!({
+                    "platform": "wechat",
+                    "account_id": "work",
+                    "recipient": "user1",
+                    "message": "hello",
+                    "idempotency_key": "key-triggered-replay"
+                }),
+            )
+            .await;
+        assert_eq!(resp1["isError"], false);
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+
+        // 第 2 次相同 key：replay，不再调用 adapter
+        let resp2 = gateway
+            .call(
+                "send_message",
+                json!({
+                    "platform": "wechat",
+                    "account_id": "work",
+                    "recipient": "user1",
+                    "message": "hello",
+                    "idempotency_key": "key-triggered-replay"
+                }),
+            )
+            .await;
+        assert_eq!(resp2["isError"], false);
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(resp2["structuredContent"]["data"]["replayed"], true);
     }
 }
