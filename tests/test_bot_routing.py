@@ -230,6 +230,21 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(child.paused, code)
             self.assertEqual(json.loads((child.root/'health.json').read_text())['state'],'waiting_for_wechat_window')
 
+    async def test_screen_not_main_waits_without_counting(self):
+        # Screen gate: extra WeChat window / context menu / save panel opens -> wait, do not count, do not pause, keep connection.
+        for kind in ('context_menu', 'save_panel', 'other_wechat_window'):
+            child = self.coordinator.session(target('a'))
+            self.coordinator.connect = AsyncMock(side_effect=ValueError(f'private visual operation failed: invalid("screen_not_main:{kind}")'))
+            self.coordinator.close_connection = AsyncMock()
+            initial_mismatches = self.coordinator.layout_mismatches
+            await self.coordinator.visit(target('a'))
+            self.assertFalse(child.paused, kind)
+            health = json.loads((child.root/'health.json').read_text())
+            self.assertEqual(health['state'], 'waiting_for_wechat_window', kind)
+            self.assertIn(f'screen_not_main:{kind}', health['reason'])
+            self.coordinator.close_connection.assert_not_awaited()
+            self.assertEqual(self.coordinator.layout_mismatches, initial_mismatches, kind)
+
     async def test_other_worker_refusal_still_pauses(self):
         child=self.coordinator.session(target('a'))
         self.coordinator.connect=AsyncMock(side_effect=ValueError('private visual operation failed: invalid("invalid_request")'))

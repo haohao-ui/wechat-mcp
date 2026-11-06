@@ -27,7 +27,7 @@ TITLE_MISMATCH_LIMIT=3
 RECALIBRATION_LIMIT=5
 WINDOW_UNAVAILABLE=('uncalibrated_theme','unsupported_image_geometry','wechat_not_visible',
                     'window_capture_failed','desktop_busy','vision_timeout',
-                    'layout_missing','layout_unreadable')+ACTION_INTERRUPTED
+                    'layout_missing','layout_unreadable','screen_not_main')+ACTION_INTERRUPTED
 
 
 def extract_mismatch_failures(error):
@@ -250,10 +250,11 @@ class BotCoordinator:
                 child.health(state,reason=str(error)[:400],failures=failures,attempt=self.layout_mismatches)
                 await self.close_connection()
                 return
-            if not child.paused and (layout_unavailable(error) or any(f'invalid("{code}")' in str(error) for code in WINDOW_UNAVAILABLE)):
+            if not child.paused and (layout_unavailable(error) or any(f'invalid("{code}")' in str(error) or f'invalid("{code}:' in str(error) for code in WINDOW_UNAVAILABLE)):
                 # Nothing was read or sent; the window comes back (e.g. appearance back to dark) without a restart.
                 child.health('waiting_for_wechat_window',reason=str(error)[:400])
-                await self.close_connection()
+                if 'screen_not_main' not in str(error):
+                    await self.close_connection()
                 return
             child.paused=True; child.pause_reason=str(error)[:400]
             child.health('paused',reason=child.pause_reason)

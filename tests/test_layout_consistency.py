@@ -84,3 +84,18 @@ class AnchorGateTests(unittest.TestCase):
         bubbles = (ROOT/'native'/'wechat_bubbles.swift').read_text()
         analyze = bubbles[bubbles.index('func analyzeFrame('):]
         self.assertIn('try checkAnchors(captured', analyze[:analyze.index('guard let title')])
+
+    def test_every_operation_gates_first(self):
+        worker = (ROOT/'native'/'bot'/'Worker.swift').read_text()
+        # 1. capture method
+        capture_idx = worker.index('func capture(')
+        capture_fn = worker[capture_idx:worker.index('\n    }\n', capture_idx)]
+        self.assertIn('screenGate(', capture_fn, 'capture must call screenGate')
+
+        # 2. the 5 operation branches in request
+        for op in ('sessions', 'open_session', 'scroll_chat', 'prepare_file', 'prepare_image'):
+            target = f'if operation == "{op}"'
+            self.assertIn(target, worker)
+            branch = worker[worker.index(target):]
+            branch = branch[:branch.index('\n        }\n')]
+            self.assertIn('screenGate(', branch, f'{op} must call screenGate')
