@@ -65,6 +65,47 @@ func run() -> Int32 {
             print(try jsonString(out))
             return 0
 
+        } else if command == "blocking" {
+            guard let dict = jsonObj as? [String: Any] else {
+                fputs("error: payload must be a json object\n", stderr)
+                return 1
+            }
+
+            let rawWindows = dict["windows"] as? [[String: Any]] ?? []
+            let windows = windowInfos(rawWindows)
+
+            let focusedIdentifier = dict["focused_identifier"] as? String ?? (dict["focus"] as? [String: Any])?["focused_identifier"] as? String
+
+            let wechatPID: Int32
+            if let pidNum = dict["wechat_pid"] as? NSNumber {
+                wechatPID = pidNum.int32Value
+            } else if let pidInt = dict["wechat_pid"] as? Int {
+                wechatPID = Int32(pidInt)
+            } else {
+                wechatPID = 0
+            }
+
+            var mainSize = CGSize(width: 880, height: 640)
+            if let mainArr = dict["main"] as? [NSNumber], mainArr.count >= 2 {
+                mainSize = CGSize(width: mainArr[0].doubleValue, height: mainArr[1].doubleValue)
+            } else if let mainDict = dict["main"] as? [String: NSNumber],
+                      let w = mainDict["w"] ?? mainDict["width"],
+                      let h = mainDict["h"] ?? mainDict["height"] {
+                mainSize = CGSize(width: w.doubleValue, height: h.doubleValue)
+            }
+
+            let kind = blockingScreen(windows: windows, wechatPID: wechatPID, mainSize: mainSize, focusedIdentifier: focusedIdentifier)
+            var out: [String: Any] = [:]
+            if let k = kind {
+                out["blocked"] = true
+                out["screen"] = k.rawValue
+            } else {
+                out["blocked"] = false
+                out["screen"] = NSNull()
+            }
+            print(try jsonString(out))
+            return 0
+
         } else if command == "convert_rows" {
             guard let rows = jsonObj as? [[String: Any]] else {
                 fputs("error: payload must be an array of objects\n", stderr)

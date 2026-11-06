@@ -180,6 +180,47 @@ func readyWindow(manage: Bool) throws -> (window: [String:Any], resized: Bool) {
     return (after, true)
 }
 
+func screenGate(_ window: [String:Any]) throws {
+    let rows = CGWindowListCopyWindowInfo([.optionOnScreenOnly,.excludeDesktopElements],kCGNullWindowID) as? [[String:Any]] ?? []
+    let infos = windowInfos(rows)
+    let pid = Int32(window["pid"] as? Int ?? 0)
+    let width = window["width"] as? Double ?? 880
+    let height = window["height"] as? Double ?? 640
+    let mainSize = CGSize(width: width, height: height)
+
+    var focusedIdent: String? = nil
+    if pid > 0, AXIsProcessTrusted() {
+        let ax = AXUIElementCreateApplication(pid)
+        var ref: CFTypeRef?
+        if AXUIElementCopyAttributeValue(ax, "AXFocusedUIElement" as CFString, &ref) == .success,
+           let ref = ref, CFGetTypeID(ref) == AXUIElementGetTypeID() {
+            let element = unsafeBitCast(ref, to: AXUIElement.self)
+            var idRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, "AXIdentifier" as CFString, &idRef) == .success,
+               let ident = idRef as? String {
+                focusedIdent = ident
+            }
+        }
+    }
+    if focusedIdent == nil, AXIsProcessTrusted() {
+        let sys = AXUIElementCreateSystemWide()
+        var ref: CFTypeRef?
+        if AXUIElementCopyAttributeValue(sys, "AXFocusedUIElement" as CFString, &ref) == .success,
+           let ref = ref, CFGetTypeID(ref) == AXUIElementGetTypeID() {
+            let element = unsafeBitCast(ref, to: AXUIElement.self)
+            var idRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, "AXIdentifier" as CFString, &idRef) == .success,
+               let ident = idRef as? String {
+                focusedIdent = ident
+            }
+        }
+    }
+
+    if let kind = blockingScreen(windows: infos, wechatPID: pid, mainSize: mainSize, focusedIdentifier: focusedIdent) {
+        throw Failure.invalid("screen_not_main:" + kind.rawValue)
+    }
+}
+
 func canonicalBytes(_ image: CGImage) throws -> Data {
     var result = Data(count:image.width*image.height*4)
     let ok = result.withUnsafeMutableBytes { pointer -> Bool in
@@ -306,6 +347,7 @@ final class CaptureWorker {
     func capture(_ recipient: String, accepted: Set<String>, manage: Bool) throws -> [String:Any] {
         let began=ProcessInfo.processInfo.systemUptime
         let (window, resized) = try readyWindow(manage:manage)
+        try screenGate(window)
         let id = window["window_id"] as! UInt32
         let image = try windowImage(window)
         guard let panel = try normalizedFrame(image,window:window).image.cropping(to:CGRect(x:300,y:0,width:570,height:496)) else { throw Failure.invalid("window_capture_failed") }
@@ -388,6 +430,7 @@ final class CaptureWorker {
             guard let direction=params["direction"] as? String, direction=="up" || direction=="down",
                   let pages=params["pages"] as? Int, (1...40).contains(pages) else { throw Failure.invalid("invalid_scroll_request") }
             let window=try readyWindow(manage:manage).window
+            try screenGate(window)
             guard titleAccepted(accepted) else { throw Failure.invalid("allowlisted_title_mismatch") }
             guard let wx=window["x"] as? Double,let wy=window["y"] as? Double else { throw Failure.invalid("invalid_window_bounds") }
             let layout = try currentLayout()
@@ -405,6 +448,7 @@ final class CaptureWorker {
             guard (1...20).contains(targets.count), targets.allSatisfy({ !$0.isEmpty && $0.count<=64 }) else { throw Failure.invalid("invalid_session_target") }
             return try openSessionRow(targets,probe:sessionProbe) {
                 let window=try readyWindow(manage:manage).window
+                try screenGate(window)
                 return (window,try checkedScreen(window))
             }
         }
@@ -413,6 +457,7 @@ final class CaptureWorker {
                   names.allSatisfy({ !$0.isEmpty && $0.count<=64 }) else { throw Failure.invalid("invalid_session_names") }
             let began=ProcessInfo.processInfo.systemUptime
             let (window,resized)=try readyWindow(manage:manage)
+            try screenGate(window)
             let image=try checkedScreen(window)
             var result=try sessionProbe.probe(image,names:names,debug:params["debug"] as? Bool == true)
             let layout=try currentLayout()
@@ -436,6 +481,8 @@ final class CaptureWorker {
             }
         }
         if operation == "prepare_file" {
+            let window=try readyWindow(manage:manage).window
+            try screenGate(window)
             guard let id=params["media_id"] as? String,let snapshot=params["snapshot_id"] as? String else { throw Failure.invalid("missing_file_identity") }
             let frame=try capture(recipient,accepted:accepted,manage:manage)
             guard frame["snapshot_id"] as? String==snapshot,
@@ -462,6 +509,8 @@ final class CaptureWorker {
             return result
         }
         if operation == "prepare_image" {
+            let window=try readyWindow(manage:manage).window
+            try screenGate(window)
             guard let id=params["media_id"] as? String,let snapshot=params["snapshot_id"] as? String else { throw Failure.invalid("missing_image_identity") }
             let frame=try capture(recipient,accepted:accepted,manage:manage)
             guard frame["snapshot_id"] as? String==snapshot,
