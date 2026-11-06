@@ -161,3 +161,33 @@ public func identifyScreen(windows: [WindowInfo], focus: FocusInfo, wechatPID: I
     // 5. 其余 -> unknown
     return .unknown
 }
+
+public func blockingScreen(windows: [WindowInfo], wechatPID: Int32, mainSize: CGSize, focusedIdentifier: String?) -> ScreenKind? {
+    // 1. focusedIdentifier == "saveAsNameTextField" -> .savePanel
+    if focusedIdentifier == "saveAsNameTextField" {
+        return .savePanel
+    }
+
+    // 2. 微信进程有 layer != 0、宽 20..600、高 20..900 的屏上窗口 -> .contextMenu
+    let hasContextMenu = windows.contains { w in
+        w.pid == wechatPID &&
+        w.onScreen &&
+        w.layer != 0 &&
+        w.bounds.width >= 20.0 && w.bounds.width <= 600.0 &&
+        w.bounds.height >= 20.0 && w.bounds.height <= 900.0
+    }
+    if hasContextMenu {
+        return .contextMenu
+    }
+
+    // 3. 微信进程 layer 0 的屏上窗口多于 1 个 -> .otherWechatWindow
+    let layer0Count = windows.filter { w in
+        w.pid == wechatPID && w.layer == 0 && w.onScreen
+    }.count
+    if layer0Count > 1 {
+        return .otherWechatWindow
+    }
+
+    // 4. 否则 -> nil
+    return nil
+}
