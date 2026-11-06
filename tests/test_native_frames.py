@@ -46,7 +46,7 @@ class NativeFrameTests(unittest.TestCase):
             raise unittest.SkipTest('native parser needs macOS swiftc')
         cls.tmp = tempfile.TemporaryDirectory()
         cls.cli = Path(cls.tmp.name)/'wechat_bubbles'
-        common = sorted(str(p) for p in (ROOT/'native'/'common').glob('*.swift'))
+        common = sorted(str(p) for p in (ROOT/'native'/'common').glob('*.swift')) + [str(ROOT/'native'/'eyes'/'Anchors.swift')]
         subprocess.run(['swiftc', '-O', '-parse-as-library', str(ROOT/'native'/'wechat_bubbles.swift')] + common + ['-o', str(cls.cli)],
                        check=True, capture_output=True)
         cls.window = (FRAMES/'window-880x640.json').read_text()
@@ -82,6 +82,29 @@ class NativeFrameTests(unittest.TestCase):
         self.assertNotIn('error', frame)
         texts = [b['text'] for b in frame.get('bubbles', [])]
         self.assertFalse(any('浅色测试' in t for t in texts))
+
+    def test_frames_report_a_passing_layout_check(self):
+        for name, (profile, scale, _, _) in CASES.items():
+            with self.subTest(name):
+                check = self.parse(name).get('layout_check')
+                self.assertEqual(check and check.get('theme'), profile)
+                self.assertAlmostEqual(check['measured']['input_divider'], 496, delta=1)
+                self.assertAlmostEqual(check['measured']['list_border'], 300, delta=1)
+
+    def test_layout_disagreeing_with_screen_is_refused(self):
+        # A map from another WeChat build (divider 30 points higher) must stop reading, not misread.
+        layout = json.loads(self.default_layout.read_text())
+        for region in ('chat', 'chat_content'):
+            layout['regions'][region]['h'] -= 30
+        layout['regions']['input']['y'] -= 30; layout['regions']['input']['h'] += 30
+        path = Path(self.tmp.name)/'shifted-divider.json'
+        path.write_text(json.dumps(layout))
+        for name in ('r1-light-bottom', 'retina-dark-bottom'):
+            with self.subTest(name):
+                frame = self.parse(name, env={'WECHAT_LAYOUT': str(path)})
+                self.assertIn('layout_mismatch:', frame.get('error', ''), frame)
+                self.assertIn('input_divider', frame['error'])
+                self.assertNotIn('bubbles', frame)
 
     def test_any_file_card_is_a_file_not_text(self):
         # Acceptance 2026-11-06: an .xls card ("27.4M 对方上传中" -> "未下载") was read as a text bubble;

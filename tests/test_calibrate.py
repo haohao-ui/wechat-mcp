@@ -417,3 +417,14 @@ class CalibrateOnDeviceTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 control.calibrate_command(args, remote_runner=self.remote, worker_func=lambda: self.worker)
         self.assertEqual(self.remote.commands, [])
+
+
+class CalibrateScaleTests(unittest.TestCase):
+    def test_anchors_measure_the_raw_capture(self):
+        # normalizedFrame returns a points-sized image with the capture's scale; pairing those two
+        # would measure Retina frames at half size. Anchors take the raw capture and its scale.
+        source = (ROOT / 'native' / 'bot' / 'Worker.swift').read_text()
+        branch = source[source.index('if operation == "calibrate"'):]
+        branch = branch[:branch.index('return result')]
+        self.assertRegex(branch, r'verifyAnchors\(rawImage,\s*scale:')
+        self.assertRegex(branch, r'drawAnnotatedLayout\(rawImage,\s*scale:')

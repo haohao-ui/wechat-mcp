@@ -383,6 +383,16 @@ func fileNameLine(_ line: String) -> String? {
     return String(trimmed[..<dot])+"."+ext
 }
 
+/// Stage C screen check on the raw capture at its own scale; throws instead of letting anything read
+/// or click a screen that does not match the map. An unknown appearance keeps its own code (a known
+/// wait, e.g. a theme switch); everything else is `layout_mismatch:<failed anchors>`.
+func checkAnchors(_ captured: CGImage, scale: Int, layout: WechatLayout) throws -> AnchorReport {
+    let report = verifyAnchors(captured, scale: scale, layout: layout)
+    if report.failures.contains("theme") { throw Failure.invalid("uncalibrated_theme") }
+    guard report.passed else { throw Failure.invalid("layout_mismatch:"+report.failures.joined(separator:",")) }
+    return report
+}
+
 func analyzeFrame(_ captured: CGImage, window: [String:Any], mediaRoot: URL? = nil, recipient: String? = nil, group: Bool = false) throws -> [String:Any] {
     let layout = try currentLayout()
     let titleRegion: WindowRect
@@ -394,6 +404,9 @@ func analyzeFrame(_ captured: CGImage, window: [String:Any], mediaRoot: URL? = n
         throw Failure.invalid(err.description)
     }
     let (full, scale) = try normalizedFrame(captured, window:window)
+    // Stage C: check the screen against the map before reading anything (anchors work on the raw
+    // capture at its own scale). A mismatch is a wait, never a guess.
+    let anchorReport = try checkAnchors(captured, scale: scale, layout: layout)
     guard let title = full.cropping(to:CGRect(x:titleRegion.x,y:titleRegion.y,width:titleRegion.w,height:titleRegion.h)),
           let chat = full.cropping(to:CGRect(x:chatContentRegion.x,y:chatContentRegion.y,width:chatContentRegion.w,height:chatContentRegion.h)) else {
         throw Failure.invalid("unsupported_image_geometry")
@@ -546,9 +559,10 @@ func analyzeFrame(_ captured: CGImage, window: [String:Any], mediaRoot: URL? = n
             if let label=label { bubbles[index]["sender"]=label.body }
         }
     }
-    let result: [String:Any] = ["profile":theme.name,"scale":scale,"title_lines":titleNames,
+    var result: [String:Any] = ["profile":theme.name,"scale":scale,"title_lines":titleNames,
         "bubbles":bubbles,"platform_message_verified":false,"sender_verified":false,
         "width":full.width,"height":full.height,"captured_width":captured.width,"clipped_bubble":clippedBubble]
+    result["layout_check"]=["theme":anchorReport.theme ?? NSNull(),"measured":anchorReport.measured] as [String:Any]
     return result
 }
 
