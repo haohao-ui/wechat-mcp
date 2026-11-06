@@ -72,7 +72,7 @@ class SendRetryTests(unittest.IsolatedAsyncioTestCase):
                     return {'status': 'triggered', 'send_id': 'send-1', 'delivery': 'unknown'}
                 if name == 'get_send_status':
                     if attempt == 1:
-                        return {'status': 'not_sent', 'delivery': 'not_sent', 'send_id': 'send-1'}
+                        return {'status': 'unknown', 'delivery': 'not_sent', 'send_id': 'send-1'}
                     return {'status': 'triggered', 'delivery': 'unknown', 'send_id': 'send-1'}
                 return {}
 
@@ -107,7 +107,7 @@ class SendRetryTests(unittest.IsolatedAsyncioTestCase):
                         'MCP tool failed: send_message: 发送尝试 fail 未触发发送: wechat_click 退出状态异常: Some(1)'
                     )
                 if name == 'get_send_status':
-                    return {'status': 'not_sent', 'delivery': 'not_sent', 'send_id': 'fail'}
+                    return {'status': 'unknown', 'delivery': 'not_sent', 'send_id': 'fail'}
                 return {}
 
         capture = type('Capture', (), {})()

@@ -312,7 +312,7 @@ impl Gateway {
                                 key,
                                 send_id.clone(),
                                 json!({"error": marked_err, "delivery": "not_sent"}),
-                                "not_sent",
+                                "unknown",
                             )
                             .await?;
                         bail!("发送尝试 {send_id} 未触发发送: {marked_err}");
@@ -702,11 +702,75 @@ mod tests {
                     .await;
                 assert_eq!(check["isError"], false);
                 let send_record = &check["structuredContent"]["data"];
-                assert_eq!(send_record["status"], "not_sent");
+                assert_eq!(send_record["status"], "unknown");
                 assert_eq!(send_record["delivery"], "not_sent");
             },
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn legacy_schema_version_2_records_not_sent_without_check_violation() {
+        let db_path = std::env::temp_dir().join(format!("legacy_v2_{}.db", uuid::Uuid::new_v4()));
+        let store = Store::open(&db_path).unwrap();
+
+        // 验证数据库是由 001+002 初始化且处于 user_version 2
+        let version: i64 = store
+            .run(|conn| Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?))
+            .await
+            .unwrap();
+        assert_eq!(version, 2);
+
+        let desktop = Arc::new(tokio::sync::Mutex::new(()));
+        let adapter = Arc::new(crate::adapters::WechatDesktop::new("work".into(), desktop));
+        let mut accounts = AccountRegistry::default();
+        accounts.register(adapter).unwrap();
+        let gateway = Gateway {
+            accounts,
+            store: store.clone(),
+            listeners: Listeners::default(),
+            legacy_tools: false,
+        };
+
+        crate::wechat::with_test_send_fault(
+            crate::wechat::SendFault::Click(Some("accessibility_permission_missing_for_executing_process")),
+            async {
+                let response = gateway
+                    .call(
+                        "send_message",
+                        json!({
+                            "platform": "wechat",
+                            "account_id": "work",
+                            "recipient": "test_user",
+                            "message": "hello",
+                            "idempotency_key": "legacy-not-sent-1"
+                        }),
+                    )
+                    .await;
+                assert_eq!(response["isError"], true);
+                let err_text = response["content"][0]["text"].as_str().unwrap();
+                assert!(err_text.contains("未触发发送"));
+
+                // 验证 get_send_status 报告 delivery 为 not_sent，且未触发任何 CHECK 约束错误
+                let check = gateway
+                    .call(
+                        "get_send_status",
+                        json!({
+                            "platform": "wechat",
+                            "account_id": "work",
+                            "idempotency_key": "legacy-not-sent-1"
+                        }),
+                    )
+                    .await;
+                assert_eq!(check["isError"], false);
+                let send_record = &check["structuredContent"]["data"];
+                assert_eq!(send_record["status"], "unknown");
+                assert_eq!(send_record["delivery"], "not_sent");
+            },
+        )
+        .await;
+
+        let _ = std::fs::remove_file(&db_path);
     }
 
     #[tokio::test]

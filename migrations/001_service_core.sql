@@ -39,7 +39,7 @@ CREATE TABLE analysis_evidence (
 CREATE TABLE outbox (
  send_id TEXT PRIMARY KEY, platform TEXT NOT NULL, account_id TEXT NOT NULL, customer_id TEXT,
  idempotency_key TEXT NOT NULL, recipient TEXT NOT NULL, message TEXT NOT NULL,
- status TEXT NOT NULL CHECK(status IN ('attempting','triggered','unknown','not_sent')),
+ status TEXT NOT NULL CHECK(status IN ('attempting','triggered','unknown')),
  result TEXT CHECK(result IS NULL OR json_valid(result)), created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
  UNIQUE(platform, account_id, idempotency_key),
  FOREIGN KEY(platform, account_id, customer_id) REFERENCES customers(platform, account_id, customer_id)
