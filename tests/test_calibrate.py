@@ -545,5 +545,13 @@ class CalibrateScaleTests(unittest.TestCase):
         source = (ROOT / 'native' / 'bot' / 'Worker.swift').read_text()
         branch = source[source.index('if operation == "calibrate"'):]
         branch = branch[:branch.index('return result')]
-        self.assertRegex(branch, r'verifyAnchors\(rawImage,\s*scale:')
+        # Re-measuring searches widely (measureAnchors), not the +/-12 point band of the screen check.
+        self.assertRegex(branch, r'measureAnchors\(rawImage,\s*scale:')
         self.assertRegex(branch, r'drawAnnotatedLayout\(rawImage,\s*scale:')
+
+
+class CalibrateMissingTests(unittest.TestCase):
+    def test_text_anchors_are_not_reported_missing(self):
+        layout = json.loads(DEFAULT_LAYOUT_PATH.read_text())
+        diffs, missing, candidate = control.derive_candidate_fields(layout, {'input_divider': 496, 'list_border': 300})
+        self.assertEqual(missing, [])

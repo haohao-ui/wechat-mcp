@@ -312,7 +312,8 @@ def derive_candidate_fields(base_layout, measured):
     diffs = []
     missing = []
 
-    expected_anchors = [a['name'] for a in candidate.get('anchors', [])]
+    # Only line anchors have a position to measure; text anchors (title_text) are checks, not places.
+    expected_anchors = [a['name'] for a in candidate.get('anchors', []) if str(a.get('kind','')).endswith('_line')]
     for name in expected_anchors:
         if name not in measured or measured[name] is None:
             missing.append(name)

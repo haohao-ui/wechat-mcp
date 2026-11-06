@@ -146,7 +146,7 @@ public func locateHorizontalLine(_ image: CGImage, scale: Int, in rect: WindowRe
 
 /// Locates a single vertical line spanning >= 70% length of the given rect with stable contrast to both sides.
 /// Returns the window point x-coordinate, or nil if not found.
-public func locateVerticalLine(_ image: CGImage, scale: Int, in rect: WindowRect) -> Double? {
+public func locateVerticalLine(_ image: CGImage, scale: Int, in rect: WindowRect, minRatio: Double = 0.70) -> Double? {
     guard let pixels = PixelBuffer(image: image) else { return nil }
     let pxStart = max(0, Int(round(rect.x * Double(scale))))
     let pxEnd = min(pixels.width, Int(round((rect.x + rect.w) * Double(scale))))
@@ -183,7 +183,7 @@ public func locateVerticalLine(_ image: CGImage, scale: Int, in rect: WindowRect
         }
 
         let ratio = Double(validCount) / Double(ph)
-        if ratio >= 0.70 {
+        if ratio >= minRatio {
             let avgResp = totalResponse / Double(ph)
             let score = ratio * 100.0 + avgResp
             if score > bestScore {
@@ -303,4 +303,61 @@ public func verifyAnchors(_ image: CGImage, scale: Int, layout: WechatLayout, to
 
     let passed = failures.isEmpty
     return AnchorReport(passed: passed, failures: failures, theme: detectedTheme, measured: measured)
+}
+
+/// Where each line anchor really is, searched widely (re-measuring after a WeChat update, when the map
+/// may be far off): horizontal edges from 30% into the region down to 40 points above the window
+/// bottom (top edges: window top to 70% into the region); vertical edges from 30% to 180% of the
+/// region width (left edges: mirrored). Text anchors have no position and are left out.
+public func measureAnchors(_ image: CGImage, scale: Int, layout: WechatLayout) -> [String: Double] {
+    let windowW = layout.window.width, windowH = layout.window.height
+    var measured: [String: Double] = [:]
+    for anchor in layout.anchors {
+        guard let region = layout.regions[anchor.region] else { continue }
+        switch anchor.kind {
+        case "horizontal_line":
+            let top = anchor.edge == "top" ? 0 : region.y + region.h * 0.3
+            let bottom = anchor.edge == "top" ? region.y + region.h * 0.7 : windowH - 40
+            guard bottom > top else { continue }
+            if let y = firstFullHorizontalLine(image, scale: scale, in: WindowRect(x: region.x, y: top, w: region.w, h: bottom - top)) {
+                measured[anchor.name] = y
+            }
+        case "vertical_line":
+            let left = anchor.edge == "left" ? max(0, region.x - region.w * 0.8) : region.x + region.w * 0.3
+            let right = anchor.edge == "left" ? region.x + region.w * 0.7 : min(windowW - 40, region.x + region.w * 1.8)
+            guard right > left else { continue }
+            if let x = locateVerticalLine(image, scale: scale, in: WindowRect(x: left, y: region.y, w: right - left, h: region.h), minRatio: fullLineRatio) {
+                measured[anchor.name] = x
+            }
+        default:
+            continue
+        }
+    }
+    return measured
+}
+
+/// A layout boundary spans the whole region (fixtures: 0.96-0.97 of the chat width); bubble, image and
+/// toolbar edges stay below 0.8, except lines inside the input box, which lie below the divider.
+let fullLineRatio = 0.9
+
+/// The topmost row in `rect` whose step or ridge response covers `fullLineRatio` of the width.
+func firstFullHorizontalLine(_ image: CGImage, scale: Int, in rect: WindowRect) -> Double? {
+    guard let pixels = PixelBuffer(image: image) else { return nil }
+    let pxStart = max(0, Int(round(rect.x * Double(scale))))
+    let pxEnd = min(pixels.width, Int(round((rect.x + rect.w) * Double(scale))))
+    let pyStart = max(scale, Int(round(rect.y * Double(scale))))
+    let pyEnd = min(pixels.height - scale, Int(round((rect.y + rect.h) * Double(scale))))
+    let width = pxEnd - pxStart
+    guard width > 0 && pyEnd > pyStart else { return nil }
+    for py in pyStart..<pyEnd {
+        var covered = 0
+        for px in pxStart..<pxEnd {
+            let c = pixels.gray(x: px, y: py)
+            let top = pixels.gray(x: px, y: py - scale)
+            let bottom = pixels.gray(x: px, y: py + scale)
+            if max(abs(2.0 * c - top - bottom), abs(top - bottom)) >= 4.0 { covered += 1 }
+        }
+        if Double(covered) / Double(width) >= fullLineRatio { return (Double(py) / Double(scale)).rounded() }
+    }
+    return nil
 }

@@ -397,11 +397,9 @@ final class CaptureWorker {
             let (window, _) = try readyWindow(manage: false)
             let rawImage = try windowImage(window)
             let normalized = try normalizedFrame(rawImage, window: window)
-            let frame = normalized.image
             let scale = normalized.scale
-            let report = verifyAnchors(rawImage, scale: scale, layout: layout, tolerance: 1000)
-            let theme = report.theme ?? detectTheme(rawImage, scale: scale, layout: layout)
-            let measured = report.measured
+            let theme = detectTheme(rawImage, scale: scale, layout: layout)
+            let measured = measureAnchors(rawImage, scale: scale, layout: layout)
 
             let annotated = try drawAnnotatedLayout(rawImage, scale: scale, layout: layout)
             let pngBytes = try pngData(annotated)
