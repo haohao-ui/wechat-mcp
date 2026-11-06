@@ -830,7 +830,15 @@ class HistoryServiceTests(ServiceTests):
         message=next(args['message'] for name,args in self.calls if name=='send_message')
         self.assertIn('第9张图片打不开，麻烦重发一下。',message)
         self.assertLessEqual(len(message),200)
-        self.assertEqual(self.model.await_args.kwargs['failed'],['第9张图片'])
+        # The model gets each unreadable item with its reason (2026-11-06: labels alone made it guess).
+        self.assertEqual(self.model.await_args.kwargs['failed'],[{'label':'第9张图片','kind':'image','reason':'download_failed'}])
+
+    async def test_unsupported_file_reason_reaches_the_model(self):
+        # Acceptance 2026-11-06: an .xls turn crashed with TypeError ('str' object is not a mapping) and
+        # the chat paused, because the service passed only labels while the prompt expected items.
+        await self.media_turn(1,failed=[{'label':'报价.xls','kind':'file','reason':'unsupported_type','detail':'unsupported_file_type'}])
+        self.assertEqual(self.model.await_args.kwargs['failed'][-1]['reason'],'unsupported_type')
+        self.assertEqual(sum(name=='send_message' for name,_ in self.calls),1)
 
     async def test_final_generation_failure_still_pauses(self):
         self.model=AsyncMock(side_effect=RuntimeError('reply generation failed'))
@@ -886,7 +894,7 @@ class HistoryServiceTests(ServiceTests):
             await self.media_turn(3)
         self.assertFalse(self.service.paused)
         self.assertEqual(len(self.model.await_args.kwargs['images']),2)
-        self.assertEqual(self.model.await_args.kwargs['failed'],['第3张图片'])
+        self.assertEqual(self.model.await_args.kwargs['failed'],[{'label':'第3张图片','kind':'image','reason':'too_large'}])
 
     async def test_send_uses_observed_title_for_alias(self):
         entry = {'recipient': '🍓示例联系人甲', 'kind': 'private', 'aliases': ['示例联系人甲']}

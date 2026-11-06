@@ -36,3 +36,9 @@ class UnreadableHintTests(unittest.TestCase):
         reasons = ['unsupported_type', 'too_large', 'download_failed', 'snapshot_changed', 'extract_failed', 'empty']
         data = self.prompt_for([{'label': r, 'kind': 'file', 'reason': r} for r in reasons])
         self.assertTrue(all(item.get('hint') for item in data['unreadable']))
+
+
+    def test_plain_labels_are_still_accepted(self):
+        data = self.prompt_for(['旧调用方只给文件名.pdf'])
+        self.assertEqual(data['unreadable'][0]['label'], '旧调用方只给文件名.pdf')
+        self.assertTrue(data['unreadable'][0]['hint'])
