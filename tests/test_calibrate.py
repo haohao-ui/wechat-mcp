@@ -23,6 +23,7 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import time
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -272,10 +273,30 @@ class CalibrateTests(unittest.TestCase):
             'measured': {'input_divider': 490.0},
             'annotated_png_base64': base64.b64encode(b'png').decode('ascii'),
         }
-        with patch('scripts.wechat_bot.control.default_remote_runner', fake_remote), \
-             patch('scripts.wechat_bot.control.run_worker_calibrate', return_value=worker_result), \
-             patch('scripts.wechat_bot.control.loaded', return_value=False), \
-             patch('scripts.wechat_bot.control.load_config', return_value={'host': 'wechat-mac'}):
+        import tempfile
+        tmp_dir = tempfile.TemporaryDirectory()
+        state_dir = Path(tmp_dir.name)
+        def fake_write_private(path, val):
+            if path.name == 'calibrate-request.json':
+                diffs, missing, candidate = control.run_calibrate(
+                    config={'host': 'wechat-mac'}, worker_result=worker_result,
+                    layout_dir='~/.wechat-rpa/layout', remote_runner=fake_remote
+                )
+                version = candidate.get('wechat_version')
+                res_path = path.with_name('calibrate-result.json')
+                res_path.write_text(json.dumps({
+                    'id': val['id'],
+                    'ok': True,
+                    'result': {
+                        'candidate_json': f"~/.wechat-rpa/layout/candidate-wechat-{version}.json",
+                        'candidate_png': f"~/.wechat-rpa/layout/candidate-wechat-{version}.png",
+                        'differences': diffs,
+                        'missing': missing,
+                    }
+                }))
+        with patch('scripts.wechat_bot.control.write_private', side_effect=fake_write_private), \
+             patch('scripts.wechat_bot.control.loaded', return_value=True), \
+             patch('scripts.wechat_bot.control.load_config', return_value={'host': 'wechat-mac', 'state_dir': str(state_dir)}):
             import io
             from contextlib import redirect_stdout
             out = io.StringIO()
@@ -284,6 +305,7 @@ class CalibrateTests(unittest.TestCase):
             res = json.loads(out.getvalue().splitlines()[-1])
             self.assertIn('candidate_json', res)
             self.assertEqual(len(res['differences']), 4)
+        tmp_dir.cleanup()
 
     def test_cli_calibrate_accept(self):
         """control.main(['calibrate', '--accept', ...]) runs correctly with fake remote."""
@@ -297,10 +319,25 @@ class CalibrateTests(unittest.TestCase):
             'wechat_version': self.version,
             'layout': self.base_layout,
         }
-        with patch('scripts.wechat_bot.control.default_remote_runner', fake_remote), \
-             patch('scripts.wechat_bot.control.run_worker_calibrate', return_value=worker_result), \
-             patch('scripts.wechat_bot.control.loaded', return_value=False), \
-             patch('scripts.wechat_bot.control.load_config', return_value={'host': 'wechat-mac'}):
+        import tempfile
+        tmp_dir = tempfile.TemporaryDirectory()
+        state_dir = Path(tmp_dir.name)
+        def fake_write_private(path, val):
+            if path.name == 'calibrate-request.json':
+                accept_res = control.calibrate_accept(
+                    host='wechat-mac', layout_dir='~/.wechat-rpa/layout',
+                    config={'host': 'wechat-mac'}, worker_func=lambda: worker_result,
+                    remote_runner=fake_remote
+                )
+                res_path = path.with_name('calibrate-result.json')
+                res_path.write_text(json.dumps({
+                    'id': val['id'],
+                    'ok': True,
+                    'result': accept_res
+                }))
+        with patch('scripts.wechat_bot.control.write_private', side_effect=fake_write_private), \
+             patch('scripts.wechat_bot.control.loaded', return_value=True), \
+             patch('scripts.wechat_bot.control.load_config', return_value={'host': 'wechat-mac', 'state_dir': str(state_dir)}):
             import io
             from contextlib import redirect_stdout
             out = io.StringIO()
@@ -309,6 +346,7 @@ class CalibrateTests(unittest.TestCase):
             res = json.loads(out.getvalue().strip())
             self.assertTrue(res.get('accepted'))
             self.assertEqual(res.get('version'), self.version)
+        tmp_dir.cleanup()
 
     # --- Invariants ---
 
@@ -413,10 +451,91 @@ class CalibrateOnDeviceTests(unittest.TestCase):
 
     def test_calibrate_refuses_while_bot_running(self):
         args = MagicMock(accept=False, layout_dir=None, config=str(self.home / 'none.json'))
-        with patch('scripts.wechat_bot.control.loaded', return_value=True):
+        with patch('scripts.wechat_bot.control.loaded', return_value=False):
             with self.assertRaises(SystemExit):
                 control.calibrate_command(args, remote_runner=self.remote, worker_func=lambda: self.worker)
         self.assertEqual(self.remote.commands, [])
+
+    def test_control_calibrate_round_trip(self):
+        """control calibrate delegates to running bot by writing request and polling result."""
+        state_dir = self.home / 'state'
+        state_dir.mkdir(parents=True, exist_ok=True)
+        config_path = self.home / 'config.json'
+        config_data = {
+            'schema_version': 1,
+            'host': 'wechat-mac',
+            'account_id': 'fixture',
+            'state_dir': str(state_dir),
+            'allowlist': [{'recipient': 'a', 'kind': 'private'}],
+            'ignorelist': [],
+            'poll_seconds': 1,
+        }
+        config_path.write_text(json.dumps(config_data))
+
+        import threading
+        def fake_bot_worker():
+            req_path = state_dir / 'calibrate-request.json'
+            res_path = state_dir / 'calibrate-result.json'
+            for _ in range(50):
+                if req_path.exists():
+                    try:
+                        req = json.loads(req_path.read_text())
+                        res_path.write_text(json.dumps({
+                            'id': req['id'],
+                            'ok': True,
+                            'result': {
+                                'candidate_json': '.wechat-rpa/layout/candidate-wechat-4.1.15.json',
+                                'candidate_png': '.wechat-rpa/layout/candidate-wechat-4.1.15.png',
+                                'differences': [{'field': 'input.y', 'old': 496, 'new': 500}],
+                                'missing': []
+                            }
+                        }))
+                        req_path.unlink()
+                        return
+                    except Exception:
+                        pass
+                time.sleep(0.05)
+
+        t = threading.Thread(target=fake_bot_worker)
+        t.start()
+
+        args = MagicMock(accept=False, layout_dir=None, config=str(config_path))
+        with patch('scripts.wechat_bot.control.loaded', return_value=True):
+            import io
+            from contextlib import redirect_stdout
+            out = io.StringIO()
+            with redirect_stdout(out):
+                control.calibrate_command(args)
+            t.join(timeout=2)
+            res = json.loads(out.getvalue().splitlines()[-1])
+            self.assertIn('candidate_json', res)
+            self.assertEqual(len(res['differences']), 1)
+
+    def test_control_calibrate_requires_running_bot(self):
+        """control calibrate errors out if bot is not running."""
+        state_dir = self.home / 'state'
+        state_dir.mkdir(parents=True, exist_ok=True)
+        config_path = self.home / 'config.json'
+        config_data = {
+            'schema_version': 1,
+            'host': 'wechat-mac',
+            'account_id': 'fixture',
+            'state_dir': str(state_dir),
+            'allowlist': [{'recipient': 'a', 'kind': 'private'}],
+            'ignorelist': [],
+            'poll_seconds': 1,
+        }
+        config_path.write_text(json.dumps(config_data))
+        args = MagicMock(accept=False, layout_dir=None, config=str(config_path))
+        with patch('scripts.wechat_bot.control.loaded', return_value=False):
+            import io
+            from contextlib import redirect_stderr
+            err = io.StringIO()
+            with redirect_stderr(err):
+                with self.assertRaises(SystemExit) as cm:
+                    control.calibrate_command(args)
+            self.assertEqual(cm.exception.code, 1)
+            self.assertIn('机器人未运行：请先 control start', err.getvalue())
 
 
 class CalibrateScaleTests(unittest.TestCase):
