@@ -37,3 +37,57 @@ public enum WorkerStatus: Equatable {
     case restarting(at: Date)
     case stopped(reason: String)
 }
+
+public struct ChildExitHandler {
+    public private(set) var restartPolicy = RestartPolicy()
+    public private(set) var isGivenUp: Bool = false
+    public private(set) var status: WorkerStatus = .stopped(reason: "服务未启动")
+
+    public var isAcceptingConnections: Bool {
+        if isGivenUp { return false }
+        if case .restarting(let at) = status {
+            return Date() >= at
+        }
+        return true
+    }
+
+    public init() {}
+
+    public mutating func markReadyToAccept() {
+        if !isGivenUp {
+            status = .stopped(reason: "等待客户端连接")
+        }
+    }
+
+    public mutating func markRunning(pid: Int32) {
+        status = .running(pid: pid)
+    }
+
+    public mutating func handleExit(status exitStatus: Int32,
+                                    reason: Process.TerminationReason,
+                                    at date: Date = Date()) -> RestartDecision? {
+        let isAbnormal = (reason == .uncaughtSignal || exitStatus != 0)
+        if !isAbnormal {
+            // 正常退出（reason == .exit 且 status == 0）：
+            // 不记录到 RestartPolicy，状态重置为等待客户端连接
+            status = .stopped(reason: "等待客户端连接")
+            return nil
+        }
+
+        let decision = restartPolicy.recordExit(at: date)
+        switch decision {
+        case .giveUp:
+            isGivenUp = true
+            status = .stopped(reason: "连续崩溃达到上限（1小时内5次），已停止自动重启")
+        case .restart(let after):
+            status = .restarting(at: date.addingTimeInterval(after))
+        }
+        return decision
+    }
+
+    public mutating func reset() {
+        restartPolicy.reset()
+        isGivenUp = false
+        status = .stopped(reason: "等待客户端连接")
+    }
+}

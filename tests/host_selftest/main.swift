@@ -3,7 +3,7 @@ import Foundation
 func run() -> Int32 {
     let args = CommandLine.arguments
     guard args.count >= 3 else {
-        fputs("usage: host_selftest restart_policy <json>\n", stderr)
+        fputs("usage: host_selftest <command> <json>\n", stderr)
         return 1
     }
 
@@ -45,6 +45,44 @@ func run() -> Int32 {
             }
 
             let response: [String: Any] = ["results": results]
+            let outputData = try JSONSerialization.data(withJSONObject: response, options: [.sortedKeys])
+            if let outputStr = String(data: outputData, encoding: .utf8) {
+                print(outputStr)
+                return 0
+            }
+        } else if command == "child_exit" {
+            var handler = ChildExitHandler()
+            handler.markReadyToAccept()
+
+            let events = dict["events"] as? [[String: Any]] ?? []
+            for event in events {
+                if let op = event["op"] as? String, op == "reset" {
+                    handler.reset()
+                    continue
+                }
+                let status = Int32(event["status"] as? Int ?? 0)
+                let reasonStr = event["reason"] as? String ?? "exit"
+                let reason: Process.TerminationReason = (reasonStr == "uncaughtSignal") ? .uncaughtSignal : .exit
+                let epoch = event["epoch"] as? Double ?? Date().timeIntervalSince1970
+                let date = Date(timeIntervalSince1970: epoch)
+                _ = handler.handleExit(status: status, reason: reason, at: date)
+            }
+
+            var statusDict: [String: Any] = [:]
+            switch handler.status {
+            case .running(let pid):
+                statusDict = ["state": "running", "pid": pid]
+            case .restarting(let at):
+                statusDict = ["state": "restarting", "at": at.timeIntervalSince1970]
+            case .stopped(let reason):
+                statusDict = ["state": "stopped", "reason": reason]
+            }
+
+            let response: [String: Any] = [
+                "is_given_up": handler.isGivenUp,
+                "accepting_connections": handler.isAcceptingConnections,
+                "status": statusDict
+            ]
             let outputData = try JSONSerialization.data(withJSONObject: response, options: [.sortedKeys])
             if let outputStr = String(data: outputData, encoding: .utf8) {
                 print(outputStr)
