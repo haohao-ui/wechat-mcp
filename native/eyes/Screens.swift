@@ -162,17 +162,21 @@ public func identifyScreen(windows: [WindowInfo], focus: FocusInfo, wechatPID: I
     return .unknown
 }
 
-public func blockingScreen(windows: [WindowInfo], wechatPID: Int32, mainSize: CGSize, focusedIdentifier: String?) -> ScreenKind? {
+public /// CGWindowLevelForKey(.popUpMenuWindow): context menus; status items sit at 25.
+let popUpMenuLayer = 101
+
+func blockingScreen(windows: [WindowInfo], wechatPID: Int32, mainSize: CGSize, focusedIdentifier: String?) -> ScreenKind? {
     // 1. focusedIdentifier == "saveAsNameTextField" -> .savePanel
     if focusedIdentifier == "saveAsNameTextField" {
         return .savePanel
     }
 
-    // 2. 微信进程有 layer != 0、宽 20..600、高 20..900 的屏上窗口 -> .contextMenu
+    // 2. 微信进程有弹出菜单层（kCGPopUpMenuWindowLevel = 101）、宽 20..600、高 20..900 的屏上窗口 -> .contextMenu
+    //    The menu-bar status item (layer 25, e.g. 52x24 at y=0) is always on screen and is not a menu.
     let hasContextMenu = windows.contains { w in
         w.pid == wechatPID &&
         w.onScreen &&
-        w.layer != 0 &&
+        w.layer == popUpMenuLayer &&
         w.bounds.width >= 20.0 && w.bounds.width <= 600.0 &&
         w.bounds.height >= 20.0 && w.bounds.height <= 900.0
     }

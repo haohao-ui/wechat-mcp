@@ -866,3 +866,11 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
 
 if __name__=='__main__': unittest.main()
+
+
+class ScreenGateNeverNavigatesTests(unittest.TestCase):
+    def test_screen_not_main_must_wait(self):
+        # retarget() falls back to MCP search navigation (clicks, typing) unless must_wait() is true;
+        # a viewer or menu being open is exactly when nothing may be clicked.
+        from scripts.wechat_bot.native_capture import must_wait
+        self.assertTrue(must_wait(ValueError('private visual operation failed: invalid("screen_not_main:other_wechat_window")')))

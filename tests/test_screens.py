@@ -386,5 +386,18 @@ class ScreenIdentificationTests(unittest.TestCase):
         self.assertIsNone(res.get("screen"))
 
 
+    def test_menubar_icon_does_not_block(self):
+        # WeChat Mac on the acceptance machine (2026-11-06): its menu-bar status item is a layer-25,
+        # 52x24 window at y=0, always on screen. Only pop-up menus (layer 101) are context menus.
+        payload = {"windows": [
+            {"owner": "微信", "pid": 49995, "layer": 25, "bounds": {"x": 751.0, "y": 0.0, "w": 52.0, "h": 24.0}, "on_screen": True},
+            {"owner": "微信", "pid": 49995, "layer": 0, "bounds": {"x": 195.0, "y": 101.0, "w": 880.0, "h": 640.0}, "on_screen": True},
+            {"owner": "WeChat RPA Test", "pid": 777, "layer": 0, "bounds": {"x": 424.0, "y": 623.0, "w": 700.0, "h": 588.0}, "on_screen": True},
+        ], "wechat_pid": 49995, "main": [880.0, 640.0], "focused_identifier": None}
+        res = self.run_cli("blocking", payload)
+        self.assertFalse(res.get("blocked"), res)
+
+
 if __name__ == '__main__':
     unittest.main()
+
