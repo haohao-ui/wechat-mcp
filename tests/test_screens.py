@@ -299,20 +299,21 @@ class ScreenIdentificationTests(unittest.TestCase):
         self.assertEqual(res.get("screen"), "context_menu")
 
     def test_blocking_image_viewer(self):
+        # CGWindowList is front to back: the opened viewer comes before the main window.
         payload = {
             "windows": [
                 {
                     "owner": "WeChat",
                     "pid": 1234,
                     "layer": 0,
-                    "bounds": {"x": 100.0, "y": 80.0, "w": 880.0, "h": 640.0},
+                    "bounds": {"x": 200.0, "y": 150.0, "w": 1024.0, "h": 768.0},
                     "on_screen": True
                 },
                 {
                     "owner": "WeChat",
                     "pid": 1234,
                     "layer": 0,
-                    "bounds": {"x": 200.0, "y": 150.0, "w": 1024.0, "h": 768.0},
+                    "bounds": {"x": 100.0, "y": 80.0, "w": 880.0, "h": 640.0},
                     "on_screen": True
                 }
             ],
@@ -365,6 +366,40 @@ class ScreenIdentificationTests(unittest.TestCase):
         res = self.run_cli("blocking", payload)
         self.assertFalse(res.get("blocked"))
         self.assertIsNone(res.get("screen"))
+
+    def test_window_behind_main_not_blocking(self):
+        # Device 2026-11-06: after "下载到..." WeChat keeps a 360x124 download window open, hidden
+        # behind the main window. The user cannot see or close it; it must not stop the bot.
+        payload = {
+            "windows": [
+                {"owner": "WeChat", "pid": 1234, "layer": 0,
+                 "bounds": {"x": 102.0, "y": 118.0, "w": 880.0, "h": 640.0}, "on_screen": True},
+                {"owner": "WeChat", "pid": 1234, "layer": 0,
+                 "bounds": {"x": 428.0, "y": 343.0, "w": 360.0, "h": 124.0}, "on_screen": True}
+            ],
+            "wechat_pid": 1234,
+            "main": [880.0, 640.0],
+            "focused_identifier": None
+        }
+        res = self.run_cli("blocking", payload)
+        self.assertFalse(res.get("blocked"))
+        self.assertIsNone(res.get("screen"))
+
+    def test_window_in_front_of_main_blocks(self):
+        payload = {
+            "windows": [
+                {"owner": "WeChat", "pid": 1234, "layer": 0,
+                 "bounds": {"x": 428.0, "y": 343.0, "w": 360.0, "h": 124.0}, "on_screen": True},
+                {"owner": "WeChat", "pid": 1234, "layer": 0,
+                 "bounds": {"x": 102.0, "y": 118.0, "w": 880.0, "h": 640.0}, "on_screen": True}
+            ],
+            "wechat_pid": 1234,
+            "main": [880.0, 640.0],
+            "focused_identifier": None
+        }
+        res = self.run_cli("blocking", payload)
+        self.assertTrue(res.get("blocked"))
+        self.assertEqual(res.get("screen"), "other_wechat_window")
 
     def test_main_only_not_blocking(self):
         payload = {

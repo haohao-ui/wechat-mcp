@@ -184,12 +184,18 @@ func blockingScreen(windows: [WindowInfo], wechatPID: Int32, mainSize: CGSize, f
         return .contextMenu
     }
 
-    // 3. 微信进程 layer 0 的屏上窗口多于 1 个 -> .otherWechatWindow
-    let layer0Count = windows.filter { w in
-        w.pid == wechatPID && w.layer == 0 && w.onScreen
-    }.count
-    if layer0Count > 1 {
-        return .otherWechatWindow
+    // 3. Another WeChat layer-0 window in front of the main window and overlapping it -> .otherWechatWindow.
+    //    CGWindowList is front to back. A window behind the main one (device 2026-11-06: the 360x124
+    //    download window left by "下载到...") is neither visible nor in the way and does not block.
+    let layer0 = windows.filter { w in w.pid == wechatPID && w.layer == 0 && w.onScreen }
+    if layer0.count > 1 {
+        guard let mainIndex = layer0.firstIndex(where: { w in
+            abs(w.bounds.width - mainSize.width) <= 2.0 && abs(w.bounds.height - mainSize.height) <= 2.0
+        }) else { return .otherWechatWindow }
+        let main = layer0[mainIndex].bounds
+        if layer0[..<mainIndex].contains(where: { $0.bounds.intersects(main) }) {
+            return .otherWechatWindow
+        }
     }
 
     // 4. 否则 -> nil
