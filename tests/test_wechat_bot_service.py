@@ -416,6 +416,17 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
                  if top+steps*90>=2 and top+steps*90+size<height-2]
         return frame(*visible)
 
+    async def test_unrecoverable_gap_scrolls_at_most_five_pages(self):
+        # Acceptance 2026-11-06: after a long absence the bot scrolled 30 pages up in front of the user and
+        # then gave up. Tall media pushes the anchor away by a page or two; more is a real gap.
+        self.service.advance(self.old)
+        cleared=self.chat([(bubble('全新的消息'),40)])
+        pages=[self.chat([(bubble('更早%d'%n),40)]) for n in range(60)]
+        capture,events=await self.scroll_cycle([cleared]*8,pages)
+        ups=[c for c in capture.scroll.await_args_list if c.args and c.args[0]=='up']
+        self.assertLessEqual(len(ups),5)
+        self.assertIn('gap_scroll_exhausted',events)
+
     async def test_interrupted_gap_scroll_retries_instead_of_rebaselining(self):
         # Review I2: a person moving the mouse during the gap scroll used to rebaseline, dropping the gap's messages.
         self.service.advance(frame(bubble('a'),bubble('b')))

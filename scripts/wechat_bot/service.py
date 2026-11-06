@@ -204,7 +204,11 @@ class BotService:
                 # The journal stays authoritative; startup reconciliation repairs the mirror.
                 log_event('history_send_mirror_failed',error_type=type(error).__name__)
 
-    async def recover_gap(self, capture, frame, max_pages=30):
+    # Tall media pushes the anchor up by a page or two; scrolling further in front of the user only to
+    # give up looked like aimless activity (acceptance 2026-11-06: 30 pages after a long absence).
+    GAP_SCROLL_PAGES = 5
+
+    async def recover_gap(self, capture, frame, max_pages=GAP_SCROLL_PAGES):
         """Changes after the cursor found by scrolling up (tall media pushed every anchor away).
 
         None when no page overlaps or the chat did not return to the same bottom frame; then
