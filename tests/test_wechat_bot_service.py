@@ -943,3 +943,24 @@ class ConfigFieldTests(unittest.TestCase):
                 path.write_text(json.dumps({**base, **extra}))
                 with self.assertRaises(ValueError):
                     load_config(path)
+
+
+class EntryPointTests(unittest.TestCase):
+    def test_main_builds_coordinator_inside_running_loop(self):
+        # Python 3.9: asyncio primitives made before asyncio.run() bind to another loop and the
+        # first wait raises "attached to a different loop". The coordinator must be built inside the loop.
+        import asyncio
+        from scripts.wechat_bot import service, coordinator
+        built = []
+
+        class FakeCoordinator:
+            def __init__(self, path):
+                built.append((path, asyncio.get_running_loop()))
+
+            async def run(self):
+                assert built[0][1] is asyncio.get_running_loop()
+
+        with patch.object(coordinator, 'BotCoordinator', FakeCoordinator), \
+                patch.object(sys, 'argv', ['service', '--config', '/x/config.json']):
+            service.main()
+        self.assertEqual(built[0][0], '/x/config.json')

@@ -82,7 +82,7 @@ if [ $APP -eq 1 ]; then
     cd "$HOME/.wechat-rpa/src"
     swiftc -O -target x86_64-apple-macos12 native/bootstrap/*.swift native/eyes/Screens.swift -o /tmp/wechat-cs-host.$TS
     APP="$HOME/Applications/微信客服助手.app"
-    [ -d "$APP" ] && cp -R "$APP" "$HOME/Applications/.old-微信客服助手.app.before-$TS"
+    mkdir -p "$HOME/.wechat-rpa/backups"; [ -d "$APP" ] && cp -R "$APP" "$HOME/.wechat-rpa/backups/微信客服助手.app.before-$TS.bak"
     mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
     install -m 0755 "/tmp/wechat-cs-host.$TS" "$APP/Contents/MacOS/wechat-cs-host"; rm -f "/tmp/wechat-cs-host.$TS"
     cp native/bootstrap/Info.plist "$APP/Contents/Info.plist"

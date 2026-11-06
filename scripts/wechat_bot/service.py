@@ -919,8 +919,13 @@ def main():
     parser.add_argument('--config',required=True)
     args=parser.parse_args()
     logging.basicConfig(level=logging.INFO,format='%(message)s',stream=sys.stdout)
-    from .coordinator import BotCoordinator
-    asyncio.run(BotCoordinator(args.config).run())
+    from . import coordinator
+
+    async def run():
+        # Built inside the loop: on Python 3.9 asyncio primitives created earlier bind to another loop.
+        await coordinator.BotCoordinator(args.config).run()
+
+    asyncio.run(run())
 
 
 if __name__=='__main__':
