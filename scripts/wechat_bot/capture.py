@@ -2,6 +2,8 @@ import asyncio
 import json
 from pathlib import Path
 
+from .transport import remote_argv
+
 
 class RemoteCapture:
     """Validation-only private diagnostic capture through the already-authorized GUI worker."""
@@ -18,7 +20,7 @@ class RemoteCapture:
 
     async def ssh(self, script, stdin=None):
         process = await asyncio.create_subprocess_exec(
-            'ssh', '-o', 'BatchMode=yes', '-o', 'LogLevel=ERROR', self.host, script,
+            *remote_argv(self.host, script),
             stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         try:
