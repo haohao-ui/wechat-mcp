@@ -11,7 +11,7 @@ import time
 from scripts.agent_bridge.codex import private_directory, write_private
 from scripts.agent_bridge.mcp import MCP
 from .capture import RemoteCapture
-from .native_capture import ACTION_INTERRUPTED, NativeCapture, layout_unavailable
+from .native_capture import must_wait, ACTION_INTERRUPTED, NativeCapture, layout_unavailable
 from .history.names import candidate_names
 from .history.store import HistoryStore
 from .routing import decision, match_entry
@@ -319,7 +319,8 @@ class BotCoordinator:
             probe=await self.capture.sessions([n for name in names for n in candidate_names(entries[name])])
         except Exception as error:
             log_event('session_probe_failed',error_type=type(error).__name__,error=str(error)[:200])
-            await self.close_connection()
+            # A wait keeps the worker: closing ends it, and restarting it needs a GUI action.
+            if not must_wait(error): await self.close_connection()
             return set(names)
         rows={}
         for row in probe.get('rows',[]):

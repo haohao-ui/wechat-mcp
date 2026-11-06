@@ -381,6 +381,44 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
             await capture.retarget('b',self.root/'b',['b'])
         capture.navigate.assert_not_awaited()
 
+    async def test_dead_worker_relaunches_quietly_before_search(self):
+        # Stage C drill 2026-11-06: with the worker gone, start() used MCP search navigation (clicks,
+        # typing) on every retry. get_messages without a recipient only focuses WeChat (Cmd+1) and
+        # starts the worker; the map-checked row click then opens the chat.
+        from scripts.wechat_bot.native_capture import NativeCapture
+        client=AsyncMock()
+        capture=NativeCapture('fixture',client,'a',self.root/'a','0'*64,names=['a'])
+        capture.ssh=AsyncMock(); capture.navigate=AsyncMock(); capture.close_transport=AsyncMock()
+        capture.connect=AsyncMock(side_effect=[RuntimeError('private GUI bot worker did not become ready'),None])
+        capture.call=AsyncMock(return_value={'opened':True})
+        await capture.start()
+        client.tool.assert_awaited_once_with('get_messages')
+        capture.call.assert_awaited_once_with('open_session',target='a',target_names=['a'])
+        capture.navigate.assert_not_awaited()
+
+    async def test_relaunch_with_bad_map_waits_without_search(self):
+        from scripts.wechat_bot.native_capture import NativeCapture
+        capture=NativeCapture('fixture',AsyncMock(),'a',self.root/'a','0'*64,names=['a'])
+        capture.ssh=AsyncMock(); capture.navigate=AsyncMock(); capture.close_transport=AsyncMock()
+        capture.connect=AsyncMock(side_effect=[RuntimeError('not ready'),None])
+        capture.call=AsyncMock(side_effect=ValueError('private visual operation failed: invalid("layout_mismatch:input_divider")'))
+        with self.assertRaisesRegex(ValueError,'layout_mismatch'):
+            await capture.start()
+        capture.navigate.assert_not_awaited()
+        # Only the dead first attempt is closed; the relaunched worker's connection stays open.
+        self.assertEqual(capture.close_transport.await_count,1)
+
+    async def test_must_wait_keeps_the_worker_connection(self):
+        # The worker exits when its one connection closes, and only a GUI action can start it again.
+        from scripts.wechat_bot.native_capture import NativeCapture
+        capture=NativeCapture('fixture',AsyncMock(),'a',self.root/'a','0'*64,names=['a'])
+        capture.ssh=AsyncMock(); capture.connect=AsyncMock(); capture.navigate=AsyncMock(); capture.close_transport=AsyncMock()
+        capture.call=AsyncMock(side_effect=ValueError('private visual operation failed: invalid("screen_not_main:context_menu")'))
+        with self.assertRaisesRegex(ValueError,'screen_not_main'):
+            await capture.start()
+        capture.close_transport.assert_not_awaited()
+        capture.navigate.assert_not_awaited()
+
     async def test_interrupted_switch_does_not_fall_back_to_search(self):
         # Review I3: MCP navigation clicks and types into search while the person is still using the mouse.
         from scripts.wechat_bot.native_capture import NativeCapture
