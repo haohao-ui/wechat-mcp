@@ -292,17 +292,43 @@ impl Gateway {
                     return Ok(json!({"account":key,"data":receipt}));
                 }
                 Err(error) => {
-                    self.store
-                        .finish_send(
-                            key,
-                            send_id.clone(),
-                            json!({"error":format!("{error:#}"),"delivery":"unknown"}),
-                            "unknown",
-                        )
-                        .await?;
-                    bail!(
-                        "发送尝试 {send_id} 结果未知，已持久记录；请使用 get_send_status 核对。错误: {error:#}"
-                    );
+                    let is_not_sent = if let Some(send_err) = error.downcast_ref::<crate::wechat::SendError>() {
+                        matches!(send_err, crate::wechat::SendError::NotSent(_))
+                    } else if let Some(send_err) = error.root_cause().downcast_ref::<crate::wechat::SendError>() {
+                        matches!(send_err, crate::wechat::SendError::NotSent(_))
+                    } else {
+                        format!("{error:#}").contains("未触发发送")
+                    };
+
+                    if is_not_sent {
+                        let err_text = format!("{error:#}");
+                        let marked_err = if err_text.contains("未触发发送") {
+                            err_text
+                        } else {
+                            format!("未触发发送: {err_text}")
+                        };
+                        self.store
+                            .finish_send(
+                                key,
+                                send_id.clone(),
+                                json!({"error": marked_err, "delivery": "not_sent"}),
+                                "not_sent",
+                            )
+                            .await?;
+                        bail!("发送尝试 {send_id} 未触发发送: {marked_err}");
+                    } else {
+                        self.store
+                            .finish_send(
+                                key,
+                                send_id.clone(),
+                                json!({"error":format!("{error:#}"),"delivery":"unknown"}),
+                                "unknown",
+                            )
+                            .await?;
+                        bail!(
+                            "发送尝试 {send_id} 结果未知，已持久记录；请使用 get_send_status 核对。错误: {error:#}"
+                        );
+                    }
                 }
             }
         }
@@ -625,5 +651,117 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn failure_injected_at_click_records_not_sent() {
+        let store = Store::memory();
+        let desktop = Arc::new(tokio::sync::Mutex::new(()));
+        let adapter = Arc::new(crate::adapters::WechatDesktop::new("work".into(), desktop));
+        let mut accounts = AccountRegistry::default();
+        accounts.register(adapter).unwrap();
+        let gateway = Gateway {
+            accounts,
+            store: store.clone(),
+            listeners: Listeners::default(),
+            legacy_tools: false,
+        };
+
+        crate::wechat::with_test_send_fault(
+            crate::wechat::SendFault::Click(Some("accessibility_permission_missing_for_executing_process")),
+            async {
+                let response = gateway
+                    .call(
+                        "send_message",
+                        json!({
+                            "platform": "wechat",
+                            "account_id": "work",
+                            "recipient": "test_user",
+                            "message": "hello",
+                            "idempotency_key": "fail-click-1"
+                        }),
+                    )
+                    .await;
+                assert_eq!(response["isError"], true);
+                let err_text = response["content"][0]["text"].as_str().unwrap();
+                assert!(
+                    err_text.contains("未触发发送"),
+                    "error text must contain marker: {err_text}"
+                );
+                assert!(err_text.contains("accessibility_permission_missing_for_executing_process"));
+
+                let check = gateway
+                    .call(
+                        "get_send_status",
+                        json!({
+                            "platform": "wechat",
+                            "account_id": "work",
+                            "idempotency_key": "fail-click-1"
+                        }),
+                    )
+                    .await;
+                assert_eq!(check["isError"], false);
+                let send_record = &check["structuredContent"]["data"];
+                assert_eq!(send_record["status"], "not_sent");
+                assert_eq!(send_record["delivery"], "not_sent");
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn failure_injected_after_enter_records_unknown() {
+        let store = Store::memory();
+        let desktop = Arc::new(tokio::sync::Mutex::new(()));
+        let adapter = Arc::new(crate::adapters::WechatDesktop::new("work".into(), desktop));
+        let mut accounts = AccountRegistry::default();
+        accounts.register(adapter).unwrap();
+        let gateway = Gateway {
+            accounts,
+            store: store.clone(),
+            listeners: Listeners::default(),
+            legacy_tools: false,
+        };
+
+        crate::wechat::with_test_send_fault(
+            crate::wechat::SendFault::AfterEnter(Some("applescript execution failed after enter")),
+            async {
+                let response = gateway
+                    .call(
+                        "send_message",
+                        json!({
+                            "platform": "wechat",
+                            "account_id": "work",
+                            "recipient": "test_user",
+                            "message": "hello",
+                            "idempotency_key": "fail-enter-1"
+                        }),
+                    )
+                    .await;
+                assert_eq!(response["isError"], true);
+                let err_text = response["content"][0]["text"].as_str().unwrap();
+                assert!(
+                    err_text.contains("结果未知"),
+                    "error text must contain 结果未知: {err_text}"
+                );
+                assert!(!err_text.contains("未触发发送"));
+
+                let check = gateway
+                    .call(
+                        "get_send_status",
+                        json!({
+                            "platform": "wechat",
+                            "account_id": "work",
+                            "idempotency_key": "fail-enter-1"
+                        }),
+                    )
+                    .await;
+                assert_eq!(check["isError"], false);
+                let send_record = &check["structuredContent"]["data"];
+                assert_eq!(send_record["status"], "unknown");
+                assert_eq!(send_record["delivery"], "unknown");
+            },
+        )
+        .await;
     }
 }

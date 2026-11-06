@@ -124,9 +124,19 @@ class BotService:
             self.cursor = {**self.cursor, 'profile':'wechat-4-dark', 'scale':1}
         if self.cursor is not None:
             self.policy.check_frame(self.cursor)
-        self.paused = any(json.loads(p.read_text()).get('status') in ['preparing_media','generating','generated','attempting','unknown']
-                          for p in self.root.glob('send-*.json'))
-        self.pause_reason = 'unfinished model/send journal requires review' if self.paused else None
+        for p in self.root.glob('send-*.json'):
+            try:
+                data = json.loads(p.read_text())
+                status = data.get('status')
+                if status in ['preparing_media', 'generating', 'generated']:
+                    data['status'] = 'not_sent'
+                    data['closed_on_startup'] = True
+                    write_private(p, data)
+            except Exception:
+                pass
+        self.paused = False
+        self.pause_reason = None
+        self.sleep = asyncio.sleep
         self.last_health_log = None
         self.last_health_log_at = 0
         self.ownership = ownership or hashlib.sha256(str(self.root).encode()).hexdigest()
@@ -135,6 +145,35 @@ class BotService:
         self.upload_pending = False
         self.turn_path = self.root/'turn.json'
         self.turn = json.loads(self.turn_path.read_text()) if self.turn_path.exists() else None
+
+    async def recover_startup_journals(self, capture):
+        for p in sorted(self.root.glob('send-*.json')):
+            try:
+                data = json.loads(p.read_text())
+                status = data.get('status')
+                if status in ['attempting', 'unknown']:
+                    reply = data.get('reply') or ''
+                    if not reply:
+                        data['status'] = 'not_sent'
+                        write_private(p, data)
+                        continue
+                    try:
+                        frame = await capture.frame()
+                        self.policy.check_frame(frame)
+                        echoed = any(
+                            b.get('direction') == 'outbound_visual' and echo_matches(b.get('text', ''), reply)
+                            for b in frame.get('bubbles', [])
+                        )
+                        if echoed:
+                            data['status'] = 'triggered'
+                            data['client_echo_observed'] = True
+                        else:
+                            data['status'] = 'not_sent'
+                        write_private(p, data)
+                    except Exception as err:
+                        log_event('startup_journal_check_failed', path=str(p), error=str(err))
+            except Exception:
+                pass
 
     def target_allowed(self):
         from .routing import decision
@@ -557,32 +596,204 @@ class BotService:
             self.write_journal(journal,record)
             if self.stop.is_set():
                 record['status']='stopped_before_send'; self.write_journal(journal,record); self.keep_turn(pending); return
-            began=time.perf_counter()
-            latest = await capture.frame()
-            timings['pre_send_seconds']=time.perf_counter()-began
-            # Title/profile only: new arrivals during generation become the next turn (spec §5.8).
-            self.policy.check_frame(latest)
-            if self.replied_meanwhile(confirmed,latest,input_ids):
-                record['status']='already_replied'; self.write_journal(journal,record)
+            async def verify_before_send():
+                b = time.perf_counter()
+                f = await capture.frame()
+                timings['pre_send_seconds'] = time.perf_counter() - b
+                self.policy.check_frame(f)
+                if self.replied_meanwhile(confirmed, f, input_ids):
+                    return 'already_replied', f
+                if self.stop.is_set():
+                    return 'stopped_before_send', f
+                if not self.target_allowed():
+                    return 'skipped_by_rule', f
+                return None, f
+
+            async def try_send_once():
+                record.update(status='attempting', attempted_at=time.time())
+                self.write_journal(journal, record)
+                self.health('sending', idempotency_key=key)
+                b = time.perf_counter()
+                s_err = None
+                res = None
+                rec = {}
+                try:
+                    res = await client.tool(
+                        'send_message',
+                        recipient=self.clean_recipient(confirmed),
+                        message=reply,
+                        idempotency_key=key,
+                    )
+                except Exception as e:
+                    s_err = e
+
+                try:
+                    rec = await client.tool('get_send_status', idempotency_key=key)
+                except Exception as e:
+                    if s_err is None:
+                        s_err = e
+                timings['send_seconds'] = time.perf_counter() - b
+                return res, rec, s_err
+
+            def is_not_sent(err, rec):
+                if rec and rec.get('status') == 'not_sent':
+                    return True
+                err_msg = str(err) if err else ''
+                return '未触发发送' in err_msg or 'not_sent' in err_msg
+
+            async def check_screen_for_echo():
+                last_f = None
+                last_e = None
+                consecutive_errs = 0
+                for attempt_idx in range(3):
+                    try:
+                        f = await capture.frame()
+                        self.policy.check_frame(f)
+                        last_f = f
+                        if any(
+                            b.get('direction') == 'outbound_visual'
+                            and echo_matches(b.get('text', ''), reply)
+                            for b in f.get('bubbles', [])
+                        ):
+                            return 'seen', f
+                        if attempt_idx < 2:
+                            await self.sleep(1.0)
+                    except Exception as e:
+                        last_e = e
+                        consecutive_errs += 1
+                if consecutive_errs == 3:
+                    return 'unverifiable', last_e
+                return 'not_seen', last_f
+
+            check_res, latest = await verify_before_send()
+            if check_res:
+                record['status'] = check_res
+                self.write_journal(journal, record)
+                if check_res == 'stopped_before_send':
+                    self.keep_turn(pending)
                 return
-            if self.stop.is_set():
-                record['status']='stopped_before_send'; self.write_journal(journal,record); self.keep_turn(pending); return
-            if not self.target_allowed():
-                record['status']='skipped_by_rule'; self.write_journal(journal,record); return
+
             if self.history is not None:
-                self.history.record_bot_reply(self.contact_id,key,reply,'generated',record.get('model',{}),input_ids)
-            record.update(status='attempting',attempted_at=time.time())
-            self.write_journal(journal,record)
-            self.health('sending',idempotency_key=key)
-            began=time.perf_counter()
-            # Send to the title actually verified on screen (an alias when OCR drops emoji/symbols).
-            result = await client.tool('send_message',recipient=self.clean_recipient(confirmed),message=reply,idempotency_key=key)
-            receipt = await client.tool('get_send_status',idempotency_key=key)
-            timings['send_seconds']=time.perf_counter()-began
-            record.update(status=receipt.get('status','unknown'),send_result=result,durable_status=receipt,delivery='unknown')
-            self.write_journal(journal,record)
-            if record['status'] != 'triggered':
-                raise RuntimeError('send outcome requires review')
+                self.history.record_bot_reply(
+                    self.contact_id, key, reply, 'generated', record.get('model', {}), input_ids
+                )
+
+            result, receipt, send_err = await try_send_once()
+            after_frame = None
+
+            if send_err is None and receipt.get('status') == 'triggered':
+                record.update(
+                    status='triggered',
+                    send_result=result,
+                    durable_status=receipt,
+                    delivery='unknown',
+                )
+                self.write_journal(journal, record)
+            elif is_not_sent(send_err, receipt):
+                succeeded = False
+                for delay in [5, 15]:
+                    await self.sleep(delay)
+                    check_res, latest = await verify_before_send()
+                    if check_res:
+                        record['status'] = check_res
+                        self.write_journal(journal, record)
+                        if check_res == 'stopped_before_send':
+                            self.keep_turn(pending)
+                        return
+                    result, receipt, send_err = await try_send_once()
+                    if send_err is None and receipt.get('status') == 'triggered':
+                        record.update(
+                            status='triggered',
+                            send_result=result,
+                            durable_status=receipt,
+                            delivery='unknown',
+                        )
+                        self.write_journal(journal, record)
+                        succeeded = True
+                        break
+                    if not is_not_sent(send_err, receipt):
+                        break
+                if not succeeded:
+                    if is_not_sent(send_err, receipt):
+                        record.update(
+                            status='not_sent',
+                            error=str(send_err)[:400],
+                            durable_status=receipt,
+                            delivery='not_sent',
+                        )
+                        self.write_journal(journal, record)
+                        log_event(
+                            'send_failed_not_sent',
+                            idempotency_key=key,
+                            error=str(send_err)[:400],
+                        )
+                        short_err = str(send_err).splitlines()[0][:80]
+                        self.health('watching', reason=f'last reply not sent: {short_err}')
+                        return
+
+            if record.get('status') != 'triggered':
+                outcome, detail = await check_screen_for_echo()
+                if outcome == 'seen':
+                    record.update(
+                        status='triggered',
+                        client_echo_observed=True,
+                        durable_status=receipt,
+                    )
+                    self.write_journal(journal, record)
+                    after_frame = detail
+                elif outcome == 'unverifiable':
+                    record.update(
+                        status='unknown',
+                        error=str(send_err)[:400],
+                        durable_status=receipt,
+                    )
+                    self.write_journal(journal, record)
+                    log_event(
+                        'send_outcome_unverified',
+                        idempotency_key=key,
+                        error=str(detail)[:400],
+                    )
+                    return
+                elif outcome == 'not_seen':
+                    record.update(
+                        status='not_sent',
+                        error=str(send_err)[:400],
+                        durable_status=receipt,
+                    )
+                    self.write_journal(journal, record)
+                    await self.sleep(5)
+                    check_res, latest = await verify_before_send()
+                    if check_res:
+                        record['status'] = check_res
+                        self.write_journal(journal, record)
+                        if check_res == 'stopped_before_send':
+                            self.keep_turn(pending)
+                        return
+                    result, receipt, send_err = await try_send_once()
+                    if send_err is None and receipt.get('status') == 'triggered':
+                        record.update(
+                            status='triggered',
+                            send_result=result,
+                            durable_status=receipt,
+                            delivery='unknown',
+                        )
+                        self.write_journal(journal, record)
+                    else:
+                        record.update(
+                            status='not_sent',
+                            error=str(send_err)[:400],
+                            durable_status=receipt,
+                            delivery='not_sent',
+                        )
+                        self.write_journal(journal, record)
+                        log_event(
+                            'send_failed_not_sent',
+                            idempotency_key=key,
+                            error=str(send_err)[:400],
+                        )
+                        short_err = str(send_err).splitlines()[0][:80]
+                        self.health('watching', reason=f'last reply not sent: {short_err}')
+                        return
         except Exception as error:
             log_event('processing_failed',phase=record['status'],error_type=type(error).__name__,idempotency_key=key)
             record['error']=str(error)[:400]
@@ -609,7 +820,10 @@ class BotService:
         # A readback error after a durable triggered receipt must not trigger another send.
         self.health('verifying_send',idempotency_key=key)
         began=time.perf_counter()
-        after = await capture.frame()
+        if after_frame is None:
+            after = await capture.frame()
+        else:
+            after = after_frame
         timings['echo_seconds']=time.perf_counter()-began
         self.policy.check_frame(after)
         echoed = any(b['direction']=='outbound_visual' and echo_matches(b['text'],reply) for b in after['bubbles'])
@@ -670,6 +884,7 @@ class BotService:
                         if status.get('enabled'):
                             raise ValueError('another observer is enabled')
                         await capture.start()
+                        await self.recover_startup_journals(capture)
                         while not self.stop.is_set() and not self.paused:
                             await self.cycle(client,capture)
                             await self.wait(self.config['poll_seconds'])
