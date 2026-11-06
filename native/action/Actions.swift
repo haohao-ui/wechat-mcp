@@ -71,7 +71,8 @@ final class Actions {
 
     /// Key combinations the hand may press. Deliberately small: editing the input box and sending.
     static let keyCombos: [String: (code: CGKeyCode, command: Bool)] = [
-        "cmd+v": (9, true), "cmd+a": (0, true), "cmd+c": (8, true), "return": (36, false)
+        "cmd+v": (9, true), "cmd+a": (0, true), "cmd+c": (8, true), "return": (36, false),
+        "delete": (51, false), "escape": (53, false), "cmd+1": (18, true)
     ]
 
     /// Presses a combination like a person: Command down first, the key held briefly, Command up last.

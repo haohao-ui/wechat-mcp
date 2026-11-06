@@ -9,6 +9,17 @@ var arguments = Array(CommandLine.arguments.dropFirst())
 let planOnly = arguments.first == "--plan-only"
 if planOnly { arguments.removeFirst() }
 
+if arguments.first == "clear-input" {
+    guard arguments.count == 1 else { exit(1) }
+    runClearInput(planOnly: planOnly)
+}
+
+if arguments.first == "input-text" {
+    guard arguments.count == 3 else { exit(1) }
+    guard let x = Double(arguments[1]), let y = Double(arguments[2]), x.isFinite, y.isFinite else { exit(1) }
+    runInputText(x: x, y: y, planOnly: planOnly)
+}
+
 if arguments.first == "key" {
     guard arguments.count == 2, Actions.keyCombos[arguments[1]] != nil else {
         fputs("wechat_click: unsupported_key\n", stderr); exit(1)
@@ -37,22 +48,7 @@ let width = numbers.count == 4 ? numbers[2] : 12, height = numbers.count == 4 ? 
 guard width > 0, height > 0 else { exit(1) }
 let target = CGRect(x: x - width/2, y: y - height/2, width: width, height: height)
 
-/// Records what would be posted (pointer follows our own moves; no time passes).
-final class PlanSink: EventSink {
-    var position = CGEvent(source: nil)?.location ?? .zero
-    var events: [[String: Any]] = []
-    func cursor() -> CGPoint { position }
-    func post(_ type: CGEventType, at point: CGPoint, button: CGMouseButton) throws {
-        let names: [CGEventType: String] = [.mouseMoved: "moved", .leftMouseDown: "left_down", .leftMouseUp: "left_up"]
-        events.append(["type": names[type] ?? "other", "x": Double(point.x), "y": Double(point.y)])
-        position = point
-    }
-    func scroll(lines: Int32, at point: CGPoint) throws {}
-    func key(_ code: CGKeyCode, down: Bool, command: Bool) throws {
-        events.append(["type": down ? "key_down" : "key_up", "code": Int(code), "cmd": command])
-    }
-    func sleep(_ seconds: Double) {}
-}
+
 
 if planOnly {
     let sink = PlanSink()
