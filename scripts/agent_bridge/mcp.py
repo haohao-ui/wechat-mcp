@@ -26,21 +26,26 @@ class MCP:
             request = {'jsonrpc': '2.0', 'id': self.counter, 'method': method, 'params': params}
             self.process.stdin.write(json.dumps(request).encode() + b'\n')
             await self.process.stdin.drain()
+            async def _read_reply():
+                while True:
+                    line = await self.process.stdout.readline()
+                    if not line:
+                        raise RuntimeError('MCP closed before response')
+                    reply = json.loads(line)
+                    if 'id' not in reply:
+                        continue
+                    if reply['id'] != self.counter:
+                        raise RuntimeError('MCP response ID mismatch')
+                    if 'error' in reply:
+                        error = reply['error']
+                        raise RuntimeError(f"MCP RPC {error.get('code')}: {str(error.get('message'))[:512]}")
+                    return reply['result']
+
             try:
-                async with asyncio.timeout(40):
-                    while True:
-                        line = await self.process.stdout.readline()
-                        if not line:
-                            raise RuntimeError('MCP closed before response')
-                        reply = json.loads(line)
-                        if 'id' not in reply:
-                            continue
-                        if reply['id'] != self.counter:
-                            raise RuntimeError('MCP response ID mismatch')
-                        if 'error' in reply:
-                            error = reply['error']
-                            raise RuntimeError(f"MCP RPC {error.get('code')}: {str(error.get('message'))[:512]}")
-                        return reply['result']
+                try:
+                    return await asyncio.wait_for(_read_reply(), 40)
+                except (asyncio.TimeoutError, TimeoutError):
+                    raise TimeoutError()
             except BaseException:
                 # Discard a stream after cancellation/timeout, including any unread response.
                 await self.close()

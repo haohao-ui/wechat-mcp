@@ -22,6 +22,7 @@ from .history.store import similar
 from .policy import strip_member_count, merge_pages, reconcile, relocate, stitch, AmbiguousAnchor, ContinuityGap, Policy, echo_matches, fingerprint, new_bubbles, validate_reply
 from .reply import generate
 from .native_capture import NativeCapture, action_interrupted
+from .transport import remote_argv
 
 
 logger = logging.getLogger('wechat_bot')
@@ -655,8 +656,7 @@ class BotService:
                         self.health('paused',reason=self.pause_reason or 'review persisted bot journal before restarting')
                         await self.wait(5)
                         continue
-                    client = MCP(['ssh','-o','BatchMode=yes','-o','LogLevel=ERROR',self.config['host'],
-                                  '/usr/bin/nc -U "$HOME/.wechat-rpa/worker.sock"'],
+                    client = MCP(remote_argv(self.config['host'], '/usr/bin/nc -U "$HOME/.wechat-rpa/worker.sock"'),
                                  {'platform':'wechat','account_id':self.account})
                     capture_class=NativeCapture if self.config.get('capture_backend','native')=='native' else RemoteCapture
                     extra = {}
