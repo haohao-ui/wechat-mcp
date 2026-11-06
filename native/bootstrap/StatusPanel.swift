@@ -94,15 +94,21 @@ public final class StatusPanelController: NSViewController {
         setupConfigSection(inside: configBox)
         mainStack.addArrangedSubview(configBox)
 
-        let clipView = NSClipView()
-        clipView.documentView = mainStack
-        scrollView.contentView = clipView
+        // The scroll document must be flipped (content starts at the top) and sized by its stack.
+        let document = FlippedView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(mainStack)
+        scrollView.documentView = document
         view.addSubview(scrollView)
 
         NSLayoutConstraint.activate([
-            mainStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            mainStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
-            mainStack.topAnchor.constraint(equalTo: view.topAnchor, constant: 16),
+            document.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
+            document.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
+            document.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            mainStack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 20),
+            mainStack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -20),
+            mainStack.topAnchor.constraint(equalTo: document.topAnchor, constant: 16),
+            mainStack.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -16),
             headerBox.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
             actionBox.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
             configBox.widthAnchor.constraint(equalTo: mainStack.widthAnchor)
@@ -116,6 +122,29 @@ public final class StatusPanelController: NSViewController {
         box.boxType = .primary
         box.translatesAutoresizingMaskIntoConstraints = false
         return box
+    }
+
+    /// Pins `content` inside the box with margins, so the box takes its height from the content.
+    private func embed(_ content: NSView, in box: NSBox) {
+        guard let holder = box.contentView else { return }
+        content.translatesAutoresizingMaskIntoConstraints = false
+        holder.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: holder.leadingAnchor, constant: 12),
+            content.trailingAnchor.constraint(equalTo: holder.trailingAnchor, constant: -12),
+            content.topAnchor.constraint(equalTo: holder.topAnchor, constant: 10),
+            content.bottomAnchor.constraint(equalTo: holder.bottomAnchor, constant: -10)
+        ])
+    }
+
+    @objc private func requestScreen() {
+        _ = CGRequestScreenCaptureAccess()
+        refresh()
+    }
+
+    @objc private func requestAccessibility() {
+        _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
+        refresh()
     }
 
     private func setupStatusSection(inside box: NSBox) {
@@ -152,19 +181,28 @@ public final class StatusPanelController: NSViewController {
             let dLabel = NSTextField(wrappingLabelWithString: "正在检查...")
             dLabel.font = NSFont.systemFont(ofSize: 12)
             dLabel.textColor = .secondaryLabelColor
+            dLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            tLabel.widthAnchor.constraint(equalToConstant: 80).isActive = true
 
             row.addArrangedSubview(dot)
             row.addArrangedSubview(tLabel)
             row.addArrangedSubview(dLabel)
             statusStack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: statusStack.widthAnchor).isActive = true
 
             statusItemViews[k] = (dot: dot, title: tLabel, detail: dLabel)
         }
 
-        let refreshBtn = NSButton(title: "立即刷新", target: self, action: #selector(refreshClicked))
-        statusStack.addArrangedSubview(refreshBtn)
+        let buttons = NSStackView(views: [
+            NSButton(title: "立即刷新", target: self, action: #selector(refreshClicked)),
+            NSButton(title: "请求屏幕录制权限", target: self, action: #selector(requestScreen)),
+            NSButton(title: "请求辅助功能权限", target: self, action: #selector(requestAccessibility))
+        ])
+        buttons.orientation = .horizontal
+        buttons.spacing = 8
+        statusStack.addArrangedSubview(buttons)
 
-        box.contentView = statusStack
+        embed(statusStack, in: box)
     }
 
     private func setupActionSection(inside box: NSBox) {
@@ -202,7 +240,7 @@ public final class StatusPanelController: NSViewController {
         stack.addArrangedSubview(row2)
         stack.addArrangedSubview(actionMessageLabel)
 
-        box.contentView = stack
+        embed(stack, in: box)
     }
 
     private func setupConfigSection(inside box: NSBox) {
@@ -250,7 +288,7 @@ public final class StatusPanelController: NSViewController {
         footerRow.spacing = 10
         stack.addArrangedSubview(footerRow)
 
-        box.contentView = stack
+        embed(stack, in: box)
     }
 
     @objc private func refreshClicked() {
@@ -258,6 +296,11 @@ public final class StatusPanelController: NSViewController {
     }
 
     public func refresh() {
+        // Permissions granted after launch: start the desktop service now (start() is idempotent).
+        let granted = readDesktopProbe()
+        if granted.screen_recording_authorized && granted.accessibility_trusted {
+            try? worker.start()
+        }
         let input = collectStatusInput()
         let items = evaluate(input)
         latestItems = items
@@ -630,4 +673,9 @@ public final class StatusPanelController: NSViewController {
             actionMessageLabel.stringValue = "配置保存被拒绝"
         }
     }
+}
+
+/// A document view whose origin is the top-left corner, so scrolled content starts at the top.
+final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
 }

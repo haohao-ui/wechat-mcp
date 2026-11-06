@@ -68,7 +68,12 @@ final class HostAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    // Closing the window must not stop the desktop service: a clean exit is not restarted by the LaunchAgent.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { window?.makeKeyAndOrderFront(nil) }
+        return true
+    }
     func applicationWillTerminate(_ notification: Notification) { worker.stop() }
 }
 
