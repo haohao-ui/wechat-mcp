@@ -248,7 +248,6 @@ class BotCoordinator:
                 failures=extract_mismatch_failures(error)
                 state='needs_recalibration' if self.layout_mismatches>=RECALIBRATION_LIMIT else 'waiting_for_wechat_window'
                 child.health(state,reason=str(error)[:400],failures=failures,attempt=self.layout_mismatches)
-                await self.close_connection()
                 return
             if not child.paused and (layout_unavailable(error) or any(f'invalid("{code}")' in str(error) or f'invalid("{code}:' in str(error) for code in WINDOW_UNAVAILABLE)):
                 # Nothing was read or sent; the window comes back (e.g. appearance back to dark) without a restart.
@@ -419,6 +418,46 @@ class BotCoordinator:
         state='ignored' if not active else 'paused' if all(self.sessions[n].paused for n in active) else 'watching'
         self.health(state,active_chat=self.active_name)
 
+    async def serve_calibration(self):
+        req_path = self.root / 'calibrate-request.json'
+        if not req_path.exists():
+            return
+        res_path = self.root / 'calibrate-result.json'
+        try:
+            req = json.loads(req_path.read_text())
+        except Exception:
+            return
+        req_id = req.get('id')
+        action = req.get('action')
+        created_at = req.get('created_at', 0)
+        try:
+            if time.time() - created_at > 600:
+                write_private(res_path, {'id': req_id, 'ok': False, 'error': 'expired'})
+                return
+            if self.capture is None:
+                write_private(res_path, {'id': req_id, 'ok': False, 'error': 'worker_not_connected'})
+                return
+            result = await self.capture.call('calibrate')
+            if action == 'accept':
+                from .control import calibrate_accept
+                res_data = calibrate_accept(config=self.config, worker_func=lambda: result)
+                write_private(res_path, {'id': req_id, 'ok': True, 'result': res_data})
+            else:
+                from .control import run_calibrate, REMOTE_LAYOUT_DIR
+                diffs, missing, candidate = run_calibrate(self.config, worker_result=result)
+                version = candidate.get('wechat_version')
+                out = {
+                    'candidate_json': f"{REMOTE_LAYOUT_DIR}/candidate-wechat-{version}.json",
+                    'candidate_png': f"{REMOTE_LAYOUT_DIR}/candidate-wechat-{version}.png",
+                    'differences': diffs,
+                    'missing': missing,
+                }
+                write_private(res_path, {'id': req_id, 'ok': True, 'result': out})
+        except Exception as error:
+            write_private(res_path, {'id': req_id, 'ok': False, 'error': str(error)})
+        finally:
+            req_path.unlink(missing_ok=True)
+
     async def run(self):
         for sig in (signal.SIGTERM,signal.SIGINT):
             asyncio.get_running_loop().add_signal_handler(sig,self.stop.set)
@@ -436,6 +475,9 @@ class BotCoordinator:
                         # Invalid config blocks all subsequent operations until corrected; no fallback rules.
                         log_event('routing_config_failed',error_type=type(error).__name__)
                         write_private(self.root/'health.json',{'pid':os.getpid(),'state':'paused','reason':str(error)[:400],'updated_at':time.time()})
+                    try: await self.serve_calibration()
+                    except Exception as error:
+                        log_event('serve_calibration_failed',error_type=type(error).__name__,error=str(error)[:200])
                     try: await asyncio.wait_for(self.stop.wait(),self.config['poll_seconds'])
                     except asyncio.TimeoutError: pass
             finally:
