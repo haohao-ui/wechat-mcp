@@ -49,7 +49,8 @@ class MCP:
     async def tool(self, name, **arguments):
         result = await self.request('tools/call', {'name': name, 'arguments': {**self.account, **arguments}})
         if result.get('isError'):
-            raise RuntimeError(f'MCP tool failed: {name}')
+            detail = ' '.join(str(c.get('text', '')) for c in result.get('content') or [] if isinstance(c, dict))
+            raise RuntimeError(f'MCP tool failed: {name}' + (f': {detail[:300]}' if detail else ''))
         output = result.get('structuredContent') or json.loads(result['content'][0]['text'])
         if output.get('account') != self.account:
             raise RuntimeError('MCP account mismatch')

@@ -137,6 +137,15 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, 'account mismatch'):
             await client.tool('claim_events')
 
+    async def test_tool_error_keeps_the_reason(self):
+        # 2026-11-06: a get_messages failure surfaced only as "MCP tool failed: get_messages".
+        client = MCP([], ACCOUNT)
+        async def response(*_):
+            return {'isError': True, 'content': [{'type': 'text', 'text': '未找到微信主窗口'}]}
+        client.request = response
+        with self.assertRaisesRegex(RuntimeError, 'get_messages: 未找到微信主窗口'):
+            await client.tool('get_messages')
+
     def test_unsafe_spool_rejected(self):
         unsafe = self.root / 'public'
         unsafe.mkdir(mode=0o755)
