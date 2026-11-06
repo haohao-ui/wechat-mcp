@@ -289,6 +289,54 @@ class SendRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(gen_journal.read_text()).get('status'), 'not_sent')
         self.assertEqual(json.loads(prep_journal.read_text()).get('status'), 'not_sent')
 
+    async def test_gateway_simulation_replays_unless_last_delivery_not_sent(self):
+        # 模拟真实网关：相同 idempotency_key 默认重放且不 dispatch，除非上一次 delivery 为 not_sent
+        class GatewaySimulationClient:
+            def __init__(self):
+                self.dispatches = 0
+                self.outbox = {}
+                self.calls = []
+
+            async def tool(self, name, **args):
+                self.calls.append((name, args))
+                if name == 'send_message':
+                    key = args['idempotency_key']
+                    existing = self.outbox.get(key)
+                    if existing is not None and existing.get('delivery') != 'not_sent':
+                        # 上一次不是 not_sent：replay，不 dispatch 到适配器
+                        return {**existing, 'replayed': True}
+                    # 重新 dispatch 到适配器
+                    self.dispatches += 1
+                    if self.dispatches == 1:
+                        self.outbox[key] = {'status': 'unknown', 'delivery': 'not_sent', 'send_id': 'sim-1'}
+                        raise RuntimeError(
+                            'MCP tool failed: send_message: 发送尝试 sim-1 未触发发送: wechat_click 退出状态异常: Some(1)'
+                        )
+                    self.outbox[key] = {'status': 'triggered', 'delivery': 'unknown', 'send_id': 'sim-1'}
+                    return {'status': 'triggered', 'delivery': 'unknown', 'send_id': 'sim-1'}
+                if name == 'get_send_status':
+                    key = args['idempotency_key']
+                    return self.outbox.get(key, {'status': 'unknown', 'delivery': 'unknown', 'send_id': 'sim-1'})
+                return {}
+
+        self.service.advance(self.old)
+        reply = bubble('你好，我是AI客服助手。', 'outbound_visual')
+        after = frame(bubble('old'), bubble('你好，介绍一下你自己'), reply)
+
+        client = GatewaySimulationClient()
+        capture = type('Capture', (), {})()
+        capture.frame = AsyncMock(side_effect=[self.new, self.new, self.new, after, after])
+
+        with patch('scripts.wechat_bot.service.generate', self.model):
+            await self.service.cycle(client, capture)
+
+        self.assertFalse(self.service.paused)
+        # 证明即便网关对相同 idempotency_key 实施幂等去重，因为首次是 not_sent，重试依然真正重新到达了 adapter（dispatch 2 次）
+        self.assertEqual(client.dispatches, 2)
+        send_calls = [args for name, args in client.calls if name == 'send_message']
+        self.assertEqual(len(send_calls), 2)
+        self.assertEqual(send_calls[0]['idempotency_key'], send_calls[1]['idempotency_key'])
+
 
 if __name__ == '__main__':
     unittest.main()
