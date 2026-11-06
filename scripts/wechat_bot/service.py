@@ -426,10 +426,10 @@ class BotService:
         log_event('already_replied',account_id=self.account,source=source)
         self.health('watching',reason='already replied ('+source+')')
 
-    def replied_meanwhile(self, confirmed, latest, input_ids):
+    def replied_meanwhile(self, confirmed, latest, input_ids, send_key=None):
         """Pre-send check (spec §5.9): a person or an earlier send already answered this turn."""
         source=None
-        if self.history is not None and self.history.replied_after(self.contact_id,input_ids):
+        if self.history is not None and self.history.replied_after(self.contact_id,input_ids,exclude_send_key=send_key):
             source='history'
         else:
             try:
@@ -601,7 +601,7 @@ class BotService:
                 f = await capture.frame()
                 timings['pre_send_seconds'] = time.perf_counter() - b
                 self.policy.check_frame(f)
-                if self.replied_meanwhile(confirmed, f, input_ids):
+                if self.replied_meanwhile(confirmed, f, input_ids, send_key=key):
                     return 'already_replied', f
                 if self.stop.is_set():
                     return 'stopped_before_send', f

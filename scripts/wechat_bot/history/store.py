@@ -164,7 +164,7 @@ class HistoryStore:
 
     # Replies that certainly never reached the chat stay out of model context (attempting/unknown may have).
     EXCLUDED_SEND = ('superseded', 'stopped_before_send', 'skipped_by_rule', 'generated', 'preparing_media', 'generating',
-                     'already_replied')
+                     'already_replied', 'not_sent')
 
     def record_frame(self, contact_id, frame, *, batch_key=None, baseline_meta=None, pair_imported=False):
         """Append bubbles not yet recorded for this contact; one transaction with the watermark."""
@@ -293,8 +293,10 @@ class HistoryStore:
                 break
         return found[::-1]
 
-    def replied_after(self, contact_id, message_ids):
-        """True when our side (bot send that went out, or a person) wrote after the newest of these messages."""
+    def replied_after(self, contact_id, message_ids, exclude_send_key=None):
+        """True when our side (bot send that went out, or a person) wrote after the newest of these messages.
+
+        exclude_send_key: the send being retried; its own earlier attempt is not somebody else's reply."""
         if not message_ids:
             return False
         marks = ','.join('?'*len(message_ids))
@@ -304,8 +306,9 @@ class HistoryStore:
         row = self.conn.execute(
             "SELECT 1 FROM messages m LEFT JOIN sends s ON s.send_key=m.send_key "
             "WHERE m.contact_id=? AND m.seq>? AND m.direction='outbound' "
-            f"AND NOT (m.sender='bot' AND (s.status IS NULL OR s.status IN ({','.join('?'*len(self.EXCLUDED_SEND))}))) LIMIT 1",
-            (contact_id, last, *self.EXCLUDED_SEND)).fetchone()
+            f"AND NOT (m.sender='bot' AND (s.status IS NULL OR s.status IN ({','.join('?'*len(self.EXCLUDED_SEND))}))) "
+            "AND (m.send_key IS NULL OR m.send_key IS NOT ?) LIMIT 1",
+            (contact_id, last, *self.EXCLUDED_SEND, exclude_send_key)).fetchone()
         return row is not None
 
     def update_send(self, send_key, status, echo_observed=None):

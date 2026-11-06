@@ -612,7 +612,8 @@ pub async fn send_message(recipient: &str, message: &str) -> Result<(), SendErro
     let prepare_result = async {
         run_applescript(paste_script).await?;
         // A sentinel prevents a failed Copy from being mistaken for a matching clipboard.
-        clipboard::set_clipboard(&format!("wechat-readback-{}", uuid::Uuid::new_v4())).await?;
+        let sentinel = format!("wechat-readback-{}", uuid::Uuid::new_v4());
+        clipboard::set_clipboard(&sentinel).await?;
         run_applescript(
             r#"tell application "System Events"
             tell process "WeChat"
@@ -627,7 +628,10 @@ pub async fn send_message(recipient: &str, message: &str) -> Result<(), SendErro
             .await?
             .context("发送前无法读取输入框正文，未触发发送")?;
         if !same_input_text(&actual, message) {
-            bail!("发送前输入正文读回不一致，未触发发送")
+            bail!(
+                "发送前输入正文读回不一致（{}），未触发发送",
+                readback_mismatch_detail(&actual, message, &sentinel)
+            )
         }
         verify_chat_title(recipient).await?;
         Ok::<(), anyhow::Error>(())
@@ -802,6 +806,16 @@ async fn ocr_screen_region(x: f64, y: f64, width: f64, height: f64) -> Result<Ve
     .await;
     let _ = std::fs::remove_file(&tmp_file);
     result
+}
+
+/// Shape of a failed read-back for the log: lengths and containment only, never the text itself.
+fn readback_mismatch_detail(actual: &str, expected: &str, sentinel: &str) -> String {
+    let expected_len = expected.chars().count();
+    if actual == sentinel {
+        return format!("复制未取到输入框内容，应为 {expected_len} 字");
+    }
+    let contains = if actual.contains(expected) { "包含正文" } else { "不含正文" };
+    format!("读回 {} 字，应为 {expected_len} 字，{contains}", actual.chars().count())
 }
 
 fn same_input_text(actual: &str, expected: &str) -> bool {
@@ -2082,6 +2096,23 @@ mod send_safety_tests {
         ));
         assert!(!same_input_text("金额 100.00", "金额 100"));
         assert!(!same_input_text(" 正文", "正文"));
+    }
+
+    #[test]
+    fn readback_mismatch_detail_reports_shape_without_content() {
+        let sentinel = "wechat-readback-1";
+        let copy_missed = readback_mismatch_detail(sentinel, "你好呀", sentinel);
+        assert!(copy_missed.contains("复制未取到输入框内容"), "{copy_missed}");
+        assert!(!copy_missed.contains("你好呀"));
+
+        let extra = readback_mismatch_detail("旧草稿你好呀", "你好呀", sentinel);
+        assert!(extra.contains("读回 6 字，应为 3 字"), "{extra}");
+        assert!(extra.contains("包含正文"), "{extra}");
+        assert!(!extra.contains("你好呀"));
+
+        let empty = readback_mismatch_detail("", "你好呀", sentinel);
+        assert!(empty.contains("读回 0 字"), "{empty}");
+        assert!(empty.contains("不含正文"), "{empty}");
     }
 
     fn rect(x: f64, y: f64, width: f64, height: f64) -> WindowRect {

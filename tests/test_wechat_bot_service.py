@@ -787,6 +787,33 @@ class HistoryServiceTests(ServiceTests):
         record=json.loads(next(self.service.root.glob('send-*.json')).read_text())
         self.assertEqual(record['status'],'already_replied')
 
+    async def test_not_sent_retry_is_not_blocked_by_own_history_row(self):
+        # Device 2026-11-07: the retry's pre-send check saw the bot's own first attempt in history and
+        # gave up as already_replied, so every not-sent reply was dropped.
+        self.service.advance(self.old)
+        attempt=0
+        calls=self.calls
+        class FailOnce:
+            async def tool(self,name,**args):
+                nonlocal attempt
+                calls.append((name,args))
+                if name=='send_message':
+                    attempt+=1
+                    if attempt==1:
+                        raise RuntimeError('MCP tool failed: send_message: 发送尝试 s 未触发发送: 读回不一致')
+                    return {'status':'triggered','send_id':'s','delivery':'unknown'}
+                if name=='get_send_status':
+                    return ({'status':'unknown','delivery':'not_sent'} if attempt==1 else
+                            {'status':'triggered','delivery':'unknown'})
+                return {}
+        self.client=FailOnce()
+        self.service.sleep=AsyncMock()
+        after=frame(bubble('old'),bubble('你好，介绍一下你自己'),bubble('你好，我是AI客服助手。','outbound_visual'))
+        await self.cycle([self.new,self.new,self.new,after,after])
+        self.assertEqual(sum(1 for name,_ in self.calls if name=='send_message'),2)
+        record=json.loads(next(self.service.root.glob('send-*.json')).read_text())
+        self.assertEqual(record['status'],'triggered')
+
     async def test_turn_media_attached_to_history(self):
         img={'text':'[图片]','digest':'image:50:40','phash':'0'*16,'media_id':'a'*64,
              'direction':'inbound_visual','kind':'image'}
