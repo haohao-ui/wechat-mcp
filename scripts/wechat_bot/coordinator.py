@@ -11,7 +11,7 @@ import time
 from scripts.agent_bridge.codex import private_directory, write_private
 from scripts.agent_bridge.mcp import MCP
 from .capture import RemoteCapture
-from .native_capture import must_wait, ACTION_INTERRUPTED, NativeCapture, layout_unavailable
+from .native_capture import ROW_NOT_VISIBLE, must_wait, ACTION_INTERRUPTED, NativeCapture, layout_unavailable
 from .history.names import candidate_names
 from .history.store import HistoryStore
 from .routing import decision, match_entry
@@ -27,7 +27,7 @@ TITLE_MISMATCH_LIMIT=3
 RECALIBRATION_LIMIT=5
 WINDOW_UNAVAILABLE=('uncalibrated_theme','unsupported_image_geometry','wechat_not_visible',
                     'window_capture_failed','desktop_busy','vision_timeout',
-                    'layout_missing','layout_unreadable','screen_not_main')+ACTION_INTERRUPTED
+                    'layout_missing','layout_unreadable','screen_not_main',ROW_NOT_VISIBLE)+ACTION_INTERRUPTED
 
 
 def extract_mismatch_failures(error):
@@ -98,6 +98,7 @@ class BotCoordinator:
         # name -> (first detected, -row y): older arrivals first; lower rows changed earlier.
         self.pending={}
         self.layout_mismatches=0
+        self.hidden_rows=set()
         binding={k:self.config[k] for k in ('host','account_id')}
         path=self.root/'coordinator-binding.json'
         if path.exists() and json.loads(path.read_text())!=binding:
@@ -263,7 +264,9 @@ class BotCoordinator:
             if not child.paused and (layout_unavailable(error) or any(f'invalid("{code}")' in str(error) or f'invalid("{code}:' in str(error) for code in WINDOW_UNAVAILABLE)):
                 # Nothing was read or sent; the window comes back (e.g. appearance back to dark) without a restart.
                 child.health('waiting_for_wechat_window',reason=str(error)[:400])
-                if 'screen_not_main' not in str(error):
+                # Waits that leave the screen usable keep the worker (closing it ends the worker, and
+                # restarting it needs a GUI action).
+                if 'screen_not_main' not in str(error) and ROW_NOT_VISIBLE not in str(error):
                     await self.close_connection()
                 return
             child.paused=True; child.pause_reason=str(error)[:400]
@@ -370,6 +373,14 @@ class BotCoordinator:
                     self.list_state[name]={'digest':row['preview_digest'],'key':row.get('preview_key'),
                                            'time':row.get('preview_time'),'min_red':low}
             if reason is None and name in self.pending: reason='pending'
+            if row is None and name!=self.active_name and reason:
+                # Not visible in the list: it can only be opened by search. A new message lifts the chat to
+                # the top, so wait until its row shows instead (acceptance 2026-11-06: search every 16s).
+                if name not in self.hidden_rows:
+                    self.hidden_rows.add(name)
+                    log_event('session_row_not_visible',recipient=name,reason=reason)
+                continue
+            self.hidden_rows.discard(name)
             if reason:
                 due.add(name)
                 if reason in ('preview_changed','unread_badge'):

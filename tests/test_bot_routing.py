@@ -741,14 +741,17 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         await self.coordinator.sweep()
         self.assertEqual(self.visited(),['a','c','b'])
 
-    async def test_invisible_session_is_checked_only_at_idle_interval(self):
+    async def test_invisible_session_waits_until_its_row_shows(self):
+        # Acceptance 2026-11-06 (replaces "checked at idle interval"): opening a chat whose row is not
+        # visible needs search, which typed the name every 16s. A new message lifts the row to the top.
         state={}
         self.probe_capture(lambda:state)
         await self.coordinator.sweep()
-        self.assertEqual(self.visited(),['a','b'])
+        self.assertEqual(self.visited(),['a'])
+        self.coordinator.last_visit['b']=0
         await self.coordinator.sweep()
         self.assertEqual(self.visited(),['a'])
-        self.coordinator.last_visit['b']-=self.coordinator.config['idle_check_seconds']
+        state['b']={'preview_digest':'p1','red_pixels':0}
         await self.coordinator.sweep()
         self.assertEqual(self.visited(),['a','b'])
 
@@ -795,7 +798,7 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         child=self.coordinator.session(target('a'))
         self.config['allowlist']=[{'recipient':'a2','kind':'private','aliases':['a']},target('b')];self.save()
         if restart: self.coordinator=BotCoordinator(self.path)
-        self.probe_capture(lambda:{})
+        self.probe_capture(lambda:{'a2':{'preview_digest':'p','red_pixels':0}})
         for _ in range(3): await self.coordinator.sweep()
         self.assertFalse((child.root/'routing-disabled.json').exists())
         self.assertIn('a2',[c.args[0]['recipient'] for c in self.coordinator.visit.await_args_list])
