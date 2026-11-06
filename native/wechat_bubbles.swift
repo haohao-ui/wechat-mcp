@@ -12,24 +12,35 @@ struct Text { let body: String; let x: Double; let y: Double }
 
 private var layoutCache: (path: String, modified: Date?, layout: WechatLayout)?
 
+
+/// WeChat's pid from its windows (also minimised ones), else from the running-application list.
+/// A long-running worker can miss WeChat in `NSRunningApplication` (acceptance 2026-11-06).
+func wechatPID() -> Int32? {
+    let rows = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String:Any]] ?? []
+    for row in rows {
+        if let owner = row[kCGWindowOwnerName as String] as? String, ["WeChat","微信"].contains(owner),
+           let pid = row[kCGWindowOwnerPID as String] as? Int32 { return pid }
+    }
+    for id in ["com.tencent.xinWeChat", "com.tencent.WeChat"] {
+        if let app = NSRunningApplication.runningApplications(withBundleIdentifier: id).first { return app.processIdentifier }
+    }
+    return nil
+}
+
 var versionMemo = VersionMemo()
 
 func wechatAppVersion() -> String? {
     return versionMemo.resolve(lookup: {
-        for id in ["com.tencent.xinWeChat", "com.tencent.WeChat"] {
-            guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: id).first else { continue }
-            var version: String? = nil
-            if let url = app.bundleURL,
-               let info = NSDictionary(contentsOf: url.appendingPathComponent("Contents/Info.plist")),
-               let read = info["CFBundleShortVersionString"] as? String, !read.isEmpty {
-                version = read
-            } else {
-                FileHandle.standardError.write(Data("wechat version unreadable: pid \(app.processIdentifier) url \(app.bundleURL?.path ?? "nil")\n".utf8))
-            }
-            return (app.processIdentifier, version)
+        guard let pid = wechatPID() else {
+            FileHandle.standardError.write(Data("wechat process not found\n".utf8))
+            return nil
         }
-        FileHandle.standardError.write(Data("wechat not among running applications\n".utf8))
-        return nil
+        let path = executablePath(pid)
+        let version = path.flatMap(appBundlePath).flatMap(bundleShortVersion)
+        if version == nil {
+            FileHandle.standardError.write(Data("wechat version unreadable: pid \(pid) path \(path ?? "nil")\n".utf8))
+        }
+        return (pid, version)
     }, alive: { pid in kill(pid, 0) == 0 })
 }
 

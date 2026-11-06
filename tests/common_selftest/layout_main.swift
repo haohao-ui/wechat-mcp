@@ -17,6 +17,16 @@ func run() -> Int32 {
     }
 
     let command = args[1]
+    if command == "exe" {
+        print((try? jsonString(["path": executablePath(getpid()) ?? NSNull()] as [String: Any])) ?? "{}")
+        return 0
+    }
+    if command == "bundle", args.count >= 3 {
+        let bundle = appBundlePath(executable: args[2])
+        let version = bundle.flatMap(bundleShortVersion)
+        print((try? jsonString(["bundle": bundle ?? NSNull(), "version": version ?? NSNull()] as [String: Any])) ?? "{}")
+        return 0
+    }
     if command == "memo" {
         // Steps: "<pid>:<version>" (version "-" = unreadable), "none" (no WeChat found, last one alive),
         // "gone" (no WeChat found, last one exited).
