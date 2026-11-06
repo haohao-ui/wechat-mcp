@@ -449,12 +449,18 @@ public final class StatusPanelController: NSViewController {
         keyStatusLabel.stringValue = masked["api_key_status"] as? String ?? "未配置"
 
         let editable = masked["editable"] as? [String: Any] ?? [:]
-        if let allow = editable["allowlist"] {
-            allowlistField.stringValue = formatListOrString(allow)
+        if let allow = editable["allowlist"] as? [[String: Any]] {
+            allowlistField.stringValue = ConfigFormLogic.formatContactText(allow)
+        } else if let allowArr = editable["allowlist"] {
+            allowlistField.stringValue = formatListOrString(allowArr)
         }
-        if let ignore = editable["ignorelist"] {
-            ignorelistField.stringValue = formatListOrString(ignore)
+
+        if let ignore = editable["ignorelist"] as? [[String: Any]] {
+            ignorelistField.stringValue = ConfigFormLogic.formatContactText(ignore)
+        } else if let ignoreArr = editable["ignorelist"] {
+            ignorelistField.stringValue = formatListOrString(ignoreArr)
         }
+
         if let att = editable["max_attachment_mb"] {
             maxAttachmentField.stringValue = "\(att)"
         }
@@ -555,7 +561,7 @@ public final class StatusPanelController: NSViewController {
             try HostActions.restoreWechatWindow(wechatPID: nil)
             actionMessageLabel.stringValue = "微信窗口已放回标准位置 (880x640)"
         } catch {
-            actionMessageLabel.stringValue = "放回标准位置失败: \(error.localizedDescription)"
+            actionMessageLabel.stringValue = error.localizedDescription
         }
         refresh()
     }
@@ -582,36 +588,28 @@ public final class StatusPanelController: NSViewController {
         configErrorLabel.stringValue = ""
         actionMessageLabel.stringValue = "正在保存并校验配置..."
 
-        var newConfig = rawConfigDict
-        if let maxAtt = Int(maxAttachmentField.stringValue) {
-            newConfig["max_attachment_mb"] = maxAtt
-        }
-        if let maxRep = Int(maxRepliesField.stringValue) {
-            newConfig["max_replies_per_hour"] = maxRep
-        }
-        if let cd = Double(cooldownField.stringValue) {
-            newConfig["cooldown_seconds"] = cd
-        }
-        if let tq = Double(quietSecField.stringValue) {
-            newConfig["turn_quiet_seconds"] = tq
-        }
-        if let tm = Double(maxSecField.stringValue) {
-            newConfig["turn_max_seconds"] = tm
-        }
-        if let cm = Int(contextMsgField.stringValue) {
-            newConfig["context_messages"] = cm
-        }
-        newConfig["manage_window"] = (manageWindowCheck.state == .on)
-
-        // allowlist / ignorelist 逗号解析
-        let allowStr = allowlistField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !allowStr.isEmpty {
-            let items = allowStr.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            newConfig["allowlist"] = items.map { ["recipient": $0, "kind": "private"] }
-        }
-
         guard let targetURL = currentConfigURL else {
             configErrorLabel.stringValue = "配置路径无效"
+            return
+        }
+
+        var formInputs: [String: Any] = [:]
+        formInputs["allowlist"] = allowlistField.stringValue
+        formInputs["ignorelist"] = ignorelistField.stringValue
+        formInputs["max_attachment_mb"] = maxAttachmentField.stringValue
+        formInputs["max_replies_per_hour"] = maxRepliesField.stringValue
+        formInputs["cooldown_seconds"] = cooldownField.stringValue
+        formInputs["turn_quiet_seconds"] = quietSecField.stringValue
+        formInputs["turn_max_seconds"] = maxSecField.stringValue
+        formInputs["context_messages"] = contextMsgField.stringValue
+        formInputs["manage_window"] = (manageWindowCheck.state == .on)
+
+        let newConfig: [String: Any]
+        do {
+            newConfig = try ConfigFormLogic.buildUpdatedConfig(original: rawConfigDict, formInputs: formInputs)
+        } catch {
+            configErrorLabel.stringValue = "表单格式错误: \(error.localizedDescription)"
+            actionMessageLabel.stringValue = "配置保存被拒绝"
             return
         }
 

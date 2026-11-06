@@ -6,6 +6,7 @@ import ApplicationServices
 public enum ActionError: Error, LocalizedError {
     case wechatNotRunning
     case windowNotFound
+    case multipleWindows(String)
     case accessibilityFailed(String)
     case cancelled
 
@@ -13,10 +14,58 @@ public enum ActionError: Error, LocalizedError {
         switch self {
         case .wechatNotRunning: return "微信未运行"
         case .windowNotFound: return "未找到微信主窗口"
-        case .accessibilityFailed(let msg): return "辅助功能操作失败: \(msg)"
+        case .multipleWindows(let msg): return msg
+        case .accessibilityFailed(let msg): return msg
         case .cancelled: return "操作已取消"
         }
     }
+}
+
+public struct WindowCandidate: Equatable {
+    public let isMinimized: Bool
+    public let isFullScreen: Bool
+    public let frame: CGRect
+
+    public init(isMinimized: Bool, isFullScreen: Bool, frame: CGRect) {
+        self.isMinimized = isMinimized
+        self.isFullScreen = isFullScreen
+        self.frame = frame
+    }
+}
+
+public enum WindowDecisionResult: Equatable {
+    case adjust(targetOrigin: CGPoint, targetSize: CGSize)
+    case rejected(String)
+}
+
+/// 纯函数：根据窗口列表和主窗口候选决定窗口调整策略（遵循 Worker.swift:140-170）
+public func decideWindowAdjustment(
+    windows: [WindowCandidate],
+    mainWindow: WindowCandidate?,
+    displayBounds: CGRect
+) -> WindowDecisionResult {
+    let nonMinimized = windows.filter { !$0.isMinimized }
+    guard nonMinimized.count <= 1 else {
+        return .rejected("微信有多个窗口，请先关闭其他窗口")
+    }
+    guard let main = mainWindow ?? nonMinimized.first else {
+        return .rejected("未找到微信主窗口")
+    }
+    guard !main.isMinimized else {
+        return .rejected("微信主窗口处于最小化状态")
+    }
+    guard !main.isFullScreen else {
+        return .rejected("微信主窗口处于全屏状态")
+    }
+
+    let origin = main.frame.origin
+    let bounds = displayBounds
+    let targetX = max(bounds.minX, min(origin.x, bounds.maxX - 880))
+    let targetY = max(bounds.minY + 25, min(origin.y, bounds.maxY - 640))
+    return .adjust(
+        targetOrigin: CGPoint(x: targetX, y: targetY),
+        targetSize: CGSize(width: 880, height: 640)
+    )
 }
 
 public struct HostActions {
@@ -81,7 +130,7 @@ public struct HostActions {
     }
 
     /// 4. 微信窗口放回标准位置
-    /// 通过 AX 设置窗口的位置 (50, 50) 和大小 (880x640)，不点击窗口内容
+    /// 遵循 Worker.swift 规则：仅当且仅当恰有 1 个非最小化微信窗口时调整，使用 kAXMainWindowAttribute 并 clamp 到屏幕内
     public static func restoreWechatWindow(wechatPID: Int32?) throws {
         var targetPID: pid_t = 0
         if let pid = wechatPID, pid > 0 {
@@ -101,24 +150,65 @@ public struct HostActions {
             throw ActionError.windowNotFound
         }
 
-        // 找到最适合的主窗口（通常是第一个或者尺寸比较大的普通窗口）
-        guard let mainWindow = windows.first else {
-            throw ActionError.windowNotFound
+        var candidates: [(element: AXUIElement, candidate: WindowCandidate)] = []
+        for win in windows {
+            var minVal: AnyObject?
+            let isMin = (AXUIElementCopyAttributeValue(win, kAXMinimizedAttribute as CFString, &minVal) == .success) && ((minVal as? Bool) == true)
+            var fullVal: AnyObject?
+            let isFull = (AXUIElementCopyAttributeValue(win, "AXFullScreen" as CFString, &fullVal) == .success) && ((fullVal as? Bool) == true)
+            var posVal: AnyObject?
+            var sizeVal: AnyObject?
+            var pt = CGPoint.zero
+            var sz = CGSize.zero
+            if AXUIElementCopyAttributeValue(win, kAXPositionAttribute as CFString, &posVal) == .success, let pv = posVal {
+                AXValueGetValue(pv as! AXValue, .cgPoint, &pt)
+            }
+            if AXUIElementCopyAttributeValue(win, kAXSizeAttribute as CFString, &sizeVal) == .success, let sv = sizeVal {
+                AXValueGetValue(sv as! AXValue, .cgSize, &sz)
+            }
+            candidates.append((win, WindowCandidate(isMinimized: isMin, isFullScreen: isFull, frame: CGRect(origin: pt, size: sz))))
         }
 
-        // 取消最小化
-        AXUIElementSetAttributeValue(mainWindow, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
-
-        // 调整大小至 880x640
-        var size = CGSize(width: 880, height: 640)
-        if let sizeVal = AXValueCreate(.cgSize, &size) {
-            AXUIElementSetAttributeValue(mainWindow, kAXSizeAttribute as CFString, sizeVal)
+        var mainVal: AnyObject?
+        var mainElem: AXUIElement? = nil
+        if AXUIElementCopyAttributeValue(appRef, kAXMainWindowAttribute as CFString, &mainVal) == .success, let mv = mainVal {
+            mainElem = (mv as! AXUIElement)
         }
 
-        // 调整位置至屏幕可视区域内标准坐标 (如 x: 60, y: 60)
-        var position = CGPoint(x: 60, y: 60)
-        if let posVal = AXValueCreate(.cgPoint, &position) {
-            AXUIElementSetAttributeValue(mainWindow, kAXPositionAttribute as CFString, posVal)
+        let mainCandidate = candidates.first(where: { CFEqual($0.element, mainElem) })?.candidate
+
+        var displayBounds = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        let centerPt = CGPoint(
+            x: (mainCandidate?.frame.origin.x ?? 0) + (mainCandidate?.frame.width ?? 880)/2,
+            y: (mainCandidate?.frame.origin.y ?? 0) + (mainCandidate?.frame.height ?? 640)/2
+        )
+        var displayID = CGDirectDisplayID(0)
+        var count: UInt32 = 0
+        if CGGetDisplaysWithPoint(centerPt, 1, &displayID, &count) == .success, count == 1 {
+            displayBounds = CGDisplayBounds(displayID)
+        }
+
+        let decision = decideWindowAdjustment(
+            windows: candidates.map { $0.candidate },
+            mainWindow: mainCandidate,
+            displayBounds: displayBounds
+        )
+
+        switch decision {
+        case .rejected(let reason):
+            throw ActionError.multipleWindows(reason)
+        case .adjust(var targetOrigin, var wantedSize):
+            let targetWin = mainElem ?? candidates.first(where: { !$0.candidate.isMinimized })?.element
+            guard let win = targetWin else { throw ActionError.windowNotFound }
+
+            AXUIElementSetAttributeValue(win, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
+
+            if let pos = AXValueCreate(.cgPoint, &targetOrigin) {
+                AXUIElementSetAttributeValue(win, kAXPositionAttribute as CFString, pos)
+            }
+            if let sz = AXValueCreate(.cgSize, &wantedSize) {
+                AXUIElementSetAttributeValue(win, kAXSizeAttribute as CFString, sz)
+            }
         }
     }
 
