@@ -14,14 +14,13 @@ final class SocketWorker {
     private var listener: Int32 = -1
     private var child: Process?
     private var socketPath: String?
-    private var restartPolicy = RestartPolicy()
+    private var supervisor = ChildExitHandler()
     private var manualTerminatedPIDs = Set<Int32>()
-    private var _status: WorkerStatus = .stopped(reason: "服务未启动")
 
     var status: WorkerStatus {
         lock.lock()
         defer { lock.unlock() }
-        return _status
+        return supervisor.status
     }
 
     private func address(_ path: String) throws -> sockaddr_un {
@@ -106,9 +105,7 @@ final class SocketWorker {
         }
         listener = fd
         socketPath = path
-        if case .stopped = _status {
-            _status = .stopped(reason: "等待客户端连接")
-        }
+        supervisor.markReadyToAccept()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             self?.acceptClients(fd: fd, helpers: helpers, directory: directory)
         }
@@ -126,20 +123,21 @@ final class SocketWorker {
             guard getpeereid(client, &uid, &gid) == 0, uid == geteuid() else { close(client); continue }
 
             lock.lock()
-            // 如果退避冷却中，暂不接受
-            if case .restarting(let at) = _status {
+            // 如果已放弃自动重启（连续崩溃超限），拒绝连接
+            if supervisor.isGivenUp {
+                lock.unlock()
+                close(client)
+                continue
+            }
+            // 如果处于退避冷却中，暂不接受
+            if case .restarting(let at) = supervisor.status {
                 if Date() < at {
                     lock.unlock()
                     close(client)
                     continue
                 } else {
-                    _status = .stopped(reason: "等待客户端连接")
+                    supervisor.markReadyToAccept()
                 }
-            }
-            if case .stopped(let reason) = _status, reason.contains("上限") {
-                lock.unlock()
-                close(client)
-                continue
             }
             if child != nil { lock.unlock(); close(client); continue }
 
@@ -163,10 +161,9 @@ final class SocketWorker {
             do {
                 try process.run()
                 child = process
-                _status = .running(pid: process.processIdentifier)
+                supervisor.markRunning(pid: process.processIdentifier)
             } catch {
                 handle.closeFile()
-                _status = .stopped(reason: "启动桌面服务失败: \(error.localizedDescription)")
             }
             lock.unlock()
         }
@@ -177,6 +174,7 @@ final class SocketWorker {
         let status = finished.terminationStatus
         let reason = finished.terminationReason
 
+        // 无论正常还是异常退出，均保留一行 host.log 日志
         logExit(pid: pid, status: status, reason: reason)
 
         lock.lock()
@@ -188,26 +186,21 @@ final class SocketWorker {
 
         if manualTerminatedPIDs.remove(pid) != nil {
             if listener >= 0 {
-                _status = .stopped(reason: "等待客户端连接")
-            } else {
-                _status = .stopped(reason: "服务未启动")
+                supervisor.markReadyToAccept()
             }
             return
         }
 
-        let decision = restartPolicy.recordExit(at: Date())
-        switch decision {
-        case .giveUp:
-            _status = .stopped(reason: "连续崩溃达到上限（1小时内5次），已停止自动重启")
-        case .restart(let after):
+        // 仅在异常退出时调用 RestartPolicy；正常退出不计入退避并恢复等待连接
+        let decision = supervisor.handleExit(status: status, reason: reason, at: Date())
+        if let decision = decision, case .restart(let after) = decision {
             let restartAt = Date().addingTimeInterval(after)
-            _status = .restarting(at: restartAt)
             DispatchQueue.global().asyncAfter(deadline: .now() + after) { [weak self] in
                 guard let self = self else { return }
                 self.lock.lock()
                 defer { self.lock.unlock() }
-                if case .restarting(let at) = self._status, at == restartAt {
-                    self._status = .stopped(reason: "等待客户端连接")
+                if case .restarting(let at) = self.supervisor.status, at == restartAt {
+                    self.supervisor.markReadyToAccept()
                 }
             }
         }
@@ -238,16 +231,14 @@ final class SocketWorker {
 
     func restartChild() {
         lock.lock()
-        restartPolicy.reset()
+        supervisor.reset()
         let running = child
         if let pid = running?.processIdentifier {
             manualTerminatedPIDs.insert(pid)
         }
         child = nil
         if listener >= 0 {
-            _status = .stopped(reason: "等待客户端连接")
-        } else {
-            _status = .stopped(reason: "服务未启动")
+            supervisor.markReadyToAccept()
         }
         lock.unlock()
         if running?.isRunning == true {
@@ -263,7 +254,7 @@ final class SocketWorker {
         child = nil
         let path = socketPath
         socketPath = nil
-        _status = .stopped(reason: "服务已停止")
+        supervisor.reset()
         lock.unlock()
         if fd >= 0 { shutdown(fd, SHUT_RDWR); close(fd) }
         if running?.isRunning == true { running?.terminate() }

@@ -49,6 +49,48 @@ class HostSupervisorLogicTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, f"host_selftest stderr: {proc.stderr}")
         return json.loads(proc.stdout)
 
+    def run_child_exit_events(self, events):
+        if not hasattr(self, 'cli') or not self.cli.exists():
+            self.fail("host_selftest executable does not exist (TDD step 1)")
+        proc = subprocess.run(
+            [str(self.cli), 'child_exit', json.dumps({'events': events})],
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(proc.returncode, 0, f"host_selftest stderr: {proc.stderr}")
+        return json.loads(proc.stdout)
+
+    def test_clean_exits_do_not_trigger_give_up_and_abnormal_exits_give_up(self):
+        """Six clean exits within an hour leave host accepting connections; five abnormal exits give up."""
+        t0 = 10000.0
+        # 1. Six clean exits (status 0, reason exit) within an hour
+        clean_events = [
+            {'status': 0, 'reason': 'exit', 'epoch': t0 + i * 300}
+            for i in range(6)
+        ]
+        res = self.run_child_exit_events(clean_events)
+        self.assertFalse(res['is_given_up'], "Host must NOT give up on clean client disconnects")
+        self.assertTrue(res['accepting_connections'], "Host must keep accepting connections after clean disconnects")
+        self.assertEqual(res['status']['state'], 'stopped')
+        self.assertEqual(res['status']['reason'], '等待客户端连接')
+
+        # 2. Five abnormal exits (status != 0 or uncaught signal) trigger giveUp
+        abnormal_events = [
+            {'status': 1, 'reason': 'exit', 'epoch': t0 + i * 10}
+            for i in range(5)
+        ]
+        res = self.run_child_exit_events(abnormal_events)
+        self.assertTrue(res['is_given_up'], "Host must give up after 5 abnormal exits in an hour")
+        self.assertFalse(res['accepting_connections'], "Host must refuse connections once given up")
+        self.assertEqual(res['status']['state'], 'stopped')
+        self.assertIn('上限', res['status']['reason'])
+
+        # 3. reset/restartChild clears given_up
+        reset_events = abnormal_events + [{'op': 'reset'}]
+        res_reset = self.run_child_exit_events(reset_events)
+        self.assertFalse(res_reset['is_given_up'], "reset must clear given_up flag")
+        self.assertTrue(res_reset['accepting_connections'])
+
     def test_backoff_sequence(self):
         """Backoff intervals should be 5s, 15s, 60s, 60s."""
         t0 = 10000.0
