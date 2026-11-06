@@ -87,6 +87,7 @@ if [ $APP -eq 1 ]; then
     install -m 0755 "/tmp/wechat-cs-host.$TS" "$APP/Contents/MacOS/wechat-cs-host"; rm -f "/tmp/wechat-cs-host.$TS"
     cp native/bootstrap/Info.plist "$APP/Contents/Info.plist"
     cp native/bootstrap/gateway.test.json "$APP/Contents/Resources/gateway.test.json"
+    cp native/bootstrap/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
     codesign --force --sign - "$APP"'
   remote "retire WeChat RPA Test.app (quit it, keep a copy in ~/Applications/.old)" '
     OLD="$HOME/Applications/WeChat RPA Test.app"
