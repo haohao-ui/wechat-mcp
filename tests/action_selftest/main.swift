@@ -103,6 +103,9 @@ final class RecordingSink: EventSink {
     func scroll(lines: Int32, at point: CGPoint) throws {
         events.append(["type":"scroll", "lines":Int(lines), "x":Double(point.x), "y":Double(point.y), "t":clock])
     }
+    func key(_ code: CGKeyCode, down: Bool, command: Bool) throws {
+        events.append(["type":down ? "key_down" : "key_up", "code":Int(code), "cmd":command, "t":clock])
+    }
     func sleep(_ seconds: Double) { clock += max(seconds, 0) }
 }
 

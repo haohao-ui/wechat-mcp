@@ -245,6 +245,27 @@ class WechatClickCliTests(unittest.TestCase):
             # 200×40 centred on (500,400), 20% inset: x 440..560, y 388..412.
             self.assertTrue(440 - EPS <= down['x'] <= 560 + EPS and 388 - EPS <= down['y'] <= 412 + EPS, down)
 
+    def keys(self, *args):
+        run, out = self.plan('key', *args)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        return [(e['type'], e['code'], e['cmd']) for e in out['events']]
+
+    def test_key_cmd_v_presses_command_around_v(self):
+        # Device 2026-11-07: System Events keystrokes stopped reaching WeChat while posted mouse events
+        # kept working; keys now go through the same event path as clicks.
+        self.assertEqual(self.keys('cmd+v'), [('key_down', 55, True), ('key_down', 9, True),
+                                               ('key_up', 9, True), ('key_up', 55, False)])
+        self.assertEqual(self.keys('cmd+a')[1], ('key_down', 0, True))
+        self.assertEqual(self.keys('cmd+c')[1], ('key_down', 8, True))
+
+    def test_key_return_has_no_modifier(self):
+        self.assertEqual(self.keys('return'), [('key_down', 36, False), ('key_up', 36, False)])
+
+    def test_key_rejects_unknown_combo(self):
+        for combo in (['cmd+q'], ['x'], [], ['cmd+v', 'extra']):
+            run, _ = self.plan('key', *combo)
+            self.assertNotEqual(run.returncode, 0, combo)
+
     def test_invalid_arguments_fail(self):
         for args in (['500'], ['a', 'b'], ['500', '400', '-3', '10'], ['500', '400', '10']):
             run, _ = self.plan(*args)

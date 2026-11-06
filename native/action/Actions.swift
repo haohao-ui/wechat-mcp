@@ -69,6 +69,23 @@ final class Actions {
     @discardableResult
     func rightClick(_ rect: CGRect) throws -> CGPoint { try click(rect, button:.right) }
 
+    /// Key combinations the hand may press. Deliberately small: editing the input box and sending.
+    static let keyCombos: [String: (code: CGKeyCode, command: Bool)] = [
+        "cmd+v": (9, true), "cmd+a": (0, true), "cmd+c": (8, true), "return": (36, false)
+    ]
+
+    /// Presses a combination like a person: Command down first, the key held briefly, Command up last.
+    func key(_ combo: String) throws {
+        guard let spec = Actions.keyCombos[combo] else { throw ActionError.eventFailed }
+        let sink = executor.sink
+        let gap = { Double.random(in:self.profile.dwell, using:&self.rng) / 2 }
+        if spec.command { try sink.key(55, down:true, command:true); sink.sleep(gap()) }
+        try sink.key(spec.code, down:true, command:spec.command)
+        sink.sleep(Double.random(in:profile.press, using:&rng))
+        try sink.key(spec.code, down:false, command:spec.command)
+        if spec.command { sink.sleep(gap()); try sink.key(55, down:false, command:false) }
+    }
+
     /// Wheel ticks over the control. Tick size is the caller's (scroll calibration depends on it);
     /// only the pointer path and the pause between ticks (80–200 ms) are human-like.
     func scroll(in rect: CGRect, lines: Int32, ticks: Int) throws {
