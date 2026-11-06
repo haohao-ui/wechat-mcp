@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use std::hash::Hasher;
 use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
@@ -39,6 +39,9 @@ unsafe extern "C" {
 }
 
 fn get_click_binary_path() -> std::path::PathBuf {
+    if let Ok(path) = std::env::var("WECHAT_CLICK_BIN") {
+        return std::path::PathBuf::from(path);
+    }
     if let Ok(exe_path) = std::env::current_exe()
         && let Some(parent) = exe_path.parent()
     {
@@ -62,15 +65,24 @@ pub async fn mouse_click(x: f64, y: f64) -> Result<()> {
         click_bin.exists()
     );
     if click_bin.exists() {
-        let status = Command::new(&click_bin)
+        let output = Command::new(&click_bin)
             .kill_on_drop(true)
             .args([&x.to_string(), &y.to_string()])
-            .status()
+            .output()
             .await
             .context("执行 wechat_click 失败")?;
-        info!("wechat_click 执行结果: {:?}", status);
-        if !status.success() {
-            bail!("wechat_click 退出状态异常: {:?}", status.code());
+        info!("wechat_click 执行结果: {:?}", output.status);
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if stderr.is_empty() {
+                bail!("wechat_click 退出状态异常: {:?}", output.status.code());
+            } else {
+                bail!(
+                    "wechat_click 退出状态异常: {:?}: {}",
+                    output.status.code(),
+                    stderr
+                );
+            }
         }
         crate::desktop::overlay::click(x, y, true).await;
         return Ok(());
@@ -481,38 +493,111 @@ pub async fn open_chat_conversation(recipient: &str) -> Result<()> {
     search_result
 }
 
+#[derive(Debug)]
+pub enum SendError {
+    NotSent(anyhow::Error),
+    Unknown(anyhow::Error),
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SendError::NotSent(err) => {
+                let s = format!("{err:#}");
+                if s.contains("未触发发送") {
+                    write!(f, "{s}")
+                } else {
+                    write!(f, "未触发发送: {s}")
+                }
+            }
+            SendError::Unknown(err) => write!(f, "{err:#}"),
+        }
+    }
+}
+
+impl std::error::Error for SendError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            SendError::NotSent(err) => Some(err.as_ref()),
+            SendError::Unknown(err) => Some(err.as_ref()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendFault {
+    Click(Option<&'static str>),
+    AfterEnter(Option<&'static str>),
+}
+
+tokio::task_local! {
+    pub static TEST_FAULT: Option<SendFault>;
+}
+
+pub async fn with_test_send_fault<F, R>(fault: SendFault, f: F) -> R
+where
+    F: std::future::Future<Output = R>,
+{
+    TEST_FAULT.scope(Some(fault), f).await
+}
+
 /// 发送微信消息给指定联系人或群组
-pub async fn send_message(recipient: &str, message: &str) -> Result<()> {
-    if !is_wechat_running().await? {
-        bail!("微信客户端未运行，请先启动并登录微信");
+pub async fn send_message(recipient: &str, message: &str) -> Result<(), SendError> {
+    if let Some(fault) = TEST_FAULT.try_with(|f| *f).ok().flatten() {
+        match fault {
+            SendFault::Click(msg) => {
+                let err_detail = msg.unwrap_or("accessibility_permission_missing_for_executing_process");
+                return Err(SendError::NotSent(anyhow!(
+                    "wechat_click 退出状态异常: Some(1): {err_detail}"
+                )));
+            }
+            SendFault::AfterEnter(msg) => {
+                let err_detail = msg.unwrap_or("applescript execution failed after enter");
+                return Err(SendError::Unknown(anyhow!("{err_detail}")));
+            }
+        }
+    }
+
+    if !is_wechat_running().await.map_err(SendError::NotSent)? {
+        return Err(SendError::NotSent(anyhow!("微信客户端未运行，请先启动并登录微信")));
     }
 
     if recipient.trim().is_empty() {
-        bail!("接收人不能为空");
+        return Err(SendError::NotSent(anyhow!("接收人不能为空")));
     }
 
     if message.trim().is_empty() {
-        bail!("消息内容不能为空");
+        return Err(SendError::NotSent(anyhow!("消息内容不能为空")));
     }
 
     info!("准备向 [{}] 发送微信消息...", recipient);
 
     // 1. 定位并打开目标会话
-    open_chat_conversation(recipient).await?;
+    open_chat_conversation(recipient)
+        .await
+        .map_err(SendError::NotSent)?;
 
     // 2. 获取当前窗口坐标并精准点击聊天输入框中心，确保光标聚焦
-    let (win_x, win_y, _win_w, win_h) = get_wechat_window_rect().await?;
+    let (win_x, win_y, _win_w, win_h) = get_wechat_window_rect()
+        .await
+        .map_err(SendError::NotSent)?;
     let input_x = win_x + 450.0;
     let input_y = win_y + win_h - 80.0;
     info!("点击聊天输入框激活光标焦点: ({}, {})", input_x, input_y);
-    mouse_click(input_x, input_y).await?;
+    mouse_click(input_x, input_y)
+        .await
+        .map_err(SendError::NotSent)?;
     tokio::time::sleep(tokio::time::Duration::from_millis(350)).await;
 
     // 输入框点击可能改变焦点；在正文进入剪贴板之前再次核验标题。
-    verify_chat_title(recipient).await?;
+    verify_chat_title(recipient)
+        .await
+        .map_err(SendError::NotSent)?;
 
     // 3. 暂存剪贴板并将正文粘贴发送
-    let mut clipboard_guard = clipboard::ClipboardGuard::replace(message).await?;
+    let mut clipboard_guard = clipboard::ClipboardGuard::replace(message)
+        .await
+        .map_err(SendError::NotSent)?;
 
     let paste_script = r#"
         tell application "System Events"
@@ -523,7 +608,8 @@ pub async fn send_message(recipient: &str, message: &str) -> Result<()> {
             end tell
         end tell
     "#;
-    let send_result = async {
+
+    let prepare_result = async {
         run_applescript(paste_script).await?;
         // A sentinel prevents a failed Copy from being mistaken for a matching clipboard.
         clipboard::set_clipboard(&format!("wechat-readback-{}", uuid::Uuid::new_v4())).await?;
@@ -544,13 +630,20 @@ pub async fn send_message(recipient: &str, message: &str) -> Result<()> {
             bail!("发送前输入正文读回不一致，未触发发送")
         }
         verify_chat_title(recipient).await?;
-        run_applescript(
-            r#"tell application "System Events"
-            tell process "WeChat" to key code 36
-        end tell"#,
-        )
-        .await
+        Ok::<(), anyhow::Error>(())
     }
+    .await;
+
+    if let Err(err) = prepare_result {
+        let _ = clipboard_guard.restore().await;
+        return Err(SendError::NotSent(err));
+    }
+
+    let enter_result = run_applescript(
+        r#"tell application "System Events"
+        tell process "WeChat" to key code 36
+    end tell"#,
+    )
     .await;
 
     // 4. 恢复原剪贴板
@@ -558,8 +651,13 @@ pub async fn send_message(recipient: &str, message: &str) -> Result<()> {
     if let Err(error) = &restore_result {
         warn!("发送后恢复剪贴板失败，将同步兜底: {error:#}");
     }
-    send_result?;
-    restore_result?;
+
+    if let Err(err) = enter_result {
+        return Err(SendError::Unknown(err));
+    }
+    if let Err(err) = restore_result {
+        return Err(SendError::Unknown(err));
+    }
 
     info!("已触发微信发送操作，送达状态未验证");
     Ok(())
@@ -2193,5 +2291,38 @@ mod send_safety_tests {
             longest_cjk_run(noisy),
             "常德长沙拼车微信交流一群"
         ));
+    }
+
+    #[tokio::test]
+    async fn mouse_click_includes_stderr_on_failure() {
+        let tmp_dir = std::env::temp_dir();
+        let script_path = tmp_dir.join(format!("fake_click_{}.sh", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &script_path,
+            "#!/bin/sh\necho 'accessibility_permission_missing_for_executing_process' >&2\nexit 1\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        unsafe {
+            std::env::set_var("WECHAT_CLICK_BIN", &script_path);
+        }
+        let result = mouse_click(100.0, 100.0).await;
+        unsafe {
+            std::env::remove_var("WECHAT_CLICK_BIN");
+        }
+        let _ = std::fs::remove_file(&script_path);
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains(
+                "wechat_click 退出状态异常: Some(1): accessibility_permission_missing_for_executing_process"
+            ),
+            "Unexpected error message: {err_msg}"
+        );
     }
 }

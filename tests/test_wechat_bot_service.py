@@ -556,7 +556,8 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeError), patch('scripts.wechat_bot.service.MODEL_RETRIES',0):
             await self.cycle([self.new,self.new])
         self.assertTrue(self.service.paused)
-        self.assertTrue(BotService(self.config).paused)
+        # 按照新规范，启动时 generating 状态的 journal 自动关闭为 not_sent，且不会暂停会话
+        self.assertFalse(BotService(self.config).paused)
         self.assertEqual(self.calls,[])
 
     async def test_restart_accepts_cursor_saved_before_theme_profiles(self):
@@ -704,7 +705,8 @@ class HistoryServiceTests(ServiceTests):
         with self.assertRaises(RuntimeError), patch('scripts.wechat_bot.service.MODEL_RETRIES', 0):
             await self.cycle([self.new, self.new])
         self.assertTrue(self.service.paused)
-        self.assertTrue(BotService(self.config, history=self.history, contact_id=self.cid).paused)
+        # 按照新规范，启动时 generating 状态的 journal 自动关闭为 not_sent，且不会暂停会话
+        self.assertFalse(BotService(self.config, history=self.history, contact_id=self.cid).paused)
         self.assertEqual(self.calls, [])
 
     def senders(self):

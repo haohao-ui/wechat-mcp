@@ -56,7 +56,7 @@ pub fn require_customer(conn: &Connection, key: &AccountKey, customer: &str) -> 
 }
 
 pub const EVENT_SELECT: &str = "SELECT json_object('event_id',event_id,'customer_id',customer_id,'kind',kind,'source',source,'verified',json(CASE verified WHEN 1 THEN 'true' ELSE 'false' END),'occurred_at',occurred_at,'observed_at',observed_at,'payload',json(payload),'state',state,'consumer',consumer,'lease_until',lease_until) FROM events WHERE platform=?1 AND account_id=?2";
-pub const OUTBOX_SELECT: &str = "SELECT json_object('send_id',send_id,'customer_id',customer_id,'idempotency_key',idempotency_key,'recipient',recipient,'message',message,'status',status,'result',CASE WHEN result IS NULL THEN NULL ELSE json(result) END,'created_at',created_at,'updated_at',updated_at,'delivery','unknown') FROM outbox WHERE platform=?1 AND account_id=?2";
+pub const OUTBOX_SELECT: &str = "SELECT json_object('send_id',send_id,'customer_id',customer_id,'idempotency_key',idempotency_key,'recipient',recipient,'message',message,'status',status,'result',CASE WHEN result IS NULL THEN NULL ELSE json(result) END,'created_at',created_at,'updated_at',updated_at,'delivery',COALESCE(json_extract(result, '$.delivery'), 'unknown')) FROM outbox WHERE platform=?1 AND account_id=?2";
 
 impl Store {
     pub fn open(path: &Path) -> Result<Arc<Self>> {
@@ -159,6 +159,20 @@ impl Store {
             if let Some(existing) = existing {
                 if existing["recipient"] != recipient || existing["message"] != message || existing["customer_id"] != json!(customer) {
                     bail!("幂等键已用于不同的发送请求");
+                }
+                if existing["status"] == "unknown" && existing["delivery"] == "not_sent" {
+                    let time = now();
+                    tx.execute(
+                        "UPDATE outbox SET status='attempting', result=NULL, updated_at=?4 WHERE platform=?1 AND account_id=?2 AND idempotency_key=?3",
+                        params![key.platform, key.account_id, request_key, time],
+                    )?;
+                    let receipt = one(
+                        &tx,
+                        &format!("{OUTBOX_SELECT} AND idempotency_key=?3"),
+                        params![key.platform, key.account_id, request_key],
+                    )?;
+                    tx.commit()?;
+                    return Ok((true, receipt));
                 }
                 return Ok((false, existing));
             }
