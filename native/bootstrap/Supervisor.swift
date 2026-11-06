@@ -40,11 +40,12 @@ public enum WorkerStatus: Equatable {
 
 public struct ChildExitHandler {
     public private(set) var restartPolicy = RestartPolicy()
-    public private(set) var isGivenUp: Bool = false
+    public private(set) var gaveUp: Bool = false
+    public var isGivenUp: Bool { gaveUp }
     public private(set) var status: WorkerStatus = .stopped(reason: "服务未启动")
 
     public var isAcceptingConnections: Bool {
-        if isGivenUp { return false }
+        if gaveUp { return false }
         if case .restarting(let at) = status {
             return Date() >= at
         }
@@ -54,7 +55,7 @@ public struct ChildExitHandler {
     public init() {}
 
     public mutating func markReadyToAccept() {
-        if !isGivenUp {
+        if !gaveUp {
             status = .stopped(reason: "等待客户端连接")
         }
     }
@@ -77,7 +78,7 @@ public struct ChildExitHandler {
         let decision = restartPolicy.recordExit(at: date)
         switch decision {
         case .giveUp:
-            isGivenUp = true
+            gaveUp = true
             status = .stopped(reason: "连续崩溃达到上限（1小时内5次），已停止自动重启")
         case .restart(let after):
             status = .restarting(at: date.addingTimeInterval(after))
@@ -87,7 +88,7 @@ public struct ChildExitHandler {
 
     public mutating func reset() {
         restartPolicy.reset()
-        isGivenUp = false
+        gaveUp = false
         status = .stopped(reason: "等待客户端连接")
     }
 }
