@@ -7,7 +7,7 @@ import posixpath
 import zipfile
 import xml.etree.ElementTree as ET
 
-MAX_BYTES=10*1024*1024
+MAX_BYTES=50*1024*1024
 MAX_TEXT=16000
 
 
@@ -31,9 +31,10 @@ def xml(archive,name):
     return ET.fromstring(data)
 
 
-def extract(path,extension,remote=None):
+def extract(path,extension,remote=None,max_bytes=None):
+    limit = MAX_BYTES if max_bytes is None else int(max_bytes)
     path=Path(path)
-    if not path.is_file() or path.stat().st_size>MAX_BYTES:
+    if not path.is_file() or path.stat().st_size>limit:
         raise ValueError('file size limit')
     extension=extension.lower()
     if extension=='pdf':

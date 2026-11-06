@@ -877,7 +877,7 @@ class CoordinatorTests(unittest.IsolatedAsyncioTestCase):
         async def idle(t): self.coordinator.sessions[t['recipient']].had_incoming=False
         self.coordinator.visit=AsyncMock(side_effect=idle)
         await self.coordinator.sweep()
-        capture.call.assert_awaited_once_with('prepare_file',media_id='m'*64,snapshot_id='s1')
+        capture.call.assert_awaited_once_with('prepare_file',media_id='m'*64,snapshot_id='s1',max_bytes=50*1024*1024)
         self.assertFalse(h.has_pending_media())
         self.assertIsNotNone(h.conn.execute("select media_id from messages where kind='file'").fetchone()[0])
 

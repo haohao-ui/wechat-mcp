@@ -206,7 +206,7 @@ class BotCoordinator:
         capture_class=NativeCapture if self.config.get('capture_backend','native')=='native' else RemoteCapture
         self.capture=capture_class(self.config['host'],self.client,child.recipient,child.root,child.ownership,names=child.names,
                                    manage_window=self.config.get('manage_window',True),
-                                   **({'group':child.group} if capture_class is NativeCapture else {}))
+                                   **({'group':child.group,'max_bytes':self.config.get('max_attachment_mb',50)*1024*1024} if capture_class is NativeCapture else {}))
         child.health('connecting')
         await self.capture.start()
         self.active_name=child.recipient
@@ -295,9 +295,10 @@ class BotCoordinator:
             if bubble is None:
                 self.history.finish_media_job(job['message_id'],'gone','not visible')
                 return
-            info=await self.capture.call('prepare_file',media_id=bubble['media_id'],snapshot_id=frame['snapshot_id'])
+            max_bytes = getattr(self.capture, 'max_bytes', self.config.get('max_attachment_mb', 50) * 1024 * 1024)
+            info=await self.capture.call('prepare_file',media_id=bubble['media_id'],snapshot_id=frame['snapshot_id'],max_bytes=max_bytes)
             path=await self.capture.download(bubble['media_id'],kind='file')
-            self.history.attach_media(job['message_id'],path,kind='file',filename=info.get('filename'),source='original')
+            self.history.attach_media(job['message_id'],path,kind='file',filename=info.get('filename'),source='original',max_bytes=max_bytes)
             self.history.finish_media_job(job['message_id'],'done')
             log_event('history_file_archived',recipient=child.recipient)
         except ValueError as error:

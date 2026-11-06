@@ -56,11 +56,12 @@ def media_reason(error):
 
 
 class NativeCapture(RemoteCapture):
-    def __init__(self,*args,names=None,manage_window=True,group=False,**kwargs):
+    def __init__(self,*args,names=None,manage_window=True,group=False,max_bytes=50*1024*1024,**kwargs):
         super().__init__(*args,**kwargs)
         self.names=list(names or [])
         # Group titles carry a member count ("示例群 (3)") that the worker ignores when this is set.
         self.group=bool(group)
+        self.max_bytes=int(max_bytes)
         # Which text engine the worker really used (vision/rapidocr) and how often RapidOCR fell back.
         self.ocr_status=None
         # Dedicated-machine default: the worker may un-minimize, resize and move WeChat back on screen.
@@ -227,8 +228,8 @@ fi
             raise ValueError('invalid media ID')
         data=bytearray()
         while True:
-            result=await self.call('read_media',media_id=media_id,offset=len(data))
-            if result['offset']!=len(data) or not 0<=result['size']<=10*1024*1024:
+            result=await self.call('read_media',media_id=media_id,offset=len(data),max_bytes=self.max_bytes)
+            if result['offset']!=len(data) or not 0<=result['size']<=self.max_bytes:
                 raise RuntimeError('invalid media size/offset')
             chunk=base64.b64decode(result['bytes'],validate=True)
             if not chunk and not result['eof']:
@@ -268,7 +269,7 @@ fi
                 label='第%d张图片'%number
                 source='original'
                 try:
-                    await self.call('prepare_image',media_id=item['media_id'],snapshot_id=frame['snapshot_id'])
+                    await self.call('prepare_image',media_id=item['media_id'],snapshot_id=frame['snapshot_id'],max_bytes=self.max_bytes)
                     # Save-as changes the screen; later items are looked up in a fresh frame.
                     frame=await self.frame()
                     items[index+1:]=relocate(items[index+1:],frame['bubbles'])
@@ -286,7 +287,7 @@ fi
             elif kind=='file':
                 label=item.get('filename') or '文件'
                 try:
-                    info=await self.call('prepare_file',media_id=item['media_id'],snapshot_id=frame['snapshot_id'])
+                    info=await self.call('prepare_file',media_id=item['media_id'],snapshot_id=frame['snapshot_id'],max_bytes=self.max_bytes)
                     path=await self.download(item['media_id'],kind='file')
                     frame=await self.frame()
                     items[index+1:]=relocate(items[index+1:],frame['bubbles'])
@@ -299,7 +300,7 @@ fi
                     images.append({'path':path,'label':label,'source':'original','bubble':item})
                     continue
                 try:
-                    content=extract(path,info['extension'],info.get('extraction'))
+                    content=extract(path,info['extension'],info.get('extraction'),max_bytes=self.max_bytes)
                 except (ValueError,RuntimeError,OSError):
                     failed.append({'label':label,'kind':'file','reason':'extract_failed'})
                     continue

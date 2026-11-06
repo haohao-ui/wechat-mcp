@@ -128,7 +128,7 @@ func saveDebugStep(_ tag: String, _ app: AXUIElement) {
     try? lines.joined(separator:"\n").write(to:directory.appendingPathComponent(tag+".txt"),atomically:true,encoding:.utf8)
 }
 
-func saveAttachment(_ item: [String:Any], window:[String:Any], destination:URL, checkSize: Bool = true) throws {
+func saveAttachment(_ item: [String:Any], window:[String:Any], destination:URL, checkSize: Bool = true, maxBytes: Int = 50*1024*1024) throws {
     // Images carry no size text; their saved size is checked after the download instead.
     if checkSize {
         let body=item["text"] as? String ?? ""
@@ -140,7 +140,7 @@ func saveAttachment(_ item: [String:Any], window:[String:Any], destination:URL, 
            let amount=Double(body[number]) {
             let unit=body[unitRange].uppercased()
             let multiplier:Double = unit.hasPrefix("G") ? 1073741824 : unit.hasPrefix("M") ? 1048576 : unit.hasPrefix("K") ? 1024 : 1
-            guard amount*multiplier<=10*1024*1024 else { throw Failure.invalid("file_size_limit") }
+            guard amount*multiplier<=Double(maxBytes) else { throw Failure.invalid("file_size_limit") }
         }
     }
     // Right after a previous save the system save-panel service can still be reported as frontmost.

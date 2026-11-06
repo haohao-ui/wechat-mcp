@@ -286,6 +286,7 @@ class MediaTests(StoreBase):
         self.assertEqual(linked, mid)
 
     def test_oversized_media_rejected(self):
+        self.store.MAX_MEDIA = 10*1024*1024
         [row] = self.store.record_frame(self.c, fr(bub('big.pdf', kind='file')))
         src = self.tmp/'big.pdf'
         src.write_bytes(b'0'*(10*1024*1024+1))

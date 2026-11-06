@@ -482,6 +482,13 @@ final class CaptureWorker {
             }
         }
         if operation == "prepare_file" {
+            let maxBytes: Int
+            if let raw = params["max_bytes"] {
+                guard let val = raw as? Int, val > 0 && val <= 200*1024*1024 else { throw Failure.invalid("invalid_max_bytes") }
+                maxBytes = val
+            } else {
+                maxBytes = 50*1024*1024
+            }
             let window=try readyWindow(manage:manage).window
             try screenGate(window)
             guard let id=params["media_id"] as? String,let snapshot=params["snapshot_id"] as? String else { throw Failure.invalid("missing_file_identity") }
@@ -498,18 +505,25 @@ final class CaptureWorker {
             if !FileManager.default.fileExists(atPath:destination.path) {
                 guard !fileAttempts.contains(id) else { throw Failure.invalid("previous_download_outcome_unknown") }
                 fileAttempts.insert(id)
-                try closingDialogsOnFailure { try saveAttachment(item,window:cachedWindow,destination:destination) }
+                try closingDialogsOnFailure { try saveAttachment(item,window:cachedWindow,destination:destination,maxBytes:maxBytes) }
             }
             try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:destination.path)
             try checkPrivate(destination,type:.typeRegular,mode:0o600)
             let size=(try FileManager.default.attributesOfItem(atPath:destination.path)[.size] as? NSNumber)?.intValue ?? 0
-            guard size>0 && size<=10*1024*1024 else { throw Failure.invalid("file_size_limit") }
+            guard size>0 && size<=maxBytes else { throw Failure.invalid("file_size_limit") }
             files[id]=destination
             var result:[String:Any]=["media_id":id,"filename":name,"extension":ext,"size":size,"original_bytes":true]
             if ext=="pdf" { result["extraction"]=try pdfContents(destination) }
             return result
         }
         if operation == "prepare_image" {
+            let maxBytes: Int
+            if let raw = params["max_bytes"] {
+                guard let val = raw as? Int, val > 0 && val <= 200*1024*1024 else { throw Failure.invalid("invalid_max_bytes") }
+                maxBytes = val
+            } else {
+                maxBytes = 50*1024*1024
+            }
             let window=try readyWindow(manage:manage).window
             try screenGate(window)
             guard let id=params["media_id"] as? String,let snapshot=params["snapshot_id"] as? String else { throw Failure.invalid("missing_image_identity") }
@@ -525,7 +539,7 @@ final class CaptureWorker {
             if !FileManager.default.fileExists(atPath:saved.path) {
                 guard !fileAttempts.contains(id) else { throw Failure.invalid("previous_download_outcome_unknown") }
                 fileAttempts.insert(id)
-                try closingDialogsOnFailure { try saveAttachment(item,window:cachedWindow,destination:saved,checkSize:false) }
+                try closingDialogsOnFailure { try saveAttachment(item,window:cachedWindow,destination:saved,checkSize:false,maxBytes:maxBytes) }
             }
             let head=try Data(contentsOf:saved).prefix(8)
             let ext = head.starts(with:[0x89,0x50,0x4E,0x47]) ? "png" : head.starts(with:[0xFF,0xD8,0xFF]) ? "jpg" : ""
@@ -538,12 +552,19 @@ final class CaptureWorker {
             try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:final.path)
             try checkPrivate(final,type:.typeRegular,mode:0o600)
             let size=(try FileManager.default.attributesOfItem(atPath:final.path)[.size] as? NSNumber)?.intValue ?? 0
-            guard size>0 && size<=10*1024*1024 else { throw Failure.invalid("media_too_large") }
+            guard size>0 && size<=maxBytes else { throw Failure.invalid("media_too_large") }
             files[id]=final
             payloads.removeValue(forKey:id)  // a cached thumbnail must not be served as the original
             return ["media_id":id,"extension":ext,"size":size,"original_bytes":true]
         }
         if operation == "read_media" {
+            let maxBytes: Int
+            if let raw = params["max_bytes"] {
+                guard let val = raw as? Int, val > 0 && val <= 200*1024*1024 else { throw Failure.invalid("invalid_max_bytes") }
+                maxBytes = val
+            } else {
+                maxBytes = 50*1024*1024
+            }
             guard let id=params["media_id"] as? String,id.count==64,id.allSatisfy({ $0.isHexDigit }),
                   let offset=params["offset"] as? Int, offset>=0 else { throw Failure.invalid("invalid_media_request") }
             // The same current snapshot must still belong to the allowlisted contact.
@@ -552,12 +573,22 @@ final class CaptureWorker {
             try checkPrivate(file,type:.typeRegular,mode:0o600)
             if payloads[id]==nil {
                 let bytes=try Data(contentsOf:file)
-                guard bytes.count<=10*1024*1024 else { throw Failure.invalid("media_too_large") }
-                if payloads.count>=8,let oldest=payloads.keys.first { payloads.removeValue(forKey:oldest) }
+                guard bytes.count<=maxBytes else { throw Failure.invalid("media_too_large") }
+                let maxTotal = 2 * maxBytes
+                var totalBytes = payloads.values.reduce(0) { $0 + $1.0.count }
+                while payloads.count >= 8 || (!payloads.isEmpty && totalBytes + bytes.count > maxTotal) {
+                    if let oldest = payloads.keys.first {
+                        if let removed = payloads.removeValue(forKey: oldest) {
+                            totalBytes -= removed.0.count
+                        }
+                    } else {
+                        break
+                    }
+                }
                 payloads[id]=(bytes,SHA256.hash(data:bytes).map { String(format:"%02x",$0) }.joined())
             }
             let (data,digest)=payloads[id]!
-            guard data.count<=10*1024*1024,offset<=data.count else { throw Failure.invalid("media_too_large_or_offset_invalid") }
+            guard data.count<=maxBytes,offset<=data.count else { throw Failure.invalid("media_too_large_or_offset_invalid") }
             let chunk=data.subdata(in:offset..<min(offset+65536,data.count))
             return ["bytes":chunk.base64EncodedString(),"offset":offset,"size":data.count,"extension":file.pathExtension,"eof":offset+chunk.count==data.count,
                     "sha256":digest]
