@@ -828,4 +828,222 @@ mod tests {
         )
         .await;
     }
+
+    struct SequenceAdapter {
+        account: AccountDescriptor,
+        calls: AtomicUsize,
+        responses: std::sync::Mutex<Vec<Result<Value, String>>>,
+    }
+
+    impl SequenceAdapter {
+        fn new(platform: &str, account_id: &str, responses: Vec<Result<Value, String>>) -> Arc<Self> {
+            Arc::new(Self {
+                account: AccountDescriptor {
+                    key: AccountKey {
+                        platform: platform.into(),
+                        account_id: account_id.into(),
+                    },
+                    adapter: "test".into(),
+                    binding_id: "test:seq".into(),
+                    identity_verified: true,
+                    capabilities: Capabilities {
+                        send_text: true,
+                        visible_conversations: true,
+                        visible_messages: true,
+                        full_history: false,
+                        delivery_receipts: false,
+                        background_events: false,
+                        background_observations: true,
+                        source: "test".into(),
+                    },
+                },
+                calls: AtomicUsize::new(0),
+                responses: std::sync::Mutex::new(responses),
+            })
+        }
+    }
+
+    impl MessageAdapter for SequenceAdapter {
+        fn account(&self) -> &AccountDescriptor {
+            &self.account
+        }
+        fn execute(&self, _: Operation) -> AdapterFuture<'_> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let mut guard = self.responses.lock().unwrap();
+                if guard.is_empty() {
+                    Ok(json!({"account": self.account.key, "data": {"status": "triggered"}}))
+                } else {
+                    let resp = guard.remove(0);
+                    match resp {
+                        Ok(v) => Ok(v),
+                        Err(err_msg) => {
+                            if err_msg.contains("未触发发送") {
+                                Err(crate::wechat::SendError::NotSent(anyhow::anyhow!("{err_msg}")).into())
+                            } else {
+                                Err(anyhow::anyhow!("{err_msg}"))
+                            }
+                        }
+                    }
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn not_sent_then_same_key_again_dispatches_twice() {
+        let store = Store::memory();
+        let adapter = SequenceAdapter::new(
+            "wechat",
+            "work",
+            vec![
+                Err("未触发发送: click failed".into()),
+                Ok(json!({"account": {"platform": "wechat", "account_id": "work"}, "data": {"status": "triggered"}})),
+            ],
+        );
+        let mut accounts = AccountRegistry::default();
+        accounts.register(adapter.clone()).unwrap();
+        let gateway = Gateway {
+            accounts,
+            store,
+            listeners: Listeners::default(),
+            legacy_tools: false,
+        };
+
+        // 第 1 次发送：失败，记录 not_sent
+        let resp1 = gateway
+            .call(
+                "send_message",
+                json!({
+                    "platform": "wechat",
+                    "account_id": "work",
+                    "recipient": "user1",
+                    "message": "hello",
+                    "idempotency_key": "key-retry-dispatch"
+                }),
+            )
+            .await;
+        assert_eq!(resp1["isError"], true);
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+
+        // 第 2 次相同 key：重新 dispatch，调用 adapter 第二次
+        let resp2 = gateway
+            .call(
+                "send_message",
+                json!({
+                    "platform": "wechat",
+                    "account_id": "work",
+                    "recipient": "user1",
+                    "message": "hello",
+                    "idempotency_key": "key-retry-dispatch"
+                }),
+            )
+            .await;
+        assert_eq!(resp2["isError"], false);
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 2);
+        assert_ne!(resp2["structuredContent"]["data"]["replayed"], true);
+        assert_eq!(resp2["structuredContent"]["data"]["status"], "triggered");
+    }
+
+    #[tokio::test]
+    async fn unknown_without_not_sent_delivery_then_same_key_again_replays() {
+        let store = Store::memory();
+        let adapter = SequenceAdapter::new(
+            "wechat",
+            "work",
+            vec![Err("timeout error".into())],
+        );
+        let mut accounts = AccountRegistry::default();
+        accounts.register(adapter.clone()).unwrap();
+        let gateway = Gateway {
+            accounts,
+            store,
+            listeners: Listeners::default(),
+            legacy_tools: false,
+        };
+
+        // 第 1 次发送：失败，记录 unknown (delivery 不是 not_sent)
+        let resp1 = gateway
+            .call(
+                "send_message",
+                json!({
+                    "platform": "wechat",
+                    "account_id": "work",
+                    "recipient": "user1",
+                    "message": "hello",
+                    "idempotency_key": "key-unknown-replay"
+                }),
+            )
+            .await;
+        assert_eq!(resp1["isError"], true);
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+
+        // 第 2 次相同 key：replay，不再调用 adapter
+        let resp2 = gateway
+            .call(
+                "send_message",
+                json!({
+                    "platform": "wechat",
+                    "account_id": "work",
+                    "recipient": "user1",
+                    "message": "hello",
+                    "idempotency_key": "key-unknown-replay"
+                }),
+            )
+            .await;
+        assert_eq!(resp2["isError"], false);
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(resp2["structuredContent"]["data"]["replayed"], true);
+    }
+
+    #[tokio::test]
+    async fn triggered_then_same_key_again_replays() {
+        let store = Store::memory();
+        let adapter = SequenceAdapter::new(
+            "wechat",
+            "work",
+            vec![Ok(json!({"account": {"platform": "wechat", "account_id": "work"}, "data": {"status": "triggered"}}))],
+        );
+        let mut accounts = AccountRegistry::default();
+        accounts.register(adapter.clone()).unwrap();
+        let gateway = Gateway {
+            accounts,
+            store,
+            listeners: Listeners::default(),
+            legacy_tools: false,
+        };
+
+        // 第 1 次发送：成功 triggered
+        let resp1 = gateway
+            .call(
+                "send_message",
+                json!({
+                    "platform": "wechat",
+                    "account_id": "work",
+                    "recipient": "user1",
+                    "message": "hello",
+                    "idempotency_key": "key-triggered-replay"
+                }),
+            )
+            .await;
+        assert_eq!(resp1["isError"], false);
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+
+        // 第 2 次相同 key：replay，不再调用 adapter
+        let resp2 = gateway
+            .call(
+                "send_message",
+                json!({
+                    "platform": "wechat",
+                    "account_id": "work",
+                    "recipient": "user1",
+                    "message": "hello",
+                    "idempotency_key": "key-triggered-replay"
+                }),
+            )
+            .await;
+        assert_eq!(resp2["isError"], false);
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(resp2["structuredContent"]["data"]["replayed"], true);
+    }
 }

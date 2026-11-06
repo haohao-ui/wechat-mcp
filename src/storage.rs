@@ -160,6 +160,20 @@ impl Store {
                 if existing["recipient"] != recipient || existing["message"] != message || existing["customer_id"] != json!(customer) {
                     bail!("幂等键已用于不同的发送请求");
                 }
+                if existing["status"] == "unknown" && existing["delivery"] == "not_sent" {
+                    let time = now();
+                    tx.execute(
+                        "UPDATE outbox SET status='attempting', result=NULL, updated_at=?4 WHERE platform=?1 AND account_id=?2 AND idempotency_key=?3",
+                        params![key.platform, key.account_id, request_key, time],
+                    )?;
+                    let receipt = one(
+                        &tx,
+                        &format!("{OUTBOX_SELECT} AND idempotency_key=?3"),
+                        params![key.platform, key.account_id, request_key],
+                    )?;
+                    tx.commit()?;
+                    return Ok((true, receipt));
+                }
                 return Ok((false, existing));
             }
             let id = new_id(); let time = now();
