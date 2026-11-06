@@ -272,6 +272,119 @@ class ScreenIdentificationTests(unittest.TestCase):
             "on_screen": True
         })
 
+    def test_blocking_menu(self):
+        payload = {
+            "windows": [
+                {
+                    "owner": "WeChat",
+                    "pid": 1234,
+                    "layer": 0,
+                    "bounds": {"x": 100.0, "y": 80.0, "w": 880.0, "h": 640.0},
+                    "on_screen": True
+                },
+                {
+                    "owner": "WeChat",
+                    "pid": 1234,
+                    "layer": 101,
+                    "bounds": {"x": 350.0, "y": 200.0, "w": 160.0, "h": 220.0},
+                    "on_screen": True
+                }
+            ],
+            "wechat_pid": 1234,
+            "main": [880.0, 640.0],
+            "focused_identifier": None
+        }
+        res = self.run_cli("blocking", payload)
+        self.assertTrue(res.get("blocked"))
+        self.assertEqual(res.get("screen"), "context_menu")
+
+    def test_blocking_image_viewer(self):
+        payload = {
+            "windows": [
+                {
+                    "owner": "WeChat",
+                    "pid": 1234,
+                    "layer": 0,
+                    "bounds": {"x": 100.0, "y": 80.0, "w": 880.0, "h": 640.0},
+                    "on_screen": True
+                },
+                {
+                    "owner": "WeChat",
+                    "pid": 1234,
+                    "layer": 0,
+                    "bounds": {"x": 200.0, "y": 150.0, "w": 1024.0, "h": 768.0},
+                    "on_screen": True
+                }
+            ],
+            "wechat_pid": 1234,
+            "main": [880.0, 640.0],
+            "focused_identifier": None
+        }
+        res = self.run_cli("blocking", payload)
+        self.assertTrue(res.get("blocked"))
+        self.assertEqual(res.get("screen"), "other_wechat_window")
+
+    def test_blocking_save_panel_focus(self):
+        payload = {
+            "windows": [
+                {
+                    "owner": "WeChat",
+                    "pid": 1234,
+                    "layer": 0,
+                    "bounds": {"x": 100.0, "y": 80.0, "w": 880.0, "h": 640.0},
+                    "on_screen": True
+                }
+            ],
+            "wechat_pid": 1234,
+            "main": [880.0, 640.0],
+            "focused_identifier": "saveAsNameTextField"
+        }
+        res = self.run_cli("blocking", payload)
+        self.assertTrue(res.get("blocked"))
+        self.assertEqual(res.get("screen"), "save_panel")
+
+    def test_other_app_frontmost_not_blocking(self):
+        payload = {
+            "windows": [
+                {
+                    "owner": "WeChat",
+                    "pid": 1234,
+                    "layer": 0,
+                    "bounds": {"x": 100.0, "y": 80.0, "w": 880.0, "h": 640.0},
+                    "on_screen": True
+                }
+            ],
+            "focus": {
+                "frontmost_bundle": "com.apple.finder",
+                "focused_identifier": None
+            },
+            "wechat_pid": 1234,
+            "main": [880.0, 640.0],
+            "focused_identifier": None
+        }
+        res = self.run_cli("blocking", payload)
+        self.assertFalse(res.get("blocked"))
+        self.assertIsNone(res.get("screen"))
+
+    def test_main_only_not_blocking(self):
+        payload = {
+            "windows": [
+                {
+                    "owner": "WeChat",
+                    "pid": 1234,
+                    "layer": 0,
+                    "bounds": {"x": 100.0, "y": 80.0, "w": 880.0, "h": 640.0},
+                    "on_screen": True
+                }
+            ],
+            "wechat_pid": 1234,
+            "main": [880.0, 640.0],
+            "focused_identifier": None
+        }
+        res = self.run_cli("blocking", payload)
+        self.assertFalse(res.get("blocked"))
+        self.assertIsNone(res.get("screen"))
+
 
 if __name__ == '__main__':
     unittest.main()
