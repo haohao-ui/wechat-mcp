@@ -124,7 +124,7 @@ final class SocketWorker {
 
             lock.lock()
             // 如果已放弃自动重启（连续崩溃超限），拒绝连接
-            if supervisor.isGivenUp {
+            if supervisor.gaveUp {
                 lock.unlock()
                 close(client)
                 continue
