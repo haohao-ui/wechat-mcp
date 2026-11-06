@@ -17,6 +17,10 @@ func run() -> Int32 {
     }
 
     let command = args[1]
+    if command == "filecard", args.count >= 4 {
+        print((try? jsonString(["identity": fileCardIdentity(filename: args[2], size: args[3])])) ?? "{}")
+        return 0
+    }
     if command == "exe" {
         print((try? jsonString(["path": executablePath(getpid()) ?? NSNull()] as [String: Any])) ?? "{}")
         return 0

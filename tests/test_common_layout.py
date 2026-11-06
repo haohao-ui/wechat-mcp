@@ -146,6 +146,15 @@ class CommonLayoutTests(unittest.TestCase):
         res = self.run_cli('bundle', '/usr/bin/true')
         self.assertEqual(res, {'bundle': None, 'version': None})
 
+    def test_file_card_identity_ignores_ocr_spacing(self):
+        # Acceptance 2026-11-06: "2024最新.xls" read as "2024 最新.xls" after the status line changed;
+        # the card looked new, continuity broke, and the bot scrolled 30 pages for nothing.
+        a = self.run_cli('filecard', '耳机报价参数2024最新.xls', '27.4M')
+        b = self.run_cli('filecard', '耳机报价参数2024 最新.xls', '27.4 M')
+        c = self.run_cli('filecard', '耳机报价参数2025最新.xls', '27.4M')
+        self.assertEqual(a, b)
+        self.assertNotEqual(a, c)
+
     def test_version_fallback_picks_nearest_lower(self):
         with tempfile.TemporaryDirectory() as tdir:
             p = Path(tdir)

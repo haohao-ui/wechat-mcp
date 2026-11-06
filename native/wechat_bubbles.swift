@@ -534,7 +534,7 @@ func analyzeFrame(_ captured: CGImage, window: [String:Any], mediaRoot: URL? = n
             item["filename"]=names[0]
             // Identity is filename + size token only: the status text (上传中 -> done) changes in place.
             let size=sizeRange.map { String(body[$0]).replacingOccurrences(of:" ",with:"") } ?? ""
-            let identity="file:"+names[0]+":"+size
+            let identity=fileCardIdentity(filename:names[0],size:size)
             item["transfer_pending"]=["上传中","下载中","接收中","发送中"].contains { body.contains($0) }
             item["digest"]=SHA256.hash(data:Data(identity.utf8)).map { String(format:"%02x",$0) }.joined()
         }
