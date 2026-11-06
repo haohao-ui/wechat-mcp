@@ -188,6 +188,18 @@ class RecalibrationTests(unittest.IsolatedAsyncioTestCase):
         await self.coordinator.visit(target('a'))
         self.coordinator.close_connection.assert_not_called()
 
+    async def test_session_probe_mismatch_keeps_worker_connection(self):
+        # Stage C drill 2026-11-06: the session-list probe closed the connection on every mismatch,
+        # the worker exited, and each retry relaunched it through MCP navigation.
+        from scripts.wechat_bot.native_capture import NativeCapture
+        capture = MagicMock(spec=NativeCapture)
+        capture.process = object()
+        capture.sessions = AsyncMock(side_effect=ValueError('private visual operation failed: invalid("layout_mismatch:list_border")'))
+        self.coordinator.capture = capture
+        self.coordinator.close_connection = AsyncMock()
+        await self.coordinator.due_sessions(['a'])
+        self.coordinator.close_connection.assert_not_called()
+
     async def test_serve_calibration_writes_candidate_via_live_capture(self):
         worker_result = {
             'wechat_version': '4.1.15',

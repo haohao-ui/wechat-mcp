@@ -90,8 +90,21 @@ fi
             self.last_switch=await self.call('open_session',target=self.recipient,target_names=self.names or [self.recipient])
             return
         except (ValueError,RuntimeError,ConnectionError,asyncio.TimeoutError) as error:
-            await self.close_transport()
+            # The worker exits when its one connection closes and only a GUI action can start it again:
+            # a wait (layout, screen, person moving the mouse) keeps the live connection.
             if must_wait(error): raise
+            await self.close_transport()
+        try:
+            # Quiet relaunch (Stage C drill 2026-11-06): get_messages without a recipient only focuses
+            # WeChat (Cmd+1, no click, no typing) and starts the worker in its TCC context; the
+            # map-checked row click then opens the chat. Search navigation is the last resort.
+            await self.client.tool('get_messages')
+            await self.connect()
+            self.last_switch=await self.call('open_session',target=self.recipient,target_names=self.names or [self.recipient])
+            return
+        except (ValueError,RuntimeError,ConnectionError,asyncio.TimeoutError) as error:
+            if must_wait(error): raise
+            await self.close_transport()
         # This one admitted GUI operation focuses the allowed chat and starts the helper in its TCC context.
         await self.navigate(self.names)
         await self.connect()
