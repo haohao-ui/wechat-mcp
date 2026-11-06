@@ -89,6 +89,80 @@ func run() -> Int32 {
                 return 0
             }
         }
+#if HOST_APP_T3
+        if command == "status" {
+            let decoder = JSONDecoder()
+            let statusInput = try decoder.decode(StatusInput.self, from: jsonData)
+            let items = evaluate(statusInput)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let outputData = try encoder.encode(items)
+            if let outputStr = String(data: outputData, encoding: .utf8) {
+                print(outputStr)
+                return 0
+            }
+        } else if command == "config" {
+            let op = dict["op"] as? String ?? ""
+            if op == "mask_config" {
+                let rawConfig = dict["config"] as? [String: Any] ?? [:]
+                let masked = ConfigFormLogic.maskConfig(rawConfig)
+                let outputData = try JSONSerialization.data(withJSONObject: masked, options: [.sortedKeys])
+                if let outputStr = String(data: outputData, encoding: .utf8) {
+                    print(outputStr)
+                    return 0
+                }
+            } else if op == "save_config" {
+                let targetPathStr = dict["target_path"] as? String ?? ""
+                let targetURL = URL(fileURLWithPath: targetPathStr)
+                let newConfig = dict["new_config"] as? [String: Any] ?? [:]
+                let newConfigData = try JSONSerialization.data(withJSONObject: newConfig, options: [.prettyPrinted])
+
+                let simCheck = dict["simulated_check_result"] as? [String: Any] ?? [:]
+                let simOk = simCheck["ok"] as? Bool ?? true
+                let simErr = simCheck["error"] as? String
+
+                var didReload = false
+                do {
+                    try ConfigFormLogic.saveConfig(
+                        targetPath: targetURL,
+                        newConfigData: newConfigData,
+                        checker: { _ in
+                            return (simOk, simErr)
+                        },
+                        reloader: {
+                            didReload = true
+                        }
+                    )
+                    let resp: [String: Any] = ["ok": true, "reloaded": didReload]
+                    let out = try JSONSerialization.data(withJSONObject: resp, options: [.sortedKeys])
+                    if let s = String(data: out, encoding: .utf8) {
+                        print(s)
+                        return 0
+                    }
+                } catch {
+                    let resp: [String: Any] = ["ok": false, "error": error.localizedDescription]
+                    let out = try JSONSerialization.data(withJSONObject: resp, options: [.sortedKeys])
+                    if let s = String(data: out, encoding: .utf8) {
+                        print(s)
+                        return 0
+                    }
+                }
+            }
+        } else if command == "diagnostics" {
+            let decoder = JSONDecoder()
+            let statusInputData = try JSONSerialization.data(withJSONObject: dict["status_input"] as? [String: Any] ?? [:], options: [])
+            let statusInput = try decoder.decode(StatusInput.self, from: statusInputData)
+            let version = dict["app_version"] as? String ?? "1.0.0"
+            let items = evaluate(statusInput)
+            let text = generateDiagnostics(items: items, appVersion: version)
+            let resp: [String: Any] = ["text": text]
+            let out = try JSONSerialization.data(withJSONObject: resp, options: [])
+            if let s = String(data: out, encoding: .utf8) {
+                print(s)
+                return 0
+            }
+        }
+#endif
 
         fputs("error: unknown command \(command)\n", stderr)
         return 1
