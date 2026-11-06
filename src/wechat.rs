@@ -73,6 +73,120 @@ async fn key_press_with(click_bin: &std::path::Path, combo: &str) -> Result<()> 
     Ok(())
 }
 
+#[derive(Debug)]
+pub enum InputError {
+    Mismatch(String),
+    NotFront,
+    Failed(anyhow::Error),
+}
+
+impl std::fmt::Display for InputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InputError::Mismatch(detail) => {
+                write!(f, "发送前输入正文读回不一致（{detail}）")
+            }
+            InputError::NotFront => write!(f, "前台不是微信"),
+            InputError::Failed(err) => write!(f, "{err:#}"),
+        }
+    }
+}
+
+impl std::error::Error for InputError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            InputError::Mismatch(_) | InputError::NotFront => None,
+            InputError::Failed(err) => Some(err.as_ref()),
+        }
+    }
+}
+
+impl From<anyhow::Error> for InputError {
+    fn from(err: anyhow::Error) -> Self {
+        InputError::Failed(err)
+    }
+}
+
+pub async fn clear_input() -> Result<()> {
+    clear_input_with(&get_click_binary_path()).await
+}
+
+pub async fn clear_input_with(click_bin: &std::path::Path) -> Result<()> {
+    let output = Command::new(click_bin)
+        .kill_on_drop(true)
+        .arg("clear-input")
+        .output()
+        .await
+        .context("执行 wechat_click clear-input 失败")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!(
+            "wechat_click clear-input 退出状态异常: {:?}: {stderr}",
+            output.status.code()
+        );
+    }
+    Ok(())
+}
+
+pub async fn input_text(x: f64, y: f64, text: &str) -> Result<(), InputError> {
+    input_text_with(&get_click_binary_path(), x, y, text).await
+}
+
+pub async fn input_text_with(
+    click_bin: &std::path::Path,
+    x: f64,
+    y: f64,
+    text: &str,
+) -> Result<(), InputError> {
+    let mut child = Command::new(click_bin)
+        .kill_on_drop(true)
+        .args(["input-text", &format!("{:.0}", x), &format!("{:.0}", y)])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| InputError::Failed(anyhow::Error::new(e).context("启动 wechat_click input-text 失败")))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        tokio::io::AsyncWriteExt::write_all(&mut stdin, text.as_bytes())
+            .await
+            .map_err(|e| InputError::Failed(anyhow::Error::new(e).context("向 wechat_click 写入 stdin 失败")))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| InputError::Failed(anyhow::Error::new(e).context("等待 wechat_click 执行完成失败")))?;
+
+    let status = output.status;
+    let code = status.code().unwrap_or(-1);
+
+    match code {
+        0 => Ok(()),
+        3 => Err(InputError::NotFront),
+        4 => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let detail = stderr
+                .lines()
+                .find_map(|line| {
+                    line.trim()
+                        .strip_prefix("wechat_click: input_readback_mismatch:")
+                })
+                .map(|s| s.trim())
+                .unwrap_or_else(|| stderr.trim())
+                .to_string();
+            Err(InputError::Mismatch(detail))
+        }
+        _ => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            Err(InputError::Failed(anyhow!(
+                "wechat_click input-text 退出状态异常: {:?}: {stderr}",
+                status.code()
+            )))
+        }
+    }
+}
+
 pub async fn mouse_click(x: f64, y: f64) -> Result<()> {
     crate::desktop::overlay::click(x, y, false).await;
     let click_bin = get_click_binary_path();
@@ -188,25 +302,30 @@ pub async fn get_wechat_window_pos() -> Result<(f64, f64)> {
     Ok((x, y))
 }
 
-/// 前台激活微信；仅在窗口过小或超出所有屏幕范围时调整窗口
-pub async fn focus_wechat() -> Result<(f64, f64, f64, f64)> {
-    if !is_wechat_running().await? {
-        bail!("微信客户端未运行，请先启动并登录微信");
-    }
-
+/// 前台激活微信窗口（不含任何按键）
+pub async fn activate_wechat() -> Result<()> {
     let script = r#"
         tell application "WeChat" to activate
         delay 0.15
         tell application "System Events"
             tell process "WeChat"
                 set frontmost to true
-                keystroke "1" using {command down}
-                delay 0.1
             end tell
         end tell
     "#;
 
     run_applescript(script).await?;
+    Ok(())
+}
+
+/// 前台激活微信；仅在窗口过小或超出所有屏幕范围时调整窗口
+pub async fn focus_wechat() -> Result<(f64, f64, f64, f64)> {
+    if !is_wechat_running().await? {
+        bail!("微信客户端未运行，请先启动并登录微信");
+    }
+
+    activate_wechat().await?;
+    key_press("cmd+1").await?;
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     let window = query_wechat_window().await?;
     let screens: Vec<WindowRect> = serde_json::from_str(&run_window_tool(&["--screens"]).await?)
@@ -497,14 +616,7 @@ pub async fn open_chat_conversation(recipient: &str) -> Result<()> {
     info!("[{}] 不在最近会话前排，启动全局搜索定位...", recipient);
     let search_result = navigation::open_legacy_search(recipient, &window).await;
     if search_result.is_err() {
-        let close_result = run_applescript(
-            r#"
-            tell application "System Events"
-                tell process "WeChat" to key code 53
-            end tell
-        "#,
-        )
-        .await;
+        let close_result = key_press("escape").await;
         if let Err(error) = close_result {
             warn!("关闭微信搜索框失败: {error:#}");
         }
@@ -596,79 +708,36 @@ pub async fn send_message(recipient: &str, message: &str) -> Result<(), SendErro
         .await
         .map_err(SendError::NotSent)?;
 
-    // 2. 获取当前窗口坐标并精准点击聊天输入框中心，确保光标聚焦
+    // 2. 取窗口位置并向聊天输入框输入正文（输入前先激活微信，确保处于前台）
+    activate_wechat()
+        .await
+        .map_err(SendError::NotSent)?;
     let (win_x, win_y, _win_w, win_h) = get_wechat_window_rect()
         .await
         .map_err(SendError::NotSent)?;
     let input_x = win_x + 450.0;
     let input_y = win_y + win_h - 80.0;
-    info!("点击聊天输入框激活光标焦点: ({}, {})", input_x, input_y);
-    mouse_click(input_x, input_y)
-        .await
-        .map_err(SendError::NotSent)?;
-    tokio::time::sleep(tokio::time::Duration::from_millis(350)).await;
-
-    // 输入框点击可能改变焦点；在正文进入剪贴板之前再次核验标题。
-    verify_chat_title(recipient)
-        .await
-        .map_err(SendError::NotSent)?;
-
-    // 3. 暂存剪贴板并将正文粘贴发送
-    let mut clipboard_guard = clipboard::ClipboardGuard::replace(message)
-        .await
-        .map_err(SendError::NotSent)?;
-
-    // Only brings WeChat to the front; the keys themselves go through the click helper, which
-    // refuses to press anything unless WeChat is frontmost.
-    let front_script = r#"
-        tell application "System Events"
-            tell process "WeChat" to set frontmost to true
-        end tell
-    "#;
-
-    let prepare_result = async {
-        run_applescript(front_script).await?;
-        key_press("cmd+v").await?;
-        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-        // A sentinel prevents a failed Copy from being mistaken for a matching clipboard.
-        let sentinel = format!("wechat-readback-{}", uuid::Uuid::new_v4());
-        clipboard::set_clipboard(&sentinel).await?;
-        key_press("cmd+a").await?;
-        key_press("cmd+c").await?;
-        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
-        let actual = clipboard::get_clipboard()
-            .await?
-            .context("发送前无法读取输入框正文，未触发发送")?;
-        if !same_input_text(&actual, message) {
-            bail!(
-                "发送前输入正文读回不一致（{}），未触发发送",
-                readback_mismatch_detail(&actual, message, &sentinel)
-            )
-        }
-        verify_chat_title(recipient).await?;
-        Ok::<(), anyhow::Error>(())
+    info!("向聊天输入框输入正文: ({}, {})", input_x, input_y);
+    if let Err(err) = input_text(input_x, input_y, message).await {
+        return Err(SendError::NotSent(match err {
+            InputError::Mismatch(detail) => {
+                anyhow!("发送前输入正文读回不一致（{detail}），未触发发送")
+            }
+            InputError::NotFront => anyhow!("前台不是微信，未触发发送"),
+            InputError::Failed(e) => e,
+        }));
     }
-    .await;
 
-    if let Err(err) = prepare_result {
-        let _ = clipboard_guard.restore().await;
+    // 3. 复核标题；失败就先清空输入框再返回 NotSent
+    if let Err(err) = verify_chat_title(recipient).await {
+        let _ = clear_input().await;
         return Err(SendError::NotSent(err));
     }
 
-    let enter_result = key_press("return").await;
-
-    // 4. 恢复原剪贴板
-    let restore_result = clipboard_guard.restore().await;
-    if let Err(error) = &restore_result {
-        warn!("发送后恢复剪贴板失败，将同步兜底: {error:#}");
-    }
-
-    if let Err(err) = enter_result {
-        return Err(SendError::Unknown(err));
-    }
-    if let Err(err) = restore_result {
-        return Err(SendError::Unknown(err));
-    }
+    // 4. 回车发送，失败返回 Unknown
+    key_press("return")
+        .await
+        .map_err(SendError::Unknown)?;
 
     info!("已触发微信发送操作，送达状态未验证");
     Ok(())
@@ -690,28 +759,12 @@ pub async fn send_file(recipient: &str, file: &files::FileToSend) -> Result<()> 
     // 先保存文本剪贴板；文件引用写入后，结束时恢复原文本。
     let mut clipboard_guard =
         clipboard::ClipboardGuard::replace(&format!("wechat-file-{}", uuid::Uuid::new_v4())).await?;
-    let clear_input = r#"tell application "System Events"
-            tell process "WeChat"
-                set frontmost to true
-                keystroke "a" using {command down}
-                key code 51
-                delay 0.2
-            end tell
-        end tell"#;
     let send_result = async {
         // 输入框里残留的草稿不能和文件一起发出。
-        run_applescript(clear_input).await?;
+        clear_input().await?;
         set_clipboard_file(&file.path).await?;
-        run_applescript(
-            r#"tell application "System Events"
-            tell process "WeChat"
-                set frontmost to true
-                keystroke "v" using {command down}
-                delay 1.0
-            end tell
-        end tell"#,
-        )
-        .await?;
+        key_press("cmd+v").await?;
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
         let lines = ocr_screen_region(
             win_x + 315.0,
             win_y + win_h - 160.0,
@@ -720,20 +773,15 @@ pub async fn send_file(recipient: &str, file: &files::FileToSend) -> Result<()> 
         )
         .await?;
         if !files::input_shows_file(&lines, &file.name) {
-            let _ = run_applescript(clear_input).await;
+            let _ = clear_input().await;
             bail!("粘贴后输入框未出现文件 {}，已清空且未触发发送", file.name);
         }
         if let Err(error) = verify_chat_title(recipient).await {
-            let _ = run_applescript(clear_input).await;
+            let _ = clear_input().await;
             return Err(error);
         }
-        run_applescript(
-            r#"tell application "System Events"
-            tell process "WeChat" to key code 36
-        end tell"#,
-        )
-        .await
-        .map(|_| ())
+        key_press("return").await?;
+        Ok::<(), anyhow::Error>(())
     }
     .await;
     let restore_result = clipboard_guard.restore().await;
@@ -2388,5 +2436,129 @@ mod send_safety_tests {
             ),
             "Unexpected error message: {err_msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn input_text_maps_exit_codes() {
+        let dir = std::env::temp_dir().join(format!("fake_input_exit_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let sh_0 = dir.join("exit_0.sh");
+        let sh_3 = dir.join("exit_3.sh");
+        let sh_4 = dir.join("exit_4.sh");
+        let sh_1 = dir.join("exit_1.sh");
+
+        std::fs::write(&sh_0, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(
+            &sh_3,
+            "#!/bin/sh\necho 'wechat_click: frontmost_not_wechat' >&2\nexit 3\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &sh_4,
+            "#!/bin/sh\necho 'wechat_click: input_readback_mismatch: 读回 5 字，应为 4 字，不含正文' >&2\nexit 4\n",
+        )
+        .unwrap();
+        std::fs::write(&sh_1, "#!/bin/sh\necho 'error' >&2\nexit 1\n").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for f in [&sh_0, &sh_3, &sh_4, &sh_1] {
+                std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+
+        let secret = "机密消息内容";
+        let res_0 = input_text_with(&sh_0, 100.0, 200.0, secret).await;
+        assert!(res_0.is_ok());
+
+        let res_3 = input_text_with(&sh_3, 100.0, 200.0, secret).await;
+        match res_3 {
+            Err(InputError::NotFront) => {}
+            other => panic!("expected NotFront, got {:?}", other),
+        }
+
+        let res_4 = input_text_with(&sh_4, 100.0, 200.0, secret).await;
+        match res_4 {
+            Err(InputError::Mismatch(detail)) => {
+                assert_eq!(detail, "读回 5 字，应为 4 字，不含正文");
+                assert!(!detail.contains(secret));
+            }
+            other => panic!("expected Mismatch, got {:?}", other),
+        }
+
+        let res_1 = input_text_with(&sh_1, 100.0, 200.0, secret).await;
+        match res_1 {
+            Err(InputError::Failed(_)) => {}
+            other => panic!("expected Failed, got {:?}", other),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn input_text_passes_body_on_stdin_and_coordinates_as_args() {
+        let dir = std::env::temp_dir().join(format!("fake_input_args_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let args_file = dir.join("args.txt");
+        let stdin_file = dir.join("stdin.txt");
+        let script = dir.join("capture.sh");
+
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho \"$@\" > '{}'\ncat > '{}'\nexit 0\n",
+                args_file.display(),
+                stdin_file.display()
+            ),
+        )
+        .unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let body = "你好\n微信世界！\r\n第三行";
+        let res = input_text_with(&script, 545.0, 609.0, body).await;
+        assert!(res.is_ok());
+
+        let recorded_args = std::fs::read_to_string(&args_file).unwrap();
+        assert_eq!(recorded_args.trim(), "input-text 545 609");
+
+        let recorded_stdin = std::fs::read_to_string(&stdin_file).unwrap();
+        assert_eq!(recorded_stdin, body);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_system_events_keystrokes_left() {
+        let wechat_src = include_str!("wechat.rs");
+        let nav_src = include_str!("wechat/navigation.rs");
+
+        fn strip_tests(src: &str) -> &str {
+            if let Some(pos) = src.find("#[cfg(test)]") {
+                &src[..pos]
+            } else {
+                src
+            }
+        }
+
+        let wechat_code = strip_tests(wechat_src);
+        let nav_code = strip_tests(nav_src);
+
+        for (name, code) in [("wechat.rs", wechat_code), ("wechat/navigation.rs", nav_code)] {
+            assert!(
+                !code.contains("keystroke"),
+                "{name} 仍然包含 keystroke"
+            );
+            assert!(
+                !code.contains("key code"),
+                "{name} 仍然包含 key code"
+            );
+        }
     }
 }
