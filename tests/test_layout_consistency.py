@@ -70,3 +70,17 @@ class DefaultLayoutMatchesCode(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class AnchorGateTests(unittest.TestCase):
+    def test_every_click_or_read_path_checks_anchors_first(self):
+        # Stage C: session-list reads and row clicks use the same screen check as chat reads.
+        worker = (ROOT/'native'/'bot'/'Worker.swift').read_text()
+        for op in ('sessions', 'open_session'):
+            branch = worker[worker.index(f'if operation == "{op}"'):]
+            branch = branch[:branch.index('\n        }\n')]
+            self.assertIn('checkedScreen(', branch, op)
+            self.assertNotIn('normalizedFrame(', branch, op)
+        bubbles = (ROOT/'native'/'wechat_bubbles.swift').read_text()
+        analyze = bubbles[bubbles.index('func analyzeFrame('):]
+        self.assertIn('try checkAnchors(captured', analyze[:analyze.index('guard let title')])

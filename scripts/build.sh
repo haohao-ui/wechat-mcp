@@ -5,7 +5,7 @@ cargo build --release --locked
 swiftc native/wechat_ocr.swift -o target/release/wechat_ocr
 swiftc native/click/main.swift native/common/*.swift native/action/*.swift -o target/release/wechat_click
 swiftc native/wechat_window.swift -o target/release/wechat_window
-swiftc -O -parse-as-library native/wechat_bubbles.swift native/common/*.swift -o target/release/wechat_bubbles
+swiftc -O -parse-as-library native/wechat_bubbles.swift native/common/*.swift native/eyes/*.swift -o target/release/wechat_bubbles
 target/release/wechat_window --self-test
 swiftc -parse-as-library native/macos/*.swift -o target/release/wechat_runtime
 target/release/wechat_runtime --self-test

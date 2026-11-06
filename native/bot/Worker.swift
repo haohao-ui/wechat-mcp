@@ -16,6 +16,14 @@ func checkPrivate(_ path: URL, type: FileAttributeType, mode: Int) throws {
 
 /// Captures one WeChat window at its native pixel scale (no shadow).
 /// macOS 14+: ScreenCaptureKit (CGWindowListCreateImage is unavailable on macOS 15+); older: CGWindowList.
+/// The window normalised to points, after the screen check passed.
+func checkedScreen(_ window: [String:Any]) throws -> CGImage {
+    let raw = try windowImage(window)
+    let (image, scale) = try normalizedFrame(raw, window: window)
+    _ = try checkAnchors(raw, scale: scale, layout: try currentLayout())
+    return image
+}
+
 func windowImage(_ window: [String:Any]) throws -> CGImage {
     let id = window["window_id"] as! UInt32
     #if compiler(>=5.9)  // SCScreenshotManager needs the macOS 14 SDK (Xcode 15+); older toolchains build CG only.
@@ -346,11 +354,11 @@ final class CaptureWorker {
             let normalized = try normalizedFrame(rawImage, window: window)
             let frame = normalized.image
             let scale = normalized.scale
-            let report = verifyAnchors(frame, scale: scale, layout: layout, tolerance: 1000)
-            let theme = report.theme ?? detectTheme(frame, scale: scale, layout: layout)
+            let report = verifyAnchors(rawImage, scale: scale, layout: layout, tolerance: 1000)
+            let theme = report.theme ?? detectTheme(rawImage, scale: scale, layout: layout)
             let measured = report.measured
 
-            let annotated = try drawAnnotatedLayout(frame, scale: scale, layout: layout)
+            let annotated = try drawAnnotatedLayout(rawImage, scale: scale, layout: layout)
             let pngBytes = try pngData(annotated)
             let base64 = pngBytes.base64EncodedString()
 
@@ -397,7 +405,7 @@ final class CaptureWorker {
             guard (1...20).contains(targets.count), targets.allSatisfy({ !$0.isEmpty && $0.count<=64 }) else { throw Failure.invalid("invalid_session_target") }
             return try openSessionRow(targets,probe:sessionProbe) {
                 let window=try readyWindow(manage:manage).window
-                return (window,try normalizedFrame(try windowImage(window),window:window).image)
+                return (window,try checkedScreen(window))
             }
         }
         if operation == "sessions" {
@@ -405,7 +413,7 @@ final class CaptureWorker {
                   names.allSatisfy({ !$0.isEmpty && $0.count<=64 }) else { throw Failure.invalid("invalid_session_names") }
             let began=ProcessInfo.processInfo.systemUptime
             let (window,resized)=try readyWindow(manage:manage)
-            let image=try normalizedFrame(try windowImage(window),window:window).image
+            let image=try checkedScreen(window)
             var result=try sessionProbe.probe(image,names:names,debug:params["debug"] as? Bool == true)
             let layout=try currentLayout()
             let sessionListRect=try layoutRegion(layout, "session_list")
