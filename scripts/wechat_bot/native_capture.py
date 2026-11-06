@@ -104,6 +104,8 @@ fi
             return
         except (ValueError,RuntimeError,ConnectionError,asyncio.TimeoutError) as error:
             if must_wait(error): raise
+            from .service import log_event  # Lazy: service imports this module.
+            log_event('quiet_relaunch_failed',recipient=self.recipient,error_type=type(error).__name__,error=str(error)[:200])
             await self.close_transport()
         # This one admitted GUI operation focuses the allowed chat and starts the helper in its TCC context.
         await self.navigate(self.names)
@@ -129,6 +131,8 @@ fi
         except ValueError as error:
             if must_wait(error): raise
             self.last_switch={'opened':False,'fallback':str(error)[:200]}
+            from .service import log_event  # Lazy: service imports this module.
+            log_event('row_click_failed',recipient=recipient,error=str(error)[:200])
             await self.navigate(self.names)
         self.recipient=recipient
         self.directory=Path(directory)
