@@ -302,12 +302,8 @@ pub async fn get_wechat_window_pos() -> Result<(f64, f64)> {
     Ok((x, y))
 }
 
-/// 前台激活微信；仅在窗口过小或超出所有屏幕范围时调整窗口
-pub async fn focus_wechat() -> Result<(f64, f64, f64, f64)> {
-    if !is_wechat_running().await? {
-        bail!("微信客户端未运行，请先启动并登录微信");
-    }
-
+/// 前台激活微信窗口（不含任何按键）
+pub async fn activate_wechat() -> Result<()> {
     let script = r#"
         tell application "WeChat" to activate
         delay 0.15
@@ -319,6 +315,16 @@ pub async fn focus_wechat() -> Result<(f64, f64, f64, f64)> {
     "#;
 
     run_applescript(script).await?;
+    Ok(())
+}
+
+/// 前台激活微信；仅在窗口过小或超出所有屏幕范围时调整窗口
+pub async fn focus_wechat() -> Result<(f64, f64, f64, f64)> {
+    if !is_wechat_running().await? {
+        bail!("微信客户端未运行，请先启动并登录微信");
+    }
+
+    activate_wechat().await?;
     key_press("cmd+1").await?;
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     let window = query_wechat_window().await?;
@@ -702,7 +708,10 @@ pub async fn send_message(recipient: &str, message: &str) -> Result<(), SendErro
         .await
         .map_err(SendError::NotSent)?;
 
-    // 2. 取窗口位置并向聊天输入框输入正文
+    // 2. 取窗口位置并向聊天输入框输入正文（输入前先激活微信，确保处于前台）
+    activate_wechat()
+        .await
+        .map_err(SendError::NotSent)?;
     let (win_x, win_y, _win_w, win_h) = get_wechat_window_rect()
         .await
         .map_err(SendError::NotSent)?;
