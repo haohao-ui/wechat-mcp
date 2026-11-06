@@ -203,6 +203,21 @@ func pngData(_ image: CGImage) throws -> Data {
     return data as Data
 }
 
+func resolveCurrentLayoutPath() throws -> String {
+    let env = ProcessInfo.processInfo.environment
+    if let explicit = env["WECHAT_LAYOUT"]?.trimmingCharacters(in: .whitespaces), !explicit.isEmpty {
+        return explicit
+    }
+    guard let ver = wechatAppVersion() else {
+        throw Failure.invalid("layout_missing")
+    }
+    let layoutDir = env["WECHAT_LAYOUT_DIR"] ?? (NSHomeDirectory() + "/.wechat-rpa/layout")
+    guard let found = WechatLayout.path(forVersion: ver, directory: layoutDir) else {
+        throw Failure.invalid("layout_missing")
+    }
+    return found
+}
+
 func drawAnnotatedLayout(_ image: CGImage, scale: Int, layout: WechatLayout) throws -> CGImage {
     let width = image.width
     let height = image.height
@@ -316,12 +331,21 @@ final class CaptureWorker {
               let operation=request["operation"] as? String,
               let params=request["params"] as? [String:Any] else { throw Failure.invalid("invalid_request") }
         if operation == "calibrate" {
+            guard let ver = wechatAppVersion() else {
+                throw Failure.invalid("layout_missing")
+            }
+            let layoutPath = try resolveCurrentLayoutPath()
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: layoutPath)),
+                  let layoutObj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw Failure.invalid("layout_missing")
+            }
+            let layout = try currentLayout()
+
             let (window, _) = try readyWindow(manage: false)
             let rawImage = try windowImage(window)
             let normalized = try normalizedFrame(rawImage, window: window)
             let frame = normalized.image
             let scale = normalized.scale
-            let layout = try currentLayout()
             let report = verifyAnchors(frame, scale: scale, layout: layout, tolerance: 1000)
             let theme = report.theme ?? detectTheme(frame, scale: scale, layout: layout)
             let measured = report.measured
@@ -331,6 +355,9 @@ final class CaptureWorker {
             let base64 = pngBytes.base64EncodedString()
 
             var result: [String: Any] = [
+                "wechat_version": ver,
+                "layout_path": layoutPath,
+                "layout": layoutObj,
                 "measured": measured,
                 "window": window,
                 "scale": scale,
