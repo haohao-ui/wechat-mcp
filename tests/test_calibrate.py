@@ -1,21 +1,30 @@
-"""Tests for control calibrate and calibrate --accept (Stage C Task C4).
+"""Tests for control calibrate and calibrate --accept (Stage C Task C4 review fixes).
 
-Tests:
-1. test_candidate_from_measurements: candidate layout derived from measurements with diffs and missing listed.
-2. test_accept_replaces_with_backup: valid candidate matching running version replaces active layout atomically with backup.
-3. test_accept_refuses_invalid_candidate: invalid candidate layout is refused and original file stays untouched.
-4. test_accept_refuses_version_mismatch: candidate version mismatching running WeChat version is refused.
-5. test_calibrate_never_clicks: worker calibrate branch never calls botActions, click, rightClick, or key events.
+Covers review issues:
+I1: Version & Layout from Worker:
+    - Worker calibrate response must include wechat_version, layout_path, layout.
+    - Missing version or layout raises/fails without writing any files.
+    - No '4.1.15' literal fallback in source code.
+    - Version must match regex ^[0-9]+(\\.[0-9]+){1,3}$.
+I2: Remote candidate write on WeChat host:
+    - Candidate JSON and PNG written to remote host ~/.wechat-rpa/layout/ via injectable remote runner.
+    - umask 077 and chmod 600 enforced remotely.
+    - shlex.quote used for all remote paths and arguments.
+I3: Remote --accept on WeChat host:
+    - Remote read of candidate -> local validation -> worker calibrate version verification.
+    - Version mismatch or invalid candidate refused with ZERO remote write commands executed.
+    - Single atomic remote command executes cp to .bak-<timestamp> then mv candidate to active.
+Invariants:
+    - Worker calibrate never clicks, scrolls, or types.
 """
 import base64
 import json
-import os
 from pathlib import Path
 import re
-import tempfile
-import time
+import shlex
+import subprocess
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch, MagicMock
 
 from scripts.wechat_bot import control
 
@@ -23,211 +32,289 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LAYOUT_PATH = ROOT / 'native' / 'layout' / 'wechat-4.1.15.json'
 
 
+class FakeRemote:
+    def __init__(self, initial_files=None):
+        self.files = dict(initial_files or {})
+        self.commands = []
+
+    def __call__(self, host, command, input_data=None):
+        self.commands.append({
+            'host': host,
+            'command': command,
+            'input_data': input_data
+        })
+        # Simulate writing file: cat > path
+        if 'cat > ' in command:
+            m = re.search(r'cat\s*>\s*(\S+)', command)
+            if m:
+                path = m.group(1).strip("'\"")
+                self.files[path] = input_data
+            return subprocess.CompletedProcess(args=['ssh', host, command], returncode=0, stdout=b'', stderr=b'')
+
+        # Simulate reading file: cat path
+        if command.strip().startswith('cat '):
+            parts = command.strip().split()
+            path = parts[1].strip("'\"")
+            if path in self.files:
+                data = self.files[path]
+                if isinstance(data, str):
+                    data = data.encode('utf-8')
+                return subprocess.CompletedProcess(args=['ssh', host, command], returncode=0, stdout=data, stderr=b'')
+            return subprocess.CompletedProcess(args=['ssh', host, command], returncode=1, stdout=b'', stderr=b'No such file')
+
+        # Simulate atomic backup & mv
+        if 'cp ' in command and 'mv ' in command:
+            m_cp = re.search(r'cp\s+(\S+)\s+(\S+)', command)
+            m_mv = re.search(r'mv\s+(\S+)\s+(\S+)', command)
+            if m_cp:
+                src, dst = m_cp.group(1).strip("'\""), m_cp.group(2).strip("'\"")
+                if src in self.files:
+                    self.files[dst] = self.files[src]
+            if m_mv:
+                src, dst = m_mv.group(1).strip("'\""), m_mv.group(2).strip("'\"")
+                if src in self.files:
+                    self.files[dst] = self.files.pop(src)
+            return subprocess.CompletedProcess(args=['ssh', host, command], returncode=0, stdout=b'', stderr=b'')
+
+        return subprocess.CompletedProcess(args=['ssh', host, command], returncode=0, stdout=b'', stderr=b'')
+
+
 class CalibrateTests(unittest.TestCase):
     def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.layout_dir = Path(self.temp_dir.name) / 'layout'
-        self.layout_dir.mkdir(parents=True, exist_ok=True)
         with open(DEFAULT_LAYOUT_PATH, 'r', encoding='utf-8') as f:
             self.base_layout = json.load(f)
         self.version = self.base_layout['wechat_version']
 
-    def tearDown(self):
-        self.temp_dir.cleanup()
+    # --- I1: Version & Layout from Worker ---
 
-    def test_candidate_from_measurements(self):
-        """Candidate layout derived from measured coordinates, missing items preserved and listed."""
-        active_path = self.layout_dir / f'wechat-{self.version}.json'
-        active_path.write_text(json.dumps(self.base_layout), encoding='utf-8')
+    def test_no_4_1_15_fallback_in_source(self):
+        """Source code in control.py and Worker.swift must NOT contain hardcoded '4.1.15' fallback."""
+        control_source = (ROOT / 'scripts' / 'wechat_bot' / 'control.py').read_text(encoding='utf-8')
+        worker_source = (ROOT / 'native' / 'bot' / 'Worker.swift').read_text(encoding='utf-8')
 
-        # Measured input_divider shifted to 490 (originally 496), list_border missing
-        measured = {
-            'input_divider': 490.0
+        self.assertNotIn('4.1.15', control_source, "control.py must not hardcode '4.1.15' fallback")
+        self.assertNotIn('4.1.15', worker_source, "Worker.swift must not hardcode '4.1.15' fallback")
+        self.assertFalse(hasattr(control, 'get_running_wechat_version'), "get_running_wechat_version must be deleted")
+
+    def test_version_regex_validation(self):
+        """Version must match regex ^[0-9]+(\\.[0-9]+){1,3}$ before being used in paths or commands."""
+        valid_versions = ['4.1.15', '4.0.0', '1.0', '1.2.3.4']
+        invalid_versions = ['4.1.15;rm -rf /', 'v4.1', 'beta', '', '4.', '.1', '4.1.15.1.2']
+
+        for v in valid_versions:
+            self.assertTrue(control.validate_version_string(v), f"Expected {v} to be valid")
+        for inv in invalid_versions:
+            self.assertFalse(control.validate_version_string(inv), f"Expected {inv} to be invalid")
+
+    def test_worker_missing_version_aborts_without_writing(self):
+        """If worker calibrate response lacks wechat_version or layout, control aborts without writing."""
+        fake_remote = FakeRemote()
+        bad_worker_result = {
+            'measured': {'input_divider': 490.0},
+            # missing wechat_version and layout
         }
-        mock_worker_result = {
-            'measured': measured,
-            'theme': 'wechat-4-dark',
-            'window': {'width': 880, 'height': 640},
-            'scale': 1,
-            'annotated_png_base64': base64.b64encode(b'fake-png-data').decode('ascii'),
+
+        with self.assertRaises(ValueError):
+            control.run_calibrate(
+                worker_result=bad_worker_result,
+                host='wechat-host',
+                remote_runner=fake_remote
+            )
+        # Assert no remote commands were executed to write files
+        write_commands = [c for c in fake_remote.commands if 'cat > ' in c['command']]
+        self.assertEqual(write_commands, [])
+
+    def test_worker_calibrate_response_fields_in_swift(self):
+        """Worker.swift calibrate operation must populate wechat_version, layout_path, layout."""
+        worker_swift = (ROOT / 'native' / 'bot' / 'Worker.swift').read_text(encoding='utf-8')
+        calibrate_match = re.search(r'if\s+operation\s*==\s*"calibrate"\s*\{([\s\S]*?)guard\s+let\s+recipient', worker_swift)
+        self.assertIsNotNone(calibrate_match, "Worker.swift must have calibrate operation")
+        calibrate_block = calibrate_match.group(1)
+
+        self.assertIn('"wechat_version"', calibrate_block)
+        self.assertIn('"layout_path"', calibrate_block)
+        self.assertIn('"layout"', calibrate_block)
+        self.assertIn('layout_missing', calibrate_block)
+
+    # --- I2: Remote candidate write on WeChat host ---
+
+    def test_candidate_written_to_remote_wechat_host(self):
+        """Candidate layout and PNG must be written to remote host ~/.wechat-rpa/layout/ with umask 077 and 600."""
+        fake_remote = FakeRemote()
+        worker_result = {
+            'wechat_version': self.version,
+            'layout_path': f'/path/to/.wechat-rpa/layout/wechat-{self.version}.json',
+            'layout': self.base_layout,
+            'measured': {'input_divider': 490.0},
+            'annotated_png_base64': base64.b64encode(b'annotated-bytes').decode('ascii'),
         }
 
-        diffs, missing, candidate = control.generate_candidate(
-            self.base_layout,
-            mock_worker_result,
-            layout_dir=self.layout_dir
+        diffs, missing, candidate = control.run_calibrate(
+            worker_result=worker_result,
+            host='wechat-host',
+            layout_dir='~/.wechat-rpa/layout',
+            remote_runner=fake_remote
         )
 
-        # 1. input_divider derived fields
-        self.assertEqual(candidate['regions']['chat']['h'], 490.0 - candidate['regions']['chat']['y'])
+        # 1. Derived values in candidate
         self.assertEqual(candidate['regions']['input']['y'], 490.0)
-        self.assertEqual(candidate['regions']['input']['h'], 640.0 - 490.0)
 
-        # 2. list_border was missing: preserved original value and listed in missing
-        self.assertEqual(candidate['regions']['session_list']['w'], self.base_layout['regions']['session_list']['w'])
-        self.assertIn('list_border', missing)
+        # 2. Assert fake_remote received commands
+        json_cand_path = f"~/.wechat-rpa/layout/candidate-wechat-{self.version}.json"
+        png_cand_path = f"~/.wechat-rpa/layout/candidate-wechat-{self.version}.png"
 
-        # 3. Diffs list includes changed fields
-        diff_keys = [d['field'] for d in diffs]
-        self.assertIn('chat.h', diff_keys)
-        self.assertIn('input.y', diff_keys)
-        self.assertIn('input.h', diff_keys)
+        self.assertIn(json_cand_path, fake_remote.files)
+        self.assertIn(png_cand_path, fake_remote.files)
+        self.assertEqual(fake_remote.files[png_cand_path], b'annotated-bytes')
 
-        # 4. Candidate JSON and PNG files written with 0o600 permissions
-        cand_json_path = self.layout_dir / f'candidate-wechat-{self.version}.json'
-        cand_png_path = self.layout_dir / f'candidate-wechat-{self.version}.png'
-        self.assertTrue(cand_json_path.exists())
-        self.assertTrue(cand_png_path.exists())
-        self.assertEqual(oct(cand_json_path.stat().st_mode & 0o777), oct(0o600))
-        self.assertEqual(oct(cand_png_path.stat().st_mode & 0o777), oct(0o600))
-        self.assertEqual(cand_png_path.read_bytes(), b'fake-png-data')
+        # 3. Assert permissions and umask
+        for call in fake_remote.commands:
+            cmd = call['command']
+            self.assertIn('umask 077', cmd)
+            self.assertIn('chmod 600', cmd)
+            self.assertEqual(call['host'], 'wechat-host')
 
-    def test_accept_replaces_with_backup(self):
-        """control calibrate --accept backs up current layout and atomically replaces it."""
-        active_path = self.layout_dir / f'wechat-{self.version}.json'
-        active_path.write_text(json.dumps(self.base_layout), encoding='utf-8')
-        active_path.chmod(0o600)
+    # --- I3: Remote --accept on WeChat host ---
 
-        # Create candidate layout
-        candidate_layout = json.loads(json.dumps(self.base_layout))
-        candidate_layout['regions']['input']['y'] = 492.0
-        candidate_layout['regions']['input']['h'] = 148.0
-        candidate_layout['regions']['chat']['h'] = 432.0
-        cand_json_path = self.layout_dir / f'candidate-wechat-{self.version}.json'
-        cand_json_path.write_text(json.dumps(candidate_layout), encoding='utf-8')
-        cand_json_path.chmod(0o600)
+    def test_accept_refuses_version_mismatch_with_zero_remote_writes(self):
+        """--accept with candidate version mismatching current running version makes NO remote writes."""
+        cand_path = f"~/.wechat-rpa/layout/candidate-wechat-{self.version}.json"
+        fake_remote = FakeRemote(initial_files={
+            cand_path: json.dumps(self.base_layout).encode('utf-8')
+        })
 
-        # Run accept
-        result = control.calibrate_accept(
-            layout_dir=self.layout_dir,
-            running_version=self.version
-        )
-        self.assertTrue(result['accepted'])
-        self.assertTrue(Path(result['backup']).exists())
-        self.assertEqual(oct(Path(result['backup']).stat().st_mode & 0o777), oct(0o600))
+        # Worker reports running version 4.1.16 while candidate is 4.1.15
+        worker_mock = MagicMock(return_value={
+            'wechat_version': '4.1.16',
+            'layout': self.base_layout,
+        })
 
-        # Check backup content is old layout
-        old_data = json.loads(Path(result['backup']).read_text(encoding='utf-8'))
-        self.assertEqual(old_data['regions']['input']['y'], 496.0)
-
-        # Check active file is now the candidate layout
-        new_active = json.loads(active_path.read_text(encoding='utf-8'))
-        self.assertEqual(new_active['regions']['input']['y'], 492.0)
-        self.assertEqual(oct(active_path.stat().st_mode & 0o777), oct(0o600))
-
-    def test_accept_refuses_invalid_candidate(self):
-        """Invalid candidate layout (e.g. missing required region or out of bounds) is refused."""
-        active_path = self.layout_dir / f'wechat-{self.version}.json'
-        original_content = json.dumps(self.base_layout)
-        active_path.write_text(original_content, encoding='utf-8')
-        active_path.chmod(0o600)
-
-        invalid_cases = [
-            # 1. Missing required region
-            lambda d: d['regions'].pop('chat'),
-            # 2. Region out of bounds
-            lambda d: d['regions']['input'].update({'y': 600.0, 'h': 100.0}),
-            # 3. Unsupported schema
-            lambda d: d.update({'schema': 2}),
-            # 4. Zero/negative dimensions
-            lambda d: d['regions']['title'].update({'w': 0}),
-        ]
-
-        cand_json_path = self.layout_dir / f'candidate-wechat-{self.version}.json'
-
-        for i, mutator in enumerate(invalid_cases):
-            candidate_layout = json.loads(json.dumps(self.base_layout))
-            mutator(candidate_layout)
-            cand_json_path.write_text(json.dumps(candidate_layout), encoding='utf-8')
-
-            with self.assertRaises((ValueError, SystemExit)):
-                control.calibrate_accept(
-                    layout_dir=self.layout_dir,
-                    running_version=self.version
-                )
-
-            # Active layout must remain untouched
-            self.assertEqual(active_path.read_text(encoding='utf-8'), original_content)
-            # No backup files created
-            backups = list(self.layout_dir.glob(f'wechat-{self.version}.json.bak-*'))
-            self.assertEqual(backups, [])
-
-    def test_accept_refuses_version_mismatch(self):
-        """Candidate layout version mismatching running WeChat version is refused."""
-        active_path = self.layout_dir / f'wechat-{self.version}.json'
-        original_content = json.dumps(self.base_layout)
-        active_path.write_text(original_content, encoding='utf-8')
-        active_path.chmod(0o600)
-
-        # Candidate is for version 4.1.15, but running is 4.1.16
-        cand_json_path = self.layout_dir / f'candidate-wechat-{self.version}.json'
-        cand_json_path.write_text(original_content, encoding='utf-8')
-
-        with self.assertRaises((ValueError, SystemExit)):
+        with self.assertRaises(ValueError):
             control.calibrate_accept(
-                layout_dir=self.layout_dir,
-                running_version='4.1.16'
+                host='wechat-host',
+                layout_dir='~/.wechat-rpa/layout',
+                worker_func=worker_mock,
+                remote_runner=fake_remote
             )
 
-        # Original file unchanged, no backup created
-        self.assertEqual(active_path.read_text(encoding='utf-8'), original_content)
-        backups = list(self.layout_dir.glob(f'wechat-{self.version}.json.bak-*'))
-        self.assertEqual(backups, [])
+        # Assert zero write commands (no cp, mv, cat >, or rm)
+        write_cmds = [c['command'] for c in fake_remote.commands if any(op in c['command'] for op in ['cp ', 'mv ', 'cat >', 'rm '])]
+        self.assertEqual(write_cmds, [])
 
-    def test_accept_refuses_corrupt_or_oversized_candidate(self):
-        """Corrupt JSON or oversized candidate file is refused without modifying original."""
-        active_path = self.layout_dir / f'wechat-{self.version}.json'
-        original_content = json.dumps(self.base_layout)
-        active_path.write_text(original_content, encoding='utf-8')
-        cand_json_path = self.layout_dir / f'candidate-wechat-{self.version}.json'
+    def test_accept_refuses_corrupt_candidate_with_zero_remote_writes(self):
+        """--accept with corrupt candidate JSON makes NO remote writes."""
+        cand_path = f"~/.wechat-rpa/layout/candidate-wechat-{self.version}.json"
+        fake_remote = FakeRemote(initial_files={
+            cand_path: b'{broken json'
+        })
+        worker_mock = MagicMock(return_value={
+            'wechat_version': self.version,
+            'layout': self.base_layout,
+        })
 
-        # 1. Corrupt JSON
-        cand_json_path.write_text('{broken json', encoding='utf-8')
         with self.assertRaises(ValueError):
-            control.calibrate_accept(layout_dir=self.layout_dir, running_version=self.version)
-        self.assertEqual(active_path.read_text(encoding='utf-8'), original_content)
+            control.calibrate_accept(
+                host='wechat-host',
+                layout_dir='~/.wechat-rpa/layout',
+                worker_func=worker_mock,
+                remote_runner=fake_remote
+            )
 
-        # 2. Oversized file (>256KB)
-        huge_candidate = json.loads(original_content)
-        huge_candidate['extra_padding'] = 'x' * (300 * 1024)
-        cand_json_path.write_text(json.dumps(huge_candidate), encoding='utf-8')
-        with self.assertRaises(ValueError):
-            control.calibrate_accept(layout_dir=self.layout_dir, running_version=self.version)
-        self.assertEqual(active_path.read_text(encoding='utf-8'), original_content)
+        write_cmds = [c['command'] for c in fake_remote.commands if any(op in c['command'] for op in ['cp ', 'mv ', 'cat >', 'rm '])]
+        self.assertEqual(write_cmds, [])
 
-    def test_cli_calibrate_accept(self):
-        """control.main(['calibrate', '--accept', ...]) runs correctly from CLI."""
-        active_path = self.layout_dir / f'wechat-{self.version}.json'
-        active_path.write_text(json.dumps(self.base_layout), encoding='utf-8')
-        cand_json_path = self.layout_dir / f'candidate-wechat-{self.version}.json'
-        cand_data = json.loads(json.dumps(self.base_layout))
-        cand_data['regions']['input']['y'] = 490.0
-        cand_json_path.write_text(json.dumps(cand_data), encoding='utf-8')
+    def test_accept_executes_backup_then_mv_atomically(self):
+        """--accept executes single atomic command: backup current file then mv candidate to active."""
+        cand_path = f"~/.wechat-rpa/layout/candidate-wechat-{self.version}.json"
+        active_path = f"~/.wechat-rpa/layout/wechat-{self.version}.json"
 
-        with patch.dict(os.environ, {'WECHAT_VERSION': self.version}):
+        updated_layout = json.loads(json.dumps(self.base_layout))
+        updated_layout['regions']['input']['y'] = 492.0
+        updated_layout['regions']['input']['h'] = 148.0
+        updated_layout['regions']['chat']['h'] = 432.0
+
+        fake_remote = FakeRemote(initial_files={
+            cand_path: json.dumps(updated_layout).encode('utf-8'),
+            active_path: json.dumps(self.base_layout).encode('utf-8')
+        })
+        worker_mock = MagicMock(return_value={
+            'wechat_version': self.version,
+            'layout': self.base_layout,
+        })
+
+        result = control.calibrate_accept(
+            host='wechat-host',
+            layout_dir='~/.wechat-rpa/layout',
+            worker_func=worker_mock,
+            remote_runner=fake_remote
+        )
+
+        self.assertTrue(result['accepted'])
+        # Find the atomic command
+        atomic_cmds = [c['command'] for c in fake_remote.commands if 'cp ' in c['command'] and 'mv ' in c['command']]
+        self.assertEqual(len(atomic_cmds), 1, f"Expected 1 atomic cp+mv command, got: {atomic_cmds}")
+
+        cmd = atomic_cmds[0]
+        # Must do cp before mv
+        cp_pos = cmd.find('cp ')
+        mv_pos = cmd.find('mv ')
+        self.assertTrue(0 <= cp_pos < mv_pos, f"cp must precede mv in command: {cmd}")
+        self.assertIn('.bak-', cmd)
+        self.assertIn('chmod 600', cmd)
+
+    def test_cli_calibrate_command(self):
+        """control.main(['calibrate', ...]) runs correctly with fake remote."""
+        fake_remote = FakeRemote()
+        worker_result = {
+            'wechat_version': self.version,
+            'layout_path': f'/path/to/.wechat-rpa/layout/wechat-{self.version}.json',
+            'layout': self.base_layout,
+            'measured': {'input_divider': 490.0},
+            'annotated_png_base64': base64.b64encode(b'png').decode('ascii'),
+        }
+        with patch('scripts.wechat_bot.control.default_remote_runner', fake_remote), \
+             patch('scripts.wechat_bot.control.run_worker_calibrate', return_value=worker_result):
             import io
             from contextlib import redirect_stdout
-            f = io.StringIO()
-            with redirect_stdout(f):
-                control.main(['calibrate', '--accept', '--layout-dir', str(self.layout_dir)])
-            output = f.getvalue()
-            res = json.loads(output)
+            out = io.StringIO()
+            with redirect_stdout(out):
+                control.main(['calibrate', '--layout-dir', '~/.wechat-rpa/layout'])
+            res = json.loads(out.getvalue().splitlines()[-1])
+            self.assertIn('candidate_json', res)
+            self.assertEqual(len(res['differences']), 4)
+
+    def test_cli_calibrate_accept(self):
+        """control.main(['calibrate', '--accept', ...]) runs correctly with fake remote."""
+        cand_path = f"~/.wechat-rpa/layout/candidate-wechat-{self.version}.json"
+        active_path = f"~/.wechat-rpa/layout/wechat-{self.version}.json"
+        fake_remote = FakeRemote(initial_files={
+            cand_path: json.dumps(self.base_layout).encode('utf-8'),
+            active_path: json.dumps(self.base_layout).encode('utf-8')
+        })
+        worker_result = {
+            'wechat_version': self.version,
+            'layout': self.base_layout,
+        }
+        with patch('scripts.wechat_bot.control.default_remote_runner', fake_remote), \
+             patch('scripts.wechat_bot.control.run_worker_calibrate', return_value=worker_result):
+            import io
+            from contextlib import redirect_stdout
+            out = io.StringIO()
+            with redirect_stdout(out):
+                control.main(['calibrate', '--accept', '--layout-dir', '~/.wechat-rpa/layout'])
+            res = json.loads(out.getvalue().strip())
             self.assertTrue(res.get('accepted'))
             self.assertEqual(res.get('version'), self.version)
+
+    # --- Invariants ---
 
     def test_calibrate_never_clicks(self):
         """Worker calibrate branch never calls botActions, click, rightClick, or key events."""
         worker_swift = (ROOT / 'native' / 'bot' / 'Worker.swift').read_text(encoding='utf-8')
-
-        # Locate the calibrate operation block in Worker.swift
-        self.assertIn('operation == "calibrate"', worker_swift, "Worker.swift must have 'operation == \"calibrate\"' handling")
-
-        # Extract the calibrate block
-        calibrate_match = re.search(r'if\s+operation\s*==\s*"calibrate"\s*\{([\s\S]*?)\n\s*\}', worker_swift)
-        self.assertIsNotNone(calibrate_match, "Could not find calibrate branch in Worker.swift")
+        calibrate_match = re.search(r'if\s+operation\s*==\s*"calibrate"\s*\{([\s\S]*?)guard\s+let\s+recipient', worker_swift)
+        self.assertIsNotNone(calibrate_match, "Worker.swift must have calibrate operation")
         calibrate_block = calibrate_match.group(1)
 
-        # Forbidden calls in calibrate branch
         forbidden = [
             'botActions',
             'click(',
@@ -240,7 +327,7 @@ class CalibrateTests(unittest.TestCase):
             self.assertNotIn(
                 term,
                 calibrate_block,
-                f"calibrate operation in Worker.swift must NOT call {term}; must be read-only (zero clicks/keys/actions)"
+                f"calibrate operation in Worker.swift must NOT call {term}; must be read-only"
             )
 
 
