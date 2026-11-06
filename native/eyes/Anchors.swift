@@ -349,6 +349,7 @@ func firstFullHorizontalLine(_ image: CGImage, scale: Int, in rect: WindowRect) 
     let pyEnd = min(pixels.height - scale, Int(round((rect.y + rect.h) * Double(scale))))
     let width = pxEnd - pxStart
     guard width > 0 && pyEnd > pyStart else { return nil }
+    var runStart: Int? = nil, runEnd: Int? = nil
     for py in pyStart..<pyEnd {
         var covered = 0
         for px in pxStart..<pxEnd {
@@ -357,7 +358,14 @@ func firstFullHorizontalLine(_ image: CGImage, scale: Int, in rect: WindowRect) 
             let bottom = pixels.gray(x: px, y: py + scale)
             if max(abs(2.0 * c - top - bottom), abs(top - bottom)) >= 4.0 { covered += 1 }
         }
-        if Double(covered) / Double(width) >= fullLineRatio { return (Double(py) / Double(scale)).rounded() }
+        if Double(covered) / Double(width) >= fullLineRatio {
+            if runStart == nil { runStart = py }
+            runEnd = py
+        } else if let start = runStart, let end = runEnd {
+            // The line and its two edges form a short run of rows (fixtures: 495-498); use its middle.
+            return (Double(start + end) / 2 / Double(scale)).rounded(.down)
+        }
     }
+    if let start = runStart, let end = runEnd { return (Double(start + end) / 2 / Double(scale)).rounded(.down) }
     return nil
 }

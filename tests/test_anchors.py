@@ -94,7 +94,8 @@ class AnchorVerificationTests(unittest.TestCase):
                 with self.subTest(name=name, layout=path):
                     cmd = [str(self.cli), str(FRAMES / f'{name}.png'), path, '--measure']
                     out = json.loads(subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=True).stdout)
-                    self.assertAlmostEqual(out['measured']['input_divider'], 496, delta=1)
+                    # The map is rewritten from these values: exact, not within a point.
+                    self.assertEqual(out['measured']['input_divider'], 496)
                     self.assertAlmostEqual(out['measured']['list_border'], 300, delta=1)
 
     def test_all_fixtures_pass(self):
