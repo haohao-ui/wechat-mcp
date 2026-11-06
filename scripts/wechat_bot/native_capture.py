@@ -29,9 +29,15 @@ def layout_unavailable(error):
     return 'invalid("layout_' in str(error)
 
 
+ROW_NOT_VISIBLE='session_row_not_unique_or_missing'
+
+
 def must_wait(error):
     # A WeChat menu, save panel or second window is open: wait, never fall back to MCP navigation.
-    return action_interrupted(error) or layout_unavailable(error) or 'invalid("screen_not_main' in str(error)
+    # A chat whose row is not visible has no new message to read (WeChat lifts it to the top when one
+    # arrives): wait for the row instead of typing its name into search (acceptance 2026-11-06).
+    return (action_interrupted(error) or layout_unavailable(error) or 'invalid("screen_not_main' in str(error)
+            or ROW_NOT_VISIBLE in str(error))
 
 
 def worker_code(error):
