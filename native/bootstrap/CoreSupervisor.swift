@@ -4,6 +4,7 @@ import Darwin
 public enum CoreProcessStatus: Equatable {
     case notRunning
     case running(pid: Int32)
+    case stopping(pid: Int32)
     case restarting(at: Date)
     case gaveUp
     case configError
@@ -12,6 +13,7 @@ public enum CoreProcessStatus: Equatable {
         switch self {
         case .notRunning: return "not_running"
         case .running: return "running"
+        case .stopping: return "stopping"
         case .restarting: return "restarting"
         case .gaveUp: return "gave_up"
         case .configError: return "config_error"
@@ -33,6 +35,9 @@ public func decideCoreAction(
     status: CoreProcessStatus,
     now: Date = Date()
 ) -> CoreDecision {
+    if case .stopping = status {
+        return .keep
+    }
     if coreEnabled && pythonLoaded {
         return .conflict
     }
@@ -47,6 +52,8 @@ public func decideCoreAction(
     case .notRunning:
         return .start
     case .running:
+        return .keep
+    case .stopping:
         return .keep
     case .restarting(let at):
         return now >= at ? .start : .keep
@@ -74,11 +81,15 @@ public func checkPythonLaunchdLoaded() -> Bool {
 
 public final class CoreSupervisor {
     private let lock = NSLock()
+    private let stopLock = NSLock()
+    private let queue = DispatchQueue(label: "local.wechat-mcp.core-supervisor")
     private var process: Process?
     private var restartPolicy = RestartPolicy()
+    private var manualStoppingPIDs = Set<Int32>()
 
     public private(set) var gaveUp: Bool = false
     public private(set) var isConfigError: Bool = false
+    public private(set) var isStopping: Bool = false
     public private(set) var restartingAt: Date?
     public private(set) var lastExitCode: Int32?
 
@@ -109,6 +120,10 @@ public final class CoreSupervisor {
     public var currentStatus: CoreProcessStatus {
         lock.lock()
         defer { lock.unlock() }
+        if isStopping {
+            let pid = process?.processIdentifier ?? 0
+            return .stopping(pid: pid)
+        }
         if let proc = process, proc.isRunning {
             return .running(pid: proc.processIdentifier)
         }
@@ -132,6 +147,8 @@ public final class CoreSupervisor {
         restartPolicy.reset()
         gaveUp = false
         isConfigError = false
+        isStopping = false
+        manualStoppingPIDs.removeAll()
         restartingAt = nil
         lastExitCode = nil
     }
@@ -153,7 +170,17 @@ public final class CoreSupervisor {
             }
         case .stop, .conflict:
             if case .running = status {
-                _ = stopProcess()
+                lock.lock()
+                isStopping = true
+                lock.unlock()
+
+                queue.async { [weak self] in
+                    guard let self = self else { return }
+                    _ = self.stopProcess()
+                    self.lock.lock()
+                    self.isStopping = false
+                    self.lock.unlock()
+                }
             }
         case .keep:
             break
@@ -206,7 +233,7 @@ public final class CoreSupervisor {
 
         proc.terminationHandler = { [weak self] p in
             try? logHandle.close()
-            self?.handleProcessTermination(exitCode: p.terminationStatus, reason: p.terminationReason)
+            self?.handleProcessTermination(pid: p.processIdentifier, exitCode: p.terminationStatus, reason: p.terminationReason)
         }
 
         try proc.run()
@@ -214,12 +241,20 @@ public final class CoreSupervisor {
         self.restartingAt = nil
     }
 
-    private func handleProcessTermination(exitCode: Int32, reason: Process.TerminationReason) {
+    private func handleProcessTermination(pid: Int32, exitCode: Int32, reason: Process.TerminationReason) {
         lock.lock()
         defer { lock.unlock() }
 
         self.process = nil
         self.lastExitCode = exitCode
+        self.isStopping = false
+
+        // 主动停止的进程（通过 stopProcess 终止）：不计入崩溃，状态回到可启动
+        if manualStoppingPIDs.remove(pid) != nil {
+            self.isConfigError = false
+            self.restartingAt = nil
+            return
+        }
 
         // 退出码 0：正常退出，不计入崩溃
         if reason == .exit && exitCode == 0 {
@@ -249,6 +284,9 @@ public final class CoreSupervisor {
     /// 停止子进程：先发 SIGTERM，最多等 gracePeriod 秒，超时发 SIGKILL
     @discardableResult
     public func stopProcess(gracePeriod: TimeInterval? = nil) -> String {
+        stopLock.lock()
+        defer { stopLock.unlock() }
+
         let (proc, timeout) = { () -> (Process?, TimeInterval) in
             lock.lock()
             defer { lock.unlock() }
@@ -256,10 +294,16 @@ public final class CoreSupervisor {
         }()
 
         guard let proc = proc, proc.isRunning else {
+            lock.lock()
+            self.isStopping = false
+            lock.unlock()
             return "none"
         }
 
         let pid = proc.processIdentifier
+        lock.lock()
+        manualStoppingPIDs.insert(pid)
+        lock.unlock()
         // 发送 SIGTERM
         kill(pid, SIGTERM)
 
@@ -275,6 +319,9 @@ public final class CoreSupervisor {
         }
 
         if exited {
+            lock.lock()
+            self.isStopping = false
+            lock.unlock()
             return "sigterm"
         }
 
@@ -283,6 +330,9 @@ public final class CoreSupervisor {
         while proc.isRunning {
             usleep(25_000)
         }
+        lock.lock()
+        self.isStopping = false
+        lock.unlock()
         return "sigkill"
     }
 

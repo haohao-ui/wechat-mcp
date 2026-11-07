@@ -296,6 +296,9 @@ func run() -> Int32 {
             case "running":
                 let pid = Int32(dict["pid"] as? Int ?? 1000)
                 status = .running(pid: pid)
+            case "stopping":
+                let pid = Int32(dict["pid"] as? Int ?? 1000)
+                status = .stopping(pid: pid)
             case "restarting":
                 let atEpoch = dict["restarting_at"] as? Double ?? (nowEpoch + 10.0)
                 status = .restarting(at: Date(timeIntervalSince1970: atEpoch))
@@ -365,6 +368,83 @@ func run() -> Int32 {
                 let resp: [String: Any] = [
                     "ok": true,
                     "stopped_by": stoppedBy
+                ]
+                let outputData = try JSONSerialization.data(withJSONObject: resp, options: [.sortedKeys])
+                if let outputStr = String(data: outputData, encoding: .utf8) {
+                    print(outputStr)
+                    return 0
+                }
+            } else if action == "test_async_reconcile_stopping" {
+                let readyPath = dict["ready_file"] as? String
+                let enabledFile = URL(fileURLWithPath: "/tmp/fake_enable_\(UUID().uuidString)")
+                FileManager.default.createFile(atPath: enabledFile.path, contents: Data())
+
+                let testSup = CoreSupervisor(
+                    coreEnabledURL: enabledFile,
+                    binaryURL: URL(fileURLWithPath: binPath),
+                    configURL: URL(fileURLWithPath: "/tmp/fake.json"),
+                    logURL: URL(fileURLWithPath: logPath),
+                    gracePeriod: graceSec,
+                    pythonLoadedChecker: { false }
+                )
+
+                // 1. 启动进程
+                testSup.checkAndReconcile()
+
+                // 2. 等待 ready_file
+                if let rp = readyPath {
+                    var waited = 0
+                    while waited < 200 {
+                        if FileManager.default.fileExists(atPath: rp) { break }
+                        usleep(10_000)
+                        waited += 1
+                    }
+                } else {
+                    usleep(100_000)
+                }
+
+                let initialStatus = testSup.currentStatus.rawStatusString
+
+                // 3. 删除开关文件，触发停止
+                try? FileManager.default.removeItem(at: enabledFile)
+
+                // 4. 调用 checkAndReconcile，并精确计时
+                let t0 = Date()
+                testSup.checkAndReconcile()
+                let elapsed = Date().timeIntervalSince(t0)
+
+                let stoppingStatus = testSup.currentStatus.rawStatusString
+
+                // 5. 停止期间再次调用，断言返回 keep 且不重复发信号
+                let secondDecision = testSup.checkAndReconcile()
+
+                // 6. 等待后台停止完成（最多等 3 秒）
+                var waitStop = 0
+                while waitStop < 300 {
+                    if testSup.currentStatus == .notRunning {
+                        break
+                    }
+                    usleep(10_000)
+                    waitStop += 1
+                }
+                let finalStatus = testSup.currentStatus.rawStatusString
+
+                // 7. 重新开启开关文件，断言状态回到可再次启动
+                FileManager.default.createFile(atPath: enabledFile.path, contents: Data())
+                let restartDecision = testSup.checkAndReconcile()
+                try? FileManager.default.removeItem(at: enabledFile)
+
+                // 清理可能遗留的子进程
+                testSup.stopProcess(gracePeriod: 0.1)
+
+                let resp: [String: Any] = [
+                    "ok": true,
+                    "elapsed_seconds": elapsed,
+                    "initial_status": initialStatus,
+                    "stopping_status": stoppingStatus,
+                    "second_reconcile_decision": secondDecision.rawValue,
+                    "final_status": finalStatus,
+                    "can_restart_decision": restartDecision.rawValue
                 ]
                 let outputData = try JSONSerialization.data(withJSONObject: resp, options: [.sortedKeys])
                 if let outputStr = String(data: outputData, encoding: .utf8) {

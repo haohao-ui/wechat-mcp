@@ -329,6 +329,13 @@ public func evaluate(_ s: StatusInput) -> [StatusItem] {
                 reason: "互斥冲突：Rust 核心已启用，但检测到 Python 机器人任务已加载",
                 fix: "请先卸载 Python launchd 任务: launchctl bootout gui/$UID/local.wechat-rpa.bot"
             )
+        } else if s.bot.coreStatus == "stopping" {
+            botItem = StatusItem(
+                key: "bot",
+                level: .yellow,
+                reason: "正在停止 Rust 核心（等待当前一轮完成）",
+                fix: nil
+            )
         } else if s.bot.coreStatus == "restarting" {
             botItem = StatusItem(
                 key: "bot",
