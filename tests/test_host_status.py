@@ -586,6 +586,163 @@ class HostStatusTests(unittest.TestCase):
             self.assertNotIn('max_attachment_mb', saved)
             self.assertEqual(saved['max_replies_per_hour'], 20)
 
+    def test_mask_config_includes_brain_setting(self):
+        """配置表单遮罩结果中包含 brain 配置项。"""
+        cfg = {
+            'account_id': 'bot1',
+            'brain': {
+                'mode': 'external',
+                'external': {
+                    'timeout_seconds': 180,
+                    'timeout_action': 'handoff',
+                    'queue_minutes': 60
+                }
+            }
+        }
+        res = self.run_config_action({'op': 'mask_config', 'config': cfg})
+        editable = res.get('editable', {})
+        self.assertIn('brain', editable)
+        self.assertEqual(editable['brain']['mode'], 'external')
+        self.assertEqual(editable['brain']['external']['timeout_seconds'], 180)
+
+    def test_config_form_brain_mode_builtin_and_external(self):
+        """配置表单更新 brain 配置项：支持 builtin 与 external，且保留其余字段 deep-equal。"""
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / 'config.json'
+            original = {
+                'schema_version': 1,
+                'account_id': 'bot1',
+                'cooldown_seconds': 15,
+                'brain': {'mode': 'builtin'}
+            }
+            target.write_text(json.dumps(original))
+
+            # 1. 设置为 external，配置超时秒数和动作
+            res = self.run_config_action({
+                'op': 'update_and_save_form',
+                'target_path': str(target),
+                'original_config': original,
+                'form_inputs': {
+                    'brain_mode': 'external',
+                    'brain_timeout_seconds': '150',
+                    'brain_timeout_action': 'handoff',
+                    'brain_queue_minutes': '45'
+                },
+                'simulated_check_result': {'ok': True}
+            })
+            self.assertTrue(res['ok'], res.get('error'))
+            saved = json.loads(target.read_text())
+            self.assertEqual(saved['brain']['mode'], 'external')
+            self.assertEqual(saved['brain']['external']['timeout_seconds'], 150)
+            self.assertEqual(saved['brain']['external']['timeout_action'], 'handoff')
+            self.assertEqual(saved['brain']['external']['queue_minutes'], 45)
+            self.assertEqual(saved['cooldown_seconds'], 15)
+            self.assertEqual(saved['account_id'], 'bot1')
+
+            # 2. 切换回 builtin
+            res2 = self.run_config_action({
+                'op': 'update_and_save_form',
+                'target_path': str(target),
+                'original_config': saved,
+                'form_inputs': {
+                    'brain_mode': 'builtin'
+                },
+                'simulated_check_result': {'ok': True}
+            })
+            self.assertTrue(res2['ok'], res2.get('error'))
+            saved2 = json.loads(target.read_text())
+            self.assertEqual(saved2['brain']['mode'], 'builtin')
+            self.assertNotIn('external', saved2['brain'])
+
+    def test_config_form_brain_external_validation(self):
+        """配置表单对 external 模式的 timeout_seconds 和 timeout_action 进行严格校验。"""
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / 'config.json'
+            original = {'schema_version': 1, 'account_id': 'bot1'}
+            target.write_text(json.dumps(original))
+
+            # 1. 超时秒数必须在 1..3600
+            res_bad_timeout = self.run_config_action({
+                'op': 'update_and_save_form',
+                'target_path': str(target),
+                'original_config': original,
+                'form_inputs': {
+                    'brain_mode': 'external',
+                    'brain_timeout_seconds': '0'
+                },
+                'simulated_check_result': {'ok': True}
+            })
+            self.assertFalse(res_bad_timeout['ok'])
+
+            res_bad_timeout2 = self.run_config_action({
+                'op': 'update_and_save_form',
+                'target_path': str(target),
+                'original_config': original,
+                'form_inputs': {
+                    'brain_mode': 'external',
+                    'brain_timeout_seconds': '3601'
+                },
+                'simulated_check_result': {'ok': True}
+            })
+            self.assertFalse(res_bad_timeout2['ok'])
+
+            # 2. 非法 timeout_action 拒绝
+            res_bad_action = self.run_config_action({
+                'op': 'update_and_save_form',
+                'target_path': str(target),
+                'original_config': original,
+                'form_inputs': {
+                    'brain_mode': 'external',
+                    'brain_timeout_action': 'destroy'
+                },
+                'simulated_check_result': {'ok': True}
+            })
+            self.assertFalse(res_bad_action['ok'])
+
+    def test_status_external_brain_unconnected_yellow_and_pending_count(self):
+        """外部大脑模式下，last_poll_at 超过 60 秒未更新显示黄色'外部大脑未连接'，并显示待处理轮次数。"""
+        inp = self._default_input()
+        inp['brain'] = {
+            'mode': 'external',
+            'pending': 3,
+            'last_poll_at': 10000.0,
+            'now': 10070.0  # 70s passed > 60s
+        }
+        items = self.run_status_eval(inp)
+        item_dict = {i['key']: i for i in items}
+        self.assertIn('brain', item_dict)
+        self.assertEqual(item_dict['brain']['level'], 'yellow')
+        self.assertIn('外部大脑未连接', item_dict['brain']['reason'])
+        self.assertIn('3', item_dict['brain']['reason'])
+
+    def test_status_external_brain_connected_green(self):
+        """外部大脑模式下，last_poll_at 在 60 秒内更新显示绿色。"""
+        inp = self._default_input()
+        inp['brain'] = {
+            'mode': 'external',
+            'pending': 0,
+            'last_poll_at': 10000.0,
+            'now': 10020.0  # 20s passed <= 60s
+        }
+        items = self.run_status_eval(inp)
+        item_dict = {i['key']: i for i in items}
+        self.assertIn('brain', item_dict)
+        self.assertEqual(item_dict['brain']['level'], 'green')
+
+    def test_status_sessions_handoff_lists_name(self):
+        """会话列表中包含转人工状态（handoff）时，在各会话状态中列出会话名称。"""
+        inp = self._default_input()
+        inp['sessions']['客户张三'] = {
+            'state': 'handoff',
+            'reason': '转人工处理中'
+        }
+        items = self.run_status_eval(inp)
+        item_dict = {i['key']: i for i in items}
+        self.assertIn('sessions', item_dict)
+        self.assertEqual(item_dict['sessions']['level'], 'yellow')
+        self.assertIn('客户张三', item_dict['sessions']['reason'])
+        self.assertIn('转人工', item_dict['sessions']['reason'])
+
 
 if __name__ == '__main__':
     unittest.main()

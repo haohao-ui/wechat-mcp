@@ -111,11 +111,34 @@ public struct SessionHealthInput: Codable {
     public var state: String
     public var reason: String?
     public var code: String?
+    public var handoff: Bool?
 
-    public init(state: String, reason: String? = nil, code: String? = nil) {
+    public init(state: String, reason: String? = nil, code: String? = nil, handoff: Bool? = nil) {
         self.state = state
         self.reason = reason
         self.code = code
+        self.handoff = handoff
+    }
+}
+
+public struct BrainInput: Codable {
+    public var mode: String?
+    public var pending: Int?
+    public var lastPollAt: Double?
+    public var now: Double?
+
+    public init(mode: String? = "builtin", pending: Int? = nil, lastPollAt: Double? = nil, now: Double? = nil) {
+        self.mode = mode
+        self.pending = pending
+        self.lastPollAt = lastPollAt
+        self.now = now
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case mode
+        case pending
+        case lastPollAt = "last_poll_at"
+        case now
     }
 }
 
@@ -202,6 +225,7 @@ public struct StatusInput: Codable {
     public var wechat: WechatInput
     public var layout: LayoutInput
     public var disk: DiskInput
+    public var brain: BrainInput?
 
     public init(
         permissions: PermissionsInput,
@@ -210,7 +234,8 @@ public struct StatusInput: Codable {
         sessions: [String: SessionHealthInput],
         wechat: WechatInput,
         layout: LayoutInput,
-        disk: DiskInput
+        disk: DiskInput,
+        brain: BrainInput? = nil
     ) {
         self.permissions = permissions
         self.desktopService = desktopService
@@ -219,6 +244,7 @@ public struct StatusInput: Codable {
         self.wechat = wechat
         self.layout = layout
         self.disk = disk
+        self.brain = brain
     }
 
     enum CodingKeys: String, CodingKey {
@@ -229,6 +255,7 @@ public struct StatusInput: Codable {
         case wechat
         case layout
         case disk
+        case brain
     }
 }
 
@@ -396,9 +423,12 @@ public func evaluate(_ s: StatusInput) -> [StatusItem] {
     let sessionsItem: StatusItem
     var waitingSessions: [(name: String, code: String)] = []
     var recalibrationSessions: [String] = []
+    var handoffSessions: [String] = []
     for (name, session) in s.sessions.sorted(by: { $0.key < $1.key }) {
         if session.state == "needs_recalibration" {
             recalibrationSessions.append(name)
+        } else if session.state == "handoff" || session.handoff == true {
+            handoffSessions.append(name)
         } else if session.state == "waiting_for_wechat_window" {
             let code = session.code ?? session.reason ?? "unknown"
             waitingSessions.append((name: name, code: code))
@@ -406,6 +436,8 @@ public func evaluate(_ s: StatusInput) -> [StatusItem] {
     }
     if !recalibrationSessions.isEmpty {
         sessionsItem = StatusItem(key: "sessions", level: .red, reason: "会话【\(recalibrationSessions.joined(separator: ", "))】需要重新校准", fix: "运行校准生成新地图")
+    } else if !handoffSessions.isEmpty {
+        sessionsItem = StatusItem(key: "sessions", level: .yellow, reason: "会话【\(handoffSessions.joined(separator: ", "))】已转人工", fix: "点击「恢复自动回复」或处理会话")
     } else if let firstWaiting = waitingSessions.first {
         sessionsItem = StatusItem(key: "sessions", level: .yellow, reason: "会话【\(firstWaiting.name)】处于 waiting_for_wechat_window: \(firstWaiting.code)", fix: "检查微信窗口是否可见且未被遮挡")
     } else {
@@ -475,6 +507,33 @@ public func evaluate(_ s: StatusInput) -> [StatusItem] {
     }
     items.append(diskItem)
 
+    // 8. brain
+    let brainMode = s.brain?.mode ?? "builtin"
+    let brainItem: StatusItem
+    if brainMode == "external" {
+        let now = s.brain?.now ?? s.bot.now
+        let lastPoll = s.brain?.lastPollAt
+        let pending = s.brain?.pending ?? 0
+        let isStale = (lastPoll == nil) || ((now - lastPoll!) > 60.0)
+
+        if isStale {
+            var reason = "外部大脑未连接"
+            if pending > 0 {
+                reason += " (待处理 \(pending) 轮)"
+            }
+            brainItem = StatusItem(key: "brain", level: .yellow, reason: reason, fix: "启动外部大脑客户端以恢复回复")
+        } else {
+            var reason = "外部大脑已连接"
+            if pending > 0 {
+                reason += " (待处理 \(pending) 轮)"
+            }
+            brainItem = StatusItem(key: "brain", level: .green, reason: reason, fix: nil)
+        }
+    } else {
+        brainItem = StatusItem(key: "brain", level: .green, reason: "内置大脑正常运行中", fix: nil)
+    }
+    items.append(brainItem)
+
     return items
 }
 
@@ -497,6 +556,7 @@ public func generateDiagnostics(items: [StatusItem], appVersion: String, hostInf
         case "wechat": name = "微信"
         case "layout": name = "布局地图"
         case "disk": name = "磁盘"
+        case "brain": name = "大脑状态"
         default: name = item.key
         }
         var line = "[\(name)] \(item.level.rawValue): \(item.reason)"
