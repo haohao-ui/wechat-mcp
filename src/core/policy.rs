@@ -3,6 +3,9 @@ use anyhow::{bail, Result};
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 use crate::core::model::{Bubble, Frame};
+use crate::core::state::write_private;
+use std::time::Duration;
+use serde_json::Value;
 
 pub const PHASH_TOLERANCE: u32 = 12;
 pub const FINGERPRINT_VERSION: u32 = 2;
@@ -560,6 +563,124 @@ impl Policy {
     }
 }
 
+pub trait CaptureFrames {
+    fn next_frame(&mut self) -> impl std::future::Future<Output = Result<Frame>> + Send;
+}
+
+pub trait PolicyToolClient {
+    fn call_tool(&mut self, name: &str, args: serde_json::Value) -> impl std::future::Future<Output = Result<serde_json::Value>> + Send;
+}
+
+pub async fn run_bounded_bot<C, T, G, Fut>(
+    root: &std::path::Path,
+    policy: &Policy,
+    client: &mut T,
+    capture: &mut C,
+    generate: G,
+    duration: std::time::Duration,
+) -> Result<()>
+where
+    C: CaptureFrames,
+    T: PolicyToolClient,
+    G: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+{
+    let baseline = capture.next_frame().await?;
+    policy.check_frame(&baseline).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    std::fs::create_dir_all(root)?;
+    write_private(&root.join("baseline.json"), &baseline)?;
+
+    let deadline = std::time::Instant::now() + duration;
+    let mut current_baseline = baseline;
+
+    while std::time::Instant::now() < deadline {
+        let frame = capture.next_frame().await?;
+        policy.check_frame(&frame).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+
+        let fp_base: Vec<_> = current_baseline.bubbles.iter().map(fingerprint).collect();
+        let fp_cur: Vec<_> = frame.bubbles.iter().map(fingerprint).collect();
+        if fp_base == fp_cur {
+            continue;
+        }
+
+        let confirmed = capture.next_frame().await?;
+        let candidate = policy.candidate(&current_baseline, &frame, &confirmed)
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+
+        let Some(candidate) = candidate else {
+            current_baseline = confirmed;
+            continue;
+        };
+
+        let key = policy.key(&current_baseline, &candidate);
+        let journal = root.join(format!("{key}.json"));
+        if journal.exists() {
+            return Ok(());
+        }
+
+        let mut record = serde_json::json!({
+            "status": "generating",
+            "account_id": policy.account,
+            "recipient": policy.recipient,
+            "input": candidate,
+            "idempotency_key": key,
+            "direction_evidence": "visual_candidate",
+            "platform_message_verified": false,
+        });
+        write_private(&journal, &record)?;
+
+        let generated_text = generate(candidate.text.clone()).await?;
+        let reply = validate_reply(&generated_text).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        record["status"] = serde_json::json!("generated");
+        record["reply"] = serde_json::json!(reply);
+        write_private(&journal, &record)?;
+
+        let latest = capture.next_frame().await?;
+        policy.check_frame(&latest).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+
+        let fp_latest: Vec<_> = latest.bubbles.iter().map(fingerprint).collect();
+        let fp_conf: Vec<_> = confirmed.bubbles.iter().map(fingerprint).collect();
+        if fp_latest != fp_conf {
+            record["status"] = serde_json::json!("chat_changed_before_send");
+            write_private(&journal, &record)?;
+            bail!("chat changed before sending; reply retained, no send");
+        }
+
+        record["status"] = serde_json::json!("attempting");
+        write_private(&journal, &record)?;
+
+        let result = client.call_tool("send_message", serde_json::json!({
+            "recipient": policy.recipient,
+            "message": reply,
+            "idempotency_key": key,
+        })).await?;
+
+        let durable = client.call_tool("get_send_status", serde_json::json!({
+            "idempotency_key": key,
+        })).await?;
+
+        record["status"] = serde_json::json!("send_returned");
+        record["send_result"] = result;
+        record["durable_status"] = durable;
+        write_private(&journal, &record)?;
+
+        let after = capture.next_frame().await?;
+        policy.check_frame(&after).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+
+        let echoed = after.bubbles.iter().any(|x| {
+            x.direction == "outbound_visual" && echo_matches(&x.text, &reply)
+        });
+
+        record["client_echo_observed"] = serde_json::json!(echoed);
+        record["delivery"] = serde_json::json!("unknown");
+        write_private(&journal, &record)?;
+
+        return Ok(());
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1029,5 +1150,218 @@ mod tests {
             frame.bubbles = baseline;
             assert_eq!(policy.key(&frame, &candidate), expected, "{account}/{recipient}");
         }
+    }
+
+    struct TestDir(std::path::PathBuf);
+    impl TestDir {
+        fn new() -> Self {
+            let p = std::env::temp_dir().join(format!("test-policy-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&p).unwrap();
+            Self(p)
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct MockCapture {
+        frames: Vec<Frame>,
+        index: usize,
+    }
+
+    impl MockCapture {
+        fn new(frames: Vec<Frame>) -> Self {
+            Self { frames, index: 0 }
+        }
+    }
+
+    impl CaptureFrames for MockCapture {
+        async fn next_frame(&mut self) -> Result<Frame> {
+            if self.index < self.frames.len() {
+                let f = self.frames[self.index].clone();
+                self.index += 1;
+                Ok(f)
+            } else {
+                bail!("no more frames");
+            }
+        }
+    }
+
+    struct MockClient {
+        calls: Vec<(String, Value)>,
+        send_error: bool,
+    }
+
+    impl MockClient {
+        fn new(send_error: bool) -> Self {
+            Self { calls: Vec::new(), send_error }
+        }
+    }
+
+    impl PolicyToolClient for MockClient {
+        async fn call_tool(&mut self, name: &str, args: Value) -> Result<Value> {
+            self.calls.push((name.to_string(), args));
+            if name == "send_message" && self.send_error {
+                bail!("send outcome unknown");
+            }
+            Ok(json!({"status": "triggered", "delivery": "unknown"}))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_one_model_reply_through_existing_idempotent_send() {
+        let td = TestDir::new();
+        let policy = Policy::new("fixture", "午夜咖啡", "Bot验证1104", None, false).unwrap();
+        let old = make_frame(vec![make_bubble("old", None, None)], None);
+        let new_frame = make_frame(vec![make_bubble("old", None, None), make_bubble("Bot验证1104 你好", None, None)], None);
+        let mut after_bubbles = new_frame.bubbles.clone();
+        after_bubbles.push(make_bubble("你好，这是自动回复测试。", Some("outbound_visual"), None));
+        let after = make_frame(after_bubbles, None);
+
+        let mut capture = MockCapture::new(vec![old, new_frame.clone(), new_frame.clone(), new_frame, after]);
+        let mut client = MockClient::new(false);
+        let gen_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gen_count_clone = gen_count.clone();
+
+        run_bounded_bot(
+            td.path(),
+            &policy,
+            &mut client,
+            &mut capture,
+            move |_| {
+                gen_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { Ok("你好，这是自动回复测试。".to_string()) }
+            },
+            Duration::from_secs(10),
+        ).await.unwrap();
+
+        let sent: Vec<_> = client.calls.iter().filter(|(n, _)| n == "send_message").collect();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].1["recipient"], "午夜咖啡");
+        assert_eq!(sent[0].1["message"], "你好，这是自动回复测试。");
+        assert!(sent[0].1["idempotency_key"].as_str().unwrap().starts_with("bot-"));
+
+        let mut found_record = None;
+        for entry in std::fs::read_dir(td.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with("bot-") && name.ends_with(".json") {
+                    let content = std::fs::read_to_string(&path).unwrap();
+                    found_record = Some(serde_json::from_str::<Value>(&content).unwrap());
+                    break;
+                }
+            }
+        }
+        let record = found_record.expect("expected bot-*.json journal");
+        assert_eq!(record["client_echo_observed"], true);
+        assert_eq!(record["delivery"], "unknown");
+        assert_eq!(gen_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_model_latency_cannot_authorize_sending_into_changed_chat() {
+        let td = TestDir::new();
+        let policy = Policy::new("fixture", "午夜咖啡", "Bot验证1104", None, false).unwrap();
+        let old = make_frame(vec![make_bubble("old", None, None)], None);
+        let new_frame = make_frame(vec![make_bubble("old", None, None), make_bubble("Bot验证1104 你好", None, None)], None);
+        let mut changed_bubbles = new_frame.bubbles.clone();
+        changed_bubbles.push(make_bubble("another", None, None));
+        let changed = make_frame(changed_bubbles, None);
+
+        let mut capture = MockCapture::new(vec![old, new_frame.clone(), new_frame, changed]);
+        let mut client = MockClient::new(false);
+
+        let err = run_bounded_bot(
+            td.path(),
+            &policy,
+            &mut client,
+            &mut capture,
+            |_| async { Ok("你好，这是自动回复测试。".to_string()) },
+            Duration::from_secs(10),
+        ).await.unwrap_err();
+
+        assert!(err.to_string().contains("changed before sending"), "got err: {}", err);
+        assert!(!client.calls.iter().any(|(n, _)| n == "send_message"));
+    }
+
+    #[tokio::test]
+    async fn test_non_allowlisted_title_never_reaches_model() {
+        let td = TestDir::new();
+        let policy = Policy::new("fixture", "午夜咖啡", "Bot验证1104", None, false).unwrap();
+        let bad_frame = make_frame(vec![], Some("其他人"));
+
+        let mut capture = MockCapture::new(vec![bad_frame]);
+        let mut client = MockClient::new(false);
+        let gen_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gen_called_clone = gen_called.clone();
+
+        let err = run_bounded_bot(
+            td.path(),
+            &policy,
+            &mut client,
+            &mut capture,
+            move |_| {
+                gen_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                async { Ok("reply".to_string()) }
+            },
+            Duration::from_secs(10),
+        ).await.unwrap_err();
+
+        assert!(err.to_string().contains("allowlisted title"), "got err: {}", err);
+        assert!(!gen_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!client.calls.iter().any(|(n, _)| n == "send_message"));
+    }
+
+    #[tokio::test]
+    async fn test_unknown_send_is_not_regenerated_or_resent_on_restart() {
+        let td = TestDir::new();
+        let policy = Policy::new("fixture", "午夜咖啡", "Bot验证1104", None, false).unwrap();
+        let old = make_frame(vec![make_bubble("old", None, None)], None);
+        let new_frame = make_frame(vec![make_bubble("old", None, None), make_bubble("Bot验证1104 你好", None, None)], None);
+
+        let mut capture1 = MockCapture::new(vec![old.clone(), new_frame.clone(), new_frame.clone(), new_frame.clone()]);
+        let mut client1 = MockClient::new(true); // send_error = true
+        let gen_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let gen_c1 = gen_count.clone();
+        let err = run_bounded_bot(
+            td.path(),
+            &policy,
+            &mut client1,
+            &mut capture1,
+            move |_| {
+                gen_c1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { Ok("你好，这是自动回复测试。".to_string()) }
+            },
+            Duration::from_secs(10),
+        ).await.unwrap_err();
+        assert!(err.to_string().contains("send outcome unknown"));
+
+        // Restart with the same state directory
+        let mut capture2 = MockCapture::new(vec![old, new_frame.clone(), new_frame]);
+        let mut client2 = MockClient::new(false);
+        let gen_c2 = gen_count.clone();
+
+        run_bounded_bot(
+            td.path(),
+            &policy,
+            &mut client2,
+            &mut capture2,
+            move |_| {
+                gen_c2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { Ok("你好，这是自动回复测试。".to_string()) }
+            },
+            Duration::from_secs(10),
+        ).await.unwrap();
+
+        let total_sends = client1.calls.iter().filter(|(n, _)| n == "send_message").count()
+            + client2.calls.iter().filter(|(n, _)| n == "send_message").count();
+        assert_eq!(total_sends, 1);
+        assert_eq!(gen_count.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }
