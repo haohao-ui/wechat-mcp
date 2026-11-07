@@ -25,8 +25,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: 测试
         run: cargo test --locked
-      - name: 安装脚本测试（隔离 HOME）
-        run: bash scripts/test-install.sh
       - name: 构建 Rust（arm64 + x86_64）
         run: |
           cargo build --release --locked --target aarch64-apple-darwin

@@ -97,23 +97,17 @@ func recognize(_ image: CGImage, timeout: Double = 12) throws -> [Text] {
     let completed = DispatchSemaphore(value:0)
     var result: [Text] = []
     var failure: Error?
-    // RapidOCR may use its own 12s and then fall back to Vision, so allow both in a row.
-    let limit = (try? currentOCREngine()) == "rapidocr" ? timeout*2 : timeout
     DispatchQueue.global(qos:.userInitiated).async {
         do { result = try recognizeNow(image) } catch { failure = error }
         completed.signal()
     }
-    guard completed.wait(timeout:.now()+limit) == .success else { throw Failure.invalid("vision_timeout") }
+    guard completed.wait(timeout:.now()+timeout) == .success else { throw Failure.invalid("vision_timeout") }
     if let failure = failure { throw failure }
     return result
 }
 
-/// Loads the text model once (Vision cold start is ~30s on macOS 26+; RapidOCR loads in a few seconds).
+/// Loads the text model once (Vision cold start is ~30s on macOS 26+).
 func warmUpRecognizer() {
-    if (try? currentOCREngine()) == "rapidocr" {
-        do { try rapidOCR.ensureStarted() } catch { fputs("rapidocr warm-up failed: \(error)\n", stderr) }
-        return
-    }
     guard let context = CGContext(data:nil,width:200,height:60,bitsPerComponent:8,bytesPerRow:0,
         space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
     context.setFillColor(CGColor(red:1,green:1,blue:1,alpha:1)); context.fill(CGRect(x:0,y:0,width:200,height:60))
@@ -121,16 +115,16 @@ func warmUpRecognizer() {
     do { _ = try recognize(image, timeout:60) } catch { fputs("vision warm-up failed: \(error)\n", stderr) }
 }
 
-// MARK: OCR engine switch (vision | rapidocr)
+// MARK: OCR engine switch (vision only)
 
 private var switchCache: (path: String, modified: Date?, engine: String)?
 
 /// WECHAT_OCR_ENGINE wins; otherwise ~/.wechat-rpa/ocr.json (or WECHAT_OCR_CONFIG); no file = vision.
-/// The file is re-read when its modification time changes, so a switch needs no restart.
+/// Only vision is supported. Invalid engines throw invalid_ocr_engine.
 func currentOCREngine() throws -> String {
     let env = ProcessInfo.processInfo.environment
     if let forced = env["WECHAT_OCR_ENGINE"]?.trimmingCharacters(in:.whitespaces).lowercased(), !forced.isEmpty {
-        guard ["vision","rapidocr"].contains(forced) else { throw Failure.invalid("invalid_ocr_engine") }
+        guard forced == "vision" else { throw Failure.invalid("invalid_ocr_engine") }
         return forced
     }
     let path = env["WECHAT_OCR_CONFIG"] ?? NSHomeDirectory()+"/.wechat-rpa/ocr.json"
@@ -141,135 +135,23 @@ func currentOCREngine() throws -> String {
         guard let data = FileManager.default.contents(atPath:path),
               let object = try? JSONSerialization.jsonObject(with:data) as? [String:Any],
               let value = (object["engine"] as? String)?.lowercased(),
-              ["vision","rapidocr"].contains(value) else { throw Failure.invalid("invalid_ocr_engine") }
+              value == "vision" else { throw Failure.invalid("invalid_ocr_engine") }
         engine = value
     }
     switchCache = (path, modified, engine)
     return engine
 }
 
-/// What the last request's recognitions actually used; `fallback` only when RapidOCR was skipped.
+/// What the last request's recognitions actually used.
 var ocrReport: [String:Any] = ["engine":"vision","engine_used":"vision"]
 
 func resetOCRReport() {
-    let engine = (try? currentOCREngine()) ?? "vision"
-    ocrReport = ["engine":engine,"engine_used":engine]
+    _ = try? currentOCREngine()
+    ocrReport = ["engine":"vision","engine_used":"vision"]
 }
-
-/// RapidOCR four-point boxes to the same centre-point Text that Vision yields (pixel coordinates).
-func rapidTexts(_ lines: [[String:Any]]) -> [Text] {
-    lines.compactMap { line -> Text? in
-        guard let raw = line["text"] as? String, let box = line["box"] as? [[Double]], box.count == 4,
-              box.allSatisfy({ $0.count == 2 }) else { return nil }
-        let body = raw.replacingOccurrences(of:"\n",with:" ").replacingOccurrences(of:"\t",with:" ")
-        guard !body.trimmingCharacters(in:.whitespaces).isEmpty else { return nil }
-        return Text(body:body, x:box.map { $0[0] }.reduce(0,+)/4, y:box.map { $0[1] }.reduce(0,+)/4)
-    }.sorted { $0.y < $1.y }
-}
-
-/// One long-lived helper process (native/rapidocr_server.py); restarted after a failure, but not
-/// sooner than `cooldown` so a broken install does not cost a cold start on every frame.
-final class RapidOCRClient {
-    private var process: Process?
-    private var input: FileHandle?
-    private var output: FileHandle?
-    private var buffer = Data()
-    private var retryAfter = Date.distantPast
-    private(set) var lastFailure = "rapidocr_unavailable"
-    let requestTimeout: Double = 12
-    let startTimeout: Double = 30
-    let cooldown: Double = 60
-
-    init() { signal(SIGPIPE, SIG_IGN) }
-
-    func ensureStarted() throws {
-        if process?.isRunning == true { return }
-        guard Date() >= retryAfter else { throw Failure.invalid(lastFailure) }
-        do { try start() } catch { fail(error); throw error }
-    }
-
-    func recognize(_ image: CGImage) throws -> [Text] {
-        try ensureStarted()
-        let env = ProcessInfo.processInfo.environment
-        let folder = env["WECHAT_OCR_TMP"] ?? NSHomeDirectory()+"/.wechat-rpa/ocr-tmp"
-        do {
-            try FileManager.default.createDirectory(atPath:folder, withIntermediateDirectories:true, attributes:[.posixPermissions:0o700])
-            let path = folder+"/"+UUID().uuidString+".png"
-            defer { try? FileManager.default.removeItem(atPath:path) }
-            guard let destination = CGImageDestinationCreateWithURL(URL(fileURLWithPath:path) as CFURL, "public.png" as CFString, 1, nil) else {
-                throw Failure.invalid("rapidocr_image_write_failed")
-            }
-            CGImageDestinationAddImage(destination, image, nil)
-            guard CGImageDestinationFinalize(destination) else { throw Failure.invalid("rapidocr_image_write_failed") }
-            var request = try JSONSerialization.data(withJSONObject:["image":path]); request.append(10)
-            input?.write(request)
-            let reply = try readJSON(timeout:requestTimeout)
-            if let error = reply["error"] as? String { throw Failure.invalid("rapidocr_error: "+error) }
-            guard let lines = reply["lines"] as? [[String:Any]] else { throw Failure.invalid("rapidocr_bad_reply") }
-            return rapidTexts(lines)
-        } catch { fail(error); throw error }
-    }
-
-    private func start() throws {
-        let env = ProcessInfo.processInfo.environment
-        let python = env["WECHAT_RAPIDOCR_PYTHON"] ?? "/usr/bin/python3"
-        let script = env["WECHAT_RAPIDOCR_SCRIPT"] ?? NSHomeDirectory()+"/.wechat-rpa/bin/rapidocr_server.py"
-        guard FileManager.default.isExecutableFile(atPath:python), FileManager.default.fileExists(atPath:script) else {
-            throw Failure.invalid("rapidocr_unavailable")
-        }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath:python)
-        process.arguments = [script]
-        let stdin = Pipe(), stdout = Pipe()
-        process.standardInput = stdin; process.standardOutput = stdout
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        self.process = process; input = stdin.fileHandleForWriting; output = stdout.fileHandleForReading; buffer = Data()
-        let ready = try readJSON(timeout:startTimeout)
-        if let error = ready["error"] as? String { throw Failure.invalid("rapidocr_unavailable: "+error) }
-        guard ready["ready"] as? Bool == true else { throw Failure.invalid("rapidocr_bad_reply") }
-    }
-
-    /// Next JSON object line; other lines (library noise) are skipped.
-    private func readJSON(timeout: Double) throws -> [String:Any] {
-        let deadline = Date().addingTimeInterval(timeout)
-        while true {
-            while let newline = buffer.firstIndex(of:10) {
-                let line = buffer.prefix(upTo:newline); buffer.removeSubrange(...newline)
-                if let object = try? JSONSerialization.jsonObject(with:Data(line)) as? [String:Any] { return object }
-            }
-            guard let output = output else { throw Failure.invalid("rapidocr_exited") }
-            let remaining = deadline.timeIntervalSinceNow
-            guard remaining > 0 else { throw Failure.invalid("rapidocr_timeout") }
-            let arrived = DispatchSemaphore(value:0)
-            final class Box { var data = Data() }
-            let box = Box()
-            DispatchQueue.global(qos:.userInitiated).async { box.data = output.availableData; arrived.signal() }
-            guard arrived.wait(timeout:.now()+remaining) == .success else { throw Failure.invalid("rapidocr_timeout") }
-            if box.data.isEmpty { throw Failure.invalid("rapidocr_exited") }
-            buffer.append(box.data)
-        }
-    }
-
-    private func fail(_ error: Error) {
-        if case Failure.invalid(let reason) = error { lastFailure = reason } else { lastFailure = "rapidocr_error: \(error)" }
-        if process?.isRunning == true { process?.terminate() }
-        process = nil; input = nil; output = nil; buffer = Data()
-        retryAfter = Date().addingTimeInterval(cooldown)
-    }
-}
-
-let rapidOCR = RapidOCRClient()
 
 func recognizeNow(_ image: CGImage) throws -> [Text] {
-    if try currentOCREngine() == "rapidocr" {
-        do {
-            return try rapidOCR.recognize(image)
-        } catch {
-            ocrReport["engine_used"] = "vision"
-            if ocrReport["fallback"] == nil { ocrReport["fallback"] = rapidOCR.lastFailure }
-        }
-    }
+    _ = try currentOCREngine()
     return try recognizeWithVision(image)
 }
 
@@ -278,8 +160,15 @@ func recognizeWithVision(_ image: CGImage) throws -> [Text] {
     request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
     request.recognitionLevel = .accurate
     request.usesLanguageCorrection = true
-    try VNImageRequestHandler(cgImage:image, options:[:]).perform([request])
-    return (request.results ?? []).compactMap { item in
+    do {
+        try VNImageRequestHandler(cgImage:image, options:[:]).perform([request])
+    } catch {
+        throw Failure.invalid("vision_error: \(error)")
+    }
+    guard let results = request.results else {
+        throw Failure.invalid("vision_failed: no results")
+    }
+    return results.compactMap { item in
         guard let text = item.topCandidates(1).first else { return nil }
         return Text(body:text.string, x:item.boundingBox.midX*Double(image.width),
                     y:(1-item.boundingBox.midY)*Double(image.height))
