@@ -1,75 +1,33 @@
 use std::collections::HashSet;
+use anyhow::{bail, Result};
+use sha2::{Digest, Sha256};
+use unicode_normalization::UnicodeNormalization;
 use crate::core::model::{Bubble, Frame};
 
 pub const PHASH_TOLERANCE: u32 = 12;
 pub const FINGERPRINT_VERSION: u32 = 2;
 pub const SCROLL_STEP_POINTS: i64 = 90;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Fingerprint {
-    pub direction: String,
-    pub digest: String,
-    pub phash: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct AmbiguousAnchor {
-    pub message: String,
-    pub certain: Vec<Bubble>,
-}
-
-impl std::fmt::Display for AmbiguousAnchor {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for AmbiguousAnchor {}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ContinuityGap(pub String);
-
-impl std::fmt::Display for ContinuityGap {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for ContinuityGap {}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum PolicyError {
-    ContinuityGap(ContinuityGap),
-    AmbiguousAnchor(AmbiguousAnchor),
-    InvalidFrame(String),
-    ValidationError(String),
-}
-
-impl std::fmt::Display for PolicyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ContinuityGap(e) => write!(f, "{}", e),
-            Self::AmbiguousAnchor(e) => write!(f, "{}", e),
-            Self::InvalidFrame(e) => write!(f, "{}", e),
-            Self::ValidationError(e) => write!(f, "{}", e),
-        }
-    }
-}
-
-impl std::error::Error for PolicyError {}
+pub type Fingerprint = (String, String, Option<String>);
 
 pub fn fingerprint(bubble: &Bubble) -> Fingerprint {
-    Fingerprint {
-        direction: bubble.direction.clone(),
-        digest: bubble.digest.clone(),
-        phash: bubble.phash.clone(),
-    }
+    (
+        bubble.direction.clone(),
+        bubble.digest.clone(),
+        bubble.phash.clone(),
+    )
 }
 
-pub fn phash_distance(a: &str, b: &str) -> u32 {
-    let va = u64::from_str_radix(a.trim(), 16).unwrap_or(0);
-    let vb = u64::from_str_radix(b.trim(), 16).unwrap_or(0);
-    (va ^ vb).count_ones()
+pub fn phash_distance(a: &str, b: &str) -> Result<u32> {
+    let va = match u64::from_str_radix(a.trim(), 16) {
+        Ok(v) => v,
+        Err(_) => bail!("invalid hex string in phash: {}", a),
+    };
+    let vb = match u64::from_str_radix(b.trim(), 16) {
+        Ok(v) => v,
+        Err(_) => bail!("invalid hex string in phash: {}", b),
+    };
+    Ok((va ^ vb).count_ones())
 }
 
 pub fn same_bubble(old: &Bubble, new: &Bubble) -> bool {
@@ -77,7 +35,10 @@ pub fn same_bubble(old: &Bubble, new: &Bubble) -> bool {
         return false;
     }
     match (&old.phash, &new.phash) {
-        (Some(pa), Some(pb)) => phash_distance(pa, pb) <= PHASH_TOLERANCE,
+        (Some(pa), Some(pb)) => match phash_distance(pa, pb) {
+            Ok(dist) => dist <= PHASH_TOLERANCE,
+            Err(_) => false,
+        },
         (None, None) => true,
         _ => false,
     }
@@ -103,7 +64,49 @@ pub fn certain_tail(old: &[Fingerprint], new: &[Fingerprint], current: &[Bubble]
     }
 }
 
-pub fn new_bubbles(previous: &[Bubble], current: &[Bubble]) -> Result<Vec<Bubble>, PolicyError> {
+#[derive(Debug, Clone, PartialEq)]
+pub enum ContinuityError {
+    ContinuityGap,
+    AmbiguousAnchor { certain: Vec<Bubble> },
+}
+
+impl std::fmt::Display for ContinuityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ContinuityGap => write!(f, "visual continuity gap or ambiguous repeated anchor"),
+            Self::AmbiguousAnchor { .. } => write!(f, "ambiguous repeated anchor"),
+        }
+    }
+}
+
+impl std::error::Error for ContinuityError {}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PolicyError {
+    Continuity(ContinuityError),
+    InvalidFrame(String),
+    ValidationError(String),
+}
+
+impl From<ContinuityError> for PolicyError {
+    fn from(err: ContinuityError) -> Self {
+        Self::Continuity(err)
+    }
+}
+
+impl std::fmt::Display for PolicyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Continuity(e) => write!(f, "{}", e),
+            Self::InvalidFrame(e) => write!(f, "{}", e),
+            Self::ValidationError(e) => write!(f, "{}", e),
+        }
+    }
+}
+
+impl std::error::Error for PolicyError {}
+
+pub fn new_bubbles(previous: &[Bubble], current: &[Bubble]) -> std::result::Result<Vec<Bubble>, ContinuityError> {
     let old: Vec<Fingerprint> = previous.iter().map(fingerprint).collect();
     let new: Vec<Fingerprint> = current.iter().map(fingerprint).collect();
     if old == new {
@@ -120,9 +123,7 @@ pub fn new_bubbles(previous: &[Bubble], current: &[Bubble]) -> Result<Vec<Bubble
         }
     }
     if matches.is_empty() {
-        return Err(PolicyError::ContinuityGap(ContinuityGap(
-            "visual continuity gap or ambiguous repeated anchor".to_string(),
-        )));
+        return Err(ContinuityError::ContinuityGap);
     }
     let size = *matches.iter().max().unwrap();
     let anchor = &old[old.len() - size..];
@@ -140,10 +141,9 @@ pub fn new_bubbles(previous: &[Bubble], current: &[Bubble]) -> Result<Vec<Bubble
 
     let unique_count = anchor.iter().collect::<HashSet<_>>().len();
     if matches.len() > 1 && (unique_count < 2 || periodic) {
-        return Err(PolicyError::AmbiguousAnchor(AmbiguousAnchor {
-            message: "ambiguous repeated anchor".to_string(),
+        return Err(ContinuityError::AmbiguousAnchor {
             certain: certain_tail(&old, &new, current),
-        }));
+        });
     }
 
     let mut count = 0;
@@ -153,10 +153,9 @@ pub fn new_bubbles(previous: &[Bubble], current: &[Bubble]) -> Result<Vec<Bubble
         }
     }
     if count != 1 {
-        return Err(PolicyError::AmbiguousAnchor(AmbiguousAnchor {
-            message: "repeated visual anchor".to_string(),
+        return Err(ContinuityError::AmbiguousAnchor {
             certain: certain_tail(&old, &new, current),
-        }));
+        });
     }
 
     Ok(current[size..].to_vec())
@@ -196,7 +195,7 @@ pub fn relocate(items: &[Bubble], current: &[Bubble]) -> Vec<Bubble> {
             for (idx, b) in current.iter().enumerate() {
                 if !used.contains(&idx) && b.kind == item.kind && same_bubble(item, b) {
                     let dist = match (&item.phash, &b.phash) {
-                        (Some(ip), Some(bp)) => phash_distance(ip, bp),
+                        (Some(ip), Some(bp)) => phash_distance(ip, bp).unwrap_or(0),
                         _ => 0,
                     };
                     candidates.push((idx, b, dist));
@@ -223,7 +222,7 @@ pub fn relocate(items: &[Bubble], current: &[Bubble]) -> Vec<Bubble> {
     result
 }
 
-pub fn merge_pages(pages: &[Vec<Bubble>], step: Option<i64>) -> Result<Vec<Bubble>, PolicyError> {
+pub fn merge_pages(pages: &[Vec<Bubble>], step: Option<i64>) -> std::result::Result<Vec<Bubble>, ContinuityError> {
     let step = step.unwrap_or(SCROLL_STEP_POINTS);
     let mut placed: Vec<(i64, Bubble)> = Vec::new();
     let mut offset: i64 = 0;
@@ -260,9 +259,7 @@ pub fn merge_pages(pages: &[Vec<Bubble>], step: Option<i64>) -> Result<Vec<Bubbl
                 None => placed.push((pos, bubble.clone())),
                 Some((_, twin_b)) => {
                     if !same_bubble(twin_b, bubble) {
-                        return Err(PolicyError::ContinuityGap(ContinuityGap(
-                            "scrolled pages disagree at one position".to_string(),
-                        )));
+                        return Err(ContinuityError::ContinuityGap);
                     }
                 }
             }
@@ -273,11 +270,11 @@ pub fn merge_pages(pages: &[Vec<Bubble>], step: Option<i64>) -> Result<Vec<Bubbl
     Ok(placed.into_iter().map(|(_, b)| b).collect())
 }
 
-pub fn stitch(cursor: &[Bubble], pages: &[Vec<Bubble>]) -> Result<Vec<Bubble>, PolicyError> {
+pub fn stitch(cursor: &[Bubble], pages: &[Vec<Bubble>]) -> std::result::Result<Vec<Bubble>, ContinuityError> {
     for (index, page) in pages.iter().enumerate() {
         let mut changes = match new_bubbles(cursor, page) {
             Ok(c) => c,
-            Err(PolicyError::ContinuityGap(_)) => continue,
+            Err(ContinuityError::ContinuityGap) => continue,
             Err(e) => return Err(e),
         };
 
@@ -287,9 +284,7 @@ pub fn stitch(cursor: &[Bubble], pages: &[Vec<Bubble>]) -> Result<Vec<Bubble>, P
         }
         return Ok(changes);
     }
-    Err(PolicyError::ContinuityGap(ContinuityGap(
-        "no scrolled page overlaps the cursor".to_string(),
-    )))
+    Err(ContinuityError::ContinuityGap)
 }
 
 pub fn strip_member_count(title: &str) -> String {
@@ -340,7 +335,7 @@ pub fn clean_title(raw: &str) -> String {
     raw.chars().filter(|&c| !is_invisible(c)).collect::<String>().trim().to_string()
 }
 
-pub fn validate_reply(value: &str) -> Result<String, PolicyError> {
+pub fn validate_reply(value: &str) -> std::result::Result<String, PolicyError> {
     let trimmed = value.trim();
     let char_count = value.chars().count();
     if trimmed.is_empty() || char_count > 200 {
@@ -356,104 +351,11 @@ pub fn validate_reply(value: &str) -> Result<String, PolicyError> {
     Ok(value.to_string())
 }
 
-pub fn normalize_for_echo(s: &str) -> String {
-    let mut out = String::new();
-    for c in s.chars() {
-        if c.is_whitespace() || c == '\u{3000}' {
-            continue;
-        }
-        let u = c as u32;
-        let mapped = if (0xFF01..=0xFF5E).contains(&u) {
-            char::from_u32(u - 0xFEE0).unwrap_or(c)
-        } else {
-            c
-        };
-        out.push(mapped);
-    }
-    out
-}
-
 pub fn echo_matches(observed: &str, expected: &str) -> bool {
-    normalize_for_echo(observed) == normalize_for_echo(expected)
-}
-
-fn sha256_hex(data: &[u8]) -> String {
-    const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-    ];
-
-    let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
-    ];
-
-    let bit_len = (data.len() as u64).wrapping_mul(8);
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while (msg.len() % 64) != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_be_bytes());
-
-    for chunk in msg.chunks_exact(64) {
-        let mut w = [0u32; 64];
-        for i in 0..16 {
-            w[i] = u32::from_be_bytes([chunk[i * 4], chunk[i * 4 + 1], chunk[i * 4 + 2], chunk[i * 4 + 3]]);
-        }
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
-        }
-
-        let mut a = h[0];
-        let mut b = h[1];
-        let mut c = h[2];
-        let mut d = h[3];
-        let mut e = h[4];
-        let mut f = h[5];
-        let mut g = h[6];
-        let mut hh = h[7];
-
-        for i in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ ((!e) & g);
-            let temp1 = hh.wrapping_add(s1).wrapping_add(ch).wrapping_add(K[i]).wrapping_add(w[i]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = s0.wrapping_add(maj);
-
-            hh = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
-        }
-
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(f);
-        h[6] = h[6].wrapping_add(g);
-        h[7] = h[7].wrapping_add(hh);
-    }
-
-    format!(
-        "{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}",
-        h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]
-    )
+    let compact = |s: &str| -> String {
+        s.nfkc().filter(|c| !c.is_whitespace()).collect()
+    };
+    compact(observed) == compact(expected)
 }
 
 fn escape_json(s: &str) -> String {
@@ -461,17 +363,17 @@ fn escape_json(s: &str) -> String {
 }
 
 fn format_fp(fp: &Fingerprint) -> String {
-    match &fp.phash {
+    match &fp.2 {
         Some(p) => format!(
             "[\"{}\", \"{}\", \"{}\"]",
-            escape_json(&fp.direction),
-            escape_json(&fp.digest),
+            escape_json(&fp.0),
+            escape_json(&fp.1),
             escape_json(p)
         ),
         None => format!(
             "[\"{}\", \"{}\", null]",
-            escape_json(&fp.direction),
-            escape_json(&fp.digest)
+            escape_json(&fp.0),
+            escape_json(&fp.1)
         ),
     }
 }
@@ -507,7 +409,7 @@ impl Policy {
         trigger: impl Into<String>,
         names: Option<Vec<String>>,
         group: bool,
-    ) -> Result<Self, PolicyError> {
+    ) -> std::result::Result<Self, PolicyError> {
         let account = account.into();
         let recipient = recipient.into();
         let trigger = trigger.into();
@@ -527,7 +429,7 @@ impl Policy {
         })
     }
 
-    pub fn check_frame(&self, frame: &Frame) -> Result<(), PolicyError> {
+    pub fn check_frame(&self, frame: &Frame) -> std::result::Result<(), PolicyError> {
         let profile = frame.profile.as_deref().unwrap_or("");
         let valid_profile = profile == "wechat-4-dark" || profile == "wechat-4-light";
         let valid_scale = match &frame.scale {
@@ -564,7 +466,7 @@ impl Policy {
         previous: &Frame,
         current: &Frame,
         confirmed: &Frame,
-    ) -> Result<Option<Bubble>, PolicyError> {
+    ) -> std::result::Result<Option<Bubble>, PolicyError> {
         self.check_frame(current)?;
         self.check_frame(confirmed)?;
         let changes = new_bubbles(&previous.bubbles, &current.bubbles)?;
@@ -595,7 +497,9 @@ impl Policy {
         let baseline_fps: Vec<Fingerprint> = baseline.bubbles.iter().map(fingerprint).collect();
         let cand_fp = fingerprint(candidate);
         let identity_json = format_identity_json(&self.account, &self.recipient, &baseline_fps, &cand_fp);
-        let hash = sha256_hex(identity_json.as_bytes());
+        let mut hasher = Sha256::new();
+        hasher.update(identity_json.as_bytes());
+        let hash: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
         format!("bot-{}", hash)
     }
 }
@@ -724,11 +628,11 @@ mod tests {
     #[test]
     fn policy_test_gap_and_repeated_anchor_stop() {
         let err1 = new_bubbles(&[make_bubble("old", None, None)], &[make_bubble("new", None, None)]).unwrap_err();
-        assert!(matches!(err1, PolicyError::ContinuityGap(_)));
+        assert_eq!(err1, ContinuityError::ContinuityGap);
 
         let same = make_bubble("same", None, None);
         let err2 = new_bubbles(&[same.clone(), same.clone()], &[same.clone(), same.clone(), make_bubble("extra", None, None)]).unwrap_err();
-        assert!(matches!(err2, PolicyError::AmbiguousAnchor(_)));
+        assert!(matches!(err2, ContinuityError::AmbiguousAnchor { .. }));
     }
 
     #[test]
@@ -752,13 +656,13 @@ mod tests {
         let same = make_bubble("same", None, None);
         let err1 = new_bubbles(&[same.clone()], &[same.clone(), same.clone()]).unwrap_err();
         match err1 {
-            PolicyError::AmbiguousAnchor(caught) => assert_eq!(caught.certain, Vec::<Bubble>::new()),
+            ContinuityError::AmbiguousAnchor { certain } => assert_eq!(certain, Vec::<Bubble>::new()),
             _ => panic!("expected AmbiguousAnchor"),
         }
 
         let err2 = new_bubbles(&[same.clone(), same.clone()], &[same.clone(), same.clone(), make_bubble("next", None, None)]).unwrap_err();
         match err2 {
-            PolicyError::AmbiguousAnchor(caught) => assert_eq!(caught.certain, vec![make_bubble("next", None, None)]),
+            ContinuityError::AmbiguousAnchor { certain } => assert_eq!(certain, vec![make_bubble("next", None, None)]),
             _ => panic!("expected AmbiguousAnchor"),
         }
     }
@@ -769,7 +673,7 @@ mod tests {
         let mut new1 = old.clone();
         new1.push(make_bubble("next", None, None));
         let err = new_bubbles(&old, &new1).unwrap_err();
-        assert!(matches!(err, PolicyError::AmbiguousAnchor(_)));
+        assert!(matches!(err, ContinuityError::AmbiguousAnchor { .. }));
     }
 
     #[test]
@@ -802,7 +706,6 @@ mod tests {
         assert_eq!(key, policy.key(&baseline.clone(), &message.clone()));
         assert_ne!(key, Policy::new("other", "示例联系人甲", "Bot验证1104", None, false).unwrap().key(&baseline, &message));
         assert_ne!(key, Policy::new("fixture", "其他人", "Bot验证1104", None, false).unwrap().key(&baseline, &message));
-        // 校验实际格式
         assert!(key.starts_with("bot-"));
         assert_eq!(key.len(), 4 + 64);
     }
@@ -906,7 +809,7 @@ mod tests {
     #[test]
     fn policy_test_stitch_without_overlap_raises() {
         let res = stitch(&[make_bubble("a", None, None)], &[vec![make_bubble("x", None, None)], vec![make_bubble("y", None, None)]]);
-        assert!(matches!(res, Err(PolicyError::ContinuityGap(_))));
+        assert_eq!(res, Err(ContinuityError::ContinuityGap));
     }
 
     #[test]
@@ -920,7 +823,7 @@ mod tests {
         let fixed = reconcile(&prev, &cur);
         assert_eq!(fixed[0].phash, b.phash);
         let res = new_bubbles(&prev, &fixed);
-        assert!(matches!(res, Err(PolicyError::ContinuityGap(_))));
+        assert_eq!(res, Err(ContinuityError::ContinuityGap));
     }
 
     #[test]
@@ -974,7 +877,7 @@ mod tests {
             vec![at_y(make_bubble("z", None, None), 390, None)],
         ];
         let res = merge_pages(&pages, Some(90));
-        assert!(matches!(res, Err(PolicyError::ContinuityGap(_))));
+        assert_eq!(res, Err(ContinuityError::ContinuityGap));
     }
 
     #[test]
@@ -1006,5 +909,11 @@ mod tests {
         assert_eq!(relocated[0].phash, old_img.phash);
         assert_eq!(relocated[0].x, Some(10));
         assert_eq!(relocated[0].y, Some(20));
+    }
+
+    #[test]
+    fn policy_test_phash_distance_invalid_hex() {
+        assert!(phash_distance("invalid", "0000").is_err());
+        assert_eq!(phash_distance("0000", "0001").unwrap(), 1);
     }
 }
