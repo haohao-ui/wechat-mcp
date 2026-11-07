@@ -271,7 +271,7 @@ pub async fn request_completion(config: &ModelConfig, payload: &Value) -> Result
         .timeout(Duration::from_secs(timeout_secs))
         .build()?;
 
-    let response = client
+    let mut response = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", key))
         .header("Content-Type", "application/json")
@@ -290,16 +290,23 @@ pub async fn request_completion(config: &ModelConfig, payload: &Value) -> Result
         );
     }
 
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| anyhow::anyhow!("model connection failed; not automatically retried: {}", e))?;
+    let max_bytes = 2 * 1024 * 1024;
+    let mut total_bytes = 0usize;
+    let mut body = Vec::new();
 
-    if bytes.len() > 2 * 1024 * 1024 {
-        bail!("model response too large");
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| anyhow::anyhow!("model connection failed; not automatically retried: {}", e))?
+    {
+        total_bytes += chunk.len();
+        if total_bytes > max_bytes {
+            bail!("model response too large");
+        }
+        body.extend_from_slice(&chunk);
     }
 
-    let result: Value = serde_json::from_slice(&bytes)?;
+    let result: Value = serde_json::from_slice(&body)?;
     Ok(result)
 }
 
@@ -1259,5 +1266,78 @@ mod tests {
 
         assert!(err.to_string().contains("HTTP 429"));
         assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_bot_model_api_response_too_large_stops_reading() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let chunk_size = 64 * 1024; // 64KB per chunk
+        let total_size = 3 * 1024 * 1024; // 3MB total
+        let total_chunks = total_size / chunk_size;
+
+        let bytes_sent = Arc::new(AtomicUsize::new(0));
+        let bs = bytes_sent.clone();
+
+        let server_task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut req_buf = vec![0u8; 4096];
+            let _ = socket.read(&mut req_buf).await.unwrap();
+
+            let header = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n";
+            if socket.write_all(header.as_bytes()).await.is_err() {
+                return;
+            }
+
+            let dummy_chunk = vec![b'a'; chunk_size];
+            for _ in 0..total_chunks {
+                let chunk_header = format!("{:X}\r\n", chunk_size);
+                if socket.write_all(chunk_header.as_bytes()).await.is_err() {
+                    break;
+                }
+                if socket.write_all(&dummy_chunk).await.is_err() {
+                    break;
+                }
+                if socket.write_all(b"\r\n").await.is_err() {
+                    break;
+                }
+                bs.fetch_add(chunk_size, Ordering::SeqCst);
+                // Allow reader task to read chunk and drop connection when limit exceeded
+                tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+            }
+        });
+
+        let f = TestFixture::new();
+        let mut cfg = f.config.clone();
+        cfg.base_url = Some(format!("http://127.0.0.1:{}", port));
+
+        let err = request_completion(&cfg, &json!({"model": "test", "messages": []}))
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("model response too large"),
+            "expected 'model response too large', got: {}",
+            err
+        );
+
+        let sent = bytes_sent.load(Ordering::SeqCst);
+        let max_allowed = 2 * 1024 * 1024 + chunk_size * 2;
+        assert!(
+            sent <= max_allowed,
+            "expected bytes sent to not exceed limit + chunks, but sent {} bytes (total 3MB is {})",
+            sent,
+            total_size
+        );
+        assert!(
+            sent < total_size,
+            "server should not have streamed all 3MB; sent {}",
+            sent
+        );
+
+        server_task.abort();
     }
 }
