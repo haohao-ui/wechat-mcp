@@ -1887,6 +1887,25 @@ mod tests {
     }
 
     #[test]
+    fn test_store_attach_media_follows_configurable_limit_and_names_it() {
+        let f = setup_fixture();
+        let rows = f.store.record_frame(&f.c, &fr(vec![bub("file.bin", "inbound_visual", "file")]), None, None, false).unwrap();
+        let row = &rows[0];
+        let message_id = row["message_id"].as_str().unwrap();
+
+        let src = f._temp.path().join("file.bin");
+        fs::write(&src, vec![b'x'; 200]).unwrap();
+
+        let err100 = f.store.attach_media(message_id, &src, "file", Some("file.bin"), "original", Some(100)).unwrap_err();
+        assert!(err100.to_string().contains("media larger than 100 bytes"), "expected 'media larger than 100 bytes', got: {}", err100);
+
+        let src_big = f._temp.path().join("big.bin");
+        fs::write(&src_big, vec![b'0'; 50 * 1024 * 1024 + 1]).unwrap();
+        let err50mb = f.store.attach_media(message_id, &src_big, "file", Some("big.bin"), "original", Some(50 * 1024 * 1024)).unwrap_err();
+        assert!(err50mb.to_string().contains("media larger than 50MB"), "expected 'media larger than 50MB', got: {}", err50mb);
+    }
+
+    #[test]
     fn test_store_file_messages_queue_download_with_backoff() {
         let f = setup_fixture();
         let rows = f.store.record_frame(&f.c, &fr(vec![bub("报价.pdf", "inbound_visual", "file")]), None, None, false).unwrap();
