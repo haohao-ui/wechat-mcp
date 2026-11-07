@@ -158,6 +158,39 @@ pub async fn run_serve_core(
     coordinator.health("connecting", serde_json::Map::new())?;
     update_health_brain(&coordinator.root, &external_brain).await;
 
+    // 5. 按配置启动历史 HTTP 服务（只监听配置的 bind，默认 127.0.0.1）
+    let history_dir = config.state_dir.join("history");
+    let http_token = crate::core::history::serve::ensure_token(&history_dir)
+        .with_context(|| format!("failed to ensure history http token in {}", history_dir.display()))?;
+    let history_db_path = history_dir.join("history.sqlite3");
+    let history_query = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::core::history::query::HistoryQuery::open(
+            &history_db_path,
+            Some(config.context_messages as i64),
+        )
+        .with_context(|| format!("failed to open history database for query at {}", history_db_path.display()))?,
+    ));
+    let history_server = crate::core::history::serve::HttpServer::start(
+        history_query,
+        http_token,
+        &config.history_http.bind,
+        config.history_http.port,
+    )
+    .with_context(|| {
+        format!(
+            "failed to start history http server on {}:{}",
+            config.history_http.bind, config.history_http.port
+        )
+    })?;
+
+    coordinator.log_event(
+        "history_http_started",
+        json!({
+            "bind": config.history_http.bind,
+            "port": history_server.port(),
+        }),
+    );
+
     let backups_dir = coordinator.config.state_dir.join("backups");
     let mut last_backup_at = crate::core::backup::latest_backup_timestamp(&backups_dir);
 
@@ -276,6 +309,9 @@ pub async fn run_serve_core(
     socket_server_handle.abort();
     let _ = fs::remove_file(&sock_path);
 
+    // 停止历史 HTTP 服务
+    history_server.shutdown();
+
     Ok(0)
 }
 
@@ -304,10 +340,19 @@ mod tests {
         }
     }
 
+    fn get_free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
     fn write_test_config(dir: &Path) -> (PathBuf, PathBuf) {
         let state_dir = dir.join("state");
         fs::create_dir_all(&state_dir).unwrap();
         fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let port = get_free_port();
         let cfg = json!({
             "schema_version": 1,
             "host": "local",
@@ -317,6 +362,10 @@ mod tests {
             "poll_seconds": 1,
             "cooldown_seconds": 15,
             "max_replies_per_hour": 20,
+            "history_http": {
+                "bind": "127.0.0.1",
+                "port": port,
+            }
         });
         let cfg_path = dir.join("config.json");
         fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
@@ -413,6 +462,7 @@ mod tests {
             std::env::set_var("WECHAT_CORE_SOCK", &sock_path);
         }
 
+        let port = get_free_port();
         let cfg = json!({
             "schema_version": 1,
             "host": "local",
@@ -422,6 +472,10 @@ mod tests {
             "poll_seconds": 1,
             "cooldown_seconds": 15,
             "max_replies_per_hour": 20,
+            "history_http": {
+                "bind": "127.0.0.1",
+                "port": port,
+            },
             "brain": {
                 "mode": "external",
                 "external": {
@@ -550,5 +604,79 @@ mod tests {
             }
         }
         assert!(found_backup, "Automatic backup of history.sqlite3 should exist in backups dir");
+    }
+
+    #[tokio::test]
+    async fn test_history_http_launchd_plist() {
+        let _lock = TEST_ENV_LOCK.lock().await;
+        let dir = TempDir::new();
+        let (cfg_path, state_dir) = write_test_config(dir.path());
+
+        let config = BotConfig::load(&cfg_path).unwrap();
+        assert_eq!(config.history_http.bind, "127.0.0.1");
+        let port = config.history_http.port;
+
+        let pid = std::process::id();
+        let count = uuid::Uuid::new_v4().simple();
+        let sock_dir = PathBuf::from(format!("/tmp/sh_{pid}_{count}"));
+        fs::create_dir_all(&sock_dir).unwrap();
+        fs::set_permissions(&sock_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let sock_path = sock_dir.join("core.sock");
+        unsafe {
+            std::env::set_var("WECHAT_CORE_SOCK", &sock_path);
+        }
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+
+        let http_client_task = tokio::spawn(async move {
+            let mut connected = false;
+            for _ in 0..50 {
+                if let Ok(mut stream) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                    connected = true;
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    // 1. 无 token 请求返回 401
+                    let req = b"GET /v1/contacts HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+                    let _ = stream.write_all(req).await;
+                    let mut buf = vec![0u8; 1024];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let resp = String::from_utf8_lossy(&buf[..n]);
+                    assert!(resp.starts_with("HTTP/1.1 401"), "Expected 401, got: {resp}");
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            assert!(connected, "History HTTP server did not start in time");
+
+            // 2. 带 token 请求返回 200
+            let token_file = state_dir.join("history").join("http-token");
+            assert!(token_file.exists());
+            let token = fs::read_to_string(&token_file).unwrap().trim().to_string();
+
+            if let Ok(mut stream) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let req = format!("GET /v1/contacts HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n");
+                let _ = stream.write_all(req.as_bytes()).await;
+                let mut buf = vec![0u8; 2048];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let resp = String::from_utf8_lossy(&buf[..n]);
+                assert!(resp.starts_with("HTTP/1.1 200"), "Expected 200, got: {resp}");
+            }
+
+            let _ = tx.send(true);
+        });
+
+        let code = run_serve_core(&cfg_path, Some(rx)).await.unwrap();
+        assert_eq!(code, 0);
+
+        http_client_task.await.unwrap();
+
+        // 验证停止后端口关闭
+        let after = std::net::TcpStream::connect(("127.0.0.1", port));
+        assert!(after.is_err(), "History HTTP server should be stopped");
+
+        let _ = fs::remove_dir_all(&sock_dir);
+        unsafe {
+            std::env::remove_var("WECHAT_CORE_SOCK");
+        }
     }
 }

@@ -532,4 +532,34 @@ mod tests {
         assert_eq!(r2["step"], "second");
         assert_eq!(server.init_count.load(Ordering::SeqCst), 2);
     }
+
+    #[tokio::test]
+    async fn test_mcp_timeout_raises_timeout_error() {
+        let server = FakeMcpServer::start(|val| {
+            let method = val.get("method").and_then(|m| m.as_str()).unwrap_or("");
+            if method == "ping" {
+                // Do not reply, let the client time out
+                None
+            } else {
+                let id = val.get("id").unwrap();
+                Some(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {}
+                }))
+            }
+        }).await;
+
+        let client = McpSocketClient::with_timeout(
+            server.sock_path.clone(),
+            "test".to_string(),
+            Duration::from_millis(50),
+        );
+        let err = client.request("ping", json!({})).await.unwrap_err();
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains("MCP request timed out"),
+            "Expected MCP request timed out, got: {err_str}"
+        );
+    }
 }
