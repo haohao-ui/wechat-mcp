@@ -33,14 +33,49 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    core::serve::ensure_locale();
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
-    if std::env::args().nth(1).as_deref() == Some("--desktop-diagnostics") {
-        let result = desktop::runtime::shared().diagnostics().await;
-        desktop::runtime::shared().shutdown().await;
-        println!("{}", serde_json::to_string(&result?)?);
-        return Ok(());
+
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "--desktop-diagnostics" => {
+                let result = desktop::runtime::shared().diagnostics().await;
+                desktop::runtime::shared().shutdown().await;
+                println!("{}", serde_json::to_string(&result?)?);
+                return Ok(());
+            }
+            "serve-core" => {
+                let mut config_path: Option<std::path::PathBuf> = None;
+                let mut i = 2;
+                while i < args.len() {
+                    if args[i] == "--config" && i + 1 < args.len() {
+                        config_path = Some(std::path::PathBuf::from(&args[i + 1]));
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                let Some(cfg_path) = config_path else {
+                    eprintln!("error: serve-core requires --config <path>");
+                    std::process::exit(2);
+                };
+                match core::serve::run_serve_core(&cfg_path, None).await {
+                    Ok(code) => std::process::exit(code),
+                    Err(err) => {
+                        eprintln!("{}", err);
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "control" => {
+                let code = core::control::run_control(&args[2..])?;
+                std::process::exit(code);
+            }
+            _ => {}
+        }
     }
     let gateway = Arc::new(Gateway::load()?);
     gateway
