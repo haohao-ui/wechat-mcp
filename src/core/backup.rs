@@ -286,6 +286,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::time::Duration;
     use std::thread;
 
     struct TempDir(PathBuf);
