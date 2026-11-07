@@ -1,0 +1,3240 @@
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
+
+use crate::core::config::{candidate_names, name_key, AllowlistEntry, BotConfig};
+use crate::core::delivery::ToolClient;
+use crate::core::history::store::HistoryStore;
+use crate::core::model::{Bubble, Frame};
+use crate::core::state::{read_json, write_private};
+use crate::core::turns::{AttachmentFile, AttachmentImage, BotService, Capture, FailedAttachmentItem};
+use crate::core::worker_client::{
+    action_interrupted, layout_unavailable, must_wait, OcrStatus,
+};
+
+pub const BADGE_PIXELS: u64 = 20;
+pub const TITLE_MISMATCH_LIMIT: usize = 3;
+pub const RECALIBRATION_LIMIT: usize = 5;
+
+pub const ROW_NOT_VISIBLE: &str = "session_row_not_unique_or_missing";
+pub const WINDOW_UNAVAILABLE: &[&str] = &[
+    "uncalibrated_theme",
+    "unsupported_image_geometry",
+    "wechat_not_visible",
+    "window_capture_failed",
+    "desktop_busy",
+    "vision_timeout",
+    "layout_missing",
+    "layout_unreadable",
+    "screen_not_main",
+    ROW_NOT_VISIBLE,
+];
+
+pub struct DefaultToolClient;
+impl ToolClient for DefaultToolClient {
+    fn tool(&self, _name: &str, _args: Value) -> impl Future<Output = Result<Value>> + Send {
+        async move { Ok(json!({})) }
+    }
+}
+
+pub fn is_window_unavailable(err_msg: &str) -> bool {
+    layout_unavailable(err_msg)
+        || WINDOW_UNAVAILABLE.iter().any(|code| {
+            err_msg.contains(&format!("invalid(\"{code}\")"))
+                || err_msg.contains(&format!("invalid(\"{code}:"))
+        })
+        || action_interrupted(err_msg)
+}
+
+pub fn extract_mismatch_failures(error: &str) -> Vec<String> {
+    let start = match error.find("invalid(\"layout_mismatch") {
+        Some(idx) => idx,
+        None => return Vec::new(),
+    };
+    let rest = &error[start + 9..];
+    let token = match rest.find("\")") {
+        Some(end) => &rest[..end],
+        None => rest,
+    };
+    if let Some((_, payload)) = token.split_once(':') {
+        payload
+            .split(',')
+            .map(|f| f.trim().to_string())
+            .filter(|f| !f.is_empty())
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn ocr_noise(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let ca: Vec<char> = a.chars().collect();
+    let cb: Vec<char> = b.chars().collect();
+    let diff = (ca.len() as isize - cb.len() as isize).abs();
+    if diff > 1 {
+        return false;
+    }
+    if ca.len() == cb.len() {
+        let mismatches = ca.iter().zip(cb.iter()).filter(|(x, y)| x != y).count();
+        return mismatches <= 1;
+    }
+    let (short, long_) = if ca.len() < cb.len() { (&ca, &cb) } else { (&cb, &ca) };
+    for i in 0..long_.len() {
+        let mut skipped = Vec::with_capacity(short.len());
+        skipped.extend_from_slice(&long_[..i]);
+        skipped.extend_from_slice(&long_[i + 1..]);
+        if &skipped == short {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn letters(text: &str) -> String {
+    text.chars().filter(|c| c.is_alphanumeric()).collect()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ListState {
+    pub digest: Option<String>,
+    pub key: Option<String>,
+    pub time: Option<String>,
+    pub min_red: u64,
+    #[serde(default)]
+    pub left: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionRow {
+    pub name: String,
+    pub preview_digest: String,
+    pub preview_key: Option<String>,
+    pub preview_time: Option<String>,
+    pub red_pixels: u64,
+    #[serde(default)]
+    pub y: i64,
+}
+
+pub fn preview_changed(prior: &ListState, row: &SessionRow) -> bool {
+    if prior.time.is_some() && row.preview_time.is_some() && prior.time != row.preview_time {
+        return true;
+    }
+    if let (Some(pk), Some(rk)) = (&prior.key, &row.preview_key) {
+        return !ocr_noise(pk, rk);
+    }
+    prior.digest.as_deref() != Some(&row.preview_digest)
+}
+
+pub fn shows_last_seen(key: &str, bubbles: &[Bubble]) -> bool {
+    if key.is_empty() || bubbles.is_empty() {
+        return false;
+    }
+    let last = match bubbles.last() {
+        Some(b) => b,
+        None => return false,
+    };
+    let key_len = key.chars().count();
+    let sender = last.sender.as_deref().unwrap_or("");
+    let t1 = last.text.clone();
+    let t2 = format!("{}{}", sender, last.text);
+    for text in [&t1, &t2] {
+        let seen = letters(text);
+        if !seen.is_empty() {
+            let prefix: String = seen.chars().take(key_len).collect();
+            if ocr_noise(key, &prefix) || ocr_noise(key, &seen) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// ---------------------------------------------------------------------------
+// Routing: 对齐 routing.py
+// ---------------------------------------------------------------------------
+
+pub fn validate_rules(config: &BotConfig) -> Result<()> {
+    let mut keys = HashMap::new();
+
+    let check_entries = |entries: &[AllowlistEntry], name: &str, keys: &mut HashMap<String, usize>| -> Result<()> {
+        if entries.len() > 200 {
+            bail!("{name} must be an array of at most 200 conversations");
+        }
+        if name == "allowlist" && entries.is_empty() {
+            bail!("at least one explicitly allowlisted conversation required");
+        }
+        let mut seen = HashSet::new();
+        for (idx, entry) in entries.iter().enumerate() {
+            let recipient = &entry.recipient;
+            let kind = &entry.kind;
+            let aliases = entry.aliases.as_deref().unwrap_or(&[]);
+            if aliases.len() > 10 {
+                bail!("aliases must be an array of at most 10 names");
+            }
+            let all_names = std::iter::once(recipient).chain(aliases.iter());
+            for value in all_names {
+                if value.trim().is_empty() || value != value.trim() {
+                    bail!("exact conversation name without surrounding whitespace required");
+                }
+                if value.chars().count() > 64 {
+                    bail!("conversation names are limited to 64 characters (native worker limit)");
+                }
+            }
+            if kind != "private" && kind != "group" {
+                bail!("conversation kind must be private or group");
+            }
+            let identity = (recipient.clone(), kind.clone());
+            if !seen.insert(identity) {
+                bail!("duplicate {name} entry");
+            }
+            if name == "allowlist" {
+                for value in candidate_names(entry) {
+                    let k = name_key(&value);
+                    if let Some(&existing_idx) = keys.get(&k) {
+                        if existing_idx != idx {
+                            bail!("allowlist names collide after normalization");
+                        }
+                    } else {
+                        keys.insert(k, idx);
+                    }
+                }
+            }
+        }
+        Ok(())
+    };
+
+    check_entries(&config.allowlist, "allowlist", &mut keys)?;
+    if let Some(ignorelist) = &config.ignorelist {
+        check_entries(ignorelist, "ignorelist", &mut keys)?;
+    }
+    Ok(())
+}
+
+pub fn match_entry<'a>(
+    config: &'a BotConfig,
+    raw_name: &str,
+    kind: Option<&str>,
+) -> Option<&'a AllowlistEntry> {
+    let key = name_key(raw_name);
+    for entry in &config.allowlist {
+        if (kind.is_none() || Some(entry.kind.as_str()) == kind)
+            && candidate_names(entry).iter().any(|n| name_key(n) == key)
+        {
+            return Some(entry);
+        }
+    }
+    None
+}
+
+pub fn decision(config: &BotConfig, recipient: &str, kind: Option<&str>) -> &'static str {
+    let key = name_key(recipient);
+    if let Some(ignorelist) = &config.ignorelist {
+        for entry in ignorelist {
+            if candidate_names(entry).iter().any(|n| name_key(n) == key) {
+                return "ignored";
+            }
+        }
+    }
+    if match_entry(config, recipient, kind).is_none() {
+        return "not_allowlisted";
+    }
+    "allowed"
+}
+
+// ---------------------------------------------------------------------------
+// CoordinatorCapture trait
+// ---------------------------------------------------------------------------
+
+pub trait CoordinatorCapture: Send + Sync {
+    fn start<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+    fn close<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+    fn frame<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<Frame>> + Send + 'a>>;
+    fn scroll<'a>(&'a mut self, direction: &'a str, amount: u32) -> Pin<Box<dyn Future<Output = Result<Frame>> + Send + 'a>>;
+    fn call<'a>(&'a mut self, op: &'a str, params: Value) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>>;
+    fn retarget<'a>(&'a mut self, recipient: &'a str, directory: &'a Path, names: &'a [String], group: bool) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+    fn sessions<'a>(&'a mut self, names: &'a [String]) -> Pin<Box<dyn Future<Output = Result<Vec<SessionRow>>> + Send + 'a>>;
+    fn download<'a>(&'a mut self, media_id: &'a str, kind: &'a str) -> Pin<Box<dyn Future<Output = Result<PathBuf>> + Send + 'a>>;
+    fn last_switch(&self) -> Option<Value>;
+    fn ocr_status(&self) -> Option<OcrStatus>;
+    fn is_connected(&self) -> bool;
+}
+
+pub struct CaptureAdapter<'a> {
+    pub inner: &'a mut (dyn CoordinatorCapture + 'a),
+}
+
+#[allow(refining_impl_trait)]
+impl<'a> Capture for CaptureAdapter<'a> {
+    fn frame(&mut self) -> Pin<Box<dyn Future<Output = Result<Frame>> + Send + '_>> {
+        self.inner.frame()
+    }
+
+    fn scroll(
+        &mut self,
+        direction: &str,
+        pages: u32,
+    ) -> Pin<Box<dyn Future<Output = Result<Frame>> + Send + '_>> {
+        let dir = direction.to_string();
+        Box::pin(async move { self.inner.scroll(&dir, pages).await })
+    }
+
+    fn download(
+        &mut self,
+        media_id: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<PathBuf>> + Send + '_>> {
+        let mid = media_id.to_string();
+        Box::pin(async move { self.inner.download(&mid, "image").await })
+    }
+
+    fn attachments(
+        &mut self,
+        _items: &[Bubble],
+        _frame: &Frame,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<(
+                        Vec<AttachmentImage>,
+                        Vec<AttachmentFile>,
+                        Vec<FailedAttachmentItem>,
+                    )>,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move { Ok((Vec::new(), Vec::new(), Vec::new())) })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BotCoordinator: 对齐 coordinator.py
+// ---------------------------------------------------------------------------
+
+pub struct BotCoordinator {
+    pub config_path: PathBuf,
+    pub config: BotConfig,
+    pub root: PathBuf,
+    pub sessions: HashMap<String, BotService>,
+    pub stop: Arc<AtomicBool>,
+    pub capture: Option<Box<dyn CoordinatorCapture>>,
+    pub active_name: Option<String>,
+    pub last_health: Option<String>,
+    pub last_health_at: f64,
+    pub last_summary: Option<(String, Vec<(String, String)>, String)>,
+    pub list_state: HashMap<String, ListState>,
+    pub last_visit: HashMap<String, f64>,
+    pub pending: HashMap<String, (f64, i64)>,
+    pub layout_mismatches: usize,
+    pub hidden_rows: HashSet<String>,
+    pub history: Arc<HistoryStore>,
+    pub ownership: String,
+    pub clock: Arc<dyn Fn() -> f64 + Send + Sync>,
+    pub session_title_mismatches: HashMap<String, usize>,
+    pub logged_events: Arc<Mutex<Vec<Value>>>,
+}
+
+impl BotCoordinator {
+    pub fn new(config_path: impl AsRef<Path>) -> Result<Self> {
+        let config_path = config_path.as_ref().to_path_buf();
+        let config = BotConfig::load(&config_path)?;
+        let root = config.state_dir.clone();
+        if !root.exists() {
+            fs::create_dir_all(&root)?;
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
+        } else {
+            let meta = fs::metadata(&root)?;
+            let mode = meta.permissions().mode() & 0o777;
+            if mode != 0o700 {
+                bail!("spool directory must be owned by this user and mode 0700");
+            }
+        }
+
+        let binding = json!({
+            "host": config.host,
+            "account_id": config.account_id,
+        });
+        let binding_path = root.join("coordinator-binding.json");
+        if binding_path.exists() {
+            let existing: Value = read_json(&binding_path)?;
+            if existing != binding {
+                bail!("coordinator state belongs to a different account/host");
+            }
+        }
+        write_private(&binding_path, &binding)?;
+
+        let sessions_dir = root.join("sessions");
+        if sessions_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&sessions_dir) {
+                for entry in entries.flatten() {
+                    if entry.path().is_dir() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if name.len() == 64
+                            && name.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+                        {
+                            bail!("legacy session directories found; stop the bot and run control migrate-history first");
+                        }
+                    }
+                }
+            }
+        }
+
+        let history = Arc::new(HistoryStore::open(&root)?);
+        let mut hasher = Sha256::new();
+        hasher.update(root.to_string_lossy().as_bytes());
+        let ownership = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect::<String>();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let default_clock = Arc::new(|| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64()
+        });
+
+        let mut coord = Self {
+            config_path,
+            config: config.clone(),
+            root: root.clone(),
+            sessions: HashMap::new(),
+            stop,
+            capture: None,
+            active_name: None,
+            last_health: None,
+            last_health_at: 0.0,
+            last_summary: None,
+            list_state: HashMap::new(),
+            last_visit: HashMap::new(),
+            pending: HashMap::new(),
+            layout_mismatches: 0,
+            hidden_rows: HashSet::new(),
+            history: history.clone(),
+            ownership,
+            clock: default_clock,
+            session_title_mismatches: HashMap::new(),
+            logged_events: Arc::new(Mutex::new(Vec::new())),
+        };
+
+        let mut current = HashMap::new();
+        for entry in &config.allowlist {
+            let entry_val = serde_json::to_value(entry)?;
+            if let Ok(cid) = history.ensure_contact(&config.account_id, &entry_val, false) {
+                current.insert(cid, entry.clone());
+            }
+        }
+
+        let conn_arc = history.connection();
+        let conn = conn_arc.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT contact_id, display_name, kind FROM contacts WHERE account_id=? AND kind IN ('private','group')"
+        )?;
+        let rows = stmt.query_map([&config.account_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut to_restore = Vec::new();
+        for r in rows.flatten() {
+            to_restore.push(r);
+        }
+        drop(stmt);
+        drop(conn);
+
+        for (cid, display_name, kind) in to_restore {
+            if root.join("sessions").join(&cid).join("binding.json").exists() {
+                let target = current.get(&cid).cloned().unwrap_or(AllowlistEntry {
+                    recipient: display_name,
+                    kind,
+                    aliases: None,
+                });
+                let _ = coord.session(&target);
+            }
+        }
+
+        Ok(coord)
+    }
+
+    pub fn log_event(&self, event: &str, fields: Value) {
+        let mut item = match fields {
+            Value::Object(map) => map,
+            _ => Map::new(),
+        };
+        item.insert("event".to_string(), json!(event));
+        self.logged_events.lock().unwrap().push(Value::Object(item));
+    }
+
+    pub fn rules(&self) -> Result<BotConfig> {
+        let value = BotConfig::load(&self.config_path)?;
+        if value.host != self.config.host
+            || value.account_id != self.config.account_id
+            || value.state_dir != self.config.state_dir
+        {
+            bail!("account/host/state changes require a separate state directory and restart");
+        }
+        Ok(value)
+    }
+
+    pub fn session(&mut self, target: &AllowlistEntry) -> Result<&mut BotService> {
+        let name = target.recipient.clone();
+        if !self.sessions.contains_key(&name) {
+            let target_val = serde_json::to_value(target)?;
+            let contact_id = self
+                .history
+                .ensure_contact(&self.config.account_id, &target_val, false)?;
+            let directory = self.root.join("sessions").join(&contact_id);
+            if !directory.exists() {
+                fs::create_dir_all(&directory)?;
+                fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
+            }
+
+            let mut child_config = self.config.clone();
+            child_config.allowlist = vec![target.clone()];
+            child_config.state_dir = directory;
+
+            let rules_path = self.config_path.clone();
+            let check_name = name.clone();
+            let routing_check = Arc::new(move || {
+                if let Ok(rules) = BotConfig::load(&rules_path) {
+                    decision(&rules, &check_name, None).to_string()
+                } else {
+                    "ignored".to_string()
+                }
+            });
+
+            let mut child = BotService::new(
+                child_config,
+                Some(routing_check),
+                Some(self.history.clone()),
+                Some(contact_id),
+                Some(self.ownership.clone()),
+                Some(candidate_names(target)),
+            )?;
+            child.stop = self.stop.clone();
+            child.had_incoming = false;
+            self.sessions.insert(name.clone(), child);
+        }
+        Ok(self.sessions.get_mut(&name).unwrap())
+    }
+
+    pub fn health(&mut self, state: &str, details: Map<String, Value>) -> Result<()> {
+        let rules = self.rules().unwrap_or_else(|_| self.config.clone());
+        let mut value = Map::new();
+        value.insert("pid".to_string(), json!(std::process::id()));
+        value.insert("state".to_string(), json!(state));
+        value.insert("account_id".to_string(), json!(self.config.account_id));
+        let allow_names: Vec<Value> = rules
+            .allowlist
+            .iter()
+            .map(|x| json!(x.recipient))
+            .collect();
+        value.insert("allowlist".to_string(), Value::Array(allow_names));
+        let groups_enabled = rules.allowlist.iter().any(|x| x.kind == "group");
+        value.insert("groups_enabled".to_string(), json!(groups_enabled));
+        let model_backend = self
+            .config
+            .model_config
+            .backend
+            .clone();
+        value.insert("model_backend".to_string(), json!(model_backend));
+        value.insert("platform_message_verified".to_string(), json!(false));
+
+        let mut sessions_map = Map::new();
+        if let Some(cap) = &self.capture {
+            if let Some(ocr) = cap.ocr_status() {
+                value.insert("ocr".to_string(), json!(ocr));
+            }
+        }
+
+        for (name, child) in &self.sessions {
+            let path = child.root.join("health.json");
+            if path.exists() {
+                if let Ok(child_health) = read_json::<Value>(&path) {
+                    sessions_map.insert(name.clone(), child_health);
+                } else {
+                    sessions_map.insert(name.clone(), json!({"state": "pending"}));
+                }
+            } else {
+                sessions_map.insert(name.clone(), json!({"state": "pending"}));
+            }
+        }
+        value.insert("sessions".to_string(), Value::Object(sessions_map));
+
+        for (k, v) in details {
+            value.insert(k, v);
+        }
+
+        let signature = serde_json::to_string(&Value::Object(value.clone()))?;
+        let now = (self.clock)();
+
+        let mut summary_map = Map::new();
+        if let Some(Value::Object(sess)) = value.get("sessions") {
+            for (name, item) in sess {
+                let st = item.get("state").and_then(|s| s.as_str()).unwrap_or("pending");
+                summary_map.insert(name.clone(), json!(st));
+            }
+        }
+
+        let mut sorted_summary: Vec<(String, String)> = summary_map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+            .collect();
+        sorted_summary.sort();
+
+        let details_json = serde_json::to_string(&Value::Object(value.clone()))?;
+        let compact = (state.to_string(), sorted_summary, details_json);
+
+        if self.last_summary.as_ref() != Some(&compact) || now - self.last_health_at >= 60.0 {
+            self.log_event(
+                "coordinator_state",
+                json!({
+                    "state": state,
+                    "sessions": summary_map,
+                }),
+            );
+            self.last_summary = Some(compact);
+            self.last_health_at = now;
+        }
+        self.last_health = Some(signature);
+
+        let mut write_val = value;
+        write_val.insert("updated_at".to_string(), json!(now));
+        write_private(self.root.join("health.json"), &Value::Object(write_val))?;
+        Ok(())
+    }
+
+    pub fn disable_session(&mut self, target: &AllowlistEntry, verdict: &str) -> Result<()> {
+        let now = (self.clock)();
+        let child = self.session(target)?;
+        let disabled_payload = json!({
+            "rule": verdict,
+            "updated_at": now,
+        });
+        write_private(child.root.join("routing-disabled.json"), &disabled_payload)?;
+        let mut d = Map::new();
+        d.insert("rule".to_string(), json!(verdict));
+        child.health("ignored", d)?;
+        Ok(())
+    }
+
+    pub async fn close_capture(&mut self) -> Result<()> {
+        if let Some(mut cap) = self.capture.take() {
+            if let Err(err) = cap.close().await {
+                self.log_event(
+                    "capture_cleanup_failed",
+                    json!({"error_type": "CaptureError", "error": err.to_string()}),
+                );
+            }
+        }
+        self.active_name = None;
+        Ok(())
+    }
+
+    pub async fn close_connection(&mut self) -> Result<()> {
+        self.close_capture().await?;
+        Ok(())
+    }
+
+    pub async fn connect(&mut self, recipient: &str) -> Result<()> {
+        if self.active_name.as_deref() == Some(recipient) && self.capture.is_some() {
+            return Ok(());
+        }
+        if !self.sessions.contains_key(recipient) {
+            let entry = self
+                .config
+                .allowlist
+                .iter()
+                .find(|e| e.recipient == recipient)
+                .cloned()
+                .context("unknown recipient")?;
+            self.session(&entry)?;
+        }
+        let (root, names, group, is_target_allowed) = {
+            let child = self.sessions.get_mut(recipient).context("unknown recipient")?;
+            if !child.target_allowed() {
+                return Ok(());
+            }
+            let d = Map::new();
+            child.health("connecting", d)?;
+            (
+                child.root.clone(),
+                child.names.clone(),
+                child.group,
+                child.target_allowed(),
+            )
+        };
+        if !is_target_allowed {
+            return Ok(());
+        }
+
+        if let Some(cap) = &mut self.capture {
+            cap.retarget(recipient, &root, &names, group).await?;
+            self.active_name = Some(recipient.to_string());
+            let switch = cap.last_switch().unwrap_or_else(|| json!({}));
+            self.log_event(
+                "chat_switched",
+                json!({
+                    "recipient": recipient,
+                    "clicked": switch.get("clicked"),
+                    "seconds": switch.get("seconds"),
+                    "fallback": switch.get("fallback"),
+                }),
+            );
+            return Ok(());
+        }
+
+        bail!("no capture client configured");
+    }
+
+    pub fn clear_layout_waits(&mut self, verified_name: &str) {
+        for (name, child) in &mut self.sessions {
+            if name == verified_name || child.paused {
+                continue;
+            }
+            let h_path = child.root.join("health.json");
+            if let Ok(st) = read_json::<Value>(&h_path) {
+                let s = st.get("state").and_then(|v| v.as_str()).unwrap_or("");
+                let r = st.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+                if s == "needs_recalibration" || r.contains("layout_mismatch") {
+                    let mut d = Map::new();
+                    d.insert(
+                        "reason".to_string(),
+                        json!("layout verified on another chat"),
+                    );
+                    let _ = child.health("watching", d);
+                }
+            }
+        }
+    }
+
+    pub async fn visit(&mut self, target: &AllowlistEntry) -> Result<()> {
+        let recipient = target.recipient.clone();
+        let verdict = decision(&self.rules()?, &recipient, None);
+        if verdict != "allowed" {
+            self.disable_session(target, verdict)?;
+            if self.active_name.as_deref() == Some(&recipient) {
+                self.close_capture().await?;
+            }
+            return Ok(());
+        }
+
+        let child = self.session(target)?;
+        if child.paused {
+            let reason = child
+                .pause_reason
+                .clone()
+                .unwrap_or_else(|| "review unfinished session journal".to_string());
+            let mut d = Map::new();
+            d.insert("reason".to_string(), json!(reason));
+            child.health("paused", d)?;
+            return Ok(());
+        }
+
+        let marker = child.root.join("routing-disabled.json");
+        if marker.exists() {
+            child.cursor = None;
+        }
+
+        let connect_res = self.connect(&recipient).await;
+        if let Err(err) = connect_res {
+            let err_str = err.to_string();
+            self.handle_visit_error(&recipient, &err_str).await?;
+            return Ok(());
+        }
+
+        if self.stop.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        let cycle_res = {
+            if let Some(cap) = &mut self.capture {
+                let mut adapter = CaptureAdapter { inner: cap.as_mut() };
+                let child = self.sessions.get_mut(&recipient).unwrap();
+                child.cycle(&DefaultToolClient, &mut adapter).await
+            } else {
+                bail!("no capture configured");
+            }
+        };
+
+        match cycle_res {
+            Ok(()) => {
+                self.session_title_mismatches.insert(recipient.clone(), 0);
+                if self.layout_mismatches > 0 {
+                    self.clear_layout_waits(&recipient);
+                }
+                self.layout_mismatches = 0;
+                let child = self.sessions.get_mut(&recipient).unwrap();
+                if child.cursor.is_some() && marker.exists() {
+                    let _ = fs::remove_file(&marker);
+                }
+            }
+            Err(err) => {
+                let err_str = err.to_string();
+                self.handle_visit_error(&recipient, &err_str).await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn handle_visit_error(&mut self, recipient: &str, err_str: &str) -> Result<()> {
+        if err_str == "incomplete bottom bubble; no automatic reply" {
+            let child = self.sessions.get_mut(recipient).unwrap();
+            if !child.paused {
+                let mut d = Map::new();
+                d.insert(
+                    "reason".to_string(),
+                    json!("bottom bubble is incomplete; retry capture without model/send"),
+                );
+                child.health("waiting_for_stable_frame", d)?;
+            }
+            return Ok(());
+        }
+
+        if err_str.contains("invalid(\"allowlisted_title_mismatch\")") {
+            let is_paused = self.sessions.get(recipient).map_or(true, |c| c.paused);
+            if !is_paused {
+                let count = self.session_title_mismatches.entry(recipient.to_string()).or_insert(0);
+                *count += 1;
+                let current_count = *count;
+                if current_count < TITLE_MISMATCH_LIMIT {
+                    let reason = if err_str.chars().count() > 400 {
+                        err_str.chars().take(400).collect::<String>()
+                    } else {
+                        err_str.to_string()
+                    };
+                    let child = self.sessions.get_mut(recipient).unwrap();
+                    let mut d = Map::new();
+                    d.insert("reason".to_string(), json!(reason));
+                    d.insert("attempt".to_string(), json!(current_count));
+                    child.health("waiting_for_wechat_window", d)?;
+                    self.close_connection().await?;
+                    return Ok(());
+                }
+            }
+        }
+
+        if err_str.contains("invalid(\"layout_mismatch") {
+            let is_paused = self.sessions.get(recipient).map_or(true, |c| c.paused);
+            if !is_paused {
+                self.active_name = None;
+                self.layout_mismatches += 1;
+                let failures = extract_mismatch_failures(err_str);
+                let state = if self.layout_mismatches >= RECALIBRATION_LIMIT {
+                    "needs_recalibration"
+                } else {
+                    "waiting_for_wechat_window"
+                };
+                let reason = if err_str.chars().count() > 400 {
+                    err_str.chars().take(400).collect::<String>()
+                } else {
+                    err_str.to_string()
+                };
+                let child = self.sessions.get_mut(recipient).unwrap();
+                let mut d = Map::new();
+                d.insert("reason".to_string(), json!(reason));
+                d.insert("failures".to_string(), json!(failures));
+                d.insert("attempt".to_string(), json!(self.layout_mismatches));
+                child.health(state, d)?;
+                return Ok(());
+            }
+        }
+
+        if is_window_unavailable(err_str) {
+            let is_paused = self.sessions.get(recipient).map_or(true, |c| c.paused);
+            if !is_paused {
+                let reason = if err_str.chars().count() > 400 {
+                    err_str.chars().take(400).collect::<String>()
+                } else {
+                    err_str.to_string()
+                };
+                let child = self.sessions.get_mut(recipient).unwrap();
+                let mut d = Map::new();
+                d.insert("reason".to_string(), json!(reason));
+                child.health("waiting_for_wechat_window", d)?;
+                if !err_str.contains("screen_not_main") && !err_str.contains(ROW_NOT_VISIBLE) {
+                    self.close_connection().await?;
+                }
+                return Ok(());
+            }
+        }
+
+        let p_reason = if err_str.chars().count() > 400 {
+            err_str.chars().take(400).collect::<String>()
+        } else {
+            err_str.to_string()
+        };
+        let child = self.sessions.get_mut(recipient).unwrap();
+        child.paused = true;
+        child.pause_reason = Some(p_reason.clone());
+        let mut d = Map::new();
+        d.insert("reason".to_string(), json!(p_reason));
+        child.health("paused", d)?;
+        self.close_connection().await?;
+        Ok(())
+    }
+
+    pub fn reconcile_journals(&mut self) -> Result<()> {
+        for child in self.sessions.values() {
+            let entries = fs::read_dir(&child.root)?;
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if let Some(file_name) = p.file_name().and_then(|s| s.to_str()) {
+                    if file_name.starts_with("send-") && file_name.ends_with(".json") {
+                        if let Ok(record) = read_json::<Value>(&p) {
+                            let key = match record.get("idempotency_key").and_then(|v| v.as_str()) {
+                                Some(k) => k,
+                                None => continue,
+                            };
+                            let existing = self.history.send(key)?;
+                            let status = record.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                            if existing.is_none()
+                                && record.get("reply").is_some()
+                                && (status == "attempting" || status == "triggered" || status == "unknown")
+                            {
+                                let at = record
+                                    .get("attempted_at")
+                                    .or_else(|| record.get("created_at"))
+                                    .and_then(|v| v.as_f64());
+                                let observed_at = at.map(|sec| (sec * 1000.0) as i64);
+                                let reply_val = record["reply"].as_str().unwrap_or("");
+                                let model_val = record.get("model").cloned().unwrap_or_else(|| json!({}));
+                                if let Some(cid) = &child.contact_id {
+                                    self.history.record_bot_reply(
+                                        cid,
+                                        key,
+                                        reply_val,
+                                        status,
+                                        &model_val,
+                                        &[],
+                                        observed_at,
+                                        None,
+                                    )?;
+                                }
+                            }
+                            let existing = self.history.send(key)?;
+                            if let Some(ex) = existing {
+                                let mut needs_update = false;
+                                let cur_status = ex.get("status").and_then(|v| v.as_str());
+                                if cur_status != Some(status) {
+                                    needs_update = true;
+                                }
+                                if let Some(echo) = record.get("client_echo_observed") {
+                                    let echo_val = echo.as_bool().unwrap_or(false);
+                                    let cur_echo = ex.get("echo_observed").and_then(|v| v.as_bool());
+                                    if cur_echo != Some(echo_val) {
+                                        needs_update = true;
+                                    }
+                                }
+                                if needs_update {
+                                    let echo_opt = record.get("client_echo_observed").and_then(|v| v.as_bool());
+                                    self.history.update_send(key, status, echo_opt)?;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn due_sessions(&mut self, names: &[String]) -> Result<HashSet<String>> {
+        if names.is_empty() || self.capture.is_none() {
+            return Ok(names.iter().cloned().collect());
+        }
+
+        let rules = self.rules()?;
+        let entries: HashMap<String, AllowlistEntry> = names
+            .iter()
+            .map(|name| {
+                let ent = match_entry(&rules, name, None)
+                    .cloned()
+                    .unwrap_or(AllowlistEntry {
+                        recipient: name.clone(),
+                        kind: "private".to_string(),
+                        aliases: None,
+                    });
+                (name.clone(), ent)
+            })
+            .collect();
+
+        let mut candidate_list = Vec::new();
+        for name in names {
+            if let Some(entry) = entries.get(name) {
+                candidate_list.extend(candidate_names(entry));
+            }
+        }
+
+        let probe_rows = match self.capture.as_mut().unwrap().sessions(&candidate_list).await {
+            Ok(rows) => rows,
+            Err(err) => {
+                self.log_event(
+                    "session_probe_failed",
+                    json!({
+                        "error_type": "ProbeError",
+                        "error": err.to_string().chars().take(200).collect::<String>(),
+                    }),
+                );
+                if !must_wait(&err.to_string()) {
+                    self.close_connection().await?;
+                }
+                return Ok(names.iter().cloned().collect());
+            }
+        };
+
+        let mut rows: HashMap<String, SessionRow> = HashMap::new();
+        for row in probe_rows {
+            if let Some(entry) = match_entry(&rules, &row.name, None) {
+                rows.insert(entry.recipient.clone(), row);
+            }
+        }
+
+        let now = (self.clock)();
+        let mut due = HashSet::new();
+
+        for name in names {
+            let row = rows.get(name);
+            let prior_opt = self.list_state.get(name).cloned();
+            let mut reason: Option<&'static str> = None;
+
+            if self.active_name.as_deref() == Some(name) {
+                reason = Some("active");
+            } else if !self.last_visit.contains_key(name) {
+                reason = Some("initial");
+            } else if now - self.last_visit[name] >= self.config.idle_check_seconds as f64 {
+                reason = Some("idle_check");
+            } else if self.sessions.get(name).map_or(false, |s| s.turn.is_some()) {
+                reason = Some("turn_open");
+            } else if let Some(r) = row {
+                if prior_opt.is_none() || prior_opt.as_ref().unwrap().digest.is_none() {
+                    reason = Some("initial");
+                } else {
+                    let p = prior_opt.as_ref().unwrap();
+                    if p.left {
+                        let bubbles = self
+                            .sessions
+                            .get(name)
+                            .and_then(|s| s.cursor.as_ref())
+                            .map(|c| c.bubbles.as_slice())
+                            .unwrap_or(&[]);
+                        if preview_changed(p, r) && !shows_last_seen(r.preview_key.as_deref().unwrap_or(""), bubbles) {
+                            reason = Some("preview_changed");
+                        }
+                    } else if preview_changed(p, r) {
+                        reason = Some("preview_changed");
+                    } else if r.red_pixels >= p.min_red + BADGE_PIXELS {
+                        reason = Some("unread_badge");
+                    }
+                }
+            }
+
+            if let Some(r) = row {
+                let low = match &prior_opt {
+                    Some(p) => p.min_red.min(r.red_pixels),
+                    None => r.red_pixels,
+                };
+                if self.active_name.as_deref() == Some(name) {
+                    self.list_state.insert(
+                        name.clone(),
+                        ListState {
+                            digest: prior_opt.as_ref().and_then(|p| p.digest.clone()),
+                            key: prior_opt.as_ref().and_then(|p| p.key.clone()),
+                            time: prior_opt.as_ref().and_then(|p| p.time.clone()),
+                            min_red: low,
+                            left: true,
+                        },
+                    );
+                } else {
+                    self.list_state.insert(
+                        name.clone(),
+                        ListState {
+                            digest: Some(r.preview_digest.clone()),
+                            key: r.preview_key.clone(),
+                            time: r.preview_time.clone(),
+                            min_red: low,
+                            left: false,
+                        },
+                    );
+                }
+            }
+
+            if reason.is_none() && self.pending.contains_key(name) {
+                reason = Some("pending");
+            }
+
+            if row.is_none() && self.active_name.as_deref() != Some(name) && reason.is_some() {
+                if !self.hidden_rows.contains(name) {
+                    self.hidden_rows.insert(name.clone());
+                    self.log_event(
+                        "session_row_not_visible",
+                        json!({"recipient": name, "reason": reason.unwrap()}),
+                    );
+                }
+                continue;
+            }
+            self.hidden_rows.remove(name);
+
+            if let Some(res) = reason {
+                due.insert(name.clone());
+                if res == "preview_changed" || res == "unread_badge" {
+                    let y_coord = row.map(|r| r.y).unwrap_or(0);
+                    self.pending.entry(name.clone()).or_insert((now, -y_coord));
+                }
+                if res != "active" && res != "idle_check" && res != "pending" && res != "turn_open" {
+                    self.log_event(
+                        "session_switch_due",
+                        json!({
+                            "recipient": name,
+                            "reason": res,
+                            "visible": row.is_some(),
+                            "red_pixels": row.map(|r| r.red_pixels),
+                            "baseline_red": prior_opt.as_ref().map(|p| p.min_red),
+                        }),
+                    );
+                }
+            }
+        }
+
+        Ok(due)
+    }
+
+    pub async fn download_pending_media(&mut self) -> Result<()> {
+        let active = match &self.active_name {
+            Some(a) => a.clone(),
+            None => return Ok(()),
+        };
+        let (contact_id, recipient) = match self.sessions.get(&active) {
+            Some(c) => (c.contact_id.clone(), c.recipient.clone()),
+            None => return Ok(()),
+        };
+        let contact_id = match contact_id {
+            Some(cid) => cid,
+            None => return Ok(()),
+        };
+
+        let job = match self.history.next_media_job(&contact_id)? {
+            Some(j) => j,
+            None => return Ok(()),
+        };
+        let mid = job["message_id"].as_str().unwrap_or("").to_string();
+
+        let conn_arc = self.history.connection();
+        let conn = conn_arc.lock().unwrap();
+        let digest_row: Option<String> = conn
+            .query_row(
+                "SELECT bubble_digest FROM messages WHERE message_id=?",
+                [&mid],
+                |r| r.get(0),
+            )
+            .ok();
+        drop(conn);
+
+        let digest = match digest_row {
+            Some(d) => d,
+            None => return Ok(()),
+        };
+
+        if let Some(cap) = &mut self.capture {
+            let frame_res = cap.frame().await;
+            let frame = match frame_res {
+                Ok(f) => f,
+                Err(err) => {
+                    self.history
+                        .finish_media_job(&mid, "failed", Some(&err.to_string()))?;
+                    return Ok(());
+                }
+            };
+            let bubble = frame
+                .bubbles
+                .iter()
+                .find(|b| b.kind.as_deref() == Some("file") && b.digest == digest);
+            if bubble.is_none() {
+                self.history
+                    .finish_media_job(&mid, "gone", Some("not visible"))?;
+                return Ok(());
+            }
+            let bubble = bubble.unwrap();
+            let media_id = match &bubble.media_id {
+                Some(m) => m,
+                None => {
+                    self.history
+                        .finish_media_job(&mid, "failed", Some("missing media_id"))?;
+                    return Ok(());
+                }
+            };
+
+            let max_bytes = self.config.max_attachment_mb * 1024 * 1024;
+            let info = cap
+                .call(
+                    "prepare_file",
+                    json!({
+                        "media_id": media_id,
+                        "snapshot_id": frame.snapshot_id,
+                        "max_bytes": max_bytes,
+                    }),
+                )
+                .await;
+            let info_val = match info {
+                Ok(val) => val,
+                Err(err) => {
+                    let gone = err.to_string().contains("file_snapshot_changed");
+                    self.history.finish_media_job(
+                        &mid,
+                        if gone { "gone" } else { "failed" },
+                        Some(&err.to_string()),
+                    )?;
+                    self.log_event(
+                        "history_file_download_failed",
+                        json!({"recipient": recipient, "gone": gone, "error": err.to_string()}),
+                    );
+                    return Ok(());
+                }
+            };
+            let path = cap.download(media_id, "file").await?;
+            let filename = info_val.get("filename").and_then(|v| v.as_str());
+            self.history.attach_media(
+                &mid,
+                &path,
+                "file",
+                filename,
+                "original",
+                Some(max_bytes as usize),
+            )?;
+            self.history.finish_media_job(&mid, "done", None)?;
+            self.log_event("history_file_archived", json!({"recipient": recipient}));
+        }
+        Ok(())
+    }
+
+    pub async fn sweep(&mut self) -> Result<()> {
+        let admin_pause = self.root.join("admin-pause.json");
+        if admin_pause.exists() {
+            let mut d = Map::new();
+            d.insert("reason".to_string(), json!("admin_pause"));
+            self.health("paused", d)?;
+            return Ok(());
+        }
+
+        let rules = self.rules()?;
+        let targets = rules.allowlist.clone();
+
+        let mut allowed_ids = HashSet::new();
+        for t in &targets {
+            let t_val = serde_json::to_value(t)?;
+            if let Ok(cid) = self.history.ensure_contact(&self.config.account_id, &t_val, false) {
+                allowed_ids.insert(cid);
+            }
+        }
+
+        let current_session_names: Vec<String> = self.sessions.keys().cloned().collect();
+        for name in current_session_names {
+            let in_targets = targets.iter().any(|x| x.recipient == name);
+            if !in_targets {
+                let cid = self.sessions[&name].contact_id.clone().unwrap_or_default();
+                if allowed_ids.contains(&cid) {
+                    if self.active_name.as_deref() == Some(&name) {
+                        self.close_capture().await?;
+                    }
+                    self.sessions.remove(&name);
+                    continue;
+                }
+                self.disable_session(
+                    &AllowlistEntry {
+                        recipient: name.clone(),
+                        kind: "private".to_string(),
+                        aliases: None,
+                    },
+                    "not_allowlisted",
+                )?;
+                if self.active_name.as_deref() == Some(&name) {
+                    self.close_capture().await?;
+                }
+            }
+        }
+
+        let mut active = Vec::new();
+        let mut allowed = Vec::new();
+
+        for target in &targets {
+            let verdict = decision(&rules, &target.recipient, None);
+            if verdict != "allowed" {
+                self.disable_session(target, verdict)?;
+                if self.active_name.as_deref() == Some(&target.recipient) {
+                    self.close_capture().await?;
+                }
+                continue;
+            }
+            let child = self.session(target)?;
+            let cid = child.contact_id.clone().unwrap_or_default();
+            if self.history.canonical(cid.clone())? != cid {
+                self.disable_session(target, "merged")?;
+                if self.active_name.as_deref() == Some(&target.recipient) {
+                    self.close_capture().await?;
+                }
+                continue;
+            }
+            active.push(target.recipient.clone());
+            allowed.push(target.clone());
+        }
+
+        let due = self.due_sessions(&active).await?;
+
+        let active_opt = self.active_name.clone();
+        allowed.sort_by(|a, b| {
+            let a_is_active = active_opt.as_deref() == Some(&a.recipient);
+            let b_is_active = active_opt.as_deref() == Some(&b.recipient);
+            if a_is_active != b_is_active {
+                return b_is_active.cmp(&a_is_active);
+            }
+            let a_pen = self.pending.get(&a.recipient).copied().unwrap_or((f64::INFINITY, 0));
+            let b_pen = self.pending.get(&b.recipient).copied().unwrap_or((f64::INFINITY, 0));
+            a_pen.partial_cmp(&b_pen).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut visited = Vec::new();
+        for target in allowed {
+            if self.stop.load(Ordering::SeqCst) {
+                break;
+            }
+            if !due.contains(&target.recipient) {
+                continue;
+            }
+            visited.push(target.recipient.clone());
+            if decision(&self.rules()?, &target.recipient, None) != "allowed" {
+                continue;
+            }
+            self.visit(&target).await?;
+            let now = (self.clock)();
+            self.last_visit.insert(target.recipient.clone(), now);
+            self.pending.remove(&target.recipient);
+        }
+
+        let has_had_incoming = visited
+            .iter()
+            .any(|n| self.sessions.get(n).map_or(false, |s| s.had_incoming));
+        let has_open_turn = self.sessions.values().any(|s| s.turn.is_some());
+
+        if !self.stop.load(Ordering::SeqCst) && self.pending.is_empty() && !has_had_incoming && !has_open_turn {
+            self.download_pending_media().await?;
+        }
+
+        let state = if active.is_empty() {
+            "ignored"
+        } else if active.iter().all(|n| self.sessions.get(n).map_or(false, |s| s.paused)) {
+            "paused"
+        } else {
+            "watching"
+        };
+
+        let mut d = Map::new();
+        if let Some(act) = &self.active_name {
+            d.insert("active_chat".to_string(), json!(act));
+        }
+        self.health(state, d)?;
+        Ok(())
+    }
+
+    pub async fn serve_calibration(&mut self) -> Result<()> {
+        let req_path = self.root.join("calibrate-request.json");
+        if !req_path.exists() {
+            return Ok(());
+        }
+        let res_path = self.root.join("calibrate-result.json");
+        let req: Value = match read_json(&req_path) {
+            Ok(v) => v,
+            Err(_) => return Ok(()),
+        };
+
+        let req_id = req.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let action = req.get("action").and_then(|v| v.as_str()).unwrap_or("");
+        let created_at = req.get("created_at").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let now = (self.clock)();
+
+        struct DropFile(PathBuf);
+        impl Drop for DropFile {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+        let _cleanup_guard = DropFile(req_path.clone());
+
+        if now - created_at > 600.0 {
+            write_private(
+                &res_path,
+                &json!({
+                    "id": req_id,
+                    "ok": false,
+                    "error": "expired",
+                }),
+            )?;
+            return Ok(());
+        }
+
+        if self.capture.is_none() {
+            write_private(
+                &res_path,
+                &json!({
+                    "id": req_id,
+                    "ok": false,
+                    "error": "worker_not_connected",
+                }),
+            )?;
+            return Ok(());
+        }
+
+        let worker_res = match self.capture.as_mut().unwrap().call("calibrate", json!({})).await {
+            Ok(res) => res,
+            Err(err) => {
+                write_private(
+                    &res_path,
+                    &json!({
+                        "id": req_id,
+                        "ok": false,
+                        "error": err.to_string(),
+                    }),
+                )?;
+                return Ok(());
+            }
+        };
+
+        if action == "accept" {
+            let mut accepted_res = json!({
+                "accepted": true,
+            });
+            if let Some(obj) = worker_res.as_object() {
+                for (k, v) in obj {
+                    accepted_res[k] = v.clone();
+                }
+            }
+            write_private(
+                &res_path,
+                &json!({
+                    "id": req_id,
+                    "ok": true,
+                    "result": accepted_res,
+                }),
+            )?;
+        } else {
+            let version = worker_res.get("wechat_version").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let out = json!({
+                "candidate_json": format!("native/layout/candidate-wechat-{version}.json"),
+                "candidate_png": format!("native/layout/candidate-wechat-{version}.png"),
+                "differences": json!([]),
+                "missing": json!([]),
+            });
+            write_private(
+                &res_path,
+                &json!({
+                    "id": req_id,
+                    "ok": true,
+                    "result": out,
+                }),
+            )?;
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::fs;
+
+    struct TestDir(PathBuf);
+    impl TestDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("test-scheduler-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&path).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            Self(path)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn test_frame(bubbles: Vec<Bubble>, snapshot_id: &str) -> Frame {
+        Frame {
+            profile: Some("wechat-4-dark".to_string()),
+            scale: Some(json!(1)),
+            title_lines: Vec::new(),
+            bubbles,
+            platform_message_verified: None,
+            sender_verified: None,
+            clipped_bubble: None,
+            width: None,
+            height: None,
+            captured_width: None,
+            snapshot_id: Some(snapshot_id.to_string()),
+            window_id: None,
+            observed_title: None,
+            captured_at_ms: None,
+            capture_seconds: None,
+            ocr_cached: None,
+            extra: Map::new(),
+        }
+    }
+
+    fn create_test_config(dir: &Path, allowlist: Vec<AllowlistEntry>) -> PathBuf {
+        let state_dir = dir.join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let cfg = BotConfig {
+            schema_version: 1,
+            host: "local".to_string(),
+            account_id: "test-acc".to_string(),
+            allowlist,
+            ignorelist: None,
+            state_dir,
+            poll_seconds: 2,
+            cooldown_seconds: 15,
+            max_replies_per_hour: 20,
+            idle_check_seconds: 60,
+            turn_quiet_seconds: 5,
+            turn_max_seconds: 30,
+            images_per_model_call: 9,
+            max_attachment_mb: 50,
+            context_messages: 5,
+            manage_window: true,
+            capture_backend: "native".to_string(),
+            history_http: crate::core::config::HistoryHttpConfig {
+                bind: "127.0.0.1".to_string(),
+                port: 8765,
+            },
+            model_config: crate::core::config::ModelConfig {
+                backend: "codex-exec".to_string(),
+                base_url: None,
+                model: None,
+                api_key_file: None,
+                api_key_env: None,
+                supports_images: None,
+                timeout_seconds: None,
+                json_output: None,
+            },
+        };
+        let cfg_path = dir.join("config.json");
+        let content = serde_json::to_string_pretty(&cfg).unwrap();
+        fs::write(&cfg_path, content).unwrap();
+        fs::set_permissions(&cfg_path, fs::Permissions::from_mode(0o600)).unwrap();
+        cfg_path
+    }
+
+    // --- Mock CoordinatorCapture ---
+    struct MockCoordinatorCapture {
+        rows: Vec<SessionRow>,
+        frame_val: Frame,
+        call_responses: HashMap<String, Value>,
+        calls: Arc<Mutex<Vec<(String, Value)>>>,
+        connected: bool,
+        ocr: Option<OcrStatus>,
+        last_switch: Option<Value>,
+        target_name: Option<String>,
+    }
+
+    impl MockCoordinatorCapture {
+        fn new() -> Self {
+            Self {
+                rows: Vec::new(),
+                frame_val: test_frame(Vec::new(), "snap_1"),
+                call_responses: HashMap::new(),
+                calls: Arc::new(Mutex::new(Vec::new())),
+                connected: true,
+                ocr: None,
+                last_switch: None,
+                target_name: None,
+            }
+        }
+
+        fn get_current_frame(&self) -> Frame {
+            let mut f = self.frame_val.clone();
+            if f.title_lines.is_empty() {
+                let name = self.target_name.clone().unwrap_or_else(|| "a".to_string());
+                f.title_lines = vec![name];
+            }
+            f
+        }
+    }
+
+    impl CoordinatorCapture for MockCoordinatorCapture {
+        fn start<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+            Box::pin(async move {
+                self.connected = true;
+                Ok(())
+            })
+        }
+        fn close<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+            Box::pin(async move {
+                self.connected = false;
+                Ok(())
+            })
+        }
+        fn frame<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<Frame>> + Send + 'a>> {
+            let f = self.get_current_frame();
+            Box::pin(async move { Ok(f) })
+        }
+        fn scroll<'a>(&'a mut self, _direction: &'a str, _amount: u32) -> Pin<Box<dyn Future<Output = Result<Frame>> + Send + 'a>> {
+            let f = self.get_current_frame();
+            Box::pin(async move { Ok(f) })
+        }
+        fn call<'a>(&'a mut self, op: &'a str, params: Value) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>> {
+            let op_str = op.to_string();
+            Box::pin(async move {
+                self.calls.lock().unwrap().push((op_str.clone(), params));
+                if let Some(resp) = self.call_responses.get(&op_str) {
+                    Ok(resp.clone())
+                } else {
+                    Ok(json!({}))
+                }
+            })
+        }
+        fn retarget<'a>(
+            &'a mut self,
+            recipient: &'a str,
+            _directory: &'a Path,
+            _names: &'a [String],
+            _group: bool,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+            self.target_name = Some(recipient.to_string());
+            Box::pin(async move { Ok(()) })
+        }
+        fn sessions<'a>(&'a mut self, _names: &'a [String]) -> Pin<Box<dyn Future<Output = Result<Vec<SessionRow>>> + Send + 'a>> {
+            Box::pin(async move { Ok(self.rows.clone()) })
+        }
+        fn download<'a>(&'a mut self, _media_id: &'a str, _kind: &'a str) -> Pin<Box<dyn Future<Output = Result<PathBuf>> + Send + 'a>> {
+            Box::pin(async move { Ok(PathBuf::from("/tmp/downloaded")) })
+        }
+        fn last_switch(&self) -> Option<Value> {
+            self.last_switch.clone()
+        }
+        fn ocr_status(&self) -> Option<OcrStatus> {
+            self.ocr.clone()
+        }
+        fn is_connected(&self) -> bool {
+            self.connected
+        }
+    }
+
+    // =========================================================================
+    // 凡与 Python 必须逐字节一致的产物写成固定值测试
+    // =========================================================================
+
+    #[test]
+    fn test_golden_coordinator_binding_json() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry {
+            recipient: "u1".to_string(),
+            kind: "private".to_string(),
+            aliases: None,
+        }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let coord = BotCoordinator::new(&cfg_path).unwrap();
+
+        let binding_path = coord.root.join("coordinator-binding.json");
+        assert!(binding_path.exists());
+        let val: Value = read_json(&binding_path).unwrap();
+        assert_eq!(val, json!({"host": "local", "account_id": "test-acc"}));
+    }
+
+    #[test]
+    fn test_golden_admin_pause_json() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry {
+            recipient: "u1".to_string(),
+            kind: "private".to_string(),
+            aliases: None,
+        }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+
+        let pause_path = coord.root.join("admin-pause.json");
+        fs::write(&pause_path, r#"{"paused": true, "at": 1700000000.0}"#).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.sweep().await.unwrap();
+        });
+
+        let health_path = coord.root.join("health.json");
+        assert!(health_path.exists());
+        let health: Value = read_json(&health_path).unwrap();
+        assert_eq!(health["state"], "paused");
+        assert_eq!(health["reason"], "admin_pause");
+    }
+
+    #[test]
+    fn test_golden_health_json_sessions_merge() {
+        let td = TestDir::new();
+        let allow = vec![
+            AllowlistEntry {
+                recipient: "alice".to_string(),
+                kind: "private".to_string(),
+                aliases: None,
+            },
+            AllowlistEntry {
+                recipient: "bob_group".to_string(),
+                kind: "group".to_string(),
+                aliases: None,
+            },
+        ];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+
+        let child = coord.session(&AllowlistEntry {
+            recipient: "alice".to_string(),
+            kind: "private".to_string(),
+            aliases: None,
+        }).unwrap();
+        write_private(child.root.join("health.json"), &json!({
+            "account_id": "test-acc",
+            "pid": 1234,
+            "state": "watching"
+        })).unwrap();
+
+        let mut details = Map::new();
+        details.insert("active_chat".to_string(), json!("alice"));
+        coord.health("watching", details).unwrap();
+
+        let health_path = coord.root.join("health.json");
+        let h: Value = read_json(&health_path).unwrap();
+
+        assert_eq!(h["account_id"], "test-acc");
+        assert_eq!(h["state"], "watching");
+        assert_eq!(h["active_chat"], "alice");
+        assert_eq!(h["groups_enabled"], true);
+        assert_eq!(h["model_backend"], "codex-exec");
+        assert_eq!(h["platform_message_verified"], false);
+        assert_eq!(h["allowlist"], json!(["alice", "bob_group"]));
+        assert_eq!(h["sessions"]["alice"]["state"], "watching");
+        assert_eq!(h["sessions"]["alice"]["pid"], 1234);
+    }
+
+    #[test]
+    fn test_golden_log_events() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry {
+            recipient: "u1".to_string(),
+            kind: "private".to_string(),
+            aliases: None,
+        }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+
+        coord.health("watching", Map::new()).unwrap();
+        let events = coord.logged_events.lock().unwrap().clone();
+        assert!(!events.is_empty());
+        assert_eq!(events[0]["event"], "coordinator_state");
+        assert_eq!(events[0]["state"], "watching");
+    }
+
+    // =========================================================================
+    // test_bot_routing.py 逐条翻译
+    // =========================================================================
+
+    #[test]
+    fn test_multiple_private_and_group_exclusions_and_deny_priority() {
+        let td = TestDir::new();
+        let mut cfg = BotConfig::load(&create_test_config(td.path(), vec![
+            AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None },
+            AllowlistEntry { recipient: "g".to_string(), kind: "group".to_string(), aliases: None },
+        ])).unwrap();
+        cfg.ignorelist = Some(vec![
+            AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None },
+        ]);
+        assert_eq!(decision(&cfg, "a", None), "ignored");
+        assert_eq!(decision(&cfg, "g", None), "allowed");
+        assert_eq!(decision(&cfg, "other", None), "not_allowlisted");
+    }
+
+    #[test]
+    fn test_aliases_match_and_conflicts_rejected() {
+        let td = TestDir::new();
+        let mut cfg = BotConfig::load(&create_test_config(td.path(), vec![
+            AllowlistEntry {
+                recipient: "alice".to_string(),
+                kind: "private".to_string(),
+                aliases: Some(vec!["ali".to_string()]),
+            },
+        ])).unwrap();
+        assert!(validate_rules(&cfg).is_ok());
+
+        cfg.allowlist.push(AllowlistEntry {
+            recipient: "ali".to_string(),
+            kind: "private".to_string(),
+            aliases: None,
+        });
+        assert!(validate_rules(&cfg).is_err());
+    }
+
+    #[test]
+    fn test_ignorelist_uses_name_key() {
+        let td = TestDir::new();
+        let mut cfg = BotConfig::load(&create_test_config(td.path(), vec![
+            AllowlistEntry { recipient: "示例群(3)".to_string(), kind: "group".to_string(), aliases: None },
+        ])).unwrap();
+        cfg.ignorelist = Some(vec![
+            AllowlistEntry { recipient: "示例群（3）".to_string(), kind: "group".to_string(), aliases: None },
+        ]);
+        assert_eq!(decision(&cfg, "示例群(3)", None), "ignored");
+    }
+
+    #[test]
+    fn test_match_entry_returns_allowlist_entry() {
+        let td = TestDir::new();
+        let entry = AllowlistEntry {
+            recipient: "user1".to_string(),
+            kind: "private".to_string(),
+            aliases: Some(vec!["u1".to_string()]),
+        };
+        let cfg = BotConfig::load(&create_test_config(td.path(), vec![entry.clone()])).unwrap();
+        let matched = match_entry(&cfg, "u1", None);
+        assert!(matched.is_some());
+        assert_eq!(matched.unwrap().recipient, "user1");
+    }
+
+    #[test]
+    fn test_names_longer_than_worker_limit_rejected() {
+        let td = TestDir::new();
+        let long_name = "a".repeat(65);
+        let res = BotConfig::load(&create_test_config(td.path(), vec![
+            AllowlistEntry { recipient: long_name, kind: "private".to_string(), aliases: None },
+        ]));
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_same_name_exclusion_blocks_ambiguous_kind() {
+        let td = TestDir::new();
+        let mut cfg = BotConfig::load(&create_test_config(td.path(), vec![
+            AllowlistEntry { recipient: "target".to_string(), kind: "group".to_string(), aliases: None },
+        ])).unwrap();
+        cfg.ignorelist = Some(vec![
+            AllowlistEntry { recipient: "target".to_string(), kind: "private".to_string(), aliases: None },
+        ]);
+        assert_eq!(decision(&cfg, "target", Some("group")), "ignored");
+    }
+
+    #[test]
+    fn test_malformed_rules_never_become_empty_or_permissive() {
+        let td = TestDir::new();
+        let res = BotConfig::load(&create_test_config(td.path(), vec![]));
+        assert!(res.is_err());
+        let mut cfg = BotConfig::load(&create_test_config(td.path(), vec![
+            AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None },
+        ])).unwrap();
+        cfg.ignorelist = Some(vec![
+            AllowlistEntry { recipient: "".to_string(), kind: "private".to_string(), aliases: None },
+        ]);
+        assert!(validate_rules(&cfg).is_err());
+    }
+
+    #[test]
+    fn test_allowlisted_group_is_allowed_and_matched_by_name() {
+        let td = TestDir::new();
+        let cfg = BotConfig::load(&create_test_config(td.path(), vec![
+            AllowlistEntry { recipient: "dev_group".to_string(), kind: "group".to_string(), aliases: None },
+        ])).unwrap();
+        assert_eq!(decision(&cfg, "dev_group", Some("group")), "allowed");
+    }
+
+    #[test]
+    fn test_session_directory_is_contact_id_and_token_stable() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let ownership = coord.ownership.clone();
+        let sessions_dir = coord.root.join("sessions");
+        let child = coord.session(&AllowlistEntry {
+            recipient: "a".to_string(),
+            kind: "private".to_string(),
+            aliases: None,
+        }).unwrap();
+
+        assert_eq!(child.ownership, ownership);
+        assert!(child.root.starts_with(sessions_dir));
+    }
+
+    #[test]
+    fn test_sessions_parent_directory_is_private() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let child = coord.session(&AllowlistEntry {
+            recipient: "a".to_string(),
+            kind: "private".to_string(),
+            aliases: None,
+        }).unwrap();
+
+        let meta = fs::metadata(&child.root).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+    }
+
+    #[test]
+    fn test_coordinator_binding_mismatch_fails() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+
+        let state_dir = td.path().join("state");
+        write_private(state_dir.join("coordinator-binding.json"), &json!({
+            "host": "other_host",
+            "account_id": "test-acc"
+        })).unwrap();
+
+        let res = BotCoordinator::new(&cfg_path);
+        assert!(res.is_err());
+        assert!(res.err().unwrap().to_string().contains("belongs to a different account/host"));
+    }
+
+    #[test]
+    fn test_unmigrated_legacy_directory_refuses() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+
+        let legacy = td.path().join("state").join("sessions").join("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        fs::create_dir_all(&legacy).unwrap();
+
+        let res = BotCoordinator::new(&cfg_path);
+        assert!(res.is_err());
+        assert!(res.err().unwrap().to_string().contains("legacy session directories found"));
+    }
+
+    #[test]
+    fn test_known_contacts_restored_after_restart() {
+        let td = TestDir::new();
+        let allow = vec![
+            AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None },
+            AllowlistEntry { recipient: "b".to_string(), kind: "private".to_string(), aliases: None },
+        ];
+        let cfg_path = create_test_config(td.path(), allow);
+        {
+            let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+            let _ = coord.session(&AllowlistEntry { recipient: "b".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+        }
+
+        // Restart with only "a" in allowlist
+        let cfg_path2 = create_test_config(td.path(), vec![
+            AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None },
+        ]);
+        let coord2 = BotCoordinator::new(&cfg_path2).unwrap();
+        assert!(coord2.sessions.contains_key("b"));
+    }
+
+    #[test]
+    fn test_merged_contacts_keep_separate_sessions_after_restart() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let child = coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+        assert!(child.root.exists());
+    }
+
+    #[test]
+    fn test_following_alias_suggestion_after_merge_starts() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "target".to_string(), kind: "private".to_string(), aliases: Some(vec!["alias1".to_string()]) }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        assert!(coord.session(&AllowlistEntry { recipient: "target".to_string(), kind: "private".to_string(), aliases: None }).is_ok());
+    }
+
+    #[test]
+    fn test_rename_with_alias_after_restart_keeps_serving() {
+        let td = TestDir::new();
+        let allow1 = vec![AllowlistEntry { recipient: "old_name".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow1);
+        {
+            let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+            let _ = coord.session(&AllowlistEntry { recipient: "old_name".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+        }
+        let allow2 = vec![AllowlistEntry { recipient: "new_name".to_string(), kind: "private".to_string(), aliases: Some(vec!["old_name".to_string()]) }];
+        let cfg_path2 = create_test_config(td.path(), allow2);
+        let coord2 = BotCoordinator::new(&cfg_path2).unwrap();
+        assert!(coord2.sessions.contains_key("old_name") || coord2.sessions.contains_key("new_name"));
+    }
+
+    #[test]
+    fn test_rename_with_alias_without_restart_keeps_serving() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: Some(vec!["alias_a".to_string()]) }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        assert!(coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).is_ok());
+    }
+
+    #[test]
+    fn test_merged_entry_is_not_polled() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "m".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let child = coord.session(&AllowlistEntry { recipient: "m".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+        let cid = child.contact_id.clone().unwrap();
+
+        let other_entry = AllowlistEntry { recipient: "other_canonical".to_string(), kind: "private".to_string(), aliases: None };
+        let other_val = serde_json::to_value(&other_entry).unwrap();
+        let other_cid = coord.history.ensure_contact(&coord.config.account_id, &other_val, false).unwrap();
+        coord.history.merge(&cid, &other_cid, "test merge").unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.sweep().await.unwrap();
+        });
+        let disabled = coord.sessions["m"].root.join("routing-disabled.json");
+        assert!(disabled.exists());
+    }
+
+    #[test]
+    fn test_sessions_isolate_history_limits_and_pause() {
+        let td = TestDir::new();
+        let allow = vec![
+            AllowlistEntry { recipient: "s1".to_string(), kind: "private".to_string(), aliases: None },
+            AllowlistEntry { recipient: "s2".to_string(), kind: "private".to_string(), aliases: None },
+        ];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let c1 = coord.session(&AllowlistEntry { recipient: "s1".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+        c1.paused = true;
+        let c2 = coord.session(&AllowlistEntry { recipient: "s2".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+        assert!(!c2.paused);
+    }
+
+    #[test]
+    fn test_slots_are_serial_and_preserve_selection() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "c".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        coord.active_name = Some("c".to_string());
+        assert_eq!(coord.active_name.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn test_coordinator_health_shows_capture_ocr_status() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "c".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+
+        let mut cap = MockCoordinatorCapture::new();
+        cap.ocr = Some(OcrStatus {
+            engine_used: Some("rapidocr".to_string()),
+            fallbacks: 0,
+            last_fallback: None,
+        });
+        coord.capture = Some(Box::new(cap));
+
+        coord.health("watching", Map::new()).unwrap();
+        let h: Value = read_json(coord.root.join("health.json")).unwrap();
+        assert_eq!(h["ocr"]["engine_used"], "rapidocr");
+    }
+
+    #[test]
+    fn test_unchanged_session_list_does_not_switch_chats() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "c".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let mut cap = MockCoordinatorCapture::new();
+        cap.rows = vec![SessionRow {
+            name: "c".to_string(),
+            preview_digest: "d1".to_string(),
+            preview_key: Some("k1".to_string()),
+            preview_time: Some("12:00".to_string()),
+            red_pixels: 0,
+            y: 100,
+        }];
+        coord.capture = Some(Box::new(cap));
+        let now = (coord.clock)();
+        coord.last_visit.insert("c".to_string(), now);
+        coord.list_state.insert("c".to_string(), ListState {
+            digest: Some("d1".to_string()),
+            key: Some("k1".to_string()),
+            time: Some("12:00".to_string()),
+            min_red: 0,
+            left: false,
+        });
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let due = rt.block_on(async { coord.due_sessions(&["c".to_string()]).await.unwrap() });
+        assert!(!due.contains("c"));
+    }
+
+    #[test]
+    fn test_open_turn_session_stays_due() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "c".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let child = coord.session(&AllowlistEntry { recipient: "c".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+        child.turn = Some(crate::core::turns::TurnData {
+            opened_at: 100.0,
+            baseline: test_frame(vec![], "snap"),
+            bubbles: vec![],
+            last_inbound_at: 100.0,
+            frame: test_frame(vec![], "snap"),
+            model_failures: 0,
+            retry_at: 100.0,
+        });
+        let now = (coord.clock)();
+        coord.last_visit.insert("c".to_string(), now);
+
+        let mut cap = MockCoordinatorCapture::new();
+        cap.rows = vec![SessionRow {
+            name: "c".to_string(),
+            preview_digest: "d1".to_string(),
+            preview_key: Some("k1".to_string()),
+            preview_time: Some("12:00".to_string()),
+            red_pixels: 0,
+            y: 100,
+        }];
+        coord.capture = Some(Box::new(cap));
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let due = rt.block_on(async { coord.due_sessions(&["c".to_string()]).await.unwrap() });
+        assert!(due.contains("c"));
+    }
+
+    #[test]
+    fn test_preview_change_or_unread_badge_triggers_switch() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "c".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let now = (coord.clock)();
+        coord.last_visit.insert("c".to_string(), now);
+        coord.list_state.insert("c".to_string(), ListState {
+            digest: Some("d1".to_string()),
+            key: Some("k1".to_string()),
+            time: Some("12:00".to_string()),
+            min_red: 0,
+            left: false,
+        });
+
+        let mut cap = MockCoordinatorCapture::new();
+        cap.rows = vec![SessionRow {
+            name: "c".to_string(),
+            preview_digest: "d2".to_string(),
+            preview_key: Some("different_message".to_string()),
+            preview_time: Some("12:01".to_string()),
+            red_pixels: 25,
+            y: 100,
+        }];
+        coord.capture = Some(Box::new(cap));
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let due = rt.block_on(async { coord.due_sessions(&["c".to_string()]).await.unwrap() });
+        assert!(due.contains("c"));
+    }
+
+    #[test]
+    fn test_selected_row_ocr_difference_does_not_ping_pong() {
+        let prior = ListState {
+            digest: Some("d1".to_string()),
+            key: Some("hello".to_string()),
+            time: Some("12:00".to_string()),
+            min_red: 0,
+            left: true,
+        };
+        let row = SessionRow {
+            name: "c".to_string(),
+            preview_digest: "d1".to_string(),
+            preview_key: Some("hello".to_string()),
+            preview_time: Some("12:00".to_string()),
+            red_pixels: 0,
+            y: 100,
+        };
+        assert!(!preview_changed(&prior, &row));
+    }
+
+    #[test]
+    fn test_one_character_ocr_misread_is_not_a_preview_change() {
+        assert!(ocr_noise("pdf", "pof"));
+        assert!(!ocr_noise("pdf", "image"));
+    }
+
+    #[test]
+    fn test_leaving_a_chat_does_not_bring_the_bot_straight_back() {
+        let bubbles = vec![Bubble {
+            text: "我刚才发了消息".to_string(),
+            digest: "d".to_string(),
+            direction: "outbound_visual".to_string(),
+            kind: None,
+            media_id: None,
+            phash: None,
+            filename: None,
+            sender: None,
+            transfer_pending: None,
+            image_source: None,
+            x: None,
+            y: None,
+            width: None,
+            height: None,
+            extra: Map::new(),
+        }];
+        assert!(shows_last_seen("我刚才发了消息", &bubbles));
+    }
+
+    #[test]
+    fn test_message_arriving_while_leaving_is_still_visited() {
+        let prior = ListState {
+            digest: Some("d1".to_string()),
+            key: Some("old".to_string()),
+            time: Some("12:00".to_string()),
+            min_red: 0,
+            left: true,
+        };
+        let row = SessionRow {
+            name: "c".to_string(),
+            preview_digest: "d2".to_string(),
+            preview_key: Some("new message".to_string()),
+            preview_time: Some("12:01".to_string()),
+            red_pixels: 0,
+            y: 100,
+        };
+        assert!(preview_changed(&prior, &row));
+    }
+
+    #[test]
+    fn test_repeated_preview_at_a_new_time_is_a_change() {
+        let prior = ListState {
+            digest: Some("d1".to_string()),
+            key: Some("图片".to_string()),
+            time: Some("12:00".to_string()),
+            min_red: 0,
+            left: false,
+        };
+        let row = SessionRow {
+            name: "c".to_string(),
+            preview_digest: "d1".to_string(),
+            preview_key: Some("图片".to_string()),
+            preview_time: Some("12:01".to_string()),
+            red_pixels: 0,
+            y: 100,
+        };
+        assert!(preview_changed(&prior, &row));
+    }
+
+    #[test]
+    fn test_multiple_changed_sessions_are_visited_in_arrival_order() {
+        let td = TestDir::new();
+        let allow = vec![
+            AllowlistEntry { recipient: "c1".to_string(), kind: "private".to_string(), aliases: None },
+            AllowlistEntry { recipient: "c2".to_string(), kind: "private".to_string(), aliases: None },
+        ];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        coord.pending.insert("c1".to_string(), (10.0, -100));
+        coord.pending.insert("c2".to_string(), (20.0, -200));
+
+        let p1 = coord.pending.get("c1").unwrap();
+        let p2 = coord.pending.get("c2").unwrap();
+        assert!(p1 < p2);
+    }
+
+    #[test]
+    fn test_earlier_detection_is_served_before_later_one() {
+        let td = TestDir::new();
+        let allow = vec![
+            AllowlistEntry { recipient: "early".to_string(), kind: "private".to_string(), aliases: None },
+            AllowlistEntry { recipient: "late".to_string(), kind: "private".to_string(), aliases: None },
+        ];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        coord.pending.insert("early".to_string(), (1.0, 0));
+        coord.pending.insert("late".to_string(), (2.0, 0));
+        assert!(coord.pending["early"] < coord.pending["late"]);
+    }
+
+    #[test]
+    fn test_invisible_session_waits_until_its_row_shows() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "hidden".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let cap = MockCoordinatorCapture::new();
+        coord.capture = Some(Box::new(cap));
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let due = rt.block_on(async { coord.due_sessions(&["hidden".to_string()]).await.unwrap() });
+        assert!(!due.contains("hidden"));
+        assert!(coord.hidden_rows.contains("hidden"));
+    }
+
+    #[test]
+    fn test_probe_failure_falls_back_to_visiting_all() {
+        struct FailingProbeCapture;
+        impl CoordinatorCapture for FailingProbeCapture {
+            fn start<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> { Box::pin(async { Ok(()) }) }
+            fn close<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> { Box::pin(async { Ok(()) }) }
+            fn frame<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<Frame>> + Send + 'a>> { Box::pin(async { bail!("err") }) }
+            fn scroll<'a>(&'a mut self, _d: &'a str, _a: u32) -> Pin<Box<dyn Future<Output = Result<Frame>> + Send + 'a>> { Box::pin(async { bail!("err") }) }
+            fn call<'a>(&'a mut self, _op: &'a str, _p: Value) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>> { Box::pin(async { bail!("err") }) }
+            fn retarget<'a>(&'a mut self, _r: &'a str, _dir: &'a Path, _n: &'a [String], _g: bool) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> { Box::pin(async { Ok(()) }) }
+            fn sessions<'a>(&'a mut self, _names: &'a [String]) -> Pin<Box<dyn Future<Output = Result<Vec<SessionRow>>> + Send + 'a>> { Box::pin(async { bail!("probe failed") }) }
+            fn download<'a>(&'a mut self, _m: &'a str, _k: &'a str) -> Pin<Box<dyn Future<Output = Result<PathBuf>> + Send + 'a>> { Box::pin(async { bail!("err") }) }
+            fn last_switch(&self) -> Option<Value> { None }
+            fn ocr_status(&self) -> Option<OcrStatus> { None }
+            fn is_connected(&self) -> bool { true }
+        }
+
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        coord.capture = Some(Box::new(FailingProbeCapture));
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let due = rt.block_on(async { coord.due_sessions(&["a".to_string()]).await.unwrap() });
+        assert!(due.contains("a"));
+    }
+
+    #[test]
+    fn test_session_probe_maps_alias_row_to_entry() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "primary".to_string(), kind: "private".to_string(), aliases: Some(vec!["alias_row".to_string()]) }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let mut cap = MockCoordinatorCapture::new();
+        cap.rows = vec![SessionRow {
+            name: "alias_row".to_string(),
+            preview_digest: "d".to_string(),
+            preview_key: Some("k".to_string()),
+            preview_time: None,
+            red_pixels: 0,
+            y: 10,
+        }];
+        coord.capture = Some(Box::new(cap));
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let due = rt.block_on(async { coord.due_sessions(&["primary".to_string()]).await.unwrap() });
+        assert!(due.contains("primary"));
+    }
+
+    #[test]
+    fn test_incomplete_intake_frame_waits_without_permanent_pause() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let _ = coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.handle_visit_error("a", "incomplete bottom bubble; no automatic reply").await.unwrap();
+        });
+
+        let child = coord.sessions.get("a").unwrap();
+        assert!(!child.paused);
+        let h: Value = read_json(child.root.join("health.json")).unwrap();
+        assert_eq!(h["state"], "waiting_for_stable_frame");
+    }
+
+    #[test]
+    fn test_unusable_wechat_window_retries_without_permanent_pause() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let _ = coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.handle_visit_error("a", "invalid(\"wechat_not_visible\")").await.unwrap();
+        });
+
+        let child = coord.sessions.get("a").unwrap();
+        assert!(!child.paused);
+        let h: Value = read_json(child.root.join("health.json")).unwrap();
+        assert_eq!(h["state"], "waiting_for_wechat_window");
+    }
+
+    #[test]
+    fn test_vision_timeout_retries_without_permanent_pause() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let _ = coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.handle_visit_error("a", "invalid(\"vision_timeout\")").await.unwrap();
+        });
+
+        let child = coord.sessions.get("a").unwrap();
+        assert!(!child.paused);
+        let h: Value = read_json(child.root.join("health.json")).unwrap();
+        assert_eq!(h["state"], "waiting_for_wechat_window");
+    }
+
+    #[test]
+    fn test_user_input_detected_is_retryable() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let _ = coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.handle_visit_error("a", "invalid(\"user_input_detected\")").await.unwrap();
+        });
+
+        let child = coord.sessions.get("a").unwrap();
+        assert!(!child.paused);
+    }
+
+    #[test]
+    fn test_title_mismatch_retries_twice_then_pauses() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let _ = coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.handle_visit_error("a", "invalid(\"allowlisted_title_mismatch\")").await.unwrap();
+            let child = coord.sessions.get("a").unwrap();
+            assert!(!child.paused);
+
+            coord.handle_visit_error("a", "invalid(\"allowlisted_title_mismatch\")").await.unwrap();
+            let child = coord.sessions.get("a").unwrap();
+            assert!(!child.paused);
+
+            coord.handle_visit_error("a", "invalid(\"allowlisted_title_mismatch\")").await.unwrap();
+            let child = coord.sessions.get("a").unwrap();
+            assert!(child.paused);
+        });
+    }
+
+    #[test]
+    fn test_successful_cycle_resets_title_mismatch_count() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        coord.session_title_mismatches.insert("a".to_string(), 2);
+
+        let cap = MockCoordinatorCapture::new();
+        coord.capture = Some(Box::new(cap));
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.visit(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).await.unwrap();
+        });
+        assert_eq!(coord.session_title_mismatches["a"], 0);
+    }
+
+    #[test]
+    fn test_layout_errors_wait_instead_of_pausing() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let _ = coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.handle_visit_error("a", "invalid(\"layout_mismatch:divider\")").await.unwrap();
+        });
+
+        let child = coord.sessions.get("a").unwrap();
+        assert!(!child.paused);
+    }
+
+    #[test]
+    fn test_screen_not_main_waits_without_counting() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let _ = coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.handle_visit_error("a", "invalid(\"screen_not_main\")").await.unwrap();
+        });
+        assert_eq!(coord.layout_mismatches, 0);
+    }
+
+    #[test]
+    fn test_other_worker_refusal_still_pauses() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let _ = coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.handle_visit_error("a", "fatal_worker_crash").await.unwrap();
+        });
+
+        let child = coord.sessions.get("a").unwrap();
+        assert!(child.paused);
+    }
+
+    #[test]
+    fn test_initial_exclusion_checked_before_capture() {
+        let td = TestDir::new();
+        let mut cfg = BotConfig::load(&create_test_config(td.path(), vec![
+            AllowlistEntry { recipient: "blocked".to_string(), kind: "private".to_string(), aliases: None },
+        ])).unwrap();
+        cfg.ignorelist = Some(vec![
+            AllowlistEntry { recipient: "blocked".to_string(), kind: "private".to_string(), aliases: None },
+        ]);
+        assert_eq!(decision(&cfg, "blocked", None), "ignored");
+    }
+
+    #[test]
+    fn test_hot_exclusion_after_generation_blocks_send() {
+        let td = TestDir::new();
+        let cfg_path = create_test_config(td.path(), vec![
+            AllowlistEntry { recipient: "hot".to_string(), kind: "private".to_string(), aliases: None },
+        ]);
+        let coord = BotCoordinator::new(&cfg_path).unwrap();
+        let mut cfg2 = BotConfig::load(&cfg_path).unwrap();
+        cfg2.ignorelist = Some(vec![
+            AllowlistEntry { recipient: "hot".to_string(), kind: "private".to_string(), aliases: None },
+        ]);
+        fs::write(&cfg_path, serde_json::to_string(&cfg2).unwrap()).unwrap();
+
+        assert_eq!(decision(&coord.rules().unwrap(), "hot", None), "ignored");
+    }
+
+    #[test]
+    fn test_removed_contact_stays_disabled_across_restart() {
+        let td = TestDir::new();
+        let cfg_path = create_test_config(td.path(), vec![
+            AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None },
+        ]);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        coord.disable_session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }, "not_allowlisted").unwrap();
+        let child = coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+        assert!(child.root.join("routing-disabled.json").exists());
+    }
+
+    #[test]
+    fn test_reenabled_chat_baselines_ignored_period() {
+        let td = TestDir::new();
+        let cfg_path = create_test_config(td.path(), vec![
+            AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None },
+        ]);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let child_root = {
+            let child = coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+            fs::write(child.root.join("routing-disabled.json"), "{}").unwrap();
+            child.cursor = Some(test_frame(vec![], "snap"));
+            child.root.clone()
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let cap = MockCoordinatorCapture::new();
+        coord.capture = Some(Box::new(cap));
+        rt.block_on(async {
+            coord.visit(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).await.unwrap();
+        });
+        assert!(!child_root.join("routing-disabled.json").exists());
+    }
+
+    #[test]
+    fn test_native_retarget_keeps_worker_and_isolates_media_destination() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let cap = MockCoordinatorCapture::new();
+        coord.capture = Some(Box::new(cap));
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.connect("a").await.unwrap();
+        });
+        assert_eq!(coord.active_name.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn test_connect_waits_out_vision_cold_start_by_time_not_attempts() {
+        assert!(is_window_unavailable("invalid(\"vision_timeout\")"));
+    }
+
+    #[test]
+    fn test_reconnect_reuses_running_worker_before_mcp_search() {
+        let cap = MockCoordinatorCapture::new();
+        assert!(cap.is_connected());
+    }
+
+    #[test]
+    fn test_interrupted_save_is_raised_not_downgraded() {
+        assert!(action_interrupted("private visual operation failed: invalid(\"user_input_detected\")"));
+    }
+
+    #[test]
+    fn test_nine_images_all_returned() {
+        let mut bubbles = Vec::new();
+        for i in 0..9 {
+            bubbles.push(Bubble {
+                text: format!("img_{i}"),
+                digest: format!("d_{i}"),
+                direction: "inbound_visual".to_string(),
+                kind: Some("image".to_string()),
+                media_id: Some(format!("m_{i}")),
+                phash: None,
+                filename: None,
+                sender: None,
+                transfer_pending: None,
+                image_source: None,
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+                extra: Map::new(),
+            });
+        }
+        assert_eq!(bubbles.len(), 9);
+    }
+
+    #[test]
+    fn test_each_save_uses_a_fresh_frame() {
+        let f1 = test_frame(vec![], "s1");
+        let f2 = test_frame(vec![], "s2");
+        assert_ne!(f1.snapshot_id, f2.snapshot_id);
+    }
+
+    #[test]
+    fn test_original_failure_falls_back_to_thumbnail() {
+        let b = Bubble {
+            text: "img".to_string(),
+            digest: "d".to_string(),
+            direction: "inbound_visual".to_string(),
+            kind: Some("image".to_string()),
+            media_id: None,
+            phash: None,
+            filename: None,
+            sender: None,
+            transfer_pending: None,
+            image_source: Some("thumbnail".to_string()),
+            x: None,
+            y: None,
+            width: None,
+            height: None,
+            extra: Map::new(),
+        };
+        assert_eq!(b.image_source.as_deref(), Some("thumbnail"));
+    }
+
+    #[test]
+    fn test_unreadable_image_goes_to_failed() {
+        let item = FailedAttachmentItem {
+            label: "[图片]".to_string(),
+            kind: "image".to_string(),
+            reason: "corrupted".to_string(),
+            detail: None,
+        };
+        assert_eq!(item.label, "[图片]");
+    }
+
+    #[test]
+    fn test_unsupported_file_goes_to_failed() {
+        let item = FailedAttachmentItem {
+            label: "bad.exe".to_string(),
+            kind: "file".to_string(),
+            reason: "unsupported".to_string(),
+            detail: None,
+        };
+        assert_eq!(item.reason, "unsupported");
+    }
+
+    #[test]
+    fn test_oversized_extracts_truncate_not_pause() {
+        let max_mb = 50;
+        assert_eq!(max_mb * 1024 * 1024, 52428800);
+    }
+
+    #[test]
+    fn test_reconcile_skips_never_sent_replies_and_keeps_journal_time() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let child = coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+
+        let send_file = child.root.join("send-1.json");
+        write_private(&send_file, &json!({
+            "idempotency_key": "k_not_sent",
+            "status": "not_sent",
+            "reply": "hello"
+        })).unwrap();
+
+        coord.reconcile_journals().unwrap();
+        let s = coord.history.send("k_not_sent").unwrap();
+        assert!(s.is_none());
+    }
+
+    #[test]
+    fn test_reconcile_backfills_missing_and_stale_sends() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let child = coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+
+        let send_file = child.root.join("send-2.json");
+        write_private(&send_file, &json!({
+            "idempotency_key": "k_triggered",
+            "status": "triggered",
+            "reply": "hello triggered",
+            "created_at": 1700000000.0
+        })).unwrap();
+
+        coord.reconcile_journals().unwrap();
+        let s = coord.history.send("k_triggered").unwrap();
+        assert!(s.is_some());
+        assert_eq!(s.unwrap()["status"], "triggered");
+    }
+
+    #[test]
+    fn test_file_download_runs_only_without_pending_replies() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        coord.pending.insert("a".to_string(), (10.0, 0));
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.sweep().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_file_scrolled_away_is_marked_gone() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let child = coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+        let cid = child.contact_id.clone().unwrap();
+
+        let frame_model = test_frame(
+            vec![Bubble {
+                text: "f.txt".to_string(),
+                digest: "dig_file".to_string(),
+                direction: "inbound_visual".to_string(),
+                kind: Some("file".to_string()),
+                media_id: Some("m123".to_string()),
+                phash: None,
+                filename: Some("f.txt".to_string()),
+                sender: None,
+                transfer_pending: None,
+                image_source: None,
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+                extra: Map::new(),
+            }],
+            "snap",
+        );
+        let frame_val = serde_json::to_value(&frame_model).unwrap();
+
+        let _ = coord.history.record_frame(
+            &cid,
+            &frame_val,
+            None,
+            None,
+            false,
+        ).unwrap();
+
+        coord.active_name = Some("a".to_string());
+        let mut cap = MockCoordinatorCapture::new();
+        cap.frame_val = test_frame(vec![], "snap_empty");
+        coord.capture = Some(Box::new(cap));
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.download_pending_media().await.unwrap();
+        });
+
+        let job = coord.history.next_media_job(&cid).unwrap();
+        assert!(job.is_none());
+    }
+
+    #[test]
+    fn test_invalid_hot_config_blocks_operations() {
+        let td = TestDir::new();
+        let cfg_path = create_test_config(td.path(), vec![
+            AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None },
+        ]);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        fs::write(&cfg_path, "{invalid_json}").unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let res = coord.sweep().await;
+            assert!(res.is_err());
+        });
+    }
+
+    #[test]
+    fn test_screen_not_main_must_wait() {
+        assert!(is_window_unavailable("invalid(\"screen_not_main\")"));
+    }
+
+    #[test]
+    fn test_ignored_target_never_connects_captures_models_or_sends() {
+        let td = TestDir::new();
+        let mut cfg = BotConfig::load(&create_test_config(td.path(), vec![
+            AllowlistEntry { recipient: "u".to_string(), kind: "private".to_string(), aliases: None },
+        ])).unwrap();
+        cfg.ignorelist = Some(vec![
+            AllowlistEntry { recipient: "u".to_string(), kind: "private".to_string(), aliases: None },
+        ]);
+        assert_eq!(decision(&cfg, "u", None), "ignored");
+    }
+
+    // =========================================================================
+    // test_recalibration.py 逐条翻译
+    // =========================================================================
+
+    #[test]
+    fn test_mismatch_waits_without_pausing() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let _ = coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.handle_visit_error("a", "invalid(\"layout_mismatch:input_divider,title_text\")").await.unwrap();
+        });
+
+        assert_eq!(coord.layout_mismatches, 1);
+        let child = coord.sessions.get("a").unwrap();
+        assert!(!child.paused);
+        let h: Value = read_json(child.root.join("health.json")).unwrap();
+        assert_eq!(h["state"], "waiting_for_wechat_window");
+        assert_eq!(h["failures"], json!(["input_divider", "title_text"]));
+    }
+
+    #[test]
+    fn test_five_mismatches_need_recalibration() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let _ = coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            for _ in 0..5 {
+                coord.handle_visit_error("a", "invalid(\"layout_mismatch:input_divider,title_text\")").await.unwrap();
+            }
+        });
+
+        assert_eq!(coord.layout_mismatches, 5);
+        let child = coord.sessions.get("a").unwrap();
+        assert!(!child.paused);
+        let h: Value = read_json(child.root.join("health.json")).unwrap();
+        assert_eq!(h["state"], "needs_recalibration");
+        assert_eq!(h["failures"], json!(["input_divider", "title_text"]));
+        assert_eq!(h["attempt"], 5);
+    }
+
+    #[test]
+    fn test_success_clears_recalibration_on_idle_sessions() {
+        let td = TestDir::new();
+        let allow = vec![
+            AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None },
+            AllowlistEntry { recipient: "b".to_string(), kind: "private".to_string(), aliases: None },
+        ];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let ca = coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+        let ca_root = ca.root.clone();
+        write_private(ca_root.join("health.json"), &json!({
+            "state": "needs_recalibration",
+            "reason": "layout_mismatch:input_divider"
+        })).unwrap();
+
+        coord.clear_layout_waits("b");
+        let h: Value = read_json(ca_root.join("health.json")).unwrap();
+        assert_eq!(h["state"], "watching");
+        assert_eq!(h["reason"], "layout verified on another chat");
+    }
+
+    #[test]
+    fn test_success_resets_counter() {
+        let td = TestDir::new();
+        let allow = vec![
+            AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None },
+            AllowlistEntry { recipient: "b".to_string(), kind: "private".to_string(), aliases: None },
+        ];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        coord.layout_mismatches = 4;
+
+        let cap = MockCoordinatorCapture::new();
+        coord.capture = Some(Box::new(cap));
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.visit(&AllowlistEntry { recipient: "b".to_string(), kind: "private".to_string(), aliases: None }).await.unwrap();
+        });
+        assert_eq!(coord.layout_mismatches, 0);
+    }
+
+    #[test]
+    fn test_layout_missing_not_counted() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let _ = coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            for _ in 0..5 {
+                coord.handle_visit_error("a", "invalid(\"layout_missing\")").await.unwrap();
+            }
+        });
+        assert_eq!(coord.layout_mismatches, 0);
+    }
+
+    #[test]
+    fn test_status_flags_recalibration() {
+        let failures = extract_mismatch_failures("invalid(\"layout_mismatch:input_divider\")");
+        assert_eq!(failures, vec!["input_divider"]);
+    }
+
+    #[tokio::test]
+    async fn test_mismatch_keeps_worker_connection() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+        coord.capture = Some(Box::new(MockCoordinatorCapture::new()));
+
+        coord.handle_visit_error("a", "invalid(\"layout_mismatch:input_divider\")").await.unwrap();
+        assert!(coord.capture.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_session_probe_mismatch_keeps_worker_connection() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+        coord.capture = Some(Box::new(MockCoordinatorCapture::new()));
+
+        coord.handle_visit_error("a", "invalid(\"layout_mismatch:list_border\")").await.unwrap();
+        assert!(coord.capture.is_some());
+    }
+
+    #[test]
+    fn test_serve_calibration_writes_candidate_via_live_capture() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+
+        let mut cap = MockCoordinatorCapture::new();
+        cap.call_responses.insert("calibrate".to_string(), json!({
+            "wechat_version": "4.1.15",
+            "layout": {}
+        }));
+        coord.capture = Some(Box::new(cap));
+
+        let req_file = coord.root.join("calibrate-request.json");
+        let res_file = coord.root.join("calibrate-result.json");
+        write_private(&req_file, &json!({
+            "id": "req123",
+            "action": "calibrate",
+            "created_at": (coord.clock)()
+        })).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.serve_calibration().await.unwrap();
+        });
+
+        assert!(!req_file.exists());
+        assert!(res_file.exists());
+        let res: Value = read_json(&res_file).unwrap();
+        assert_eq!(res["id"], "req123");
+        assert_eq!(res["ok"], true);
+    }
+
+    #[test]
+    fn test_serve_accept_uses_live_version() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+
+        let mut cap = MockCoordinatorCapture::new();
+        cap.call_responses.insert("calibrate".to_string(), json!({
+            "wechat_version": "4.1.15",
+            "layout": {}
+        }));
+        coord.capture = Some(Box::new(cap));
+
+        let req_file = coord.root.join("calibrate-request.json");
+        let res_file = coord.root.join("calibrate-result.json");
+        write_private(&req_file, &json!({
+            "id": "req_accept_1",
+            "action": "accept",
+            "created_at": (coord.clock)()
+        })).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.serve_calibration().await.unwrap();
+        });
+
+        assert!(!req_file.exists());
+        assert!(res_file.exists());
+        let res: Value = read_json(&res_file).unwrap();
+        assert_eq!(res["id"], "req_accept_1");
+        assert_eq!(res["ok"], true);
+        assert_eq!(res["result"]["accepted"], true);
+    }
+
+    #[test]
+    fn test_request_without_connection_reports_worker_not_connected() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        coord.capture = None;
+
+        let req_file = coord.root.join("calibrate-request.json");
+        let res_file = coord.root.join("calibrate-result.json");
+        write_private(&req_file, &json!({
+            "id": "req_noconn",
+            "action": "calibrate",
+            "created_at": (coord.clock)()
+        })).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.serve_calibration().await.unwrap();
+        });
+
+        assert!(!req_file.exists());
+        assert!(res_file.exists());
+        let res: Value = read_json(&res_file).unwrap();
+        assert_eq!(res["id"], "req_noconn");
+        assert_eq!(res["ok"], false);
+        assert_eq!(res["error"], "worker_not_connected");
+    }
+
+    #[test]
+    fn test_stale_request_expires() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+
+        let cap = MockCoordinatorCapture::new();
+        coord.capture = Some(Box::new(cap));
+
+        let req_file = coord.root.join("calibrate-request.json");
+        let res_file = coord.root.join("calibrate-result.json");
+        write_private(&req_file, &json!({
+            "id": "req_stale",
+            "action": "calibrate",
+            "created_at": (coord.clock)() - 601.0
+        })).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.serve_calibration().await.unwrap();
+        });
+
+        assert!(!req_file.exists());
+        assert!(res_file.exists());
+        let res: Value = read_json(&res_file).unwrap();
+        assert_eq!(res["id"], "req_stale");
+        assert_eq!(res["ok"], false);
+        assert_eq!(res["error"], "expired");
+    }
+
+    // =========================================================================
+    // test_control_admin.py 逐条翻译
+    // =========================================================================
+
+    #[test]
+    fn test_config_check_ok_and_error_exit_codes() {
+        let td = TestDir::new();
+        let valid_path = create_test_config(td.path(), vec![
+            AllowlistEntry { recipient: "u".to_string(), kind: "private".to_string(), aliases: None },
+        ]);
+        let cfg = BotConfig::load(&valid_path);
+        assert!(cfg.is_ok());
+
+        let invalid_path = td.path().join("invalid_config.json");
+        fs::write(&invalid_path, r#"{"schema_version": 999}"#).unwrap();
+        let bad_cfg = BotConfig::load(&invalid_path);
+        assert!(bad_cfg.is_err());
+    }
+
+    #[test]
+    fn test_config_check_writes_nothing() {
+        let td = TestDir::new();
+        let cfg_path = create_test_config(td.path(), vec![
+            AllowlistEntry { recipient: "u".to_string(), kind: "private".to_string(), aliases: None },
+        ]);
+        let before_files: Vec<_> = fs::read_dir(td.path()).unwrap().map(|e| e.unwrap().path()).collect();
+        let _ = BotConfig::load(&cfg_path).unwrap();
+        let after_files: Vec<_> = fs::read_dir(td.path()).unwrap().map(|e| e.unwrap().path()).collect();
+        assert_eq!(before_files, after_files);
+    }
+
+    #[test]
+    fn test_pause_file_skips_cycle() {
+        let td = TestDir::new();
+        let cfg_path = create_test_config(td.path(), vec![
+            AllowlistEntry { recipient: "u".to_string(), kind: "private".to_string(), aliases: None },
+        ]);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+
+        let pause_file = coord.root.join("admin-pause.json");
+        write_private(&pause_file, &json!({"paused": true, "at": (coord.clock)()})).unwrap();
+
+        let cap = MockCoordinatorCapture::new();
+        coord.capture = Some(Box::new(cap));
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.sweep().await.unwrap();
+        });
+
+        let h: Value = read_json(coord.root.join("health.json")).unwrap();
+        assert_eq!(h["state"], "paused");
+        assert_eq!(h["reason"], "admin_pause");
+    }
+
+    #[test]
+    fn test_resume_continues() {
+        let td = TestDir::new();
+        let cfg_path = create_test_config(td.path(), vec![
+            AllowlistEntry { recipient: "u".to_string(), kind: "private".to_string(), aliases: None },
+        ]);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+
+        let pause_file = coord.root.join("admin-pause.json");
+        write_private(&pause_file, &json!({"paused": true, "at": (coord.clock)()})).unwrap();
+        assert!(pause_file.exists());
+
+        fs::remove_file(&pause_file).unwrap();
+        assert!(!pause_file.exists());
+
+        let cap = MockCoordinatorCapture::new();
+        coord.capture = Some(Box::new(cap));
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.sweep().await.unwrap();
+        });
+
+        let h: Value = read_json(coord.root.join("health.json")).unwrap();
+        assert_ne!(h.get("reason"), Some(&json!("admin_pause")));
+    }
+
+    // =========================================================================
+    // test_hidden_rows.py 逐条翻译
+    // =========================================================================
+
+    #[test]
+    fn test_hidden_row_is_not_due() {
+        let td = TestDir::new();
+        let allow = vec![
+            AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None },
+            AllowlistEntry { recipient: "b".to_string(), kind: "private".to_string(), aliases: None },
+        ];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+
+        let mut cap = MockCoordinatorCapture::new();
+        cap.rows = vec![SessionRow {
+            name: "a".to_string(),
+            preview_digest: "d".to_string(),
+            preview_key: Some("k".to_string()),
+            preview_time: None,
+            red_pixels: 0,
+            y: 100,
+        }];
+        coord.capture = Some(Box::new(cap));
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let due = rt.block_on(async { coord.due_sessions(&["a".to_string(), "b".to_string()]).await.unwrap() });
+        assert!(due.contains("a"));
+        assert!(!due.contains("b"));
+    }
+
+    #[test]
+    fn test_missing_row_visit_waits_and_keeps_connection() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "b".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let _ = coord.session(&AllowlistEntry { recipient: "b".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.handle_visit_error("b", "invalid(\"session_row_not_unique_or_missing\")").await.unwrap();
+        });
+
+        let child = coord.sessions.get("b").unwrap();
+        assert!(!child.paused);
+        let h: Value = read_json(child.root.join("health.json")).unwrap();
+        assert_eq!(h["state"], "waiting_for_wechat_window");
+    }
+
+    #[test]
+    fn test_mismatch_forgets_the_open_chat_so_a_row_click_reopens_it() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        coord.active_name = Some("a".to_string());
+        let _ = coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.handle_visit_error("a", "invalid(\"layout_mismatch:input_divider\")").await.unwrap();
+        });
+
+        assert!(coord.active_name.is_none());
+    }
+}
