@@ -150,7 +150,7 @@ pub fn execute_control<W1: std::io::Write, W2: std::io::Write>(
     if action == "-h" || action == "--help" {
         let _ = writeln!(
             stdout,
-            "Usage: wechat-mcp control <status|pause|resume|config-check|calibrate> [--config <path>]"
+            "Usage: wechat-mcp control <status|pause|resume|resume-session|config-check|calibrate> [--config <path>]"
         );
         return 0;
     }
@@ -261,6 +261,115 @@ pub fn execute_control<W1: std::io::Write, W2: std::io::Write>(
             }
 
             let _ = writeln!(stdout, "{}", json!({"status": "resumed"}));
+            0
+        }
+        "resume-session" => {
+            let mut target_session: Option<String> = None;
+            let mut config_file: Option<PathBuf> = None;
+            let mut idx = 1;
+            while idx < args.len() {
+                if args[idx] == "--config" && idx + 1 < args.len() {
+                    config_file = Some(PathBuf::from(&args[idx + 1]));
+                    idx += 2;
+                } else if !args[idx].starts_with('-') && target_session.is_none() {
+                    target_session = Some(args[idx].clone());
+                    idx += 1;
+                } else {
+                    idx += 1;
+                }
+            }
+
+            let Some(session_name) = target_session else {
+                let _ = writeln!(stderr, "control resume-session: missing session name");
+                return 2;
+            };
+
+            let config_path = config_file.unwrap_or(default_config_path);
+            let state_dir = if config_path.exists() {
+                if let Ok(cfg) = BotConfig::load(&config_path) {
+                    cfg.state_dir
+                } else {
+                    base.join("state")
+                }
+            } else {
+                base.join("state")
+            };
+
+            let sessions_dir = state_dir.join("sessions");
+            let mut removed_any = false;
+
+            // 1. 直接检查 sessions/<session_name>/handoff.json
+            let direct_handoff = sessions_dir.join(&session_name).join("handoff.json");
+            if direct_handoff.exists() {
+                if fs::remove_file(&direct_handoff).is_ok() {
+                    removed_any = true;
+                }
+            }
+
+            // 2. 遍历 sessions 目录下的各 contact 目录匹配 binding.json 或目录名
+            if sessions_dir.exists() && sessions_dir.is_dir() {
+                if let Ok(entries) = fs::read_dir(&sessions_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            let mut matches = false;
+                            if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
+                                if dir_name == session_name {
+                                    matches = true;
+                                }
+                            }
+                            let binding_file = path.join("binding.json");
+                            if binding_file.exists() {
+                                if let Ok(content) = fs::read_to_string(&binding_file) {
+                                    if let Ok(b_val) = serde_json::from_str::<Value>(&content) {
+                                        if b_val.get("recipient").and_then(|v| v.as_str()) == Some(&session_name) {
+                                            matches = true;
+                                        }
+                                    }
+                                }
+                            }
+                            if matches {
+                                let handoff_file = path.join("handoff.json");
+                                if handoff_file.exists() {
+                                    if fs::remove_file(&handoff_file).is_ok() {
+                                        removed_any = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. 若 core.sock 存在，尝试通知核心
+            let home_dir = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"));
+            let sock_path = home_dir.join(".wechat-rpa/core.sock");
+            if sock_path.exists() {
+                use std::os::unix::net::UnixStream;
+                use std::io::Write as _;
+                if let Ok(mut stream) = UnixStream::connect(&sock_path) {
+                    let req = json!({
+                        "id": uuid::Uuid::new_v4().to_string(),
+                        "op": "resume_session",
+                        "recipient": session_name
+                    });
+                    if let Ok(mut payload) = serde_json::to_vec(&req) {
+                        payload.push(b'\n');
+                        let _ = stream.write_all(&payload);
+                    }
+                }
+            }
+
+            let _ = writeln!(
+                stdout,
+                "{}",
+                json!({
+                    "ok": true,
+                    "session": session_name,
+                    "status": "resumed",
+                    "file_removed": removed_any
+                })
+            );
             0
         }
         "status" => {
@@ -911,5 +1020,62 @@ mod tests {
             String::from_utf8(rust_cal_stderr).unwrap(),
             String::from_utf8(py_cal.stderr).unwrap()
         );
+    }
+
+    #[test]
+    fn test_control_resume_session_removes_handoff_and_validates() {
+        let td = TempDir::new();
+        let state_dir = td.path().join("state");
+        let session_dir = state_dir.join("sessions").join("test_vip");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let handoff_file = session_dir.join("handoff.json");
+        fs::write(&handoff_file, json!({"handoff": true}).to_string()).unwrap();
+        assert!(handoff_file.exists());
+
+        let cfg_path = td.path().join("config.json");
+        fs::write(
+            &cfg_path,
+            json!({
+                "schema_version": 1,
+                "account_id": "test",
+                "state_dir": state_dir.to_str().unwrap()
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // 1. 缺少 session 参数 -> 退出码 2
+        let mut err_out = Vec::new();
+        let mut err_err = Vec::new();
+        let code_missing = execute_control(
+            &["resume-session".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &mut err_out,
+            &mut err_err,
+            Some(false),
+        );
+        assert_eq!(code_missing, 2);
+
+        // 2. 正常指定 session -> 删除 handoff.json 并返回 ok
+        let mut succ_out = Vec::new();
+        let mut succ_err = Vec::new();
+        let code_succ = execute_control(
+            &[
+                "resume-session".into(),
+                "test_vip".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
+            &mut succ_out,
+            &mut succ_err,
+            Some(false),
+        );
+        assert_eq!(code_succ, 0);
+        let res: Value = serde_json::from_slice(&succ_out).unwrap();
+        assert_eq!(res["ok"], true);
+        assert_eq!(res["session"], "test_vip");
+        assert_eq!(res["status"], "resumed");
+        assert_eq!(res["file_removed"], true);
+        assert!(!handoff_file.exists());
     }
 }

@@ -71,6 +71,7 @@ public struct ConfigFormLogic {
         if let tm = raw["turn_max_seconds"] { editable["turn_max_seconds"] = tm }
         if let cm = raw["context_messages"] { editable["context_messages"] = cm }
         if let mw = raw["manage_window"] { editable["manage_window"] = mw }
+        if let brain = raw["brain"] { editable["brain"] = brain }
 
         masked["editable"] = editable
         return masked
@@ -216,6 +217,120 @@ public struct ConfigFormLogic {
         // 4. manage_window
         if let mw = formInputs["manage_window"] as? Bool {
             updated["manage_window"] = mw
+        }
+
+        // 5. brain setting
+        if let brainModeRaw = formInputs["brain_mode"] as? String {
+            let brainMode = brainModeRaw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if brainMode == "builtin" {
+                updated["brain"] = ["mode": "builtin"]
+            } else if brainMode == "external" {
+                var extDict: [String: Any] = [:]
+
+                // timeout_seconds: 1..3600 (default 120)
+                var timeoutSec = 120
+                if let tVal = formInputs["brain_timeout_seconds"] {
+                    if let tStr = tVal as? String {
+                        let trimmed = tStr.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty {
+                            timeoutSec = try parseIntStrict(field: "brain_timeout_seconds", value: trimmed)
+                        }
+                    } else if let tInt = tVal as? Int {
+                        timeoutSec = tInt
+                    } else {
+                        throw ConfigFormError.validationFailed("brain_timeout_seconds 必须为整数")
+                    }
+                }
+                guard timeoutSec >= 1 && timeoutSec <= 3600 else {
+                    throw ConfigFormError.validationFailed("brain.external.timeout_seconds 必须在 1 到 3600 秒之间")
+                }
+                extDict["timeout_seconds"] = timeoutSec
+
+                // timeout_action: "skip" | "builtin" | "handoff" (default "skip")
+                var timeoutAct = "skip"
+                if let aVal = formInputs["brain_timeout_action"] as? String {
+                    let aStr = aVal.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                    if !aStr.isEmpty {
+                        timeoutAct = aStr
+                    }
+                }
+                guard ["skip", "builtin", "handoff"].contains(timeoutAct) else {
+                    throw ConfigFormError.validationFailed("brain.external.timeout_action 必须是 skip、builtin 或 handoff")
+                }
+                extDict["timeout_action"] = timeoutAct
+
+                // queue_minutes: 1..1440 (default 30)
+                var queueMin = 30
+                if let qVal = formInputs["brain_queue_minutes"] {
+                    if let qStr = qVal as? String {
+                        let trimmed = qStr.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty {
+                            queueMin = try parseIntStrict(field: "brain_queue_minutes", value: trimmed)
+                        }
+                    } else if let qInt = qVal as? Int {
+                        queueMin = qInt
+                    } else {
+                        throw ConfigFormError.validationFailed("brain_queue_minutes 必须为整数")
+                    }
+                }
+                guard queueMin >= 1 && queueMin <= 1440 else {
+                    throw ConfigFormError.validationFailed("brain.external.queue_minutes 必须在 1 到 1440 分钟之间")
+                }
+                extDict["queue_minutes"] = queueMin
+
+                updated["brain"] = [
+                    "mode": "external",
+                    "external": extDict
+                ]
+            } else {
+                throw ConfigFormError.validationFailed("brain.mode 必须是 builtin 或 external")
+            }
+        } else if let brainObj = formInputs["brain"] as? [String: Any] {
+            guard let mode = brainObj["mode"] as? String else {
+                throw ConfigFormError.validationFailed("brain.mode 缺失")
+            }
+            if mode == "builtin" {
+                guard brainObj.count == 1 else {
+                    throw ConfigFormError.validationFailed("brain.mode=builtin 时不允许包含其他字段")
+                }
+                updated["brain"] = ["mode": "builtin"]
+            } else if mode == "external" {
+                for (k, _) in brainObj {
+                    if !["mode", "external"].contains(k) {
+                        throw ConfigFormError.validationFailed("brain 包含未知字段: \(k)")
+                    }
+                }
+                var extDict: [String: Any] = [:]
+                if let ext = brainObj["external"] as? [String: Any] {
+                    for (k, _) in ext {
+                        if !["timeout_seconds", "timeout_action", "queue_minutes"].contains(k) {
+                            throw ConfigFormError.validationFailed("brain.external 包含未知字段: \(k)")
+                        }
+                    }
+                    let t = ext["timeout_seconds"] as? Int ?? 120
+                    guard t >= 1 && t <= 3600 else {
+                        throw ConfigFormError.validationFailed("brain.external.timeout_seconds 必须在 1 到 3600 秒之间")
+                    }
+                    extDict["timeout_seconds"] = t
+
+                    let a = ext["timeout_action"] as? String ?? "skip"
+                    guard ["skip", "builtin", "handoff"].contains(a) else {
+                        throw ConfigFormError.validationFailed("brain.external.timeout_action 必须是 skip、builtin 或 handoff")
+                    }
+                    extDict["timeout_action"] = a
+
+                    let q = ext["queue_minutes"] as? Int ?? 30
+                    guard q >= 1 && q <= 1440 else {
+                        throw ConfigFormError.validationFailed("brain.external.queue_minutes 必须在 1 到 1440 分钟之间")
+                    }
+                    extDict["queue_minutes"] = q
+                } else {
+                    extDict = ["timeout_seconds": 120, "timeout_action": "skip", "queue_minutes": 30]
+                }
+                updated["brain"] = ["mode": "external", "external": extDict]
+            } else {
+                throw ConfigFormError.validationFailed("brain.mode 必须是 builtin 或 external")
+            }
         }
 
         return updated
