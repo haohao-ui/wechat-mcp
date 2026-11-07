@@ -3,7 +3,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 use crate::core::config::BotConfig;
@@ -285,92 +285,37 @@ pub fn execute_control<W1: std::io::Write, W2: std::io::Write>(
             };
 
             let config_path = config_file.unwrap_or(default_config_path);
-            let state_dir = if config_path.exists() {
-                if let Ok(cfg) = BotConfig::load(&config_path) {
-                    cfg.state_dir
-                } else {
-                    base.join("state")
-                }
-            } else {
-                base.join("state")
+            // Never fall back to a default directory: a wrong config must not touch the real state.
+            let state_dir = match BotConfig::load(&config_path) {
+                Ok(cfg) => cfg.state_dir,
+                Err(_) => match fs::read_to_string(&config_path)
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                    .and_then(|v| v.get("state_dir").and_then(Value::as_str).map(PathBuf::from))
+                {
+                    Some(dir) => dir,
+                    None => {
+                        let _ = writeln!(stderr, "control resume-session: cannot read state_dir from {}", config_path.display());
+                        return 2;
+                    }
+                },
             };
 
-            let sessions_dir = state_dir.join("sessions");
-            let mut removed_any = false;
-
-            // 1. 直接检查 sessions/<session_name>/handoff.json
-            let direct_handoff = sessions_dir.join(&session_name).join("handoff.json");
-            if direct_handoff.exists() {
-                if fs::remove_file(&direct_handoff).is_ok() {
-                    removed_any = true;
+            let socket = crate::core::brain_tools::default_socket_path();
+            match resume_session_with(&socket, &state_dir, &session_name) {
+                Ok(ResumeOutcome::Core) => {
+                    let _ = writeln!(stdout, "{}", json!({"ok": true, "session": session_name, "status": "resumed", "via": "core", "file_removed": false}));
+                    0
+                }
+                Ok(ResumeOutcome::MarkerRemoved(n)) => {
+                    let _ = writeln!(stdout, "{}", json!({"ok": true, "session": session_name, "status": if n > 0 { "resumed" } else { "not_handed_off" }, "via": "file", "file_removed": n > 0}));
+                    0
+                }
+                Err(error) => {
+                    let _ = writeln!(stderr, "control resume-session: {error:#}");
+                    1
                 }
             }
-
-            // 2. 遍历 sessions 目录下的各 contact 目录匹配 binding.json 或目录名
-            if sessions_dir.exists() && sessions_dir.is_dir() {
-                if let Ok(entries) = fs::read_dir(&sessions_dir) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.is_dir() {
-                            let mut matches = false;
-                            if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
-                                if dir_name == session_name {
-                                    matches = true;
-                                }
-                            }
-                            let binding_file = path.join("binding.json");
-                            if binding_file.exists() {
-                                if let Ok(content) = fs::read_to_string(&binding_file) {
-                                    if let Ok(b_val) = serde_json::from_str::<Value>(&content) {
-                                        if b_val.get("recipient").and_then(|v| v.as_str()) == Some(&session_name) {
-                                            matches = true;
-                                        }
-                                    }
-                                }
-                            }
-                            if matches {
-                                let handoff_file = path.join("handoff.json");
-                                if handoff_file.exists() {
-                                    if fs::remove_file(&handoff_file).is_ok() {
-                                        removed_any = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 3. 若 core.sock 存在，尝试通知核心
-            let home_dir = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"));
-            let sock_path = home_dir.join(".wechat-rpa/core.sock");
-            if sock_path.exists() {
-                use std::os::unix::net::UnixStream;
-                use std::io::Write as _;
-                if let Ok(mut stream) = UnixStream::connect(&sock_path) {
-                    let req = json!({
-                        "id": uuid::Uuid::new_v4().to_string(),
-                        "op": "resume_session",
-                        "recipient": session_name
-                    });
-                    if let Ok(mut payload) = serde_json::to_vec(&req) {
-                        payload.push(b'\n');
-                        let _ = stream.write_all(&payload);
-                    }
-                }
-            }
-
-            let _ = writeln!(
-                stdout,
-                "{}",
-                json!({
-                    "ok": true,
-                    "session": session_name,
-                    "status": "resumed",
-                    "file_removed": removed_any
-                })
-            );
-            0
         }
         "status" => {
             let mut config_file: Option<PathBuf> = None;
@@ -575,6 +520,50 @@ pub fn execute_control<W1: std::io::Write, W2: std::io::Write>(
             let _ = writeln!(stderr, "unknown control action: {}", other);
             2
         }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ResumeOutcome {
+    /// The running core received resume_session over core.sock.
+    Core,
+    /// No core: this many handoff.json markers naming the recipient were removed.
+    MarkerRemoved(usize),
+}
+
+/// Ends a person's handoff. A running core owns the handoff state, so it is told over its socket;
+/// only when no core is listening are the marker files (sessions/*/handoff.json) removed directly.
+pub fn resume_session_with(socket: &Path, state_dir: &Path, recipient: &str) -> Result<ResumeOutcome> {
+    use std::io::{BufRead, BufReader, Write as _};
+    match std::os::unix::net::UnixStream::connect(socket) {
+        Ok(stream) => {
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+            let mut writer = stream.try_clone()?;
+            writeln!(writer, "{}", json!({"id": "control-resume", "op": "resume_session", "recipient": recipient}))?;
+            let mut line = String::new();
+            BufReader::new(stream).read_line(&mut line)?;
+            let response: Value = serde_json::from_str(line.trim()).context("core.sock 返回了无效 JSON")?;
+            if response.get("ok").and_then(Value::as_bool) == Some(true) {
+                Ok(ResumeOutcome::Core)
+            } else {
+                anyhow::bail!("core 拒绝 resume_session: {}", response.get("error").cloned().unwrap_or(Value::Null))
+            }
+        }
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) => {
+            let mut removed = 0;
+            if let Ok(entries) = fs::read_dir(state_dir.join("sessions")) {
+                for entry in entries.flatten() {
+                    let marker = entry.path().join("handoff.json");
+                    let Ok(text) = fs::read_to_string(&marker) else { continue };
+                    let Ok(value) = serde_json::from_str::<Value>(&text) else { continue };
+                    if value.get("recipient").and_then(Value::as_str) == Some(recipient) && fs::remove_file(&marker).is_ok() {
+                        removed += 1;
+                    }
+                }
+            }
+            Ok(ResumeOutcome::MarkerRemoved(removed))
+        }
+        Err(error) => Err(error).context("连接 core.sock 失败"),
     }
 }
 
@@ -1023,6 +1012,54 @@ mod tests {
     }
 
     #[test]
+    fn test_resume_session_tells_running_core_over_socket() {
+        use std::io::{BufRead, BufReader, Write as _};
+        let td = TempDir::new();
+        // Unix socket paths are limited to ~104 bytes; the temp dir path is too long.
+        let sock = PathBuf::from(format!("/tmp/wcc-{}.sock", &uuid::Uuid::new_v4().simple().to_string()[..8]));
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap()).read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            let mut out = stream;
+            writeln!(out, "{}", json!({"id": request["id"], "ok": true, "result": {"resumed": true}})).unwrap();
+            request
+        });
+        let state_dir = td.path().join("state");
+        let handoff = state_dir.join("sessions").join("c_1").join("handoff.json");
+        fs::create_dir_all(handoff.parent().unwrap()).unwrap();
+        fs::write(&handoff, r#"{"recipient":"测试群"}"#).unwrap();
+
+        let outcome = resume_session_with(&sock, &state_dir, "测试群").unwrap();
+        let request = server.join().unwrap();
+        let _ = fs::remove_file(&sock);
+        assert_eq!(outcome, ResumeOutcome::Core);
+        assert_eq!(request["op"], "resume_session");
+        assert_eq!(request["recipient"], "测试群");
+        assert!(handoff.exists(), "the running core owns the marker; control must not delete it behind its back");
+    }
+
+    #[test]
+    fn test_resume_session_without_core_removes_only_matching_marker() {
+        let td = TempDir::new();
+        let state_dir = td.path().join("state");
+        let mine = state_dir.join("sessions").join("c_a").join("handoff.json");
+        let other = state_dir.join("sessions").join("c_b").join("handoff.json");
+        for (path, name) in [(&mine, "测试群"), (&other, "午夜咖啡")] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, json!({"recipient": name}).to_string()).unwrap();
+        }
+        let outcome = resume_session_with(Path::new("/tmp/wcc-absent-core.sock"), &state_dir, "测试群").unwrap();
+        assert_eq!(outcome, ResumeOutcome::MarkerRemoved(1));
+        assert!(!mine.exists());
+        assert!(other.exists());
+        let none = resume_session_with(Path::new("/tmp/wcc-absent-core.sock"), &state_dir, "测试群").unwrap();
+        assert_eq!(none, ResumeOutcome::MarkerRemoved(0));
+    }
+
+    #[test]
     fn test_control_resume_session_removes_handoff_and_validates() {
         let td = TempDir::new();
         let state_dir = td.path().join("state");
@@ -1030,7 +1067,9 @@ mod tests {
         fs::create_dir_all(&session_dir).unwrap();
 
         let handoff_file = session_dir.join("handoff.json");
-        fs::write(&handoff_file, json!({"handoff": true}).to_string()).unwrap();
+        // The marker names its recipient (written by the core on handoff); no core is listening here.
+        fs::write(&handoff_file, json!({"recipient": "test_vip", "turn_id": "t", "at": 1.0}).to_string()).unwrap();
+        unsafe { std::env::set_var("WECHAT_CORE_SOCK", "/tmp/wcc-absent-control-test.sock") };
         assert!(handoff_file.exists());
 
         let cfg_path = td.path().join("config.json");
