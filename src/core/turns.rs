@@ -1500,6 +1500,8 @@ impl BotService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::config::AllowlistEntry;
+    use std::collections::HashMap;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Mutex;
     
