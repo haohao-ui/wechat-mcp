@@ -3,7 +3,7 @@ use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -13,8 +13,118 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
+#[repr(C)]
+struct Tm {
+    tm_sec: i32,
+    tm_min: i32,
+    tm_hour: i32,
+    tm_mday: i32,
+    tm_mon: i32,
+    tm_year: i32,
+    tm_wday: i32,
+    tm_yday: i32,
+    tm_isdst: i32,
+    tm_gmtoff: i64,
+    tm_zone: *const std::ffi::c_char,
+}
+
 unsafe extern "C" {
     fn getuid() -> u32;
+    fn localtime_r(timep: *const i64, result: *mut Tm) -> *mut Tm;
+}
+
+pub const FRAME_DUMP_MAX_BYTES: u64 = 50 * 1024 * 1024;
+pub const FRAME_DUMP_DAYS: u64 = 3;
+
+fn format_local_date(timestamp_secs: i64) -> String {
+    unsafe {
+        let mut tm: Tm = std::mem::zeroed();
+        localtime_r(&timestamp_secs, &mut tm);
+        format!(
+            "{:04}{:02}{:02}",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday
+        )
+    }
+}
+
+pub fn find_frame_dump_root(directory: &Path) -> &Path {
+    if let Some(parent) = directory.parent() {
+        if parent.file_name().and_then(|n| n.to_str()) == Some("sessions") {
+            if let Some(grandparent) = parent.parent() {
+                return grandparent;
+            }
+        }
+    }
+    directory
+}
+
+pub fn dump_frame_impl(
+    directory: &Path,
+    recipient: &str,
+    op: &str,
+    frame_val: &Value,
+    max_bytes: u64,
+) -> Result<()> {
+    let root = find_frame_dump_root(directory);
+    if !root.join("frame-dump.enabled").exists() {
+        return Ok(());
+    }
+
+    let dur = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let now_secs = dur.as_secs() as i64;
+    let now_f64 = dur.as_secs_f64();
+
+    let today = format_local_date(now_secs);
+    let cutoff = format_local_date(now_secs - (FRAME_DUMP_DAYS as i64) * 86400);
+
+    if let Ok(entries) = fs::read_dir(directory) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with("frames-") && name.ends_with(".jsonl") && name.len() >= 15 {
+                    let date_part = &name[7..15];
+                    if date_part < cutoff.as_str() {
+                        let _ = fs::remove_file(&path);
+                    }
+                }
+            }
+        }
+    }
+
+    let dump_path = directory.join(format!("frames-{}.jsonl", today));
+    if dump_path.exists() {
+        if let Ok(meta) = fs::metadata(&dump_path) {
+            if meta.len() >= max_bytes {
+                return Ok(());
+            }
+        }
+    }
+
+    let row = json!({
+        "t": now_f64,
+        "op": op,
+        "recipient": recipient,
+        "frame": frame_val,
+    });
+    let mut line = serde_json::to_string(&row)?;
+    line.push('\n');
+
+    // macOS O_NOFOLLOW = 0x0100
+    const O_NOFOLLOW: i32 = 0x0100;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(O_NOFOLLOW)
+        .open(&dump_path)?;
+    file.write_all(line.as_bytes())?;
+
+    Ok(())
 }
 
 pub const ROW_NOT_VISIBLE: &str = "session_row_not_unique_or_missing";
@@ -389,6 +499,18 @@ impl WorkerClient {
         }
     }
 
+    pub fn dump_frame(&self, op: &str, frame_val: &Value) {
+        if let Err(err) = dump_frame_impl(
+            &self.directory,
+            &self.recipient,
+            op,
+            frame_val,
+            FRAME_DUMP_MAX_BYTES,
+        ) {
+            tracing::warn!("frame_dump_failed: {:#}", err);
+        }
+    }
+
     pub async fn frame(&mut self) -> Result<crate::core::model::Frame> {
         let res = self.call("capture", json!({})).await?;
         if res.get("window_resized").and_then(|v| v.as_bool()) == Some(true) {
@@ -398,6 +520,7 @@ impl WorkerClient {
                 res.get("scale")
             );
         }
+        self.dump_frame("capture", &res);
         serde_json::from_value(res).context("failed to deserialize Frame from operation 'capture'")
     }
 
@@ -414,6 +537,7 @@ impl WorkerClient {
                 json!({"direction": direction, "pages": pages}),
             )
             .await?;
+        self.dump_frame("scroll_chat", &res);
         serde_json::from_value(res).context("failed to deserialize Frame from operation 'scroll_chat'")
     }
 
@@ -1771,5 +1895,199 @@ mod tests {
             "Error should report operation name: {}",
             msg
         );
+    }
+
+    fn test_sample_frame() -> Value {
+        json!({
+            "bubbles": [
+                {
+                    "text": "你好",
+                    "digest": "d1",
+                    "direction": "inbound_visual"
+                }
+            ],
+            "title_lines": ["测试群 (3)"]
+        })
+    }
+
+    #[tokio::test]
+    async fn test_frame_dump_no_flag_writes_nothing() {
+        let temp = TestDir::new();
+        let state_dir = temp.path().join("state");
+        let session_dir = state_dir.join("sessions").join("c_0123456789abcdef");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let sock = temp.path().join("worker.sock");
+        let sample = test_sample_frame();
+        let sample_clone = sample.clone();
+        let _server = MockWorkerServer::spawn(sock.clone(), move |req| {
+            let id = req["id"].as_u64().unwrap_or(1);
+            json!({
+                "id": id,
+                "protocol_version": 1,
+                "ok": true,
+                "result": sample_clone
+            })
+        })
+        .await;
+
+        let mut client = setup_test_client(&temp, sock, None);
+        client.recipient = "测试群".to_string();
+        client.directory = session_dir.clone();
+        client.connect(5).await.unwrap();
+
+        let res = client.frame().await.unwrap();
+        assert_eq!(res.title_lines, vec!["测试群 (3)"]);
+
+        let dumped_files: Vec<_> = fs::read_dir(&session_dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("frames-"))
+            .collect();
+        assert!(dumped_files.is_empty(), "未开启 frame-dump 时不写入任何文件");
+    }
+
+    #[tokio::test]
+    async fn test_frame_dump_flag_appends_capture_and_scroll_privately() {
+        let temp = TestDir::new();
+        let state_dir = temp.path().join("state");
+        let session_dir = state_dir.join("sessions").join("c_0123456789abcdef");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(state_dir.join("frame-dump.enabled"), "").unwrap();
+
+        let sock = temp.path().join("worker.sock");
+        let sample = test_sample_frame();
+        let sample_clone = sample.clone();
+        let _server = MockWorkerServer::spawn(sock.clone(), move |req| {
+            let id = req["id"].as_u64().unwrap_or(1);
+            json!({
+                "id": id,
+                "protocol_version": 1,
+                "ok": true,
+                "result": sample_clone
+            })
+        })
+        .await;
+
+        let mut client = setup_test_client(&temp, sock, None);
+        client.recipient = "测试群".to_string();
+        client.directory = session_dir.clone();
+        client.connect(5).await.unwrap();
+
+        let _ = client.frame().await.unwrap();
+        let _ = client.scroll("up", 2).await.unwrap();
+
+        let dumped_files: Vec<_> = fs::read_dir(&session_dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("frames-"))
+            .map(|e| e.path())
+            .collect();
+        assert_eq!(dumped_files.len(), 1, "应该生成一个 frames 日志文件");
+
+        let file_path = &dumped_files[0];
+        let meta = fs::metadata(file_path).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "文件权限必须为 0600");
+
+        let content = fs::read_to_string(file_path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2, "应记录两行 (capture 与 scroll_chat)");
+
+        let row0: Value = serde_json::from_str(lines[0]).unwrap();
+        let row1: Value = serde_json::from_str(lines[1]).unwrap();
+
+        assert_eq!(row0["op"], "capture");
+        assert_eq!(row0["recipient"], "测试群");
+        assert_eq!(row0["frame"]["title_lines"][0], "测试群 (3)");
+        assert!(row0["t"].as_f64().is_some());
+
+        assert_eq!(row1["op"], "scroll_chat");
+        assert_eq!(row1["recipient"], "测试群");
+        assert_eq!(row1["frame"]["title_lines"][0], "测试群 (3)");
+        assert!(row1["t"].as_f64().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_frame_dump_failure_never_breaks_capture() {
+        let temp = TestDir::new();
+        let state_dir = temp.path().join("state");
+        let session_dir = state_dir.join("sessions").join("c_0123456789abcdef");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(state_dir.join("frame-dump.enabled"), "").unwrap();
+
+        let sock = temp.path().join("worker.sock");
+        let sample = test_sample_frame();
+        let sample_clone = sample.clone();
+        let _server = MockWorkerServer::spawn(sock.clone(), move |req| {
+            let id = req["id"].as_u64().unwrap_or(1);
+            json!({
+                "id": id,
+                "protocol_version": 1,
+                "ok": true,
+                "result": sample_clone
+            })
+        })
+        .await;
+
+        let mut client = setup_test_client(&temp, sock, None);
+        client.recipient = "测试群".to_string();
+        let unwritable = session_dir.join("readonly_dir").join("subdir");
+        client.directory = unwritable;
+        client.connect(5).await.unwrap();
+
+        let res = client.frame().await.unwrap();
+        assert_eq!(res.title_lines, vec!["测试群 (3)"]);
+    }
+
+    #[tokio::test]
+    async fn test_frame_dump_old_files_pruned_and_size_capped() {
+        let temp = TestDir::new();
+        let state_dir = temp.path().join("state");
+        let session_dir = state_dir.join("sessions").join("c_0123456789abcdef");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(state_dir.join("frame-dump.enabled"), "").unwrap();
+
+        let old_file = session_dir.join("frames-20000101.jsonl");
+        fs::write(&old_file, "{}\n").unwrap();
+        assert!(old_file.exists());
+
+        let sock = temp.path().join("worker.sock");
+        let sample = test_sample_frame();
+        let sample_clone = sample.clone();
+        let _server = MockWorkerServer::spawn(sock.clone(), move |req| {
+            let id = req["id"].as_u64().unwrap_or(1);
+            json!({
+                "id": id,
+                "protocol_version": 1,
+                "ok": true,
+                "result": sample_clone
+            })
+        })
+        .await;
+
+        let mut client = setup_test_client(&temp, sock, None);
+        client.recipient = "测试群".to_string();
+        client.directory = session_dir.clone();
+        client.connect(5).await.unwrap();
+
+        let _ = client.frame().await.unwrap();
+        assert!(!old_file.exists(), "超过 3 天的历史 frames 文件应被清理");
+
+        let dumped_files: Vec<_> = fs::read_dir(&session_dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("frames-"))
+            .map(|e| e.path())
+            .collect();
+        assert_eq!(dumped_files.len(), 1);
+        let today_file = &dumped_files[0];
+        let today_size = fs::metadata(today_file).unwrap().len();
+
+        let dummy_frame = json!({"bubbles": []});
+        dump_frame_impl(&session_dir, "测试群", "capture", &dummy_frame, today_size).unwrap();
+
+        let content = fs::read_to_string(today_file).unwrap();
+        assert_eq!(content.lines().count(), 1, "达到大小上限后不再追加写入");
     }
 }
