@@ -56,6 +56,11 @@ def media_reason(error):
     return 'download_failed'
 
 
+# Frame dump for the Rust replay (P2 Task 10): on only while <state_dir>/frame-dump.enabled exists.
+FRAME_DUMP_MAX_BYTES = 50*1024*1024
+FRAME_DUMP_DAYS = 3
+
+
 class NativeCapture(RemoteCapture):
     def __init__(self,*args,names=None,manage_window=True,group=False,max_bytes=50*1024*1024,**kwargs):
         super().__init__(*args,**kwargs)
@@ -200,7 +205,32 @@ fi
         self.ocr_status=status
 
     async def frame(self):
-        return self.logged(await self.call('capture'))
+        return self.dump_frame('capture', self.logged(await self.call('capture')))
+
+    def dump_frame(self, op, result):
+        """Appends the frame to sessions/<id>/frames-YYYYMMDD.jsonl (0600). Never affects the capture."""
+        try:
+            root = self.directory.parents[1] if self.directory.parent.name == 'sessions' else self.directory
+            if not (root/'frame-dump.enabled').exists():
+                return result
+            today = time.strftime('%Y%m%d')
+            cutoff = time.strftime('%Y%m%d', time.localtime(time.time()-FRAME_DUMP_DAYS*86400))
+            for old in self.directory.glob('frames-*.jsonl'):
+                if old.name[7:15] < cutoff:
+                    old.unlink()
+            path = self.directory/('frames-'+today+'.jsonl')
+            if path.exists() and path.stat().st_size >= FRAME_DUMP_MAX_BYTES:
+                return result
+            line = json.dumps({'t':time.time(),'op':op,'recipient':self.recipient,'frame':result},ensure_ascii=False)+'\n'
+            descriptor = os.open(path, os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW, 0o600)
+            try:
+                os.write(descriptor, line.encode())
+            finally:
+                os.close(descriptor)
+        except Exception as error:
+            from .service import log_event  # Lazy: service imports this module.
+            log_event('frame_dump_failed',error_type=type(error).__name__)
+        return result
 
     @staticmethod
     def logged(result):
@@ -213,7 +243,7 @@ fi
         # Wheel-scrolls the open chat and returns the frame captured after it.
         if direction not in ('up','down') or not 1<=pages<=40:
             raise ValueError('invalid scroll request')
-        return self.logged(await self.call('scroll_chat',direction=direction,pages=pages))
+        return self.dump_frame('scroll_chat', self.logged(await self.call('scroll_chat',direction=direction,pages=pages)))
 
     async def sessions(self, names, debug=False):
         # Read-only probe of the left session list; only allowlisted rows are returned.
