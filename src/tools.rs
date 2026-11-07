@@ -129,6 +129,7 @@ pub fn list_tools_with_legacy(legacy_enabled: bool) -> Value {
     tools.push(json!({"name":"upload_file","description":"把文件内容（base64）存到运行微信的这台电脑，返回本机路径，供 send_file 发送；≤10MB，文件名原样保留（不含路径），每次上传放在新的子目录，不会覆盖已有文件；只保存，不发送","inputSchema":{"type":"object","properties":{"name":{"type":"string","minLength":1,"maxLength":255},"content_base64":{"type":"string","minLength":4}},"required":["name","content_base64"],"additionalProperties":false}}));
     tools.push(crate::article::tool());
     tools.extend(crate::core::brain_tools::tools());
+    tools.extend(crate::core::history::mcp_tools::tools());
     json!({ "tools": tools })
 }
 
@@ -307,6 +308,22 @@ mod tests {
             assert!(tools.contains(&"next_turn"), "should include next_turn");
             assert!(tools.contains(&"reply"), "should include reply");
             assert!(tools.contains(&"resume_session"), "should include resume_session");
+
+            // 新增的历史查询 MCP 工具
+            for history_tool in [
+                "history_list_contacts",
+                "history_get_contact",
+                "history_get_recent_messages",
+                "history_get_history",
+                "history_search_messages",
+                "history_get_message",
+                "history_get_media",
+            ] {
+                assert!(
+                    tools.contains(&history_tool),
+                    "should include history tool {history_tool}"
+                );
+            }
 
             // 原有网关工具保持不变
             for original in [
