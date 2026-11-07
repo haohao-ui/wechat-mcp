@@ -40,10 +40,34 @@ pub const WINDOW_UNAVAILABLE: &[&str] = &[
     ROW_NOT_VISIBLE,
 ];
 
-pub struct DefaultToolClient;
-impl ToolClient for DefaultToolClient {
-    fn tool(&self, _name: &str, _args: Value) -> impl Future<Output = Result<Value>> + Send {
-        async move { Ok(json!({})) }
+pub trait DynToolClient: Send + Sync {
+    fn tool(
+        self: Arc<Self>,
+        name: String,
+        args: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<Value>> + Send>>;
+}
+
+impl<T: ToolClient + 'static> DynToolClient for T {
+    fn tool(
+        self: Arc<Self>,
+        name: String,
+        args: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<Value>> + Send>> {
+        Box::pin(async move {
+            let fut = <Self as ToolClient>::tool(&self, &name, args);
+            fut.await
+        })
+    }
+}
+
+impl ToolClient for Arc<dyn DynToolClient> {
+    fn tool(&self, name: &str, args: Value) -> impl Future<Output = Result<Value>> + Send {
+        let this = self.clone();
+        let name_owned = name.to_string();
+        async move {
+            this.tool(name_owned, args).await
+        }
     }
 }
 
@@ -330,6 +354,7 @@ pub struct BotCoordinator {
     pub sessions: HashMap<String, BotService>,
     pub stop: Arc<AtomicBool>,
     pub capture: Option<Box<dyn CoordinatorCapture>>,
+    pub tool_client: Option<Arc<dyn DynToolClient>>,
     pub active_name: Option<String>,
     pub last_health: Option<String>,
     pub last_health_at: f64,
@@ -411,6 +436,7 @@ impl BotCoordinator {
             sessions: HashMap::new(),
             stop,
             capture: None,
+            tool_client: None,
             active_name: None,
             last_health: None,
             last_health_at: 0.0,
@@ -681,6 +707,9 @@ impl BotCoordinator {
         }
 
         if let Some(cap) = &mut self.capture {
+            if !cap.is_connected() {
+                cap.start().await?;
+            }
             cap.retarget(recipient, &root, &names, group).await?;
             self.active_name = Some(recipient.to_string());
             let switch = cap.last_switch().unwrap_or_else(|| json!({}));
@@ -759,15 +788,16 @@ impl BotCoordinator {
             return Ok(());
         }
 
-        let cycle_res = {
-            if let Some(cap) = &mut self.capture {
-                let mut adapter = CaptureAdapter { inner: cap.as_mut() };
-                let child = self.sessions.get_mut(&recipient).unwrap();
-                child.cycle(&DefaultToolClient, &mut adapter).await
-            } else {
-                bail!("no capture configured");
-            }
-        };
+        let cycle_res: Result<()> = async {
+            let cap = self.capture.as_mut().context("no capture configured")?;
+            let tool = self
+                .tool_client
+                .as_ref()
+                .context("no tool client configured")?;
+            let mut adapter = CaptureAdapter { inner: cap.as_mut() };
+            let child = self.sessions.get_mut(&recipient).unwrap();
+            child.cycle(tool, &mut adapter).await
+        }.await;
 
         match cycle_res {
             Ok(()) => {
@@ -784,6 +814,9 @@ impl BotCoordinator {
             Err(err) => {
                 let err_str = err.to_string();
                 self.handle_visit_error(&recipient, &err_str).await?;
+                if err_str.contains("no tool client configured") || err_str.contains("no capture configured") {
+                    bail!("{err_str}");
+                }
             }
         }
         Ok(())
@@ -1541,6 +1574,23 @@ mod tests {
         cfg_path
     }
 
+    // --- Mock ToolClient ---
+    #[derive(Clone, Default)]
+    pub struct MockToolClient {
+        pub calls: Arc<Mutex<Vec<(String, Value)>>>,
+    }
+
+    impl ToolClient for MockToolClient {
+        fn tool(&self, name: &str, args: Value) -> impl Future<Output = Result<Value>> + Send {
+            let calls = self.calls.clone();
+            let name_str = name.to_string();
+            async move {
+                calls.lock().unwrap().push((name_str, args));
+                Ok(json!({}))
+            }
+        }
+    }
+
     // --- Mock CoordinatorCapture ---
     struct MockCoordinatorCapture {
         rows: Vec<SessionRow>,
@@ -2279,6 +2329,7 @@ mod tests {
         let mut coord = BotCoordinator::new(&cfg_path).unwrap();
         let cap = MockCoordinatorCapture::new();
         coord.capture = Some(Box::new(cap));
+        coord.tool_client = Some(Arc::new(MockToolClient::default()));
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let due = rt.block_on(async { coord.due_sessions(&["hidden".to_string()]).await.unwrap() });
@@ -2434,6 +2485,34 @@ mod tests {
         });
     }
 
+    #[tokio::test]
+    async fn test_cycle_fails_when_no_tool_client_configured() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry {
+            recipient: "target".to_string(),
+            kind: "private".to_string(),
+            aliases: None,
+        }];
+        let cfg_path = create_test_config(td.path(), allow.clone());
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let cap = MockCoordinatorCapture::new();
+        coord.capture = Some(Box::new(cap));
+        assert!(coord.tool_client.is_none());
+
+        let res = coord.visit(&allow[0]).await;
+        assert!(res.is_err(), "Expected error when no tool client configured");
+        let err_msg = res.unwrap_err().to_string();
+        assert!(err_msg.contains("no tool client configured"));
+
+        let child = coord.sessions.get("target").unwrap();
+        assert!(child.paused);
+        let reason = child.pause_reason.as_deref().unwrap_or("");
+        assert!(
+            reason.contains("no tool client configured"),
+            "Expected 'no tool client configured', got: {reason}"
+        );
+    }
+
     #[test]
     fn test_successful_cycle_resets_title_mismatch_count() {
         let td = TestDir::new();
@@ -2444,6 +2523,7 @@ mod tests {
 
         let cap = MockCoordinatorCapture::new();
         coord.capture = Some(Box::new(cap));
+        coord.tool_client = Some(Arc::new(MockToolClient::default()));
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -2558,6 +2638,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let cap = MockCoordinatorCapture::new();
         coord.capture = Some(Box::new(cap));
+        coord.tool_client = Some(Arc::new(MockToolClient::default()));
         rt.block_on(async {
             coord.visit(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).await.unwrap();
         });
@@ -2572,6 +2653,7 @@ mod tests {
         let mut coord = BotCoordinator::new(&cfg_path).unwrap();
         let cap = MockCoordinatorCapture::new();
         coord.capture = Some(Box::new(cap));
+        coord.tool_client = Some(Arc::new(MockToolClient::default()));
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -2904,6 +2986,7 @@ mod tests {
 
         let cap = MockCoordinatorCapture::new();
         coord.capture = Some(Box::new(cap));
+        coord.tool_client = Some(Arc::new(MockToolClient::default()));
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -3068,6 +3151,7 @@ mod tests {
 
         let cap = MockCoordinatorCapture::new();
         coord.capture = Some(Box::new(cap));
+        coord.tool_client = Some(Arc::new(MockToolClient::default()));
 
         let req_file = coord.root.join("calibrate-request.json");
         let res_file = coord.root.join("calibrate-result.json");
@@ -3134,6 +3218,7 @@ mod tests {
 
         let cap = MockCoordinatorCapture::new();
         coord.capture = Some(Box::new(cap));
+        coord.tool_client = Some(Arc::new(MockToolClient::default()));
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -3162,6 +3247,7 @@ mod tests {
 
         let cap = MockCoordinatorCapture::new();
         coord.capture = Some(Box::new(cap));
+        coord.tool_client = Some(Arc::new(MockToolClient::default()));
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -3237,5 +3323,529 @@ mod tests {
         });
 
         assert!(coord.active_name.is_none());
+    }
+
+    // =========================================================================
+    // 端到端测试：假 worker.sock 与假 bot-worker.sock 组装测试
+    // =========================================================================
+
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    fn e2e_test_bubble(text: &str, direction: &str) -> Bubble {
+        Bubble {
+            text: text.to_string(),
+            digest: text.to_string(),
+            direction: direction.to_string(),
+            kind: None,
+            media_id: None,
+            phash: None,
+            filename: None,
+            sender: None,
+            transfer_pending: None,
+            image_source: None,
+            x: None,
+            y: None,
+            width: None,
+            height: None,
+            extra: Default::default(),
+        }
+    }
+
+    fn e2e_test_frame(bubbles: Vec<Bubble>, title: &str) -> Frame {
+        Frame {
+            profile: Some("wechat-4-dark".to_string()),
+            scale: Some(json!(1)),
+            title_lines: vec![title.to_string()],
+            bubbles,
+            platform_message_verified: None,
+            sender_verified: None,
+            clipped_bubble: None,
+            width: Some(800),
+            height: Some(600),
+            captured_width: Some(800),
+            snapshot_id: Some("snap1".to_string()),
+            window_id: None,
+            observed_title: Some(title.to_string()),
+            captured_at_ms: None,
+            capture_seconds: None,
+            ocr_cached: None,
+            extra: Default::default(),
+        }
+    }
+
+    struct E2eFakeMcp {
+        pub sock_path: PathBuf,
+        pub calls: Arc<Mutex<Vec<Value>>>,
+    }
+
+    impl E2eFakeMcp {
+        async fn start(account_id: &str, fault_not_sent: bool) -> Self {
+            let unique = uuid::Uuid::new_v4();
+            let sock_path = PathBuf::from(format!("/tmp/emcp_{}.sock", &unique.to_string()[..8]));
+            if sock_path.exists() {
+                let _ = fs::remove_file(&sock_path);
+            }
+            let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let calls_clone = calls.clone();
+            let acc = account_id.to_string();
+
+            tokio::spawn(async move {
+                while let Ok((stream, _)) = listener.accept().await {
+                    let (read_half, mut write_half) = stream.into_split();
+                    let mut reader = BufReader::new(read_half);
+                    let calls_inner = calls_clone.clone();
+                    let acc_inner = acc.clone();
+
+                    tokio::spawn(async move {
+                        let mut line = String::new();
+                        while let Ok(n) = reader.read_line(&mut line).await {
+                            if n == 0 {
+                                break;
+                            }
+                            if let Ok(req) = serde_json::from_str::<Value>(&line) {
+                                let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                                let id = req.get("id").cloned();
+                                if method == "initialize" {
+                                    let resp = json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id.unwrap_or(json!(1)),
+                                        "result": {
+                                            "protocolVersion": "2025-06-18",
+                                            "capabilities": {},
+                                            "serverInfo": {"name": "fake-mcp", "version": "1.0"}
+                                        }
+                                    });
+                                    let mut out = serde_json::to_vec(&resp).unwrap();
+                                    out.push(b'\n');
+                                    let _ = write_half.write_all(&out).await;
+                                    let _ = write_half.flush().await;
+                                } else if method == "notifications/initialized" {
+                                    // notification: no reply
+                                } else if method == "tools/call" {
+                                    calls_inner.lock().unwrap().push(req["params"].clone());
+                                    let tool_name = req["params"]["name"].as_str().unwrap_or("");
+                                    let resp = if tool_name == "send_message" {
+                                        if fault_not_sent {
+                                            json!({
+                                                "jsonrpc": "2.0",
+                                                "id": id.unwrap(),
+                                                "result": {
+                                                    "isError": true,
+                                                    "content": [
+                                                        {"type": "text", "text": "发送尝试 send-1 未触发发送: 微信未准备好"}
+                                                    ]
+                                                }
+                                            })
+                                        } else {
+                                            json!({
+                                                "jsonrpc": "2.0",
+                                                "id": id.unwrap(),
+                                                "result": {
+                                                    "structuredContent": {
+                                                        "account": {"platform": "wechat", "account_id": acc_inner},
+                                                        "data": {
+                                                            "status": "triggered",
+                                                            "delivery": "triggered",
+                                                            "send_id": "send-e2e-1"
+                                                        }
+                                                    }
+                                                }
+                                            })
+                                        }
+                                    } else if tool_name == "get_send_status" {
+                                        json!({
+                                            "jsonrpc": "2.0",
+                                            "id": id.unwrap(),
+                                            "result": {
+                                                "structuredContent": {
+                                                    "account": {"platform": "wechat", "account_id": acc_inner},
+                                                    "data": {
+                                                        "status": "triggered",
+                                                        "delivery": "triggered",
+                                                        "send_id": "send-e2e-1"
+                                                    }
+                                                }
+                                            }
+                                        })
+                                    } else {
+                                        json!({
+                                            "jsonrpc": "2.0",
+                                            "id": id.unwrap(),
+                                            "result": {
+                                                "structuredContent": {
+                                                    "account": {"platform": "wechat", "account_id": acc_inner},
+                                                    "data": []
+                                                }
+                                            }
+                                        })
+                                    };
+                                    let mut out = serde_json::to_vec(&resp).unwrap();
+                                    out.push(b'\n');
+                                    let _ = write_half.write_all(&out).await;
+                                    let _ = write_half.flush().await;
+                                }
+                            }
+                            line.clear();
+                        }
+                    });
+                }
+            });
+
+            Self { sock_path, calls }
+        }
+    }
+
+    impl Drop for E2eFakeMcp {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.sock_path);
+        }
+    }
+
+    struct E2eFakeBotWorker {
+        pub sock_path: PathBuf,
+    }
+
+    impl E2eFakeBotWorker {
+        async fn start(frames: Vec<Frame>) -> Self {
+            let unique = uuid::Uuid::new_v4();
+            let sock_path = PathBuf::from(format!("/tmp/ebot_{}.sock", &unique.to_string()[..8]));
+            if sock_path.exists() {
+                let _ = fs::remove_file(&sock_path);
+            }
+            let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+            let frames_arc = Arc::new(Mutex::new(frames));
+            let frames_clone = frames_arc.clone();
+
+            tokio::spawn(async move {
+                while let Ok((stream, _)) = listener.accept().await {
+                    let (read_half, mut write_half) = stream.into_split();
+                    let mut reader = BufReader::new(read_half);
+                    let frames_inner = frames_clone.clone();
+
+                    tokio::spawn(async move {
+                        let mut line = String::new();
+                        while let Ok(n) = reader.read_line(&mut line).await {
+                            if n == 0 {
+                                break;
+                            }
+                            if let Ok(req) = serde_json::from_str::<Value>(&line) {
+                                let op = req.get("operation").and_then(|o| o.as_str()).unwrap_or("");
+                                let id = req.get("id").and_then(|v| v.as_u64()).unwrap_or(1);
+                                let result = if op == "sessions" {
+                                    json!({
+                                        "profile": "wechat-4",
+                                        "rows": [
+                                            {
+                                                "name": "Alice",
+                                                "preview_digest": "d_alice",
+                                                "preview_key": "k_alice",
+                                                "preview_time": "12:00",
+                                                "red_pixels": 0,
+                                                "y": 100
+                                            }
+                                        ]
+                                    })
+                                } else if op == "open_session" {
+                                    json!({
+                                        "clicked": true,
+                                        "seconds": 0.05
+                                    })
+                                } else if op == "capture" {
+                                    let mut q = frames_inner.lock().unwrap();
+                                    let f = if q.len() > 1 {
+                                        q.remove(0)
+                                    } else if !q.is_empty() {
+                                        q[0].clone()
+                                    } else {
+                                        e2e_test_frame(vec![], "Alice")
+                                    };
+                                    serde_json::to_value(&f).unwrap()
+                                } else {
+                                    json!({})
+                                };
+
+                                let resp = json!({
+                                    "protocol_version": 1,
+                                    "id": id,
+                                    "ok": true,
+                                    "result": result
+                                });
+                                let mut out = serde_json::to_vec(&resp).unwrap();
+                                out.push(b'\n');
+                                let _ = write_half.write_all(&out).await;
+                                let _ = write_half.flush().await;
+                            }
+                            line.clear();
+                        }
+                    });
+                }
+            });
+
+            Self { sock_path }
+        }
+    }
+
+    impl Drop for E2eFakeBotWorker {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.sock_path);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_e2e_assembly_send_message_triggered() {
+        let td = TestDir::new();
+        let recipient = "Alice";
+        let allow = vec![AllowlistEntry {
+            recipient: recipient.to_string(),
+            kind: "private".to_string(),
+            aliases: None,
+        }];
+        let cfg_path = create_test_config(td.path(), allow.clone());
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+
+        // 1. 启动假 MCP 服务
+        let fake_mcp = E2eFakeMcp::start(&coord.config.account_id, false).await;
+        let mcp_client = Arc::new(crate::core::mcp_client::McpSocketClient::new(
+            fake_mcp.sock_path.clone(),
+            coord.config.account_id.clone(),
+        ));
+
+        // 2. 准备脚本化帧：
+        let mut b_old = e2e_test_bubble("历史消息", "inbound_visual");
+        b_old.digest = "msg_old".to_string();
+
+        let mut b_in = e2e_test_bubble("你好机器人", "inbound_visual");
+        b_in.digest = "msg_001".to_string();
+
+        let mut b_out = e2e_test_bubble("Echo: 你好机器人", "outbound_visual");
+        b_out.digest = "msg_002".to_string();
+
+        // 帧1 (retarget 时的初始校验帧): 基线
+        let f_retarget = e2e_test_frame(vec![b_old.clone()], recipient);
+        // 帧2 (第1轮 cycle 建立 baseline 帧): 包含历史消息
+        let f_base = e2e_test_frame(vec![b_old.clone()], recipient);
+        // 帧3 (第2轮 cycle 探测到用户新消息):
+        let f_incoming = e2e_test_frame(vec![b_old.clone(), b_in.clone()], recipient);
+        // 帧4 (发送后验证 echo 的回显帧):
+        let f_echo = e2e_test_frame(vec![b_old, b_in, b_out], recipient);
+
+        let fake_bot = E2eFakeBotWorker::start(vec![
+            f_retarget,
+            f_base,
+            f_incoming.clone(),
+            f_incoming.clone(),
+            f_incoming,
+            f_echo,
+        ]).await;
+
+        // 3. 准备 WorkerClient 所需的 base_dir (遵循 0o700, 拥有可执行 bin/wechat_bot_worker)
+        let base_dir = td.path().join(".wechat-rpa");
+        fs::create_dir_all(&base_dir).unwrap();
+        let mut base_perms = fs::metadata(&base_dir).unwrap().permissions();
+        base_perms.set_mode(0o700);
+        fs::set_permissions(&base_dir, base_perms).unwrap();
+
+        let bin_dir = base_dir.join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let worker_bin = bin_dir.join("wechat_bot_worker");
+        fs::write(&worker_bin, b"#!/bin/sh\nexit 0\n").unwrap();
+        let mut bin_perms = fs::metadata(&worker_bin).unwrap().permissions();
+        bin_perms.set_mode(0o755);
+        fs::set_permissions(&worker_bin, bin_perms).unwrap();
+
+        let flag_file = base_dir.join("bot-worker.enabled");
+        fs::write(&flag_file, &coord.ownership).unwrap();
+        let mut flag_perms = fs::metadata(&flag_file).unwrap().permissions();
+        flag_perms.set_mode(0o600);
+        fs::set_permissions(&flag_file, flag_perms).unwrap();
+
+        // 4. 构造 WorkerClient
+        let worker_client = crate::core::worker_client::WorkerClient::new(
+            base_dir.clone(),
+            fake_bot.sock_path.clone(),
+            coord.ownership.clone(),
+            recipient.to_string(),
+            base_dir.clone(),
+            None,
+            true,
+            false,
+            50 * 1024 * 1024,
+            Some(mcp_client.clone()),
+        );
+
+        // 5. 注入协调器
+        coord.tool_client = Some(mcp_client.clone());
+        coord.capture = Some(Box::new(worker_client));
+
+        // 6. 注入假大脑：产生回复
+        coord.config.turn_quiet_seconds = 0;
+        let brain_fn: crate::core::turns::BrainFn = Arc::new(|_turn| {
+            Box::pin(async {
+                Ok(crate::brain::BrainReply {
+                    reply: "Echo: 你好机器人".to_string(),
+                    metadata: HashMap::new(),
+                })
+            })
+        });
+        {
+            let child = coord.session(&allow[0]).unwrap();
+            child.config.turn_quiet_seconds = 0;
+            child.brain = Some(brain_fn);
+        }
+
+        // 7. 运行协调周期
+        // 周期 1: 建立 baseline
+        coord.visit(&allow[0]).await.unwrap();
+        // 周期 2: 探测到新消息并建立 turn
+        coord.visit(&allow[0]).await.unwrap();
+        // 周期 3: turn 到期并触发大脑与 send_message
+        coord.visit(&allow[0]).await.unwrap();
+
+        // 8. 断言：MCP 收到 send_message，参数 recipient/message/idempotency_key 正确
+        let calls = fake_mcp.calls.lock().unwrap();
+        let send_call = calls.iter().find(|c| c["name"] == "send_message");
+        assert!(send_call.is_some(), "MCP should have received send_message call");
+        let args = &send_call.unwrap()["arguments"];
+        assert_eq!(args["recipient"], "Alice");
+        assert_eq!(args["message"], "Echo: 你好机器人");
+        assert!(args["idempotency_key"].is_string());
+        assert!(!args["idempotency_key"].as_str().unwrap().is_empty());
+
+        // 9. 断言会话日志状态为 triggered
+        let child = coord.sessions.get("Alice").unwrap();
+        let entries = fs::read_dir(&child.root).unwrap();
+        let mut found_triggered = false;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with("send-") && name.ends_with(".json") {
+                    let content: Value = read_json(&path).unwrap();
+                    if content["status"] == "triggered" {
+                        found_triggered = true;
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(found_triggered, "Expected send record with status triggered in journal");
+    }
+
+    #[tokio::test]
+    async fn test_e2e_mcp_is_error_recognized_as_not_sent() {
+        let td = TestDir::new();
+        let recipient = "Alice";
+        let allow = vec![AllowlistEntry {
+            recipient: recipient.to_string(),
+            kind: "private".to_string(),
+            aliases: None,
+        }];
+        let cfg_path = create_test_config(td.path(), allow.clone());
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+
+        // 启动带有 fault_not_sent=true 的假 MCP
+        let fake_mcp = E2eFakeMcp::start(&coord.config.account_id, true).await;
+        let mcp_client = Arc::new(crate::core::mcp_client::McpSocketClient::new(
+            fake_mcp.sock_path.clone(),
+            coord.config.account_id.clone(),
+        ));
+
+        let mut b_old = e2e_test_bubble("历史消息", "inbound_visual");
+        b_old.digest = "msg_old".to_string();
+
+        let f_retarget = e2e_test_frame(vec![b_old.clone()], recipient);
+        let f_base = e2e_test_frame(vec![b_old.clone()], recipient);
+        let mut b_in = e2e_test_bubble("测试失败发送", "inbound_visual");
+        b_in.digest = "msg_fail_1".to_string();
+        let f_incoming = e2e_test_frame(vec![b_old, b_in], recipient);
+        let fake_bot = E2eFakeBotWorker::start(vec![
+            f_retarget,
+            f_base,
+            f_incoming.clone(),
+            f_incoming.clone(),
+            f_incoming,
+        ]).await;
+
+        let base_dir = td.path().join(".wechat-rpa");
+        fs::create_dir_all(&base_dir).unwrap();
+        let mut base_perms = fs::metadata(&base_dir).unwrap().permissions();
+        base_perms.set_mode(0o700);
+        fs::set_permissions(&base_dir, base_perms).unwrap();
+
+        let bin_dir = base_dir.join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let worker_bin = bin_dir.join("wechat_bot_worker");
+        fs::write(&worker_bin, b"#!/bin/sh\nexit 0\n").unwrap();
+        let mut bin_perms = fs::metadata(&worker_bin).unwrap().permissions();
+        bin_perms.set_mode(0o755);
+        fs::set_permissions(&worker_bin, bin_perms).unwrap();
+
+        let flag_file = base_dir.join("bot-worker.enabled");
+        fs::write(&flag_file, &coord.ownership).unwrap();
+        let mut flag_perms = fs::metadata(&flag_file).unwrap().permissions();
+        flag_perms.set_mode(0o600);
+        fs::set_permissions(&flag_file, flag_perms).unwrap();
+
+        let worker_client = crate::core::worker_client::WorkerClient::new(
+            base_dir.clone(),
+            fake_bot.sock_path.clone(),
+            coord.ownership.clone(),
+            recipient.to_string(),
+            base_dir.clone(),
+            None,
+            true,
+            false,
+            50 * 1024 * 1024,
+            Some(mcp_client.clone()),
+        );
+
+        coord.tool_client = Some(mcp_client.clone());
+        coord.capture = Some(Box::new(worker_client));
+
+        coord.config.turn_quiet_seconds = 0;
+        let brain_fn: crate::core::turns::BrainFn = Arc::new(|_turn| {
+            Box::pin(async {
+                Ok(crate::brain::BrainReply {
+                    reply: "回复内容".to_string(),
+                    metadata: HashMap::new(),
+                })
+            })
+        });
+        {
+            let child = coord.session(&allow[0]).unwrap();
+            child.config.turn_quiet_seconds = 0;
+            child.brain = Some(brain_fn);
+        }
+
+        // 周期 1
+        coord.visit(&allow[0]).await.unwrap();
+        // 周期 2: 探测到新消息并建立 turn
+        coord.visit(&allow[0]).await.unwrap();
+        // 周期 3: 触发发送，发生发送错误（未触发发送）
+        coord.visit(&allow[0]).await.unwrap();
+
+        // 验证日志中被识别为 not_sent
+        let child = coord.sessions.get("Alice").unwrap();
+        let entries = fs::read_dir(&child.root).unwrap();
+        let mut not_sent_found = false;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with("send-") && name.ends_with(".json") {
+                    let content: Value = read_json(&path).unwrap();
+                    let delivery = content.get("delivery").and_then(|v| v.as_str());
+                    let status = content.get("status").and_then(|v| v.as_str());
+                    let err = content.get("error").and_then(|v| v.as_str());
+                    if crate::core::delivery::is_not_sent(err, Some(&content))
+                        || delivery == Some("not_sent")
+                        || status == Some("not_sent")
+                    {
+                        not_sent_found = true;
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(not_sent_found, "Expected not_sent recognition in send record or delivery");
     }
 }
