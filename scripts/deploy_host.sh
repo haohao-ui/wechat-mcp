@@ -27,11 +27,14 @@ GIT_REV=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 VERSION_DATE=$(date +%Y%m%d%H%M%S)
 APP_VERSION="${GIT_REV}-${VERSION_DATE}"
 CERT_NAME="WeChat CS Local Signing"
+# Remote helper: unlocks the dedicated signing keychain (created by scripts/setup_signing.sh) and signs by the
+# certificate's SHA-1, so every build carries the same designated requirement and TCC grants survive upgrades.
+SIGN_FN='SIGN_KC="$HOME/.wechat-rpa/signing/wechat-cs-signing.keychain-db"; SIGN_PASS="$HOME/.wechat-rpa/signing/keychain.pass"; sign_file() { security unlock-keychain -p "$(cat "$SIGN_PASS")" "$SIGN_KC"; local id; id=$(security find-identity -p codesigning "$SIGN_KC" | grep "\"$CERT_NAME\"" | grep -oE "[0-9A-F]{40}" | head -1); [ -n "$id" ] || { echo "ERROR: signing identity $CERT_NAME missing; run scripts/setup_signing.sh" >&2; exit 1; }; codesign --force --sign "$id" --keychain "$SIGN_KC" "$@"; };'
 
 # remote <description> <script>: the script runs in the remote login shell (remote $HOME, remote $UID).
 remote() {
   echo "--- $1"
-  if [ $YES -eq 1 ]; then ssh -o BatchMode=yes -o LogLevel=ERROR "$HOST" "bash -s" <<<"set -euo pipefail; TS=$TS; APP_VERSION='$APP_VERSION'; CERT_NAME='$CERT_NAME'; $2"
+  if [ $YES -eq 1 ]; then ssh -o BatchMode=yes -o LogLevel=ERROR "$HOST" "bash -s" <<<"set -euo pipefail; TS=$TS; APP_VERSION='$APP_VERSION'; CERT_NAME='$CERT_NAME'; $SIGN_FN $2"
   else printf '[dry-run] ssh %s <<EOF\n%s\nEOF\n' "$HOST" "$2"; fi
 }
 # local_step <description> <command...>
@@ -44,8 +47,13 @@ echo "=== deploy to $HOST ($([ $YES -eq 1 ] && echo live || echo dry-run)) app=$
 
 # 校验目标机上的固定代码签名证书。找不到签名证书时报错停止，不能退回临时签名。
 remote "verify code signing certificate '$CERT_NAME'" "
-  security find-certificate -c \"$CERT_NAME\" >/dev/null 2>&1 || {
-    echo \"ERROR: Code signing certificate '$CERT_NAME' not found in keychain. Run scripts/setup_signing.sh first.\" >&2
+  [ -f \"\$SIGN_KC\" ] && [ -f \"\$SIGN_PASS\" ] || {
+    echo \"ERROR: signing keychain missing. Run scripts/setup_signing.sh first.\" >&2
+    exit 1
+  }
+  security unlock-keychain -p \"\$(cat \"\$SIGN_PASS\")\" \"\$SIGN_KC\"
+  security find-identity -p codesigning \"\$SIGN_KC\" | grep -q \"$CERT_NAME\" || {
+    echo \"ERROR: Code signing identity '$CERT_NAME' not found. Run scripts/setup_signing.sh first.\" >&2
     exit 1
   }
 "
@@ -83,8 +91,8 @@ if [ $WORKER -eq 1 ]; then
       [ -f "$dst" ] && cp -p "$dst" "$dst.before-$TS"
       install -m 0755 "/tmp/$name.$TS" "$dst"; rm -f "/tmp/$name.$TS"
     done
-    codesign --force --sign "$CERT_NAME" "$HOME/.wechat-rpa/bin/wechat_bot_worker"
-    codesign --force --sign "$CERT_NAME" "$HOME/.wechat-rpa/bin/wechat_click"
+    sign_file "$HOME/.wechat-rpa/bin/wechat_bot_worker"
+    sign_file "$HOME/.wechat-rpa/bin/wechat_click"
     echo "worker and click installed and signed with $CERT_NAME; a running worker keeps its old binary until its connection ends"'
 fi
 
@@ -97,7 +105,7 @@ if [ $MCP -eq 1 ]; then
     ssh -o BatchMode=yes -o LogLevel=ERROR "$HOST" 'mkdir -p "$HOME/.wechat-rpa/bin" && cat > "$HOME/.wechat-rpa/bin/wechat-mcp.new" && chmod 0755 "$HOME/.wechat-rpa/bin/wechat-mcp.new" && mv "$HOME/.wechat-rpa/bin/wechat-mcp.new" "$HOME/.wechat-rpa/bin/wechat-mcp"' < target/x86_64-apple-darwin/release/wechat-mcp
   else echo "[dry-run] ssh $HOST 'cat > ~/.wechat-rpa/bin/wechat-mcp' < target/x86_64-apple-darwin/release/wechat-mcp"; fi
   remote "sign wechat-mcp" '
-    codesign --force --sign "$CERT_NAME" "$HOME/.wechat-rpa/bin/wechat-mcp"'
+    sign_file "$HOME/.wechat-rpa/bin/wechat-mcp"'
 fi
 
 if [ $APP -eq 1 ]; then
@@ -112,7 +120,7 @@ if [ $APP -eq 1 ]; then
     plutil -replace CFBundleVersion -string "$APP_VERSION" "$APP/Contents/Info.plist" 2>/dev/null || sed -i "" "s|<key>CFBundleVersion</key><string>.*</string>|<key>CFBundleVersion</key><string>$APP_VERSION</string>|" "$APP/Contents/Info.plist"
     cp native/bootstrap/gateway.test.json "$APP/Contents/Resources/gateway.test.json"
     cp native/bootstrap/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
-    codesign --force --sign "$CERT_NAME" "$HOME/Applications/微信客服助手.app"'
+    sign_file "$HOME/Applications/微信客服助手.app"'
   remote "retire WeChat RPA Test.app (quit it, keep a copy in ~/Applications/.old)" '
     OLD="$HOME/Applications/WeChat RPA Test.app"
     if [ -d "$OLD" ]; then

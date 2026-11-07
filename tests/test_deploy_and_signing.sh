@@ -32,7 +32,7 @@ grep -q 'codeSigning' scripts/setup_signing.sh || {
   echo "FAIL: scripts/setup_signing.sh must configure codeSigning key usage" >&2
   exit 1
 }
-grep -q 'security find-certificate' scripts/setup_signing.sh || {
+grep -q 'security find-identity' scripts/setup_signing.sh || {
   echo "FAIL: scripts/setup_signing.sh must check if certificate already exists (idempotency)" >&2
   exit 1
 }
@@ -76,22 +76,22 @@ if ! echo "$DRY_RUN_OUTPUT" | grep -q 'VERSION'; then
 fi
 
 # 必须对每个二进制产物进行代码签名
-if ! echo "$DRY_RUN_OUTPUT" | grep -q 'codesign.*wechat_bot_worker'; then
+if ! echo "$DRY_RUN_OUTPUT" | grep -q 'sign_file.*wechat_bot_worker'; then
   echo "FAIL: deploy_host.sh must sign wechat_bot_worker" >&2
   exit 1
 fi
 
-if ! echo "$DRY_RUN_OUTPUT" | grep -q 'codesign.*wechat_click'; then
+if ! echo "$DRY_RUN_OUTPUT" | grep -q 'sign_file.*wechat_click'; then
   echo "FAIL: deploy_host.sh must sign wechat_click" >&2
   exit 1
 fi
 
-if ! echo "$DRY_RUN_OUTPUT" | grep -q 'codesign.*wechat-mcp'; then
+if ! echo "$DRY_RUN_OUTPUT" | grep -q 'sign_file.*wechat-mcp'; then
   echo "FAIL: deploy_host.sh must sign wechat-mcp" >&2
   exit 1
 fi
 
-if ! echo "$DRY_RUN_OUTPUT" | grep -q 'codesign.*微信客服助手\.app'; then
+if ! echo "$DRY_RUN_OUTPUT" | grep -q 'sign_file.*微信客服助手\.app'; then
   echo "FAIL: deploy_host.sh must sign 微信客服助手.app" >&2
   exit 1
 fi
