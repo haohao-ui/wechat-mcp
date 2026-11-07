@@ -8,6 +8,11 @@ func encodedProbe(_ probe: Probe) throws -> Data {
     return try encoder.encode(probe)
 }
 
+if CommandLine.arguments.dropFirst() == ["--version"] {
+    print(hostAppVersion())
+    exit(0)
+}
+
 if CommandLine.arguments.dropFirst() == ["--json"] {
     do {
         print(String(decoding: try encodedProbe(readDesktopProbe()), as: UTF8.self))
@@ -36,6 +41,7 @@ final class HostAppDelegate: NSObject, NSApplicationDelegate {
     private var panelController: StatusPanelController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        HostLogger.shared.log("微信客服助手启动，版本: \(hostAppVersion())")
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 720, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -76,6 +82,7 @@ final class HostAppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
     func applicationWillTerminate(_ notification: Notification) {
+        HostLogger.shared.log("微信客服助手退出")
         worker.stop()
         coreSupervisor.stopProcess()
     }

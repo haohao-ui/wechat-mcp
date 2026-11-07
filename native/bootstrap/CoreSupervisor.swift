@@ -1,6 +1,119 @@
 import Foundation
 import Darwin
 
+/// 日志轮换管理器：单个文件最大 10MB，超过 10MB 就改名为 .1 到 .5，最多保留 5 份历史
+public enum LogRotator {
+    public static let defaultMaxBytes: UInt64 = 10 * 1024 * 1024 // 10MB
+    public static let defaultMaxFiles: Int = 5
+    private static let lock = NSLock()
+
+    /// 检查指定日志文件大小，若超过 maxBytes 则执行轮换
+    @discardableResult
+    public static func rotateIfNeeded(
+        fileURL: URL,
+        maxBytes: UInt64 = defaultMaxBytes,
+        maxFiles: Int = defaultMaxFiles
+    ) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let fm = FileManager.default
+        let path = fileURL.path
+        guard fm.fileExists(atPath: path) else { return false }
+        guard let attrs = try? fm.attributesOfItem(atPath: path),
+              let size = attrs[.size] as? UInt64,
+              size >= maxBytes else {
+            return false
+        }
+        return rotateUnlocked(fileURL: fileURL, maxFiles: maxFiles)
+    }
+
+    /// 执行轮换：删除最老的 .maxFiles，将其余备份依次后移，当前文件命名为 .1，并创建新的空日志文件（0600权限）
+    @discardableResult
+    public static func rotate(fileURL: URL, maxFiles: Int = defaultMaxFiles) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return rotateUnlocked(fileURL: fileURL, maxFiles: maxFiles)
+    }
+
+    private static func rotateUnlocked(fileURL: URL, maxFiles: Int) -> Bool {
+        let fm = FileManager.default
+        let basePath = fileURL.path
+        guard fm.fileExists(atPath: basePath) else { return false }
+
+        // 1. 删除超出 maxFiles 的文件
+        let oldestPath = "\(basePath).\(maxFiles)"
+        if fm.fileExists(atPath: oldestPath) {
+            try? fm.removeItem(atPath: oldestPath)
+        }
+
+        // 2. 倒序顺移历史备份文件: .(i) -> .(i+1)
+        if maxFiles > 1 {
+            for i in stride(from: maxFiles - 1, through: 1, by: -1) {
+                let src = "\(basePath).\(i)"
+                let dst = "\(basePath).\(i + 1)"
+                if fm.fileExists(atPath: src) {
+                    try? fm.removeItem(atPath: dst)
+                    try? fm.moveItem(atPath: src, toPath: dst)
+                }
+            }
+        }
+
+        // 3. 将当前文件重命名为 .1
+        let firstBackup = "\(basePath).1"
+        try? fm.removeItem(atPath: firstBackup)
+        do {
+            try fm.moveItem(atPath: basePath, toPath: firstBackup)
+            try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: firstBackup)
+        } catch {
+            return false
+        }
+
+        // 4. 创建新的空基准日志文件，权限严格设置为 0600
+        fm.createFile(atPath: basePath, contents: Data(), attributes: [.posixPermissions: 0o600])
+        return true
+    }
+}
+
+/// 宿主日志管理器：写入 host.log 并在超过 10MB 时自动轮换
+public final class HostLogger {
+    public static let shared = HostLogger()
+    private let lock = NSLock()
+    public var logURL: URL
+
+    public init(logURL: URL? = nil) {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        self.logURL = logURL ?? home.appendingPathComponent(".wechat-rpa/logs/host.log")
+    }
+
+    public func log(_ message: String) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let logDir = logURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+
+        // 写入前检查是否需要轮换
+        LogRotator.rotateIfNeeded(fileURL: logURL)
+
+        if !FileManager.default.fileExists(atPath: logURL.path) {
+            FileManager.default.createFile(atPath: logURL.path, contents: Data(), attributes: [.posixPermissions: 0o600])
+        } else {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: logURL.path)
+        }
+
+        let df = ISO8601DateFormatter()
+        let line = "\(df.string(from: Date())) [host] \(message)\n"
+        if let data = line.data(using: .utf8) {
+            if let handle = try? FileHandle(forWritingTo: logURL) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                try? handle.close()
+            }
+        }
+    }
+}
+
 public enum CoreProcessStatus: Equatable {
     case notRunning
     case running(pid: Int32)
@@ -208,6 +321,9 @@ public final class CoreSupervisor {
         // 确保日志目录存在 (0700)
         let logDir = targetLog.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+
+        // 启动前检查日志轮换：超过 10MB 时轮换为 .1 到 .5
+        LogRotator.rotateIfNeeded(fileURL: targetLog)
 
         // 确保日志文件存在并设置 0600 权限
         if !FileManager.default.fileExists(atPath: targetLog.path) {
