@@ -1335,6 +1335,17 @@ mod tests {
     }
 
     #[test]
+    fn test_history_http_launchd_plist() {
+        // 在 Python 中，test_history_http_launchd_plist 验证历史 HTTP 服务按配置启动；
+        // 在生产撤除 Python 后，历史 HTTP 服务由 serve-core 随机器人直接按配置启动，
+        // 默认只监听 127.0.0.1，默认端口为 8765。
+        let f = TestFixture::setup();
+        let cfg = BotConfig::load(&f.path).unwrap();
+        assert_eq!(cfg.history_http.bind, "127.0.0.1");
+        assert_eq!(cfg.history_http.port, 8765);
+    }
+
+    #[test]
     fn test_history_serve_token_file_private_and_stable() {
         let f = TestFixture::setup();
         let history_dir = f.state.join("history");
