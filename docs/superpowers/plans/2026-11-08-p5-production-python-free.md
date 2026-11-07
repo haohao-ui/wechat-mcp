@@ -100,3 +100,54 @@
 3. 观察 3 天。
 4. 合并 Task 6，部署零 Python 的版本，在专用 Mac 上删除 Python 的 launchd plist、`~/.wechat-rpa/bot` 和 pip 包（删除前先列出清单，请用户确认）。
 5. 再部署一次，验证升级后不需要重新授权。
+
+### Task 8: P2 迁移缺口补齐（2026-11-08 协调者核对发现）
+
+删除 Python 之前逐条比对：以下 Python 测试在 Rust 中没有对应测试。P2 各 worker 曾报告"全部翻译"，与事实不符。必须逐条迁移（缺功能就实现），否则不得进入 Task 6b。
+
+不需迁移（有理由）：test_agent_bridge.py（删除 agent_bridge）、test_rapidocr_server.py（只用 Vision）、test_transport_local.py 的 local/remote argv 三项（只在本机运行）、test_wechat_bot_service.py::test_main_builds_coordinator_inside_running_loop 与 ::test_load_config_accepts_brain（Python 专属；Rust 配置测试已覆盖 brain）。
+
+必须迁移：
+- tests/test_attachment_limit.py test_store_attach_media_follows_configurable_limit_and_names_it
+- tests/test_attachment_limit.py test_swift_sources_use_max_bytes_and_no_received_10mb_constants
+- tests/test_calibrate.py test_no_4_1_15_fallback_in_source
+- tests/test_calibrate.py test_version_regex_validation
+- tests/test_calibrate.py test_worker_missing_version_aborts_without_writing
+- tests/test_calibrate.py test_worker_calibrate_response_fields_in_swift
+- tests/test_calibrate.py test_candidate_written_to_remote_wechat_host
+- tests/test_calibrate.py test_accept_refuses_version_mismatch_with_zero_remote_writes
+- tests/test_calibrate.py test_accept_refuses_corrupt_candidate_with_zero_remote_writes
+- tests/test_calibrate.py test_accept_executes_backup_then_mv_atomically
+- tests/test_calibrate.py test_cli_calibrate_command
+- tests/test_calibrate.py test_cli_calibrate_accept
+- tests/test_calibrate.py test_calibrate_never_clicks
+- tests/test_calibrate.py test_default_paths_land_in_remote_home
+- tests/test_calibrate.py test_accept_with_defaults_backs_up_then_replaces
+- tests/test_calibrate.py test_missing_host_is_refused
+- tests/test_calibrate.py test_failed_remote_write_raises
+- tests/test_calibrate.py test_calibrate_refuses_while_bot_running
+- tests/test_calibrate.py test_control_calibrate_round_trip
+- tests/test_calibrate.py test_control_calibrate_requires_running_bot
+- tests/test_calibrate.py test_anchors_measure_the_raw_capture
+- tests/test_calibrate.py test_text_anchors_are_not_reported_missing
+- tests/test_history_servers.py test_history_http_launchd_plist
+- tests/test_transport_local.py test_mcp_timeout_raises_timeout_error
+- tests/test_wechat_bot.py test_one_model_reply_through_existing_idempotent_send
+- tests/test_wechat_bot.py test_model_latency_cannot_authorize_sending_into_changed_chat
+- tests/test_wechat_bot.py test_non_allowlisted_title_never_reaches_model
+- tests/test_wechat_bot.py test_unknown_send_is_not_regenerated_or_resent_on_restart
+- tests/test_wechat_bot_service.py test_default_config_is_in_user_home
+- tests/test_wechat_bot_service.py test_status_reads_configured_state_after_config_move
+- tests/test_wechat_bot_service.py test_stop_waits_until_launchd_task_is_unloaded
+- tests/test_wechat_bot_service.py test_start_reenables_and_loads_unloaded_task
+- tests/test_wechat_bot_service.py test_history_failure_blocks_model_and_send
+- tests/test_wechat_bot_service.py test_history_read_failure_keeps_message_pending
+- tests/test_wechat_bot_service.py test_scroll_recovered_messages_are_recorded_in_history
+- tests/test_wechat_bot_service.py test_nine_image_turn_sends_one_reply
+- tests/test_wechat_bot_service.py test_few_images_go_to_the_model_directly
+- tests/test_wechat_bot_service.py test_unsupported_file_reason_reaches_the_model
+- tests/test_wechat_bot_service.py test_final_generation_failure_still_pauses
+- tests/test_wechat_bot_service.py test_media_is_fetched_from_the_current_frame
+- tests/test_wechat_bot_service.py test_model_is_told_this_turns_image_count_separately
+- tests/test_wechat_bot_service.py test_earlier_context_images_follow_this_turns_and_are_counted
+- tests/test_wechat_bot_service.py test_images_over_the_request_size_are_named_not_paused
