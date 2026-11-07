@@ -364,8 +364,24 @@ pub fn echo_matches(observed: &str, expected: &str) -> bool {
     compact(observed) == compact(expected)
 }
 
+/// String escaping of Python `json.dumps(..., ensure_ascii=False)`: quote, backslash, the short forms
+/// \n \r \t \b \f, other C0 controls as lowercase \u00xx; everything else (DEL, U+2028, non-ASCII) raw.
 fn escape_json(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn format_fp(fp: &Fingerprint) -> String {
@@ -935,5 +951,31 @@ mod tests {
         assert!(echo_matches("全角　空格\r\n测试", "全角 空格 测试"));
         assert!(echo_matches("客服　电话：１２３４５", "客服 电话: 12345"));
         assert!(!echo_matches("收到～\n好的", "收到～\n不好"));
+    }
+
+    #[test]
+    fn test_key_matches_python_golden() {
+        // Expected keys computed by scripts/wechat_bot/policy.py Policy.key (json.dumps ensure_ascii=False).
+        // A different key after switching from Python to Rust would let the same turn be sent twice.
+        fn fp(direction: &str, digest: &str, phash: Option<&str>) -> Bubble {
+            let mut b = make_bubble(digest, Some(direction), Some(digest));
+            b.phash = phash.map(str::to_string);
+            b
+        }
+        let cases: Vec<(&str, &str, Vec<Bubble>, Bubble, &str)> = vec![
+            ("test-desktop", "示例群", vec![fp("inbound_visual", "你好", None)], fp("inbound_visual", "在吗", None),
+             "bot-ab507730f719356627784f02651896ad60d40a37fe49425f5be84558b67ca4ee"),
+            ("acc", "示例联系人甲☕", vec![fp("outbound_visual", "引\"号\\反斜杠", Some("00ff00ff00ff00ff"))],
+             fp("inbound_visual", "换行\n制表\t控制\u{1}\u{7f}末尾 😀", Some("0123456789abcdef")),
+             "bot-b80fe1c960d3bcc0891c7f19043572e29054fff7136a435e925cb9b3b11bb994"),
+            ("a", "b", vec![], fp("inbound_visual", "\u{2028}\u{e9}", None),
+             "bot-fe2f1fa9b5c4bb4fde22f14dcf0fd69cc54e1d809218e6efb009b7ca16266f63"),
+        ];
+        for (account, recipient, baseline, candidate, expected) in cases {
+            let policy = Policy::new(account, recipient, "t", None, false).unwrap();
+            let mut frame: Frame = serde_json::from_value(json!({"bubbles": []})).unwrap();
+            frame.bubbles = baseline;
+            assert_eq!(policy.key(&frame, &candidate), expected, "{account}/{recipient}");
+        }
     }
 }
