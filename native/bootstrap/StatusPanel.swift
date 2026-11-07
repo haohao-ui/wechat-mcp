@@ -4,6 +4,7 @@ import AppKit
 
 public final class StatusPanelController: NSViewController {
     private let worker: SocketWorker
+    private let coreSupervisor: CoreSupervisor
     private var timer: Timer?
 
     // UI Elements - Status
@@ -38,8 +39,9 @@ public final class StatusPanelController: NSViewController {
     private var latestItems: [StatusItem] = []
     private var latestBotState: String?
 
-    init(worker: SocketWorker) {
+    init(worker: SocketWorker, coreSupervisor: CoreSupervisor = CoreSupervisor()) {
         self.worker = worker
+        self.coreSupervisor = coreSupervisor
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -321,6 +323,7 @@ public final class StatusPanelController: NSViewController {
         if granted.screen_recording_authorized && granted.accessibility_trusted {
             try? worker.start()
         }
+        coreSupervisor.checkAndReconcile()
         let input = collectStatusInput()
         let items = evaluate(input)
         latestItems = items
@@ -422,11 +425,26 @@ public final class StatusPanelController: NSViewController {
             }
         }
 
+        let coreEnabled = FileManager.default.fileExists(atPath: coreSupervisor.coreEnabledURL.path)
+        let pyLoaded = coreSupervisor.pythonLoadedChecker()
+        let coreSt = coreSupervisor.currentStatus
+        var corePid: Int32? = nil
+        var coreReason: String? = nil
+        if case .running(let pid) = coreSt {
+            corePid = pid
+        } else if case .restarting(let at) = coreSt {
+            coreReason = "退避重试中 (预计 \(Int(at.timeIntervalSince1970)) 重试)"
+        }
+
         let botInput = BotInput(
-            launchdLoaded: true, // 在本机默认已加载/运行
+            launchdLoaded: pyLoaded,
             healthState: healthState,
             healthUpdatedAt: healthUpdated,
-            now: Date().timeIntervalSince1970
+            now: Date().timeIntervalSince1970,
+            coreEnabled: coreEnabled,
+            coreStatus: coreSt.rawStatusString,
+            corePid: corePid,
+            coreStoppedReason: coreReason
         )
 
         // 4. WeChat
@@ -603,6 +621,14 @@ public final class StatusPanelController: NSViewController {
 
     @objc private func handleRestartBot() {
         actionMessageLabel.stringValue = "正在重启机器人..."
+        if FileManager.default.fileExists(atPath: coreSupervisor.coreEnabledURL.path) {
+            coreSupervisor.reset()
+            coreSupervisor.stopProcess()
+            coreSupervisor.checkAndReconcile()
+            actionMessageLabel.stringValue = "已触发 Rust 核心重启"
+            refresh()
+            return
+        }
         do {
             let ok = try HostActions.restartBot(healthState: latestBotState, confirmHandler: { [weak self] in
                 return self?.confirmIfSending(actionName: "重启机器人") ?? false

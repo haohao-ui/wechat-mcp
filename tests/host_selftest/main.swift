@@ -283,6 +283,97 @@ func run() -> Int32 {
             }
         }
 #endif
+#if HOST_APP_CORE
+        if command == "core_decision" {
+            let coreEnabled = dict["core_enabled"] as? Bool ?? false
+            let pythonLoaded = dict["python_loaded"] as? Bool ?? false
+            let procState = dict["process_state"] as? String ?? "not_running"
+            let nowEpoch = dict["now"] as? Double ?? Date().timeIntervalSince1970
+            let now = Date(timeIntervalSince1970: nowEpoch)
+
+            let status: CoreProcessStatus
+            switch procState {
+            case "running":
+                let pid = Int32(dict["pid"] as? Int ?? 1000)
+                status = .running(pid: pid)
+            case "restarting":
+                let atEpoch = dict["restarting_at"] as? Double ?? (nowEpoch + 10.0)
+                status = .restarting(at: Date(timeIntervalSince1970: atEpoch))
+            case "gave_up":
+                status = .gaveUp
+            case "config_error":
+                status = .configError
+            default:
+                status = .notRunning
+            }
+
+            let decision = decideCoreAction(coreEnabled: coreEnabled, pythonLoaded: pythonLoaded, status: status, now: now)
+            let resp: [String: Any] = ["decision": decision.rawValue]
+            let outputData = try JSONSerialization.data(withJSONObject: resp, options: [.sortedKeys])
+            if let outputStr = String(data: outputData, encoding: .utf8) {
+                print(outputStr)
+                return 0
+            }
+        } else if command == "core_supervisor_run" {
+            let action = dict["action"] as? String ?? "run_once"
+            let binPath = dict["binary_path"] as? String ?? ""
+            let logPath = dict["log_path"] as? String ?? ""
+            let graceSec = dict["grace_seconds"] as? Double ?? 240.0
+
+            let sup = CoreSupervisor(
+                coreEnabledURL: URL(fileURLWithPath: "/tmp/fake.enabled"),
+                binaryURL: URL(fileURLWithPath: binPath),
+                configURL: URL(fileURLWithPath: "/tmp/fake.json"),
+                logURL: URL(fileURLWithPath: logPath),
+                gracePeriod: graceSec,
+                pythonLoadedChecker: { false }
+            )
+
+            if action == "run_once" {
+                try sup.startProcess(binaryPath: binPath, arguments: [], logPath: logPath)
+                sup.waitUntilExit()
+                usleep(50_000) // 50ms 等待 terminationHandler 完成
+                let st = sup.currentStatus
+                let exitCode = sup.lastExitCode ?? 0
+                let resp: [String: Any] = [
+                    "ok": true,
+                    "exit_code": exitCode,
+                    "supervisor_status": st.rawStatusString,
+                    "gave_up": sup.gaveUp
+                ]
+                let outputData = try JSONSerialization.data(withJSONObject: resp, options: [.sortedKeys])
+                if let outputStr = String(data: outputData, encoding: .utf8) {
+                    print(outputStr)
+                    return 0
+                }
+            } else if action == "start_and_stop" {
+                let readyPath = dict["ready_file"] as? String
+                try sup.startProcess(binaryPath: binPath, arguments: [], logPath: logPath)
+                if let rp = readyPath {
+                    var waited = 0
+                    while waited < 200 { // 最多等 2 秒
+                        if FileManager.default.fileExists(atPath: rp) {
+                            break
+                        }
+                        usleep(10_000) // 10ms
+                        waited += 1
+                    }
+                } else {
+                    usleep(100_000) // 100ms
+                }
+                let stoppedBy = sup.stopProcess(gracePeriod: graceSec)
+                let resp: [String: Any] = [
+                    "ok": true,
+                    "stopped_by": stoppedBy
+                ]
+                let outputData = try JSONSerialization.data(withJSONObject: resp, options: [.sortedKeys])
+                if let outputStr = String(data: outputData, encoding: .utf8) {
+                    print(outputStr)
+                    return 0
+                }
+            }
+        }
+#endif
 
         fputs("error: unknown command \(command)\n", stderr)
         return 1
