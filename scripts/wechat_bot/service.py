@@ -62,7 +62,7 @@ def load_config(path):
     value = json.loads(Path(path).read_text())
     allowed = {'schema_version', 'host', 'account_id', 'allowlist', 'state_dir', 'poll_seconds',
                'cooldown_seconds', 'max_replies_per_hour','capture_backend','model_config','ignorelist','idle_check_seconds','context_messages','history_http','manage_window',
-               'turn_quiet_seconds','turn_max_seconds','images_per_model_call','max_attachment_mb'}
+               'turn_quiet_seconds','turn_max_seconds','images_per_model_call','max_attachment_mb','brain'}
     if set(value)-allowed or value.get('schema_version') != 1:
         raise ValueError('unsupported bot config schema or field')
     from .routing import validate_rules
