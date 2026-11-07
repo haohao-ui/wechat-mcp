@@ -67,13 +67,31 @@ public struct BotInput: Codable {
     public var healthUpdatedAt: Double?
     public var now: Double
     public var needsRecalibration: Bool?
+    public var coreEnabled: Bool?
+    public var coreStatus: String?
+    public var corePid: Int32?
+    public var coreStoppedReason: String?
 
-    public init(launchdLoaded: Bool, healthState: String? = nil, healthUpdatedAt: Double? = nil, now: Double = Date().timeIntervalSince1970, needsRecalibration: Bool? = nil) {
+    public init(
+        launchdLoaded: Bool,
+        healthState: String? = nil,
+        healthUpdatedAt: Double? = nil,
+        now: Double = Date().timeIntervalSince1970,
+        needsRecalibration: Bool? = nil,
+        coreEnabled: Bool? = nil,
+        coreStatus: String? = nil,
+        corePid: Int32? = nil,
+        coreStoppedReason: String? = nil
+    ) {
         self.launchdLoaded = launchdLoaded
         self.healthState = healthState
         self.healthUpdatedAt = healthUpdatedAt
         self.now = now
         self.needsRecalibration = needsRecalibration
+        self.coreEnabled = coreEnabled
+        self.coreStatus = coreStatus
+        self.corePid = corePid
+        self.coreStoppedReason = coreStoppedReason
     }
 
     enum CodingKeys: String, CodingKey {
@@ -82,6 +100,10 @@ public struct BotInput: Codable {
         case healthUpdatedAt = "health_updated_at"
         case now
         case needsRecalibration = "needs_recalibration"
+        case coreEnabled = "core_enabled"
+        case coreStatus = "core_status"
+        case corePid = "core_pid"
+        case coreStoppedReason = "core_stopped_reason"
     }
 }
 
@@ -297,18 +319,76 @@ public func evaluate(_ s: StatusInput) -> [StatusItem] {
 
     // 3. bot
     let botItem: StatusItem
-    if !s.bot.launchdLoaded {
-        botItem = StatusItem(key: "bot", level: .red, reason: "机器人服务未加载 (launchd 缺失)", fix: "检查并加载 local.wechat-rpa.bot")
-    } else if s.bot.healthUpdatedAt == nil || s.bot.healthState == nil {
-        botItem = StatusItem(key: "bot", level: .red, reason: "未检测到机器人健康状态 (health.json 缺失)", fix: "启动机器人服务")
-    } else if (s.bot.now - (s.bot.healthUpdatedAt ?? 0)) > 120.0 {
-        botItem = StatusItem(key: "bot", level: .red, reason: "机器人健康状态超过 120 秒未更新", fix: "检查机器人进程或点击「重启机器人」")
-    } else if s.bot.healthState == "needs_recalibration" || s.bot.needsRecalibration == true {
-        botItem = StatusItem(key: "bot", level: .red, reason: "机器人需要重新校准 (needs_recalibration)", fix: "运行 control calibrate 重新定位")
-    } else if s.bot.healthState == "paused" {
-        botItem = StatusItem(key: "bot", level: .yellow, reason: "机器人已暂停", fix: "点击「恢复机器人」")
+    let isCore = s.bot.coreEnabled ?? false
+
+    if isCore {
+        if s.bot.launchdLoaded {
+            botItem = StatusItem(
+                key: "bot",
+                level: .red,
+                reason: "互斥冲突：Rust 核心已启用，但检测到 Python 机器人任务已加载",
+                fix: "请先卸载 Python launchd 任务: launchctl bootout gui/$UID/local.wechat-rpa.bot"
+            )
+        } else if s.bot.coreStatus == "stopping" {
+            botItem = StatusItem(
+                key: "bot",
+                level: .yellow,
+                reason: "正在停止 Rust 核心（等待当前一轮完成）",
+                fix: nil
+            )
+        } else if s.bot.coreStatus == "restarting" {
+            botItem = StatusItem(
+                key: "bot",
+                level: .yellow,
+                reason: "Rust 核心正在退避重试中",
+                fix: "等待自动重试或排查配置"
+            )
+        } else if s.bot.coreStatus == "gave_up" {
+            botItem = StatusItem(
+                key: "bot",
+                level: .red,
+                reason: "Rust 核心连续崩溃达到上限，已停止自动重启",
+                fix: "排查错误后点击「重启机器人」"
+            )
+        } else if s.bot.coreStatus == "config_error" {
+            botItem = StatusItem(
+                key: "bot",
+                level: .red,
+                reason: "Rust 核心配置错误 (退出码 2)，已停止自动重启",
+                fix: "检查配置文件 ~/.WeChatRPABot/config.json"
+            )
+        } else if s.bot.coreStatus == "stopped" || (s.bot.coreStatus != "running" && s.bot.corePid == nil) {
+            let reason = s.bot.coreStoppedReason ?? "Rust 核心未运行"
+            botItem = StatusItem(key: "bot", level: .red, reason: reason, fix: "点击「重启机器人」")
+        } else {
+            // Rust 核心运行中
+            let pidStr = s.bot.corePid != nil ? " (PID: \(s.bot.corePid!))" : ""
+            if s.bot.healthUpdatedAt == nil || s.bot.healthState == nil {
+                botItem = StatusItem(key: "bot", level: .red, reason: "未检测到机器人健康状态 (health.json 缺失)\(pidStr)", fix: "等待核心写入状态或启动机器人服务")
+            } else if (s.bot.now - (s.bot.healthUpdatedAt ?? 0)) > 120.0 {
+                botItem = StatusItem(key: "bot", level: .red, reason: "机器人健康状态超过 120 秒未更新\(pidStr)", fix: "检查机器人进程或点击「重启机器人」")
+            } else if s.bot.healthState == "needs_recalibration" || s.bot.needsRecalibration == true {
+                botItem = StatusItem(key: "bot", level: .red, reason: "机器人需要重新校准 (needs_recalibration)\(pidStr)", fix: "运行 control calibrate 重新定位")
+            } else if s.bot.healthState == "paused" {
+                botItem = StatusItem(key: "bot", level: .yellow, reason: "机器人已暂停\(pidStr)", fix: "点击「恢复机器人」")
+            } else {
+                botItem = StatusItem(key: "bot", level: .green, reason: "Rust 核心运行中\(pidStr) (\(s.bot.healthState ?? "running"))", fix: nil)
+            }
+        }
     } else {
-        botItem = StatusItem(key: "bot", level: .green, reason: "机器人正常运行中 (\(s.bot.healthState ?? "running"))", fix: nil)
+        if !s.bot.launchdLoaded {
+            botItem = StatusItem(key: "bot", level: .red, reason: "Python 模式：机器人服务未加载 (launchd 缺失)", fix: "检查并加载 local.wechat-rpa.bot")
+        } else if s.bot.healthUpdatedAt == nil || s.bot.healthState == nil {
+            botItem = StatusItem(key: "bot", level: .red, reason: "未检测到机器人健康状态 (health.json 缺失)", fix: "启动机器人服务")
+        } else if (s.bot.now - (s.bot.healthUpdatedAt ?? 0)) > 120.0 {
+            botItem = StatusItem(key: "bot", level: .red, reason: "机器人健康状态超过 120 秒未更新", fix: "检查机器人进程或点击「重启机器人」")
+        } else if s.bot.healthState == "needs_recalibration" || s.bot.needsRecalibration == true {
+            botItem = StatusItem(key: "bot", level: .red, reason: "机器人需要重新校准 (needs_recalibration)", fix: "运行 control calibrate 重新定位")
+        } else if s.bot.healthState == "paused" {
+            botItem = StatusItem(key: "bot", level: .yellow, reason: "机器人已暂停", fix: "点击「恢复机器人」")
+        } else {
+            botItem = StatusItem(key: "bot", level: .green, reason: "Python 模式：机器人正常运行中 (\(s.bot.healthState ?? "running"))", fix: nil)
+        }
     }
     items.append(botItem)
 
