@@ -2,6 +2,24 @@
 import Foundation
 import AppKit
 
+/// 获取宿主程序当前版本号：优先读取 ~/.wechat-rpa/VERSION，其次读取 Info.plist 中的版本信息
+public func hostAppVersion() -> String {
+    let home = FileManager.default.homeDirectoryForCurrentUser
+    let versionFile = home.appendingPathComponent(".wechat-rpa/VERSION")
+    if let data = try? Data(contentsOf: versionFile),
+       let str = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+       !str.isEmpty {
+        return str
+    }
+    if let info = Bundle.main.infoDictionary,
+       let build = info["CFBundleVersion"] as? String,
+       !build.isEmpty, build != "1" {
+        let short = info["CFBundleShortVersionString"] as? String ?? "0.1.0"
+        return "\(short) (\(build))"
+    }
+    return Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
+}
+
 public final class StatusPanelController: NSViewController {
     private let worker: SocketWorker
     private let coreSupervisor: CoreSupervisor
@@ -88,7 +106,8 @@ public final class StatusPanelController: NSViewController {
         mainStack.translatesAutoresizingMaskIntoConstraints = false
 
         // 1. Title & Header
-        let headerBox = createSectionBox(title: "微信客服助手 — 系统状态")
+        let currentVersion = hostAppVersion()
+        let headerBox = createSectionBox(title: "微信客服助手 — 系统状态 (版本: \(currentVersion))")
         setupStatusSection(inside: headerBox)
         mainStack.addArrangedSubview(headerBox)
 
@@ -750,7 +769,7 @@ public final class StatusPanelController: NSViewController {
     }
 
     @objc private func handleCopyDiagnostics() {
-        let text = generateDiagnostics(items: latestItems, appVersion: "1.0.0")
+        let text = generateDiagnostics(items: latestItems, appVersion: hostAppVersion())
         HostActions.copyDiagnostics(text)
         actionMessageLabel.stringValue = "诊断信息已复制到剪贴板"
     }
