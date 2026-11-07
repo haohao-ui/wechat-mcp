@@ -461,6 +461,14 @@ impl BotService {
         Ok(())
     }
 
+    pub fn resume_session(&mut self) -> Result<()> {
+        let handoff_path = self.root.join("handoff.json");
+        if handoff_path.exists() {
+            let _ = fs::remove_file(&handoff_path);
+        }
+        Ok(())
+    }
+
     pub fn turn_due(&self) -> bool {
         let Some(turn) = &self.turn else {
             return false;
@@ -967,6 +975,16 @@ impl BotService {
         client: &impl ToolClient,
         capture: &mut impl Capture,
     ) -> Result<()> {
+        let handoff_path = self.root.join("handoff.json");
+        if handoff_path.exists() {
+            self.turn = None;
+            let _ = fs::remove_file(&self.turn_path);
+            let mut d = Map::new();
+            d.insert("recipient".to_string(), json!(self.recipient));
+            self.health("handoff", d)?;
+            return Ok(());
+        }
+
         let turn = self.turn.clone().context("no active turn")?;
         let incoming = turn.bubbles.clone();
 
@@ -1254,15 +1272,49 @@ impl BotService {
             max_attachment_mb: self.config.max_attachment_mb,
         };
 
-        let generated_reply = if let Some(brain) = &self.brain {
-            brain(&brain_turn).await?.reply
+        let brain_reply = if let Some(brain) = &self.brain {
+            brain(&brain_turn).await?
         } else {
             let builtin = crate::brain::builtin::BuiltinBrain::new(
                 self.config.model_config.clone(),
             );
-            builtin.reply(&brain_turn).await?.reply
+            builtin.reply(&brain_turn).await?
         };
 
+        let action = brain_reply
+            .metadata
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("send");
+
+        if action == "skip" {
+            if let Some(map) = record.as_object_mut() {
+                map.insert("status".to_string(), json!("skipped_by_brain"));
+            }
+            self.write_journal(journal_path, record)?;
+            return Ok(None);
+        }
+
+        if action == "handoff" {
+            let handoff_path = self.root.join("handoff.json");
+            let handoff_data = json!({
+                "recipient": self.recipient,
+                "turn_id": key,
+                "at": (self.clock)(),
+            });
+            write_private(&handoff_path, &handoff_data)?;
+            if let Some(map) = record.as_object_mut() {
+                map.insert("status".to_string(), json!("handoff"));
+            }
+            self.write_journal(journal_path, record)?;
+            let mut d = Map::new();
+            d.insert("recipient".to_string(), json!(self.recipient));
+            d.insert("turn_id".to_string(), json!(key));
+            self.health("handoff", d)?;
+            return Ok(None);
+        }
+
+        let generated_reply = brain_reply.reply;
         let validated = validate_reply(&generated_reply).map_err(|e| anyhow::anyhow!("{e:?}"))?;
         let reply = ensure_unreadable_named(&validated, &failed)?;
 
@@ -1737,6 +1789,7 @@ mod tests {
                 timeout_seconds: None,
                 json_output: None,
             },
+            brain: Default::default(),
         }
     }
 
@@ -4015,4 +4068,155 @@ mod tests {
         assert!(binding.get("recipient").is_none());
     }
 
+    #[tokio::test]
+    async fn test_brain_reply_action_skip() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+
+        // Brain 返回 action=skip
+        svc.brain = Some(Arc::new(|_| {
+            Box::pin(async {
+                let mut meta = HashMap::new();
+                meta.insert("action".to_string(), json!("skip"));
+                Ok(BrainReply {
+                    reply: String::new(),
+                    metadata: meta,
+                })
+            })
+        }));
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "午夜咖啡");
+        svc.advance(old).unwrap();
+
+        let new_f = test_frame(vec![test_bubble("old", "inbound_visual"), test_bubble("你好", "inbound_visual")], "午夜咖啡");
+        let client = MockToolClient::new_default();
+        let mut cap = MockCapture::new(vec![new_f.clone(), new_f.clone()]);
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        // 没发送任何消息
+        let sends: Vec<_> = client.calls.lock().unwrap().iter().filter(|(n, _)| n == "send_message").cloned().collect();
+        assert_eq!(sends.len(), 0);
+
+        // 检查日志状态为 skipped_by_brain
+        let mut found_journal = false;
+        for entry in fs::read_dir(td.path()).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("send-") && name.ends_with(".json") {
+                let j: Value = read_json(entry.path()).unwrap();
+                assert_eq!(j["status"], "skipped_by_brain");
+                found_journal = true;
+            }
+        }
+        assert!(found_journal, "should create journal with status skipped_by_brain");
+    }
+
+    #[tokio::test]
+    async fn test_brain_reply_action_handoff_and_resume() {
+        use std::os::unix::fs::PermissionsExt;
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+
+        // 1. Brain 返回 action=handoff
+        svc.brain = Some(Arc::new(|_| {
+            Box::pin(async {
+                let mut meta = HashMap::new();
+                meta.insert("action".to_string(), json!("handoff"));
+                Ok(BrainReply {
+                    reply: String::new(),
+                    metadata: meta,
+                })
+            })
+        }));
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "午夜咖啡");
+        svc.advance(old).unwrap();
+
+        let new_f = test_frame(vec![test_bubble("old", "inbound_visual"), test_bubble("转人工客服", "inbound_visual")], "午夜咖啡");
+        let client = MockToolClient::new_default();
+        let mut cap = MockCapture::new(vec![new_f.clone(), new_f.clone()]);
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        // 没有调用 send_message
+        let sends: Vec<_> = client.calls.lock().unwrap().iter().filter(|(n, _)| n == "send_message").cloned().collect();
+        assert_eq!(sends.len(), 0);
+
+        // 检查日志状态为 handoff
+        let mut found_journal = false;
+        for entry in fs::read_dir(td.path()).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("send-") && name.ends_with(".json") {
+                let j: Value = read_json(entry.path()).unwrap();
+                assert_eq!(j["status"], "handoff");
+                found_journal = true;
+            }
+        }
+        assert!(found_journal, "journal status should be handoff");
+
+        // 检查 sessions/<id>/handoff.json 生成且权限为 0600
+        let handoff_path = td.path().join("handoff.json");
+        assert!(handoff_path.exists());
+        let perm = fs::metadata(&handoff_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(perm, 0o600);
+        let handoff_data: Value = read_json(&handoff_path).unwrap();
+        assert_eq!(handoff_data["recipient"], "午夜咖啡");
+        assert!(handoff_data.get("turn_id").is_some());
+        assert!(handoff_data.get("at").is_some());
+
+        // 2. 当 handoff.json 存在时，新消息到达：不交给任何大脑、不回复，health 为 handoff
+        let brain_called = Arc::new(AtomicBool::new(false));
+        let bc = brain_called.clone();
+        svc.brain = Some(Arc::new(move |_| {
+            bc.store(true, Ordering::SeqCst);
+            Box::pin(async {
+                Ok(BrainReply {
+                    reply: "should not be called".to_string(),
+                    metadata: HashMap::new(),
+                })
+            })
+        }));
+
+        let new_f2 = test_frame(vec![test_bubble("old", "inbound_visual"), test_bubble("转人工客服", "inbound_visual"), test_bubble("有人在吗", "inbound_visual")], "午夜咖啡");
+        let mut cap2 = MockCapture::new(vec![new_f2.clone(), new_f2.clone()]);
+        svc.cycle(&client, &mut cap2).await.unwrap();
+
+        assert!(!brain_called.load(Ordering::SeqCst), "brain should not be called while in handoff");
+        let health: Value = read_json(td.path().join("health.json")).unwrap();
+        assert_eq!(health["state"], "handoff");
+
+        // 3. resume_session 删除 handoff.json 并恢复自动回复
+        svc.resume_session().unwrap();
+        assert!(!handoff_path.exists(), "handoff.json should be removed on resume_session");
+
+        let reply_f = test_bubble("您好，我是AI助手", "outbound_visual");
+        let after_f = test_frame(vec![test_bubble("old", "inbound_visual"), test_bubble("转人工客服", "inbound_visual"), test_bubble("有人在吗", "inbound_visual"), test_bubble("问个问题", "inbound_visual"), reply_f], "午夜咖啡");
+        let new_f3 = test_frame(vec![test_bubble("old", "inbound_visual"), test_bubble("转人工客服", "inbound_visual"), test_bubble("有人在吗", "inbound_visual"), test_bubble("问个问题", "inbound_visual")], "午夜咖啡");
+
+        let mut cap3 = MockCapture::new(vec![new_f3.clone(), new_f3.clone(), new_f3.clone(), after_f.clone()]);
+        svc.cycle(&client, &mut cap3).await.unwrap();
+        assert!(brain_called.load(Ordering::SeqCst), "brain should be called after resume_session");
+    }
+
+    #[test]
+    fn test_startup_recovery_closes_generating_journals_to_not_sent() {
+        let td = TestDir::new();
+        let journal_path = td.path().join("send-testkey123.json");
+        let record = json!({
+            "status": "generating",
+            "account_id": "fixture",
+            "recipient": "午夜咖啡",
+            "idempotency_key": "testkey123"
+        });
+        write_private(&journal_path, &record).unwrap();
+
+        let cfg = fixture_config(td.path());
+        let _svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+
+        let recovered: Value = read_json(&journal_path).unwrap();
+        assert_eq!(recovered["status"], "not_sent");
+        assert_eq!(recovered["closed_on_startup"], true);
+    }
 }

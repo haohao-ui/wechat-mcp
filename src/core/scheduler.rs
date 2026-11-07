@@ -1532,6 +1532,7 @@ mod tests {
                 timeout_seconds: None,
                 json_output: None,
             },
+            brain: Default::default(),
         };
         let cfg_path = dir.join("config.json");
         let content = serde_json::to_string_pretty(&cfg).unwrap();
