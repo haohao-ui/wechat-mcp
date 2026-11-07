@@ -127,6 +127,9 @@ pub async fn run_serve_core(
     coordinator.health("connecting", serde_json::Map::new())?;
     update_health_brain(&coordinator.root, &external_brain).await;
 
+    let backups_dir = coordinator.config.state_dir.join("backups");
+    let mut last_backup_at = crate::core::backup::latest_backup_timestamp(&backups_dir);
+
     let poll_seconds = coordinator.config.poll_seconds.max(1);
 
     loop {
@@ -171,6 +174,33 @@ pub async fn run_serve_core(
                     "error": e.to_string(),
                 }),
             );
+        }
+
+        // 检查自动备份：空闲且距离上次备份满 24 小时
+        let now = (coordinator.clock)();
+        let is_idle = coordinator.pending.is_empty() && !coordinator.sessions.values().any(|s| s.turn.is_some());
+        if crate::core::backup::should_auto_backup(is_idle, now, last_backup_at) {
+            match crate::core::backup::run_backup(&coordinator.config, None) {
+                Ok(out_path) => {
+                    last_backup_at = now;
+                    coordinator.log_event(
+                        "backup_succeeded",
+                        json!({
+                            "path": out_path.display().to_string(),
+                            "timestamp": now,
+                        }),
+                    );
+                }
+                Err(e) => {
+                    coordinator.log_event(
+                        "backup_failed",
+                        json!({
+                            "error": e.to_string(),
+                            "timestamp": now,
+                        }),
+                    );
+                }
+            }
         }
 
         if STOP_SIGNAL.load(Ordering::SeqCst) || coordinator.stop.load(Ordering::SeqCst) {
@@ -439,5 +469,55 @@ mod tests {
         assert!(res.is_err());
         let err_str = res.err().unwrap().to_string();
         assert!(err_str.contains("state lock error") || err_str.contains("failed to acquire core.lock"));
+    }
+
+    #[tokio::test]
+    async fn test_serve_core_auto_backup_on_idle() {
+        let _guard = TEST_ENV_LOCK.lock().await;
+        let dir = TempDir::new();
+        let (cfg_path, state_dir) = write_test_config(dir.path());
+
+        // 创建并写入初始历史库
+        let history_dir = state_dir.join("history");
+        fs::create_dir_all(&history_dir).unwrap();
+        let db_path = history_dir.join("history.sqlite3");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE auto_test (id INT PRIMARY KEY, name TEXT);
+                 INSERT INTO auto_test VALUES (1, 'hello');"
+            ).unwrap();
+        }
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+
+        tokio::spawn(async move {
+            // 等待一轮 sweep 完成，并触发自动备份
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let _ = tx.send(true);
+        });
+
+        let code = run_serve_core(&cfg_path, Some(rx)).await.unwrap();
+        assert_eq!(code, 0);
+
+        // 验证 backups 目录下生成了备份
+        let backups_dir = state_dir.join("backups");
+        assert!(backups_dir.exists(), "backups dir should be created");
+
+        let mut found_backup = false;
+        for entry in fs::read_dir(&backups_dir).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().is_dir() {
+                let backup_db = entry.path().join("history.sqlite3");
+                if backup_db.exists() {
+                    let conn = rusqlite::Connection::open(&backup_db).unwrap();
+                    let check: String = conn.query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap();
+                    assert_eq!(check, "ok");
+                    found_backup = true;
+                    break;
+                }
+            }
+        }
+        assert!(found_backup, "Automatic backup of history.sqlite3 should exist in backups dir");
     }
 }
