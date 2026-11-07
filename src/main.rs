@@ -81,6 +81,15 @@ async fn async_main() -> Result<()> {
                 let code = core::control::run_control(&args[2..])?;
                 std::process::exit(code);
             }
+            "replay" => {
+                match core::replay::run_replay_cli(&args[2..]).await {
+                    Ok(code) => std::process::exit(code),
+                    Err(err) => {
+                        eprintln!("{}", err);
+                        std::process::exit(2);
+                    }
+                }
+            }
             _ => {}
         }
     }
