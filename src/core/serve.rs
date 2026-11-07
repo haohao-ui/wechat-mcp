@@ -158,38 +158,35 @@ pub async fn run_serve_core(
     coordinator.health("connecting", serde_json::Map::new())?;
     update_health_brain(&coordinator.root, &external_brain).await;
 
-    // 5. 按配置启动历史 HTTP 服务（只监听配置的 bind，默认 127.0.0.1）
+    // 5. 按配置启动历史 HTTP 服务（只监听配置的 bind，默认 127.0.0.1）。它只是辅助查询：启动失败（例如端口
+    //    仍被旧的 Python 历史服务占用）只记录事件，不能让核心退出、停止回复客户。
     let history_dir = config.state_dir.join("history");
-    let http_token = crate::core::history::serve::ensure_token(&history_dir)
-        .with_context(|| format!("failed to ensure history http token in {}", history_dir.display()))?;
-    let history_db_path = history_dir.join("history.sqlite3");
-    let history_query = std::sync::Arc::new(std::sync::Mutex::new(
-        crate::core::history::query::HistoryQuery::open(
-            &history_db_path,
-            Some(config.context_messages as i64),
+    let start_history = || -> Result<crate::core::history::serve::HttpServer> {
+        let http_token = crate::core::history::serve::ensure_token(&history_dir)
+            .with_context(|| format!("failed to ensure history http token in {}", history_dir.display()))?;
+        let history_db_path = history_dir.join("history.sqlite3");
+        let history_query = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::core::history::query::HistoryQuery::open(&history_db_path, Some(config.context_messages as i64))
+                .with_context(|| format!("failed to open history database for query at {}", history_db_path.display()))?,
+        ));
+        crate::core::history::serve::HttpServer::start(
+            history_query,
+            http_token,
+            &config.history_http.bind,
+            config.history_http.port,
         )
-        .with_context(|| format!("failed to open history database for query at {}", history_db_path.display()))?,
-    ));
-    let history_server = crate::core::history::serve::HttpServer::start(
-        history_query,
-        http_token,
-        &config.history_http.bind,
-        config.history_http.port,
-    )
-    .with_context(|| {
-        format!(
-            "failed to start history http server on {}:{}",
-            config.history_http.bind, config.history_http.port
-        )
-    })?;
-
-    coordinator.log_event(
-        "history_http_started",
-        json!({
-            "bind": config.history_http.bind,
-            "port": history_server.port(),
-        }),
-    );
+        .with_context(|| format!("failed to start history http server on {}:{}", config.history_http.bind, config.history_http.port))
+    };
+    let history_server = match start_history() {
+        Ok(server) => {
+            coordinator.log_event("history_http_started", json!({"bind": config.history_http.bind, "port": server.port()}));
+            Some(server)
+        }
+        Err(error) => {
+            coordinator.log_event("history_http_failed", json!({"error": format!("{error:#}").chars().take(300).collect::<String>()}));
+            None
+        }
+    };
 
     let backups_dir = coordinator.config.state_dir.join("backups");
     let mut last_backup_at = crate::core::backup::latest_backup_timestamp(&backups_dir);
@@ -310,7 +307,9 @@ pub async fn run_serve_core(
     let _ = fs::remove_file(&sock_path);
 
     // 停止历史 HTTP 服务
-    history_server.shutdown();
+    if let Some(server) = history_server {
+        server.shutdown();
+    }
 
     Ok(0)
 }
