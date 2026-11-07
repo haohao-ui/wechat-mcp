@@ -81,6 +81,43 @@ async fn async_main() -> Result<()> {
                 let code = core::control::run_control(&args[2..])?;
                 std::process::exit(code);
             }
+            "backup" => {
+                let mut config_path: Option<std::path::PathBuf> = None;
+                let mut out_dir: Option<std::path::PathBuf> = None;
+                let mut i = 2;
+                while i < args.len() {
+                    if args[i] == "--config" && i + 1 < args.len() {
+                        config_path = Some(std::path::PathBuf::from(&args[i + 1]));
+                        i += 2;
+                    } else if args[i] == "--out" && i + 1 < args.len() {
+                        out_dir = Some(std::path::PathBuf::from(&args[i + 1]));
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                let Some(cfg_path) = config_path else {
+                    eprintln!("error: backup requires --config <path>");
+                    std::process::exit(2);
+                };
+                let config = match core::config::BotConfig::load(&cfg_path) {
+                    Ok(cfg) => cfg,
+                    Err(err) => {
+                        eprintln!("configuration error in {}: {}", cfg_path.display(), err);
+                        std::process::exit(2);
+                    }
+                };
+                match core::backup::run_backup(&config, out_dir.as_deref()) {
+                    Ok(out) => {
+                        println!("Backup completed: {}", out.display());
+                        std::process::exit(0);
+                    }
+                    Err(err) => {
+                        eprintln!("Backup failed: {}", err);
+                        std::process::exit(1);
+                    }
+                }
+            }
             "replay" => {
                 match core::replay::run_replay_cli(&args[2..]).await {
                     Ok(code) => std::process::exit(code),
