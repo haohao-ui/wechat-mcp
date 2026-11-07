@@ -4,6 +4,7 @@ pub mod delivery;
 pub mod history;
 pub mod model;
 pub mod policy;
+pub mod replay;
 pub mod scheduler;
 pub mod serve;
 pub mod state;
