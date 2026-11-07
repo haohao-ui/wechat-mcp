@@ -30,6 +30,12 @@ public final class StatusPanelController: NSViewController {
     private let maxSecField = NSTextField()
     private let contextMsgField = NSTextField()
     private let manageWindowCheck = NSButton(checkboxWithTitle: "自动管理微信主窗口 (调整至 880x640)", target: nil, action: nil)
+    private let brainModePopup = NSPopUpButton()
+    private let brainTimeoutField = NSTextField()
+    private let brainTimeoutActionPopup = NSPopUpButton()
+    private let resumeHandoffButton = NSButton(title: "恢复自动回复", target: nil, action: nil)
+    /// Sessions the core marked as handed to a person (health.json sessions[*].state == "handoff").
+    private var handoffSessionNames: [String] = []
 
     private let configErrorLabel = NSTextField(wrappingLabelWithString: "")
     private let configSaveButton = NSButton()
@@ -166,7 +172,7 @@ public final class StatusPanelController: NSViewController {
         statusStack.spacing = 8
         statusStack.translatesAutoresizingMaskIntoConstraints = false
 
-        let keys = ["permissions", "desktop_service", "bot", "sessions", "wechat", "layout", "disk"]
+        let keys = ["permissions", "desktop_service", "bot", "brain", "sessions", "wechat", "layout", "disk"]
         let titles = [
             "permissions": "权限状态",
             "desktop_service": "桌面服务",
@@ -174,7 +180,8 @@ public final class StatusPanelController: NSViewController {
             "sessions": "各会话状态",
             "wechat": "微信客户端",
             "layout": "布局地图",
-            "disk": "磁盘空间"
+            "disk": "磁盘空间",
+            "brain": "大脑状态"
         ]
 
         for k in keys {
@@ -241,8 +248,12 @@ public final class StatusPanelController: NSViewController {
         let row2 = NSStackView(views: [
             NSButton(title: "打开附件文件夹", target: self, action: #selector(handleOpenAttachments)),
             NSButton(title: "打开日志文件夹", target: self, action: #selector(handleOpenLogs)),
-            NSButton(title: "复制诊断信息", target: self, action: #selector(handleCopyDiagnostics))
+            NSButton(title: "复制诊断信息", target: self, action: #selector(handleCopyDiagnostics)),
+            resumeHandoffButton
         ])
+        resumeHandoffButton.target = self
+        resumeHandoffButton.action = #selector(handleResumeHandoff)
+        resumeHandoffButton.isEnabled = false
         row2.orientation = .horizontal
         row2.spacing = 8
 
@@ -282,12 +293,18 @@ public final class StatusPanelController: NSViewController {
             [NSTextField(labelWithString: "冷却时间 (秒):"), cooldownField],
             [NSTextField(labelWithString: "静默等待 (秒):"), quietSecField],
             [NSTextField(labelWithString: "轮次最长时间 (秒):"), maxSecField],
-            [NSTextField(labelWithString: "上下文消息条数:"), contextMsgField]
+            [NSTextField(labelWithString: "上下文消息条数:"), contextMsgField],
+            [NSTextField(labelWithString: "回复由:"), brainModePopup],
+            [NSTextField(labelWithString: "外部大脑超时 (秒):"), brainTimeoutField],
+            [NSTextField(labelWithString: "超时后:"), brainTimeoutActionPopup]
         ])
         grid.rowSpacing = 6
         grid.columnSpacing = 10
         stack.addArrangedSubview(grid)
         stack.addArrangedSubview(manageWindowCheck)
+        brainModePopup.addItems(withTitles: ["内置大脑", "外部大脑 (MCP next_turn / reply)"])
+        brainTimeoutActionPopup.addItems(withTitles: ["这一轮不回复", "改用内置大脑", "转人工"])
+        brainTimeoutField.placeholderString = "留空使用默认值 120"
 
         configErrorLabel.font = NSFont.systemFont(ofSize: 11)
         configErrorLabel.textColor = .systemRed
@@ -416,14 +433,28 @@ public final class StatusPanelController: NSViewController {
             healthUpdated = hObj["updated_at"] as? Double
             if let sessObj = hObj["sessions"] as? [String: [String: Any]] {
                 for (name, sDict) in sessObj {
+                    let state = sDict["state"] as? String ?? "unknown"
                     sessionsInput[name] = SessionHealthInput(
-                        state: sDict["state"] as? String ?? "unknown",
+                        state: state,
                         reason: sDict["reason"] as? String,
-                        code: sDict["code"] as? String
+                        code: sDict["code"] as? String,
+                        handoff: state == "handoff"
                     )
                 }
             }
         }
+
+        var brainInput: BrainInput? = nil
+        if let hData = try? Data(contentsOf: healthFile),
+           let hObj = try? JSONSerialization.jsonObject(with: hData, options: []) as? [String: Any],
+           let b = hObj["brain"] as? [String: Any] {
+            brainInput = BrainInput(mode: b["mode"] as? String ?? "builtin",
+                                    pending: b["pending"] as? Int,
+                                    lastPollAt: b["last_poll_at"] as? Double,
+                                    now: Date().timeIntervalSince1970)
+        }
+        handoffSessionNames = sessionsInput.filter { $0.value.handoff == true }.map { $0.key }.sorted()
+        resumeHandoffButton.isEnabled = !handoffSessionNames.isEmpty
 
         let coreEnabled = FileManager.default.fileExists(atPath: coreSupervisor.coreEnabledURL.path)
         let pyLoaded = coreSupervisor.pythonLoadedChecker()
@@ -495,7 +526,8 @@ public final class StatusPanelController: NSViewController {
             sessions: sessionsInput,
             wechat: wechatInput,
             layout: layoutInput,
-            disk: diskInput
+            disk: diskInput,
+            brain: brainInput
         )
     }
 
@@ -534,6 +566,9 @@ public final class StatusPanelController: NSViewController {
             field.isEnabled = enabled
         }
         manageWindowCheck.isEnabled = enabled
+        brainModePopup.isEnabled = enabled
+        brainTimeoutField.isEnabled = enabled
+        brainTimeoutActionPopup.isEnabled = enabled
         configSaveButton.isEnabled = enabled
     }
 
@@ -578,6 +613,11 @@ public final class StatusPanelController: NSViewController {
         // The bot defaults manage_window to true when the key is absent.
         let mw = editable["manage_window"] as? Bool ?? true
         manageWindowCheck.state = mw ? .on : .off
+        let brain = editable["brain"] as? [String: Any] ?? [:]
+        brainModePopup.selectItem(at: (brain["mode"] as? String) == "external" ? 1 : 0)
+        let ext = brain["external"] as? [String: Any] ?? [:]
+        brainTimeoutField.stringValue = (ext["timeout_seconds"]).map { "\($0)" } ?? ""
+        brainTimeoutActionPopup.selectItem(at: ["skip", "builtin", "handoff"].firstIndex(of: ext["timeout_action"] as? String ?? "skip") ?? 0)
     }
 
     private func formatListOrString(_ val: Any) -> String {
@@ -660,6 +700,33 @@ public final class StatusPanelController: NSViewController {
         refresh()
     }
 
+    /// Hands the listed sessions back to automatic replies through `wechat-mcp control resume-session`
+    /// (the running core is told over core.sock; without a core the handoff marker file is removed).
+    @objc private func handleResumeHandoff() {
+        let names = handoffSessionNames
+        guard !names.isEmpty else { return }
+        let bin = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".wechat-rpa/bin/wechat-mcp")
+        let config = getConfigURL().path
+        actionMessageLabel.stringValue = "正在恢复自动回复：\(names.joined(separator: "、"))"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var failed: [String] = []
+            for name in names {
+                let process = Process()
+                process.executableURL = bin
+                process.arguments = ["control", "resume-session", name, "--config", config]
+                var env = ProcessInfo.processInfo.environment
+                env["LANG"] = "en_US.UTF-8"; env["LC_ALL"] = "en_US.UTF-8"
+                process.environment = env
+                do { try process.run(); process.waitUntilExit() } catch { failed.append(name); continue }
+                if process.terminationStatus != 0 { failed.append(name) }
+            }
+            DispatchQueue.main.async {
+                self?.actionMessageLabel.stringValue = failed.isEmpty ? "已恢复自动回复" : "恢复失败：\(failed.joined(separator: "、"))"
+                self?.refresh()
+            }
+        }
+    }
+
     @objc private func handleRestoreWechatWindow() {
         do {
             try HostActions.restoreWechatWindow(wechatPID: nil)
@@ -707,6 +774,11 @@ public final class StatusPanelController: NSViewController {
         formInputs["turn_max_seconds"] = maxSecField.stringValue
         formInputs["context_messages"] = contextMsgField.stringValue
         formInputs["manage_window"] = (manageWindowCheck.state == .on)
+        formInputs["brain_mode"] = brainModePopup.indexOfSelectedItem == 1 ? "external" : "builtin"
+        if brainModePopup.indexOfSelectedItem == 1 {
+            formInputs["brain_timeout_seconds"] = brainTimeoutField.stringValue
+            formInputs["brain_timeout_action"] = ["skip", "builtin", "handoff"][max(0, brainTimeoutActionPopup.indexOfSelectedItem)]
+        }
 
         let newConfig: [String: Any]
         do {
