@@ -173,7 +173,7 @@ fn run_bubbles(
     env: Option<&[(&str, &str)]>,
     timeout: Duration,
 ) -> RunResult {
-    let _lock = VISION_LOCK.lock().unwrap();
+    let _lock = VISION_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let bin = match wechat_bubbles_bin() {
         Some(b) => b,
@@ -745,6 +745,10 @@ fn test_cli_rejects_invalid_engine() {
     let no_ocr = temp.path.join("no-ocr.json");
     let ocr_tmp = temp.path.join("ocr-tmp");
     let frame_png = frames_dir().join("r1-dark-top.png");
+
+    // The OCR CLI warms Vision too: serialize with the other Vision tests (parallel runs made the Neural
+    // Engine fail with e5rtError, 2026-11-08).
+    let _lock = VISION_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
     // Case 1: WECHAT_OCR_ENGINE="paddle"
     let out1 = Command::new(bin)
