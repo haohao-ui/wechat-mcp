@@ -1096,10 +1096,24 @@ impl BotService {
 
         match result {
             Ok(Some(after)) => {
-                let echoed = after.bubbles.iter().any(|b| {
-                    b.direction == "outbound_visual"
-                        && echo_matches(&b.text, record.get("reply").and_then(|v| v.as_str()).unwrap_or(""))
-                });
+                let reply_text = record.get("reply").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let shows_echo = |frame: &Frame| {
+                    frame.bubbles.iter().any(|b| b.direction == "outbound_visual" && echo_matches(&b.text, &reply_text))
+                };
+                // The bubble can appear several seconds after Enter (device 2026-11-08: 6–11 s). Look again
+                // once a second for about 15 s; read-only, never re-sends.
+                let mut echoed = shows_echo(&after);
+                let mut capture_errors = 0;
+                for _ in 0..15 {
+                    if echoed || capture_errors >= 3 {
+                        break;
+                    }
+                    (self.sleep)(Duration::from_secs(1)).await;
+                    match capture.frame().await {
+                        Ok(frame) => echoed = shows_echo(&frame),
+                        Err(_) => capture_errors += 1,
+                    }
+                }
                 if let Some(map) = record.as_object_mut() {
                     map.insert("client_echo_observed".to_string(), json!(echoed));
                 }
@@ -1915,6 +1929,45 @@ mod tests {
     }
 
     // === SendRetryTests (8 tests) ===
+    #[tokio::test]
+    async fn test_echo_appearing_seconds_after_send_is_observed() {
+        // Device 2026-11-08: our reply first showed up in captures 6–11 s after Enter; a single post-send
+        // frame missed it. Keep looking (about 15 s) until the bubble appears.
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        let sleeps = Arc::new(AtomicUsize::new(0));
+        let sleeps_clone = sleeps.clone();
+        svc.sleep = Arc::new(move |_| { sleeps_clone.fetch_add(1, Ordering::SeqCst); Box::pin(async {}) });
+        svc.brain = Some(default_brain("你好，我是AI客服助手。"));
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "午夜咖啡");
+        let new_f = test_frame(vec![test_bubble("old", "inbound_visual"), test_bubble("你好，介绍一下你自己", "inbound_visual")], "午夜咖啡");
+        let after = test_frame(vec![test_bubble("old", "inbound_visual"), test_bubble("你好，介绍一下你自己", "inbound_visual"),
+                                    test_bubble("你好，我是AI客服助手。", "outbound_visual")], "午夜咖啡");
+        svc.advance(old).unwrap();
+
+        let client = MockToolClient {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            handler: Arc::new(|name, _args| match name {
+                "send_message" => Ok(json!({"status": "triggered", "send_id": "send-1", "delivery": "unknown"})),
+                "get_send_status" => Ok(json!({"status": "triggered", "delivery": "unknown", "send_id": "send-1"})),
+                _ => Ok(json!({})),
+            }),
+        };
+        let mut frames = vec![new_f.clone(); 6];
+        frames.push(after.clone());
+        let mut capture = MockCapture::new(frames);
+        svc.cycle(&client, &mut capture).await.unwrap();
+
+        let journal = fs::read_dir(&svc.root).unwrap().flatten()
+            .find(|e| e.file_name().to_string_lossy().starts_with("send-")).unwrap();
+        let data: Value = read_json(journal.path()).unwrap();
+        assert_eq!(data["status"], "triggered");
+        assert_eq!(data["client_echo_observed"], true, "the late echo must be found");
+        assert_eq!(client.calls.lock().unwrap().iter().filter(|(n, _)| n == "send_message").count(), 1, "never re-send");
+    }
+
     #[tokio::test]
     async fn test_send_retry_not_sent_click_failure_retries_and_does_not_pause() {
         let td = TestDir::new();

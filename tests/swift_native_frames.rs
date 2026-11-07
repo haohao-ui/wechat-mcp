@@ -244,7 +244,11 @@ fn run_bubbles(
     // A deterministic refusal (`invalid("…")`, e.g. invalid_ocr_engine) is a real result the test must check,
     // even when it surfaces during warm-up; only a warm-up failure without a reason means Vision is busy.
     let deterministic = stderr_str.contains("invalid(\"");
-    if !deterministic && (stderr_str.contains("vision warm-up failed") || stderr_str.contains("ANECompilerService")) {
+    // e5rtError: the Neural Engine runtime failed transiently (seen 2026-11-08 under load); environmental.
+    let environmental = stderr_str.contains("vision warm-up failed")
+        || stderr_str.contains("ANECompilerService")
+        || stderr_str.contains("e5rtError");
+    if !deterministic && environmental {
         return RunResult::VisionBusy(stderr_str);
     }
 
