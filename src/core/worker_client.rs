@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
@@ -61,92 +62,10 @@ pub fn media_reason(error: &str) -> String {
 }
 
 pub fn sha256(data: &[u8]) -> String {
-    let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
-    ];
-    let k: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-        0xc67178f2,
-    ];
-
-    let bit_len = (data.len() as u64) * 8;
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while (msg.len() % 64) != 56 {
-        msg.push(0x00);
-    }
-    msg.extend_from_slice(&bit_len.to_be_bytes());
-
-    for chunk in msg.chunks_exact(64) {
-        let mut w = [0u32; 64];
-        for i in 0..16 {
-            w[i] = u32::from_be_bytes([
-                chunk[4 * i],
-                chunk[4 * i + 1],
-                chunk[4 * i + 2],
-                chunk[4 * i + 3],
-            ]);
-        }
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-
-        let mut a = h[0];
-        let mut b = h[1];
-        let mut c = h[2];
-        let mut d = h[3];
-        let mut e = h[4];
-        let mut f = h[5];
-        let mut g = h[6];
-        let mut h_val = h[7];
-
-        for i in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ ((!e) & g);
-            let temp1 = h_val
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(k[i])
-                .wrapping_add(w[i]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = s0.wrapping_add(maj);
-
-            h_val = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
-        }
-
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(f);
-        h[6] = h[6].wrapping_add(g);
-        h[7] = h[7].wrapping_add(h_val);
-    }
-
-    h.iter().map(|v| format!("{:08x}", v)).collect()
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let result = hasher.finalize();
+    result.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -223,32 +142,29 @@ impl WorkerClient {
             bail!("persistent worker requires stable ownership token");
         }
 
-        if self.base_dir.exists() {
-            let meta = fs::metadata(&self.base_dir)?;
-            let mode = meta.permissions().mode() & 0o777;
-            let uid = meta.uid();
-            unsafe {
-                let current_uid = getuid();
-                if uid != current_uid {
-                    bail!("unsafe_private_path: owner mismatch");
-                }
+        if !self.base_dir.exists() {
+            bail!("unsafe_private_path: base directory does not exist");
+        }
+        let meta = fs::metadata(&self.base_dir)?;
+        let mode = meta.permissions().mode() & 0o777;
+        let uid = meta.uid();
+        unsafe {
+            let current_uid = getuid();
+            if uid != current_uid {
+                bail!("unsafe_private_path: owner mismatch");
             }
-            if mode != 0o700 {
-                bail!("unsafe_private_path: mode {:o} != 0700", mode);
-            }
-        } else {
-            fs::create_dir_all(&self.base_dir)?;
-            let mut perms = fs::metadata(&self.base_dir)?.permissions();
-            perms.set_mode(0o700);
-            fs::set_permissions(&self.base_dir, perms)?;
+        }
+        if mode != 0o700 {
+            bail!("unsafe_private_path: mode {:o} != 0700", mode);
         }
 
         let worker_bin = self.base_dir.join("bin").join("wechat_bot_worker");
-        if worker_bin.exists() {
-            let perms = fs::metadata(&worker_bin)?.permissions();
-            if (perms.mode() & 0o111) == 0 {
-                bail!("worker binary is not executable");
-            }
+        if !worker_bin.exists() {
+            bail!("worker_missing: bin/wechat_bot_worker not found");
+        }
+        let perms = fs::metadata(&worker_bin)?.permissions();
+        if (perms.mode() & 0o111) == 0 {
+            bail!("worker_missing: bin/wechat_bot_worker is not executable");
         }
 
         let flag_path = self.base_dir.join("bot-worker.enabled");
@@ -473,7 +389,7 @@ impl WorkerClient {
         }
     }
 
-    pub async fn frame(&mut self) -> Result<Value> {
+    pub async fn frame(&mut self) -> Result<crate::core::model::Frame> {
         let res = self.call("capture", json!({})).await?;
         if res.get("window_resized").and_then(|v| v.as_bool()) == Some(true) {
             tracing::info!(
@@ -482,21 +398,23 @@ impl WorkerClient {
                 res.get("scale")
             );
         }
-        Ok(res)
+        serde_json::from_value(res).context("failed to deserialize Frame from operation 'capture'")
     }
 
-    pub async fn scroll(&mut self, direction: &str, pages: u32) -> Result<Value> {
+    pub async fn scroll(&mut self, direction: &str, pages: u32) -> Result<crate::core::model::Frame> {
         if direction != "up" && direction != "down" {
             bail!("invalid scroll request: direction must be up or down");
         }
         if !(1..=40).contains(&pages) {
             bail!("invalid scroll request: pages must be in 1..=40");
         }
-        self.call(
-            "scroll_chat",
-            json!({"direction": direction, "pages": pages}),
-        )
-        .await
+        let res = self
+            .call(
+                "scroll_chat",
+                json!({"direction": direction, "pages": pages}),
+            )
+            .await?;
+        serde_json::from_value(res).context("failed to deserialize Frame from operation 'scroll_chat'")
     }
 
     pub async fn sessions(&mut self, names: &[String], debug: bool) -> Result<Value> {
@@ -1704,7 +1622,8 @@ mod tests {
         let mut client = setup_test_client(&temp, sock, None);
         client.connect(5).await.unwrap();
         let frame = client.frame().await.unwrap();
-        assert_eq!(frame["window_resized"], true);
+        assert_eq!(frame.profile.as_deref(), Some("wechat-4-light"));
+        assert_eq!(frame.extra.get("window_resized"), Some(&json!(true)));
     }
 
     #[tokio::test]
@@ -1784,6 +1703,73 @@ mod tests {
         assert_eq!(
             worker_code("private visual operation failed: invalid(\"layout_missing\")"),
             "layout_missing"
+        );
+    }
+
+    #[test]
+    fn test_sha256_known_vector() {
+        assert_eq!(
+            sha256(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_start_fails_and_does_not_create_nonexistent_base_dir() {
+        let temp = TestDir::new();
+        let nonexistent_base = temp.path().join("does_not_exist");
+        let sock = temp.path().join("worker.sock");
+        let root = temp.path().join("private");
+        fs::create_dir_all(&root).unwrap();
+
+        let mut client = WorkerClient::new(
+            nonexistent_base.clone(),
+            sock,
+            "0".repeat(64),
+            "a".to_string(),
+            root,
+            None,
+            true,
+            false,
+            50 * 1024 * 1024,
+            None,
+        );
+
+        let err = client.start().await.unwrap_err();
+        assert!(err.to_string().contains("unsafe_private_path"));
+        assert!(!nonexistent_base.exists());
+    }
+
+    #[tokio::test]
+    async fn test_frame_deserialization_failure_reports_operation_name() {
+        let temp = TestDir::new();
+        let sock = temp.path().join("worker.sock");
+        let _server = MockWorkerServer::spawn(sock.clone(), |req| {
+            let id = req["id"].as_u64().unwrap_or(1);
+            let op = req["operation"].as_str().unwrap_or("");
+            if op == "capture" {
+                json!({
+                    "id": id,
+                    "protocol_version": 1,
+                    "ok": true,
+                    "result": {
+                        "bubbles": "not_an_array"
+                    }
+                })
+            } else {
+                json!({"id": id, "protocol_version": 1, "ok": true, "result": {}})
+            }
+        })
+        .await;
+
+        let mut client = setup_test_client(&temp, sock, None);
+        client.connect(5).await.unwrap();
+        let err = client.frame().await.unwrap_err();
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("capture"),
+            "Error should report operation name: {}",
+            msg
         );
     }
 }
