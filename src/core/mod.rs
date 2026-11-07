@@ -5,6 +5,7 @@ pub mod control;
 pub mod delivery;
 pub mod external_brain;
 pub mod history;
+pub mod mcp_client;
 pub mod model;
 pub mod policy;
 pub mod replay;
