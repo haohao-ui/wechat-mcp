@@ -357,11 +357,45 @@ pub fn validate_reply(value: &str) -> std::result::Result<String, PolicyError> {
     Ok(value.to_string())
 }
 
+/// Is `observed` (OCR of a bubble) our message `expected`? NFKC, whitespace ignored.
+/// Replies longer than 10 characters tolerate OCR misreads: up to max(1, n/20) edits and length difference
+/// (device 2026-11-08: unrecognised echoes were the right bubble with 1–2 misread characters). Short replies
+/// stay exact because one character can change their meaning.
 pub fn echo_matches(observed: &str, expected: &str) -> bool {
-    let compact = |s: &str| -> String {
+    let compact = |s: &str| -> Vec<char> {
         s.nfkc().filter(|c| !c.is_whitespace()).collect()
     };
-    compact(observed) == compact(expected)
+    let (seen, want) = (compact(observed), compact(expected));
+    if seen == want {
+        return true;
+    }
+    let n = want.len();
+    if n <= 10 {
+        return false;
+    }
+    let allowed = std::cmp::max(1, n / 20);
+    if seen.len().abs_diff(n) > allowed {
+        return false;
+    }
+    edit_distance_within(&seen, &want, allowed)
+}
+
+/// Levenshtein distance between `a` and `b` is at most `limit` (early exit once every cell exceeds it).
+fn edit_distance_within(a: &[char], b: &[char], limit: usize) -> bool {
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut current = vec![i + 1; b.len() + 1];
+        for (j, cb) in b.iter().enumerate() {
+            current[j + 1] = (previous[j + 1] + 1)
+                .min(current[j] + 1)
+                .min(previous[j] + usize::from(ca != cb));
+        }
+        if current.iter().all(|&d| d > limit) {
+            return false;
+        }
+        previous = current;
+    }
+    previous[b.len()] <= limit
 }
 
 /// String escaping of Python `json.dumps(..., ensure_ascii=False)`: quote, backslash, the short forms
@@ -951,6 +985,24 @@ mod tests {
         assert!(echo_matches("全角　空格\r\n测试", "全角 空格 测试"));
         assert!(echo_matches("客服　电话：１２３４５", "客服 电话: 12345"));
         assert!(!echo_matches("收到～\n好的", "收到～\n不好"));
+    }
+
+    #[test]
+    fn test_echo_matches_tolerates_ocr_misreads_on_long_replies() {
+        // Device 2026-11-08: most unrecognised echoes were the right bubble with 1–2 characters misread by OCR.
+        let reply = "您好，我是AI客服助手，请问有什么可以帮您？订单问题请提供订单号，我们会尽快为您处理。";
+        let one_off = reply.replacen("订单号", "订单弓", 1);
+        let two_off = one_off.replacen("尽快", "尽快", 1).replacen("处理", "处埋", 1);
+        assert!(echo_matches(&one_off, reply));
+        assert!(echo_matches(&two_off, reply));
+        // Too many differences, or a clearly different message, is not our echo.
+        // 43 characters allow 2 edits; three differ here.
+        let many = reply.replace("订单", "汀单").replacen("客服", "客眼", 1);
+        assert!(!echo_matches(&many, reply));
+        assert!(!echo_matches("今天天气很好，适合出去走走，记得带伞以防下雨，路上注意安全哦。", reply));
+        // Short replies stay exact: one character changes the meaning.
+        assert!(!echo_matches("好的谢谢", "好吧谢谢"));
+        assert!(!echo_matches("金额100", "金额100.00"));
     }
 
     #[test]
