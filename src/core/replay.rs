@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use anyhow::{bail, Context, Result};
@@ -189,6 +189,23 @@ impl ToolClient for ReplayToolClient {
     }
 }
 
+fn collect_send_journals(dir: &Path, out: &mut Vec<PathBuf>) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                collect_send_journals(&p, out);
+            } else if p.is_file() {
+                if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with("send-") && name.ends_with(".json") {
+                        out.push(p);
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub async fn run_replay_cli(args: &[String]) -> Result<i32> {
     let replay_args = match parse_replay_args(args) {
         Ok(a) => a,
@@ -336,30 +353,42 @@ pub async fn execute_replay(args: &ReplayArgs) -> Result<ReplayReport> {
         send_message_calls: send_message_calls.clone(),
     };
 
-    // 6. 从 --journals 只读提取 reply 记录
+    // 6. 从 --journals 只读提取 reply 记录（支持 Python 与 Rust 格式，支持递归子目录与会话过滤）
+    let mut journal_files = Vec::new();
+    if args.journals.exists() {
+        if args.journals.is_dir() {
+            collect_send_journals(&args.journals, &mut journal_files);
+        } else if args.journals.is_file() {
+            journal_files.push(args.journals.clone());
+        }
+    }
+
     let mut journal_replies: HashMap<String, String> = HashMap::new();
-    if args.journals.exists() && args.journals.is_dir() {
-        for entry in fs::read_dir(&args.journals)?.flatten() {
-            let path = entry.path();
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with("send-") && name.ends_with(".json") {
-                    if let Ok(data) = read_json::<Value>(&path) {
-                        let key = data.get("idempotency_key")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| {
-                                name.strip_prefix("send-")
-                                    .unwrap()
-                                    .strip_suffix(".json")
-                                    .unwrap()
-                                    .to_string()
-                            });
-                        if let Some(reply) = data.get("reply").and_then(|v| v.as_str()) {
-                            if !reply.trim().is_empty() {
-                                journal_replies.insert(key, reply.to_string());
-                            }
-                        }
-                    }
+    for path in &journal_files {
+        if let Ok(data) = read_json::<Value>(path) {
+            if let Some(rec) = data.get("recipient").and_then(|v| v.as_str()) {
+                if rec != args.session {
+                    continue;
+                }
+            }
+            let key = data
+                .get("idempotency_key")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    path.file_name()
+                        .and_then(|n| n.to_str())
+                        .and_then(|n| n.strip_prefix("send-"))
+                        .and_then(|n| n.strip_suffix(".json"))
+                        .unwrap_or("")
+                        .to_string()
+                });
+            if key.is_empty() {
+                continue;
+            }
+            if let Some(reply) = data.get("reply").and_then(|v| v.as_str()) {
+                if !reply.trim().is_empty() {
+                    journal_replies.insert(key, reply.to_string());
                 }
             }
         }
@@ -408,62 +437,72 @@ pub async fn execute_replay(args: &ReplayArgs) -> Result<ReplayReport> {
 
     // 8. 收集 Rust 产生的日志（key -> status）
     let mut rust_logs: BTreeMap<String, String> = BTreeMap::new();
-    if let Ok(entries) = fs::read_dir(&state_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with("send-") && name.ends_with(".json") {
-                    if let Ok(data) = read_json::<Value>(&path) {
-                        let key = data.get("idempotency_key")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| {
-                                name.strip_prefix("send-")
-                                    .unwrap()
-                                    .strip_suffix(".json")
-                                    .unwrap()
-                                    .to_string()
-                            });
-                        let status = data.get("status")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown")
-                            .to_string();
-                        rust_logs.insert(key, status);
-                    }
-                }
+    let mut current_rust_files = Vec::new();
+    collect_send_journals(&state_dir, &mut current_rust_files);
+    for path in current_rust_files {
+        if let Ok(data) = read_json::<Value>(&path) {
+            let key = data
+                .get("idempotency_key")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    path.file_name()
+                        .and_then(|n| n.to_str())
+                        .and_then(|n| n.strip_prefix("send-"))
+                        .and_then(|n| n.strip_suffix(".json"))
+                        .unwrap_or("")
+                        .to_string()
+                });
+            if !key.is_empty() {
+                let status = data
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                rust_logs.insert(key, status);
             }
         }
     }
 
-    // 9. 收集 Python 日志（只取 created_at 在首帧与末帧时间范围内的，key -> status）
+    // 9. 收集历史日志（Python 或 Rust，只取 created_at/attempted_at 在首帧与末帧时间范围内的，key -> status）
     let mut python_logs: BTreeMap<String, String> = BTreeMap::new();
-    if frames_count > 0 && args.journals.exists() && args.journals.is_dir() {
-        for entry in fs::read_dir(&args.journals)?.flatten() {
-            let path = entry.path();
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with("send-") && name.ends_with(".json") {
-                    if let Ok(data) = read_json::<Value>(&path) {
-                        let created_at = data.get("created_at").and_then(|v| {
-                            v.as_f64().or_else(|| v.as_i64().map(|i| i as f64))
-                        });
-                        if let Some(cat) = created_at {
-                            if cat >= first_t - 1e-6 && cat <= last_t + 1e-6 {
-                                let key = data.get("idempotency_key")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string())
-                                    .unwrap_or_else(|| {
-                                        name.strip_prefix("send-")
-                                            .unwrap()
-                                            .strip_suffix(".json")
-                                            .unwrap()
-                                            .to_string()
-                                    });
-                                let status = data.get("status")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("unknown")
-                                    .to_string();
-                                python_logs.insert(key, status);
-                            }
+    if frames_count > 0 {
+        for path in &journal_files {
+            if let Ok(data) = read_json::<Value>(path) {
+                if let Some(rec) = data.get("recipient").and_then(|v| v.as_str()) {
+                    if rec != args.session {
+                        continue;
+                    }
+                }
+                let created_at = data
+                    .get("created_at")
+                    .or_else(|| data.get("attempted_at"))
+                    .and_then(|v| {
+                        v.as_f64()
+                            .or_else(|| v.as_i64().map(|i| i as f64))
+                            .or_else(|| v.as_str().and_then(|s| s.parse::<f64>().ok()))
+                    });
+                if let Some(cat) = created_at {
+                    if cat >= first_t - 1e-6 && cat <= last_t + 1e-6 {
+                        let key = data
+                            .get("idempotency_key")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| {
+                                path.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .and_then(|n| n.strip_prefix("send-"))
+                                    .and_then(|n| n.strip_suffix(".json"))
+                                    .unwrap_or("")
+                                    .to_string()
+                            });
+                        if !key.is_empty() {
+                            let status = data
+                                .get("status")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown")
+                                .to_string();
+                            python_logs.insert(key, status);
                         }
                     }
                 }
@@ -915,5 +954,74 @@ mod tests {
 
         // 验证超出范围的 Python 日志被正确排除
         assert!(!report.python_logs.contains_key("out_of_range_key"));
+    }
+
+    #[tokio::test]
+    async fn test_replay_supports_rust_journals_in_subdirectories() {
+        let td = TestDir::new();
+        let work = td.path().join("work");
+        let cfg = td.path().join("config.json");
+        write_test_config(&cfg, &work.join("state"), "alice");
+
+        // 构造 Rust 核心运行时生成的 sessions/<contact_id>/send-*.json 结构
+        let journals_root = td.path().join("state_journals");
+        let alice_dir = journals_root.join("sessions").join("c_alice_123");
+        let bob_dir = journals_root.join("sessions").join("c_bob_456");
+        fs::create_dir_all(&alice_dir).unwrap();
+        fs::create_dir_all(&bob_dir).unwrap();
+
+        let f0 = test_frame(vec![test_bubble("初始", "inbound_visual")], "alice");
+        let b1 = test_bubble("新消息", "inbound_visual");
+        let f1 = test_frame(vec![test_bubble("初始", "inbound_visual"), b1.clone()], "alice");
+
+        let tmp_dir = td.path().join("tmp_state");
+        let tmp_cfg = td.path().join("tmp_cfg.json");
+        write_test_config(&tmp_cfg, &tmp_dir, "alice");
+        let tmp_svc = BotService::new(BotConfig::load(&tmp_cfg).unwrap(), None, None, None, None, None).unwrap();
+        let k1 = tmp_svc.batch_key(&f0, &[b1.clone()]);
+
+        // 写入由 Rust 核心生成的 journal（含 recipient: alice，嵌套在 sessions/c_alice_123/）
+        let k1_file = alice_dir.join(format!("send-{k1}.json"));
+        fs::write(&k1_file, json!({
+            "account_id": "test_account",
+            "recipient": "alice",
+            "idempotency_key": k1,
+            "created_at": 1001.0,
+            "status": "triggered",
+            "reply": "Rust 核心在线回复"
+        }).to_string()).unwrap();
+
+        // 写入另一个会话 bob 的 journal，验证不被混淆
+        let bob_file = bob_dir.join("send-bobkey.json");
+        fs::write(&bob_file, json!({
+            "account_id": "test_account",
+            "recipient": "bob",
+            "idempotency_key": "bobkey",
+            "created_at": 1001.0,
+            "status": "triggered",
+            "reply": "Bob 回复"
+        }).to_string()).unwrap();
+
+        let frames_path = td.path().join("frames.jsonl");
+        let mut file = File::create(&frames_path).unwrap();
+        writeln!(file, "{}", json!({"t": 1000.0, "op": "capture", "recipient": "alice", "frame": f0})).unwrap();
+        writeln!(file, "{}", json!({"t": 1001.0, "op": "scroll_chat", "recipient": "alice", "frame": f1})).unwrap();
+
+        let args = ReplayArgs {
+            config: cfg,
+            session: "alice".to_string(),
+            frames: vec![frames_path],
+            journals: journals_root,
+            work,
+        };
+
+        let report = execute_replay(&args).await.unwrap();
+        assert_eq!(report.frames, 2);
+        assert_eq!(report.matched, vec![k1.clone()]);
+        assert_eq!(report.rust_only, Vec::<String>::new());
+        assert_eq!(report.python_only, Vec::<String>::new());
+        assert!(report.missing_reply.is_empty());
+        assert!(!report.python_logs.contains_key("bobkey"), "属于其他会话的 journal 不被混淆");
+        assert_eq!(report.python_logs.get(&k1).map(|s| s.as_str()), Some("triggered"));
     }
 }
