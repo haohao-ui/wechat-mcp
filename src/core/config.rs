@@ -43,6 +43,53 @@ pub struct ModelConfig {
     pub json_output: Option<bool>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BrainMode {
+    Builtin,
+    External,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TimeoutAction {
+    Skip,
+    Builtin,
+    Handoff,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExternalBrainConfig {
+    pub timeout_seconds: u64,
+    pub timeout_action: TimeoutAction,
+    pub queue_minutes: u64,
+}
+
+impl Default for ExternalBrainConfig {
+    fn default() -> Self {
+        Self {
+            timeout_seconds: 120,
+            timeout_action: TimeoutAction::Skip,
+            queue_minutes: 30,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrainConfig {
+    pub mode: BrainMode,
+    pub external: ExternalBrainConfig,
+}
+
+impl Default for BrainConfig {
+    fn default() -> Self {
+        Self {
+            mode: BrainMode::Builtin,
+            external: ExternalBrainConfig::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BotConfig {
     pub schema_version: u32,
@@ -65,6 +112,7 @@ pub struct BotConfig {
     pub capture_backend: String,
     pub history_http: HistoryHttpConfig,
     pub model_config: ModelConfig,
+    pub brain: BrainConfig,
 }
 
 const INVISIBLE_CHARS: &[char] = &[
@@ -400,6 +448,82 @@ fn validate_model_config(config_val: &Value) -> Result<ModelConfig> {
     })
 }
 
+fn validate_brain_config(val: Option<&Value>) -> Result<BrainConfig> {
+    let Some(val) = val else {
+        return Ok(BrainConfig::default());
+    };
+    let map = val.as_object().context("brain must be an object")?;
+    for k in map.keys() {
+        if k != "mode" && k != "external" {
+            bail!("unsupported brain config field: {}", k);
+        }
+    }
+    let mode = match map.get("mode") {
+        Some(m) => {
+            let s = m.as_str().context("brain mode must be string")?;
+            match s {
+                "builtin" => BrainMode::Builtin,
+                "external" => BrainMode::External,
+                _ => bail!("invalid brain mode: {}", s),
+            }
+        }
+        None => BrainMode::Builtin,
+    };
+
+    let external = match map.get("external") {
+        Some(ext_val) => {
+            let ext_map = ext_val
+                .as_object()
+                .context("external brain config must be an object")?;
+            for k in ext_map.keys() {
+                if !["timeout_seconds", "timeout_action", "queue_minutes"].contains(&k.as_str()) {
+                    bail!("unsupported external brain config field: {}", k);
+                }
+            }
+            let timeout_seconds = match ext_map.get("timeout_seconds") {
+                Some(v) => {
+                    let n = v.as_u64().context("invalid timeout_seconds")?;
+                    if !(1..=3600).contains(&n) {
+                        bail!("timeout_seconds must be 1..3600");
+                    }
+                    n
+                }
+                None => 120,
+            };
+            let timeout_action = match ext_map.get("timeout_action") {
+                Some(v) => {
+                    let s = v.as_str().context("invalid timeout_action")?;
+                    match s {
+                        "skip" => TimeoutAction::Skip,
+                        "builtin" => TimeoutAction::Builtin,
+                        "handoff" => TimeoutAction::Handoff,
+                        _ => bail!("invalid timeout_action: {}", s),
+                    }
+                }
+                None => TimeoutAction::Skip,
+            };
+            let queue_minutes = match ext_map.get("queue_minutes") {
+                Some(v) => {
+                    let n = v.as_u64().context("invalid queue_minutes")?;
+                    if !(1..=1440).contains(&n) {
+                        bail!("queue_minutes must be 1..1440");
+                    }
+                    n
+                }
+                None => 30,
+            };
+            ExternalBrainConfig {
+                timeout_seconds,
+                timeout_action,
+                queue_minutes,
+            }
+        }
+        None => ExternalBrainConfig::default(),
+    };
+
+    Ok(BrainConfig { mode, external })
+}
+
 impl BotConfig {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -430,6 +554,7 @@ impl BotConfig {
             "turn_max_seconds",
             "images_per_model_call",
             "max_attachment_mb",
+            "brain",
         ];
 
         for k in map.keys() {
@@ -557,6 +682,8 @@ impl BotConfig {
         });
         let model_config = validate_model_config(&model_config_val)?;
 
+        let brain = validate_brain_config(map.get("brain"))?;
+
         let allowlist: Vec<AllowlistEntry> =
             serde_json::from_value(map["allowlist"].clone()).context("invalid allowlist")?;
 
@@ -586,6 +713,7 @@ impl BotConfig {
             capture_backend,
             history_http,
             model_config,
+            brain,
         })
     }
 }
@@ -856,5 +984,101 @@ mod tests {
         assert_eq!(name_key("小\u{200B}美\u{FE0F}"), "小美");
         assert_eq!(name_key("🍓🍓"), "🍓🍓");
         assert_eq!(clean_title(" \u{200B}🍓小美 "), "🍓小美");
+    }
+
+    #[test]
+    fn test_brain_config_defaults_and_validation() {
+        let td = temp_dir();
+        let path = td.join("config.json");
+        let base = base_config(&td);
+
+        // 1. 默认缺省 brain -> builtin
+        fs::write(&path, serde_json::to_string(&base).unwrap()).unwrap();
+        let loaded = BotConfig::load(&path).unwrap();
+        assert_eq!(loaded.brain.mode, BrainMode::Builtin);
+        assert_eq!(loaded.brain.external.timeout_seconds, 120);
+        assert_eq!(loaded.brain.external.timeout_action, TimeoutAction::Skip);
+        assert_eq!(loaded.brain.external.queue_minutes, 30);
+
+        // 2. 正常配置 external
+        let mut ext_cfg = base.clone();
+        ext_cfg["brain"] = json!({
+            "mode": "external",
+            "external": {
+                "timeout_seconds": 60,
+                "timeout_action": "handoff",
+                "queue_minutes": 15
+            }
+        });
+        fs::write(&path, serde_json::to_string(&ext_cfg).unwrap()).unwrap();
+        let loaded = BotConfig::load(&path).unwrap();
+        assert_eq!(loaded.brain.mode, BrainMode::External);
+        assert_eq!(loaded.brain.external.timeout_seconds, 60);
+        assert_eq!(loaded.brain.external.timeout_action, TimeoutAction::Handoff);
+        assert_eq!(loaded.brain.external.queue_minutes, 15);
+
+        // 3. timeout_action: builtin
+        let mut builtin_action = base.clone();
+        builtin_action["brain"] = json!({
+            "mode": "external",
+            "external": {
+                "timeout_action": "builtin"
+            }
+        });
+        fs::write(&path, serde_json::to_string(&builtin_action).unwrap()).unwrap();
+        let loaded = BotConfig::load(&path).unwrap();
+        assert_eq!(loaded.brain.external.timeout_action, TimeoutAction::Builtin);
+
+        // 4. 边界值测试
+        for valid_sec in [1, 3600] {
+            let mut c = base.clone();
+            c["brain"] = json!({"mode": "external", "external": {"timeout_seconds": valid_sec}});
+            fs::write(&path, serde_json::to_string(&c).unwrap()).unwrap();
+            assert!(BotConfig::load(&path).is_ok());
+        }
+        for invalid_sec in [0, 3601, -1] {
+            let mut c = base.clone();
+            c["brain"] = json!({"mode": "external", "external": {"timeout_seconds": invalid_sec}});
+            fs::write(&path, serde_json::to_string(&c).unwrap()).unwrap();
+            assert!(BotConfig::load(&path).is_err());
+        }
+
+        for valid_qm in [1, 1440] {
+            let mut c = base.clone();
+            c["brain"] = json!({"mode": "external", "external": {"queue_minutes": valid_qm}});
+            fs::write(&path, serde_json::to_string(&c).unwrap()).unwrap();
+            assert!(BotConfig::load(&path).is_ok());
+        }
+        for invalid_qm in [0, 1441] {
+            let mut c = base.clone();
+            c["brain"] = json!({"mode": "external", "external": {"queue_minutes": invalid_qm}});
+            fs::write(&path, serde_json::to_string(&c).unwrap()).unwrap();
+            assert!(BotConfig::load(&path).is_err());
+        }
+
+        // 5. 拒绝非法 action 和非法 mode
+        for bad_action in ["unknown", "", "none"] {
+            let mut c = base.clone();
+            c["brain"] = json!({"mode": "external", "external": {"timeout_action": bad_action}});
+            fs::write(&path, serde_json::to_string(&c).unwrap()).unwrap();
+            assert!(BotConfig::load(&path).is_err());
+        }
+        let mut bad_mode = base.clone();
+        bad_mode["brain"] = json!({"mode": "other"});
+        fs::write(&path, serde_json::to_string(&bad_mode).unwrap()).unwrap();
+        assert!(BotConfig::load(&path).is_err());
+
+        // 6. 拒绝额外未知字段
+        let mut unknown_brain_field = base.clone();
+        unknown_brain_field["brain"] = json!({"mode": "builtin", "extra": 123});
+        fs::write(&path, serde_json::to_string(&unknown_brain_field).unwrap()).unwrap();
+        assert!(BotConfig::load(&path).is_err());
+
+        let mut unknown_ext_field = base.clone();
+        unknown_ext_field["brain"] = json!({"mode": "external", "external": {"unknown_field": true}});
+        fs::write(&path, serde_json::to_string(&unknown_ext_field).unwrap()).unwrap();
+        assert!(BotConfig::load(&path).is_err());
+
+        let _ = fs::remove_dir_all(td);
     }
 }
