@@ -13,6 +13,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
+use crate::core::scheduler::{CoordinatorCapture, SessionRow};
+
 #[repr(C)]
 struct Tm {
     tm_sec: i32,
@@ -766,6 +768,67 @@ impl WorkerClient {
             self.active = false;
         }
         Ok(())
+    }
+}
+
+impl CoordinatorCapture for WorkerClient {
+    fn start<'a>(&'a mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move { self.start().await })
+    }
+
+    fn close<'a>(&'a mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move { self.close().await })
+    }
+
+    fn frame<'a>(&'a mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<crate::core::model::Frame>> + Send + 'a>> {
+        Box::pin(async move { self.frame().await })
+    }
+
+    fn scroll<'a>(&'a mut self, direction: &'a str, amount: u32) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<crate::core::model::Frame>> + Send + 'a>> {
+        Box::pin(async move { self.scroll(direction, amount).await })
+    }
+
+    fn call<'a>(&'a mut self, op: &'a str, params: Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
+        Box::pin(async move { self.call(op, params).await })
+    }
+
+    fn retarget<'a>(&'a mut self, recipient: &'a str, directory: &'a Path, names: &'a [String], group: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        let names_vec = names.to_vec();
+        Box::pin(async move {
+            self.recipient = recipient.to_string();
+            self.names = names_vec.clone();
+            self.group = group;
+            self.directory = directory.to_path_buf();
+            if !self.is_connected() {
+                self.start().await?;
+                return Ok(());
+            }
+            self.retarget(recipient, directory, Some(names_vec), group).await
+        })
+    }
+
+    fn sessions<'a>(&'a mut self, names: &'a [String]) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<SessionRow>>> + Send + 'a>> {
+        Box::pin(async move {
+            let res = self.sessions(names, false).await?;
+            let rows_val = res.get("rows").cloned().unwrap_or(res);
+            serde_json::from_value(rows_val).context("failed to deserialize SessionRow array from sessions")
+        })
+    }
+
+    fn download<'a>(&'a mut self, media_id: &'a str, kind: &'a str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<PathBuf>> + Send + 'a>> {
+        Box::pin(async move { self.download(media_id, kind).await })
+    }
+
+    fn last_switch(&self) -> Option<Value> {
+        self.last_switch.clone()
+    }
+
+    fn ocr_status(&self) -> Option<OcrStatus> {
+        self.ocr_status.clone()
+    }
+
+    fn is_connected(&self) -> bool {
+        self.writer.is_some()
     }
 }
 
