@@ -196,6 +196,22 @@ class HostCoreTests(unittest.TestCase):
         })
         self.assertEqual(res_config_err['decision'], 'keep')
 
+    def test_decision_stopping_keeps_idle(self):
+        """进程处于 stopping 状态时，不重复停止也不启动新进程，输出 keep。"""
+        res_stopping_enabled = self.run_cmd('core_decision', {
+            'core_enabled': True,
+            'python_loaded': False,
+            'process_state': 'stopping'
+        })
+        self.assertEqual(res_stopping_enabled['decision'], 'keep')
+
+        res_stopping_disabled = self.run_cmd('core_decision', {
+            'core_enabled': False,
+            'python_loaded': False,
+            'process_state': 'stopping'
+        })
+        self.assertEqual(res_stopping_disabled['decision'], 'keep')
+
     # ---------------- Panel Status Display Tests ----------------
 
     def test_panel_bot_status_rust_core_running(self):
@@ -266,6 +282,16 @@ class HostCoreTests(unittest.TestCase):
         bot_item = next(i for i in items if i['key'] == 'bot')
         self.assertEqual(bot_item['level'], 'red')
         self.assertIn('配置错误', bot_item['reason'])
+
+    def test_panel_bot_status_stopping(self):
+        """核心正在停止时：黄色且显示正在停止 Rust 核心（等待当前一轮完成）。"""
+        inp = self._default_status_input()
+        inp['bot']['core_enabled'] = True
+        inp['bot']['core_status'] = 'stopping'
+        items = self.run_cmd('status', inp)
+        bot_item = next(i for i in items if i['key'] == 'bot')
+        self.assertEqual(bot_item['level'], 'yellow')
+        self.assertIn('正在停止 Rust 核心（等待当前一轮完成）', bot_item['reason'])
 
     # ---------------- Subprocess Lifecycle & Env Tests ----------------
 
@@ -380,6 +406,33 @@ class HostCoreTests(unittest.TestCase):
         })
         self.assertTrue(res['ok'])
         self.assertEqual(res['stopped_by'], 'sigkill')
+
+    def test_supervisor_async_stopping_non_blocking_and_recovers(self):
+        """忽略 SIGTERM 的假脚本：checkAndReconcile 在 1 秒内返回，期间状态为 stopping 且不重复停止，最终被 SIGKILL 终止并恢复到可启动。"""
+        log_path = Path(self.tmp.name) / "core_async_stop.log"
+        ready_path = Path(self.tmp.name) / "ready_async_stop.txt"
+        fake_script = self._create_fake_script(f"""
+            trap '' TERM
+            touch "{ready_path}"
+            while true; do
+                sleep 0.05
+            done
+        """)
+
+        res = self.run_cmd('core_supervisor_run', {
+            'action': 'test_async_reconcile_stopping',
+            'binary_path': str(fake_script),
+            'log_path': str(log_path),
+            'ready_file': str(ready_path),
+            'grace_seconds': 0.3
+        })
+        self.assertTrue(res['ok'])
+        self.assertLess(res['elapsed_seconds'], 1.0, f"checkAndReconcile must return in < 1s, took {res['elapsed_seconds']}s")
+        self.assertEqual(res['initial_status'], 'running')
+        self.assertEqual(res['stopping_status'], 'stopping')
+        self.assertEqual(res['second_reconcile_decision'], 'keep')
+        self.assertEqual(res['final_status'], 'not_running')
+        self.assertEqual(res['can_restart_decision'], 'start')
 
 
 if __name__ == '__main__':
