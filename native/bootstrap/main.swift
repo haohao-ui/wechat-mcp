@@ -32,6 +32,7 @@ if CommandLine.arguments.dropFirst() == ["--transport-self-test"] {
 final class HostAppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
     private let worker = SocketWorker()
+    private let coreSupervisor = CoreSupervisor()
     private var panelController: StatusPanelController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -44,7 +45,7 @@ final class HostAppDelegate: NSObject, NSApplicationDelegate {
         window.title = "微信客服助手"
         window.isReleasedWhenClosed = false
 
-        let controller = StatusPanelController(worker: worker)
+        let controller = StatusPanelController(worker: worker, coreSupervisor: coreSupervisor)
         self.panelController = controller
         window.contentViewController = controller
 
@@ -74,7 +75,10 @@ final class HostAppDelegate: NSObject, NSApplicationDelegate {
         if !flag { window?.makeKeyAndOrderFront(nil) }
         return true
     }
-    func applicationWillTerminate(_ notification: Notification) { worker.stop() }
+    func applicationWillTerminate(_ notification: Notification) {
+        worker.stop()
+        coreSupervisor.stopProcess()
+    }
 }
 
 let delegate = HostAppDelegate()
