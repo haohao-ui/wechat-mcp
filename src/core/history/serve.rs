@@ -60,19 +60,9 @@ pub fn ensure_token(history_dir: &Path) -> io::Result<String> {
     let path = history_dir.join("http-token");
     if !path.exists() {
         // Generate 32 bytes of secure random data
+        // The token guards the history API: no silent fallback if the system CSPRNG is unavailable.
         let mut random_bytes = [0u8; 32];
-        let mut read_ok = false;
-        if let Ok(mut f) = fs::File::open("/dev/urandom") {
-            if f.read_exact(&mut random_bytes).is_ok() {
-                read_ok = true;
-            }
-        }
-        if !read_ok {
-            let u1 = uuid::Uuid::new_v4();
-            let u2 = uuid::Uuid::new_v4();
-            random_bytes[..16].copy_from_slice(u1.as_bytes());
-            random_bytes[16..].copy_from_slice(u2.as_bytes());
-        }
+        fs::File::open("/dev/urandom")?.read_exact(&mut random_bytes)?;
 
         // URL-safe base64 encoding without padding (matches Python secrets.token_urlsafe(32))
         const URL_SAFE_CHARS: &[u8] =
