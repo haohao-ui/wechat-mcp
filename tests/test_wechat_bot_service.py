@@ -971,6 +971,18 @@ class ConfigFieldTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     load_config(path)
 
+    def test_load_config_accepts_brain(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp)/'config.json'
+            base = {'schema_version': 1, 'host': 'fixture', 'account_id': 'fixture',
+                    'allowlist': [{'recipient': '示例联系人甲', 'kind': 'private'}], 'state_dir': str(Path(temp)/'s'),
+                    'brain': {'mode': 'external', 'external': {'timeout_seconds': 120, 'timeout_action': 'skip'}}}
+            path.write_text(json.dumps(base))
+            loaded = load_config(path)
+            self.assertIn('brain', loaded)
+            self.assertEqual(loaded['brain']['mode'], 'external')
+
+
 
 class EntryPointTests(unittest.TestCase):
     def test_main_builds_coordinator_inside_running_loop(self):
