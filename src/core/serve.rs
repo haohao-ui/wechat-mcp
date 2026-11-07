@@ -9,8 +9,10 @@ use serde_json::json;
 
 use crate::core::config::{BotConfig, BrainMode};
 use crate::core::external_brain::{bind_core_socket, start_socket_server, ExternalBrain};
+use crate::core::mcp_client::McpSocketClient;
 use crate::core::scheduler::BotCoordinator;
 use crate::core::state::{read_json, write_private};
+use crate::core::worker_client::WorkerClient;
 
 static STOP_SIGNAL: AtomicBool = AtomicBool::new(false);
 
@@ -105,6 +107,35 @@ pub async fn run_serve_core(
     // 4. 运行调度器
     let mut coordinator = BotCoordinator::new(config_path)?;
     coordinator.reconcile_journals()?;
+
+    let home = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let base_dir = home.join(".wechat-rpa");
+    let worker_sock = base_dir.join("worker.sock");
+    let bot_worker_sock = base_dir.join("bot-worker.sock");
+
+    let mcp_client = std::sync::Arc::new(McpSocketClient::new(
+        worker_sock,
+        coordinator.config.account_id.clone(),
+    ));
+
+    let max_bytes = (coordinator.config.max_attachment_mb * 1024 * 1024) as usize;
+    let worker_client = WorkerClient::new(
+        base_dir.clone(),
+        bot_worker_sock,
+        coordinator.ownership.clone(),
+        String::new(),
+        base_dir.clone(),
+        None,
+        coordinator.config.manage_window,
+        false,
+        max_bytes,
+        Some(mcp_client.clone()),
+    );
+
+    coordinator.tool_client = Some(mcp_client);
+    coordinator.capture = Some(Box::new(worker_client));
 
     if config.brain.mode == BrainMode::External {
         let brain_fn = external_brain.brain_fn();
