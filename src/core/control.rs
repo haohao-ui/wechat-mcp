@@ -9,8 +9,422 @@ use serde_json::{json, Value};
 use crate::core::config::BotConfig;
 use crate::core::state::write_private;
 
+pub const BOT_LABEL: &str = "local.wechat-rpa.bot";
+pub const HISTORY_LABEL: &str = "local.wechat-rpa.history";
+pub const REMOTE_LAYOUT_DIR: &str = ".wechat-rpa/layout";
+pub const CALIBRATE_PROBE: &str = "calibrate-probe";
+
+#[repr(C)]
+struct Tm {
+    tm_sec: i32,
+    tm_min: i32,
+    tm_hour: i32,
+    tm_mday: i32,
+    tm_mon: i32,
+    tm_year: i32,
+    tm_wday: i32,
+    tm_yday: i32,
+    tm_isdst: i32,
+    tm_gmtoff: i64,
+    tm_zone: *const std::ffi::c_char,
+}
+
 unsafe extern "C" {
     fn getuid() -> u32;
+    fn localtime_r(timep: *const i64, result: *mut Tm) -> *mut Tm;
+}
+
+pub fn format_timestamp_compact(time: SystemTime) -> String {
+    let secs = time.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+    unsafe {
+        let mut tm: Tm = std::mem::zeroed();
+        localtime_r(&secs, &mut tm);
+        format!(
+            "{:04}{:02}{:02}{:02}{:02}{:02}",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec
+        )
+    }
+}
+
+pub fn shlex_quote(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '-')) {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+pub fn resolve_local_path(p: &str) -> PathBuf {
+    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"));
+    if p == "~" {
+        home
+    } else if let Some(stripped) = p.strip_prefix("~/") {
+        home.join(stripped)
+    } else if p.starts_with('/') {
+        PathBuf::from(p)
+    } else {
+        home.join(p)
+    }
+}
+
+pub fn validate_version_string(version: &str) -> bool {
+    let s = version.trim();
+    if s.is_empty() {
+        return false;
+    }
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() < 2 || parts.len() > 4 {
+        return false;
+    }
+    for part in parts {
+        if part.is_empty() || !part.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn validate_layout_candidate(candidate: &Value) -> Result<()> {
+    let obj = candidate.as_object().context("layout_unreadable")?;
+    if obj.get("schema").and_then(Value::as_i64) != Some(1) {
+        anyhow::bail!("layout_schema_unsupported");
+    }
+    let window = obj.get("window").and_then(Value::as_object).context("layout_invalid_value:window")?;
+    let win_w = window.get("width").and_then(Value::as_f64).context("layout_invalid_value:window")?;
+    let win_h = window.get("height").and_then(Value::as_f64).context("layout_invalid_value:window")?;
+
+    let regions = obj.get("regions").and_then(Value::as_object).context("layout_unreadable")?;
+    let required_regions = ["session_list", "title", "chat", "input"];
+    for req in required_regions {
+        if !regions.contains_key(req) {
+            anyhow::bail!("layout_missing_region:{}", req);
+        }
+    }
+
+    for (name, rect_val) in regions {
+        let rect = rect_val.as_object().with_context(|| format!("layout_invalid_value:{}", name))?;
+        let x = rect.get("x").and_then(Value::as_f64).unwrap_or(0.0);
+        let y = rect.get("y").and_then(Value::as_f64).unwrap_or(0.0);
+        let w = match rect.get("w").and_then(Value::as_f64) {
+            Some(w) => w,
+            None => anyhow::bail!("layout_invalid_value:{}", name),
+        };
+        let h = match rect.get("h").and_then(Value::as_f64) {
+            Some(h) => h,
+            None => anyhow::bail!("layout_invalid_value:{}", name),
+        };
+        if w <= 0.0 {
+            anyhow::bail!("layout_invalid_value:{}.w", name);
+        }
+        if h <= 0.0 {
+            anyhow::bail!("layout_invalid_value:{}.h", name);
+        }
+        if x < 0.0 || y < 0.0 || (x + w) > win_w || (y + h) > win_h {
+            anyhow::bail!("layout_region_out_of_window:{}", name);
+        }
+    }
+
+    let scroll = obj.get("scroll").and_then(Value::as_object).context("layout_invalid_value:scroll")?;
+    let ppt = scroll.get("points_per_tick").and_then(Value::as_f64).unwrap_or(0.0);
+    if ppt <= 0.0 {
+        anyhow::bail!("layout_invalid_value:scroll.points_per_tick");
+    }
+    let lpt = scroll.get("lines_per_tick").and_then(Value::as_i64).unwrap_or(0);
+    if lpt <= 0 {
+        anyhow::bail!("layout_invalid_value:scroll.lines_per_tick");
+    }
+
+    Ok(())
+}
+
+pub fn derive_candidate_fields(base_layout: &Value, measured: &Value) -> (Vec<Value>, Vec<String>, Value) {
+    let mut candidate = base_layout.clone();
+    let window_h = candidate
+        .get("window")
+        .and_then(|w| w.get("height"))
+        .and_then(Value::as_f64)
+        .unwrap_or(640.0);
+
+    let mut diffs = Vec::new();
+    let mut missing = Vec::new();
+
+    if let Some(anchors) = candidate.get("anchors").and_then(Value::as_array) {
+        for a in anchors {
+            let kind = a.get("kind").and_then(Value::as_str).unwrap_or("");
+            if kind.ends_with("_line") {
+                if let Some(name) = a.get("name").and_then(Value::as_str) {
+                    let has_measured = measured
+                        .as_object()
+                        .and_then(|m| m.get(name))
+                        .map(|v| !v.is_null())
+                        .unwrap_or(false);
+                    if !has_measured {
+                        missing.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(divider_val) = measured.as_object().and_then(|m| m.get("input_divider")).filter(|v| !v.is_null()) {
+        if let Some(divider) = divider_val.as_f64() {
+            if let Some(regions) = candidate.get_mut("regions").and_then(Value::as_object_mut) {
+                if let Some(chat) = regions.get_mut("chat").and_then(Value::as_object_mut) {
+                    let chat_y = chat.get("y").and_then(Value::as_f64).unwrap_or(0.0);
+                    let new_chat_h = divider - chat_y;
+                    let old_chat_h = chat.get("h").cloned().unwrap_or(Value::Null);
+                    if chat.get("h").and_then(Value::as_f64) != Some(new_chat_h) {
+                        diffs.push(json!({"field": "chat.h", "old": old_chat_h, "new": new_chat_h}));
+                        chat.insert("h".to_string(), json!(new_chat_h));
+                    }
+                }
+                if let Some(chat_content) = regions.get_mut("chat_content").and_then(Value::as_object_mut) {
+                    let cc_y = chat_content.get("y").and_then(Value::as_f64).unwrap_or(0.0);
+                    let new_cc_h = divider - cc_y;
+                    let old_cc_h = chat_content.get("h").cloned().unwrap_or(Value::Null);
+                    if chat_content.get("h").and_then(Value::as_f64) != Some(new_cc_h) {
+                        diffs.push(json!({"field": "chat_content.h", "old": old_cc_h, "new": new_cc_h}));
+                        chat_content.insert("h".to_string(), json!(new_cc_h));
+                    }
+                }
+                if let Some(inp) = regions.get_mut("input").and_then(Value::as_object_mut) {
+                    let old_inp_y = inp.get("y").cloned().unwrap_or(Value::Null);
+                    if inp.get("y").and_then(Value::as_f64) != Some(divider) {
+                        diffs.push(json!({"field": "input.y", "old": old_inp_y, "new": divider}));
+                        inp.insert("y".to_string(), json!(divider));
+                    }
+                    let new_inp_h = window_h - divider;
+                    let old_inp_h = inp.get("h").cloned().unwrap_or(Value::Null);
+                    if inp.get("h").and_then(Value::as_f64) != Some(new_inp_h) {
+                        diffs.push(json!({"field": "input.h", "old": old_inp_h, "new": new_inp_h}));
+                        inp.insert("h".to_string(), json!(new_inp_h));
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(border_val) = measured.as_object().and_then(|m| m.get("list_border")).filter(|v| !v.is_null()) {
+        if let Some(border) = border_val.as_f64() {
+            if let Some(regions) = candidate.get_mut("regions").and_then(Value::as_object_mut) {
+                if let Some(s_list) = regions.get_mut("session_list").and_then(Value::as_object_mut) {
+                    let s_x = s_list.get("x").and_then(Value::as_f64).unwrap_or(0.0);
+                    let new_w = border - s_x;
+                    let old_w = s_list.get("w").cloned().unwrap_or(Value::Null);
+                    if s_list.get("w").and_then(Value::as_f64) != Some(new_w) {
+                        diffs.push(json!({"field": "session_list.w", "old": old_w, "new": new_w}));
+                        s_list.insert("w".to_string(), json!(new_w));
+                    }
+                }
+            }
+        }
+    }
+
+    (diffs, missing, candidate)
+}
+
+pub fn require_host(config: Option<&Value>, host: Option<&str>) -> Result<String> {
+    if let Some(h) = host {
+        if !h.trim().is_empty() {
+            return Ok(h.trim().to_string());
+        }
+    }
+    if let Some(cfg) = config {
+        if let Some(h) = cfg.get("host").and_then(Value::as_str) {
+            if !h.trim().is_empty() {
+                return Ok(h.trim().to_string());
+            }
+        }
+    }
+    anyhow::bail!("config has no WeChat host; calibrate never guesses one");
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandOutput {
+    pub returncode: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+pub type RemoteRunner<'a> = &'a mut dyn FnMut(&str, &str, Option<&[u8]>) -> Result<CommandOutput>;
+
+pub fn run_calibrate(
+    config: Option<&Value>,
+    worker_result: Option<&Value>,
+    host: Option<&str>,
+    layout_dir: Option<&str>,
+    mut remote_runner: Option<RemoteRunner>,
+) -> Result<(Vec<Value>, Vec<String>, Value)> {
+    let host_str = require_host(config, host)?;
+    let layout_dir_str = layout_dir.unwrap_or(REMOTE_LAYOUT_DIR);
+
+    let Some(res) = worker_result else {
+        anyhow::bail!("layout_missing");
+    };
+    if !res.is_object() {
+        anyhow::bail!("layout_missing");
+    }
+
+    let version = res.get("wechat_version").and_then(Value::as_str).unwrap_or("");
+    if !validate_version_string(version) {
+        anyhow::bail!("layout_missing");
+    }
+
+    let base_layout = res.get("layout").and_then(Value::as_object).context("layout_missing")?;
+
+    let measured = res.get("measured").cloned().unwrap_or_else(|| json!({}));
+    let (diffs, missing, mut candidate) = derive_candidate_fields(&Value::Object(base_layout.clone()), &measured);
+    candidate["wechat_version"] = json!(version);
+
+    let cand_json_path = format!("{}/candidate-wechat-{}.json", layout_dir_str, version);
+    let cand_png_path = format!("{}/candidate-wechat-{}.png", layout_dir_str, version);
+
+    let mut json_bytes = serde_json::to_vec_pretty(&candidate)?;
+    json_bytes.push(b'\n');
+
+    let cmd_json = format!(
+        "umask 077 && mkdir -p {} && cat > {} && chmod 600 {}",
+        shlex_quote(layout_dir_str),
+        shlex_quote(&cand_json_path),
+        shlex_quote(&cand_json_path)
+    );
+
+    let has_png = res.get("annotated_png_base64").and_then(Value::as_str);
+    let png_bytes = if let Some(b64) = has_png {
+        crate::wechat::files::decode_base64(b64).ok()
+    } else {
+        None
+    };
+
+    if let Some(ref mut runner) = remote_runner {
+        let out = runner(&host_str, &cmd_json, Some(&json_bytes))?;
+        if out.returncode != 0 {
+            let err_msg = String::from_utf8_lossy(&out.stderr);
+            anyhow::bail!("remote write failed (candidate json): {}", err_msg);
+        }
+        if let Some(png) = &png_bytes {
+            let cmd_png = format!(
+                "umask 077 && mkdir -p {} && cat > {} && chmod 600 {}",
+                shlex_quote(layout_dir_str),
+                shlex_quote(&cand_png_path),
+                shlex_quote(&cand_png_path)
+            );
+            let out_png = runner(&host_str, &cmd_png, Some(png))?;
+            if out_png.returncode != 0 {
+                let err_msg = String::from_utf8_lossy(&out_png.stderr);
+                anyhow::bail!("remote write failed (candidate png): {}", err_msg);
+            }
+        }
+    } else {
+        let resolved_dir = resolve_local_path(layout_dir_str);
+        fs::create_dir_all(&resolved_dir)?;
+        let _ = fs::set_permissions(&resolved_dir, fs::Permissions::from_mode(0o700));
+
+        let resolved_json = resolved_dir.join(format!("candidate-wechat-{}.json", version));
+        fs::write(&resolved_json, &json_bytes)?;
+        let _ = fs::set_permissions(&resolved_json, fs::Permissions::from_mode(0o600));
+
+        if let Some(png) = &png_bytes {
+            let resolved_png = resolved_dir.join(format!("candidate-wechat-{}.png", version));
+            fs::write(&resolved_png, png)?;
+            let _ = fs::set_permissions(&resolved_png, fs::Permissions::from_mode(0o600));
+        }
+    }
+
+    Ok((diffs, missing, candidate))
+}
+
+pub fn calibrate_accept(
+    config: Option<&Value>,
+    host: Option<&str>,
+    layout_dir: Option<&str>,
+    worker_result: Option<&Value>,
+    mut remote_runner: Option<RemoteRunner>,
+) -> Result<Value> {
+    let host_str = require_host(config, host)?;
+    let layout_dir_str = layout_dir.unwrap_or(REMOTE_LAYOUT_DIR);
+
+    let Some(res) = worker_result else {
+        anyhow::bail!("layout_missing");
+    };
+    let running_version = res.get("wechat_version").and_then(Value::as_str).unwrap_or("");
+    if !validate_version_string(running_version) {
+        anyhow::bail!("layout_missing");
+    }
+
+    let cand_path_str = format!("{}/candidate-wechat-{}.json", layout_dir_str, running_version);
+
+    let cand_bytes = if let Some(ref mut runner) = remote_runner {
+        let cat_cmd = format!("cat {}", shlex_quote(&cand_path_str));
+        let out = runner(&host_str, &cat_cmd, None)?;
+        if out.returncode != 0 {
+            anyhow::bail!("candidate_not_found: {}", cand_path_str);
+        }
+        out.stdout
+    } else {
+        let resolved_cand = resolve_local_path(&cand_path_str);
+        if !resolved_cand.exists() {
+            anyhow::bail!("candidate_not_found: {}", cand_path_str);
+        }
+        fs::read(&resolved_cand)?
+    };
+
+    if cand_bytes.len() > 256 * 1024 {
+        anyhow::bail!("layout_too_large");
+    }
+
+    let candidate_val: Value = serde_json::from_slice(&cand_bytes).map_err(|_| anyhow::anyhow!("layout_unreadable"))?;
+    validate_layout_candidate(&candidate_val)?;
+
+    let cand_version = candidate_val.get("wechat_version").and_then(Value::as_str).unwrap_or("");
+    if cand_version != running_version {
+        anyhow::bail!("version_mismatch: candidate is {}, running is {}", cand_version, running_version);
+    }
+
+    let active_path_str = format!("{}/wechat-{}.json", layout_dir_str, running_version);
+    let timestamp = format_timestamp_compact(SystemTime::now());
+    let backup_path_str = format!("{}/wechat-{}.json.bak-{}", layout_dir_str, running_version, timestamp);
+
+    let cmd_atomic = format!(
+        "if [ -f {} ]; then cp {} {} && chmod 600 {}; fi && mv {} {} && chmod 600 {}",
+        shlex_quote(&active_path_str),
+        shlex_quote(&active_path_str),
+        shlex_quote(&backup_path_str),
+        shlex_quote(&backup_path_str),
+        shlex_quote(&cand_path_str),
+        shlex_quote(&active_path_str),
+        shlex_quote(&active_path_str)
+    );
+
+    if let Some(ref mut runner) = remote_runner {
+        let out = runner(&host_str, &cmd_atomic, None)?;
+        if out.returncode != 0 {
+            anyhow::bail!("remote_accept_failed");
+        }
+    } else {
+        let resolved_active = resolve_local_path(&active_path_str);
+        let resolved_backup = resolve_local_path(&backup_path_str);
+        let resolved_cand = resolve_local_path(&cand_path_str);
+
+        if resolved_active.exists() {
+            fs::copy(&resolved_active, &resolved_backup)?;
+            let _ = fs::set_permissions(&resolved_backup, fs::Permissions::from_mode(0o600));
+        }
+        fs::rename(&resolved_cand, &resolved_active)?;
+        let _ = fs::set_permissions(&resolved_active, fs::Permissions::from_mode(0o600));
+    }
+
+    Ok(json!({
+        "accepted": true,
+        "version": running_version,
+        "active_layout": active_path_str,
+        "backup": backup_path_str,
+    }))
 }
 
 pub fn locations() -> (PathBuf, PathBuf, PathBuf) {
@@ -19,6 +433,22 @@ pub fn locations() -> (PathBuf, PathBuf, PathBuf) {
     let config = base.join("config.json");
     let plist = home.join("Library/LaunchAgents/local.wechat-rpa.bot.plist");
     (base, config, plist)
+}
+
+pub fn resolve_state_dir(config_path: &Path, base: &Path) -> PathBuf {
+    if config_path.exists() {
+        if let Ok(cfg) = BotConfig::load(config_path) {
+            return cfg.state_dir;
+        }
+        if let Ok(content) = fs::read_to_string(config_path) {
+            if let Ok(v) = serde_json::from_str::<Value>(&content) {
+                if let Some(s) = v.get("state_dir").and_then(Value::as_str) {
+                    return PathBuf::from(s);
+                }
+            }
+        }
+    }
+    base.join("state")
 }
 
 pub fn loaded() -> bool {
@@ -141,6 +571,17 @@ pub fn execute_control<W1: std::io::Write, W2: std::io::Write>(
     stderr: &mut W2,
     loaded_override: Option<bool>,
 ) -> i32 {
+    let mut default_loaded = move || loaded_override.unwrap_or_else(loaded);
+    execute_control_full(args, stdout, stderr, Some(&mut default_loaded), None)
+}
+
+pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
+    args: &[String],
+    stdout: &mut W1,
+    stderr: &mut W2,
+    mut loaded_fn: Option<&mut dyn FnMut() -> bool>,
+    mut launchctl_runner: Option<&mut dyn FnMut(&str, &[&str]) -> bool>,
+) -> i32 {
     if args.is_empty() {
         let _ = writeln!(stderr, "control: missing action");
         return 2;
@@ -150,15 +591,123 @@ pub fn execute_control<W1: std::io::Write, W2: std::io::Write>(
     if action == "-h" || action == "--help" {
         let _ = writeln!(
             stdout,
-            "Usage: wechat-mcp control <status|pause|resume|resume-session|config-check|calibrate> [--config <path>]"
+            "Usage: wechat-mcp control <status|start|stop|pause|resume|resume-session|config-check|calibrate> [--config <path>]"
         );
         return 0;
     }
     let (base, default_config_path, _) = locations();
 
-    let is_loaded = loaded_override.unwrap_or_else(loaded);
+    let is_loaded = if let Some(ref mut lfn) = loaded_fn {
+        lfn()
+    } else {
+        loaded()
+    };
 
     match action.as_str() {
+        "start" => {
+            let mut config_file: Option<PathBuf> = None;
+            let mut idx = 1;
+            while idx < args.len() {
+                if args[idx] == "--config" && idx + 1 < args.len() {
+                    config_file = Some(PathBuf::from(&args[idx + 1]));
+                    idx += 2;
+                } else {
+                    idx += 1;
+                }
+            }
+            let config_path = config_file.unwrap_or(default_config_path);
+            let uid = unsafe { getuid() };
+            let domain = format!("gui/{uid}");
+            let label = format!("{domain}/{BOT_LABEL}");
+
+            if let Some(ref mut runner) = launchctl_runner {
+                runner("launchctl", &["enable", &label]);
+            } else {
+                let _ = Command::new("launchctl").args(["enable", &label]).status();
+            }
+
+            let loaded_now = if let Some(ref mut lfn) = loaded_fn {
+                lfn()
+            } else {
+                loaded()
+            };
+
+            if !loaded_now {
+                if config_path.exists() {
+                    if let Err(e) = BotConfig::load(&config_path) {
+                        let _ = writeln!(stderr, "failed to load config: {}", e);
+                        return 1;
+                    }
+                }
+                let (_, _, plist_path) = locations();
+                let plist_str = plist_path.to_string_lossy();
+                if let Some(ref mut runner) = launchctl_runner {
+                    runner("launchctl", &["bootstrap", &domain, &plist_str]);
+                } else {
+                    let _ = Command::new("launchctl")
+                        .args(["bootstrap", &domain, &plist_str])
+                        .status();
+                }
+            }
+
+            let _ = writeln!(stdout, "{}", json!({"status": "started", "label": BOT_LABEL}));
+            0
+        }
+        "stop" => {
+            let uid = unsafe { getuid() };
+            let domain = format!("gui/{uid}");
+            let label = format!("{domain}/{BOT_LABEL}");
+
+            if let Some(ref mut runner) = launchctl_runner {
+                runner("launchctl", &["disable", &label]);
+            } else {
+                let _ = Command::new("launchctl").args(["disable", &label]).status();
+            }
+
+            let loaded_first = if let Some(ref mut lfn) = loaded_fn {
+                lfn()
+            } else {
+                loaded()
+            };
+
+            if loaded_first {
+                if let Some(ref mut runner) = launchctl_runner {
+                    runner("launchctl", &["bootout", &label]);
+                } else {
+                    let _ = Command::new("launchctl").args(["bootout", &label]).status();
+                }
+            }
+
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            let mut is_still_loaded = if let Some(ref mut lfn) = loaded_fn {
+                lfn()
+            } else {
+                loaded()
+            };
+
+            while is_still_loaded && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                is_still_loaded = if let Some(ref mut lfn) = loaded_fn {
+                    lfn()
+                } else {
+                    loaded()
+                };
+            }
+
+            let final_loaded = if let Some(ref mut lfn) = loaded_fn {
+                lfn()
+            } else {
+                loaded()
+            };
+
+            if final_loaded {
+                let _ = writeln!(stderr, "service is still unloading; do not start a replacement yet");
+                return 1;
+            }
+
+            let _ = writeln!(stdout, "{}", json!({"status": "stopped", "label": BOT_LABEL}));
+            0
+        }
         "config-check" => {
             // 支持 config-check <path> 或 config-check --config <path>
             let mut target_path: Option<PathBuf> = None;
@@ -199,15 +748,7 @@ pub fn execute_control<W1: std::io::Write, W2: std::io::Write>(
                 }
             }
             let config_path = config_file.unwrap_or(default_config_path);
-            let state_dir = if config_path.exists() {
-                if let Ok(cfg) = BotConfig::load(&config_path) {
-                    cfg.state_dir
-                } else {
-                    base.join("state")
-                }
-            } else {
-                base.join("state")
-            };
+            let state_dir = resolve_state_dir(&config_path, &base);
 
             if let Err(e) = fs::create_dir_all(&state_dir) {
                 let _ = writeln!(stderr, "failed to create state dir: {}", e);
@@ -245,15 +786,7 @@ pub fn execute_control<W1: std::io::Write, W2: std::io::Write>(
                 }
             }
             let config_path = config_file.unwrap_or(default_config_path);
-            let state_dir = if config_path.exists() {
-                if let Ok(cfg) = BotConfig::load(&config_path) {
-                    cfg.state_dir
-                } else {
-                    base.join("state")
-                }
-            } else {
-                base.join("state")
-            };
+            let state_dir = resolve_state_dir(&config_path, &base);
 
             let pause_file = state_dir.join("admin-pause.json");
             if pause_file.exists() {
@@ -329,15 +862,7 @@ pub fn execute_control<W1: std::io::Write, W2: std::io::Write>(
                 }
             }
             let config_path = config_file.unwrap_or(default_config_path);
-            let state_dir = if config_path.exists() {
-                if let Ok(cfg) = BotConfig::load(&config_path) {
-                    cfg.state_dir
-                } else {
-                    base.join("state")
-                }
-            } else {
-                base.join("state")
-            };
+            let state_dir = resolve_state_dir(&config_path, &base);
 
             let health_path = state_dir.join("health.json");
             let health = if health_path.exists() {
@@ -408,15 +933,7 @@ pub fn execute_control<W1: std::io::Write, W2: std::io::Write>(
             }
 
             let config_path = config_file.unwrap_or(default_config_path);
-            let state_dir = if config_path.exists() {
-                if let Ok(cfg) = BotConfig::load(&config_path) {
-                    cfg.state_dir
-                } else {
-                    base.join("state")
-                }
-            } else {
-                base.join("state")
-            };
+            let state_dir = resolve_state_dir(&config_path, &base);
 
             if let Err(e) = fs::create_dir_all(&state_dir) {
                 let _ = writeln!(stderr, "failed to create state dir: {}", e);
@@ -1116,5 +1633,889 @@ mod tests {
         assert_eq!(res["status"], "resumed");
         assert_eq!(res["file_removed"], true);
         assert!(!handoff_file.exists());
+    }
+
+    // -------------------------------------------------------------
+    // tests/test_calibrate.py 20 项缺口迁移
+    // -------------------------------------------------------------
+
+    use std::time::Duration;
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn load_default_layout() -> Value {
+        let layout_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("native")
+            .join("layout")
+            .join("wechat-4.1.15.json");
+        let content = fs::read_to_string(&layout_path).expect("failed to read default layout");
+        serde_json::from_str(&content).expect("invalid layout json")
+    }
+
+    /// 1. test_no_4_1_15_fallback_in_source
+    /// 检查生产源码中不包含硬编码的 4.1.15 fallback，且 Worker.swift 中也没有
+    #[test]
+    fn test_no_4_1_15_fallback_in_source() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let control_source = fs::read_to_string(manifest_dir.join("src/core/control.rs")).unwrap();
+        let worker_source = fs::read_to_string(manifest_dir.join("native/bot/Worker.swift")).unwrap();
+
+        let prod_control = control_source.split("#[cfg(test)]").next().unwrap();
+        assert!(!prod_control.contains("\"4.1.15\""), "control.rs 生产代码不得硬编码 '4.1.15' fallback");
+        assert!(!worker_source.contains("\"4.1.15\""), "Worker.swift 不得硬编码 '4.1.15' fallback");
+    }
+
+    /// 2. test_version_regex_validation
+    /// 版本必须符合正则 ^[0-9]+(\\.[0-9]+){1,3}$
+    #[test]
+    fn test_version_regex_validation() {
+        let valid_versions = ["4.1.15", "4.0.0", "1.0", "1.2.3.4"];
+        let invalid_versions = ["4.1.15;rm -rf /", "v4.1", "beta", "", "4.", ".1", "4.1.15.1.2"];
+
+        for v in valid_versions {
+            assert!(validate_version_string(v), "Expected {} to be valid", v);
+        }
+        for inv in invalid_versions {
+            assert!(!validate_version_string(inv), "Expected {} to be invalid", inv);
+        }
+    }
+
+    /// 3. test_worker_missing_version_aborts_without_writing
+    /// worker 响应缺少版本或 layout 时，run_calibrate 拒绝且不写任何文件
+    #[test]
+    fn test_worker_missing_version_aborts_without_writing() {
+        let mut commands = Vec::new();
+        let mut fake_runner = |_host: &str, cmd: &str, _input: Option<&[u8]>| {
+            commands.push(cmd.to_string());
+            Ok(CommandOutput { returncode: 0, stdout: vec![], stderr: vec![] })
+        };
+
+        let bad_worker = json!({
+            "measured": {"input_divider": 490.0}
+        });
+
+        let res = run_calibrate(
+            None,
+            Some(&bad_worker),
+            Some("wechat-host"),
+            Some("~/.wechat-rpa/layout"),
+            Some(&mut fake_runner),
+        );
+
+        assert!(res.is_err(), "缺少版本或 layout 时应报错中止");
+        let write_cmds: Vec<_> = commands.iter().filter(|c| c.contains("cat > ")).collect();
+        assert!(write_cmds.is_empty(), "未写入任何文件");
+    }
+
+    /// 4. test_worker_calibrate_response_fields_in_swift
+    /// Worker.swift calibrate 操作必须返回 wechat_version, layout_path, layout 等字段
+    #[test]
+    fn test_worker_calibrate_response_fields_in_swift() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let worker_swift = fs::read_to_string(manifest_dir.join("native/bot/Worker.swift")).unwrap();
+
+        let cal_idx = worker_swift.find("operation == \"calibrate\"").expect("Worker.swift must have calibrate");
+        let branch = &worker_swift[cal_idx..];
+        let end_idx = branch.find("guard let recipient").expect("must bound calibrate branch");
+        let cal_block = &branch[..end_idx];
+
+        assert!(cal_block.contains("\"wechat_version\""));
+        assert!(cal_block.contains("\"layout_path\""));
+        assert!(cal_block.contains("\"layout\""));
+        assert!(cal_block.contains("layout_missing"));
+    }
+
+    /// 5. test_candidate_written_to_remote_wechat_host
+    /// 候选布局和 PNG 写入对应布局目录，设置 umask 077 和权限 0600
+    /// 注：Rust 在本机运行，断言对本地文件系统路径等价生效，同时对 runner 命令进行相同校验
+    #[test]
+    fn test_candidate_written_to_remote_wechat_host() {
+        let base_layout = load_default_layout();
+        let version = base_layout["wechat_version"].as_str().unwrap();
+
+        let mut written_files = std::collections::HashMap::new();
+        let mut recorded_commands = Vec::new();
+
+        let mut fake_runner = |host: &str, cmd: &str, input: Option<&[u8]>| {
+            recorded_commands.push((host.to_string(), cmd.to_string()));
+            if cmd.contains("cat > ") {
+                if let Some(pos) = cmd.find("cat > ") {
+                    let rest = &cmd[pos + 6..];
+                    let path = rest.split_whitespace().next().unwrap().trim_matches('\'').trim_matches('"');
+                    if let Some(data) = input {
+                        written_files.insert(path.to_string(), data.to_vec());
+                    }
+                }
+            }
+            Ok(CommandOutput { returncode: 0, stdout: vec![], stderr: vec![] })
+        };
+
+        let worker_res = json!({
+            "wechat_version": version,
+            "layout_path": format!("/path/to/.wechat-rpa/layout/wechat-{}.json", version),
+            "layout": base_layout,
+            "measured": {"input_divider": 490.0},
+            "annotated_png_base64": "YW5ub3RhdGVkLWJ5dGVz" // base64 of b"annotated-bytes"
+        });
+
+        let (diffs, _missing, candidate) = run_calibrate(
+            None,
+            Some(&worker_res),
+            Some("wechat-host"),
+            Some("~/.wechat-rpa/layout"),
+            Some(&mut fake_runner),
+        ).unwrap();
+
+        // 1. 派生字段验证
+        assert_eq!(candidate["regions"]["input"]["y"], 490.0);
+        assert!(diffs.iter().any(|d| d["field"] == "input.y" && d["new"] == 490.0));
+
+        // 2. 写入文件路径验证
+        let json_cand = format!("~/.wechat-rpa/layout/candidate-wechat-{}.json", version);
+        let png_cand = format!("~/.wechat-rpa/layout/candidate-wechat-{}.png", version);
+        assert!(written_files.contains_key(&json_cand), "应写入 candidate json");
+        assert!(written_files.contains_key(&png_cand), "应写入 candidate png");
+        assert_eq!(written_files[&png_cand], b"annotated-bytes");
+
+        // 3. 校验权限与 umask
+        for (host, cmd) in &recorded_commands {
+            assert_eq!(host, "wechat-host");
+            assert!(cmd.contains("umask 077"));
+            assert!(cmd.contains("chmod 600"));
+        }
+    }
+
+    /// 6. test_accept_refuses_version_mismatch_with_zero_remote_writes
+    /// 版本不匹配时拒绝 accept，写操作次数为 0
+    #[test]
+    fn test_accept_refuses_version_mismatch_with_zero_remote_writes() {
+        let base_layout = load_default_layout();
+        let _version = base_layout["wechat_version"].as_str().unwrap();
+
+        let mut commands = Vec::new();
+        let mut fake_runner = |_host: &str, cmd: &str, _input: Option<&[u8]>| {
+            commands.push(cmd.to_string());
+            if cmd.starts_with("cat ") {
+                let json_bytes = serde_json::to_vec(&base_layout).unwrap();
+                return Ok(CommandOutput { returncode: 0, stdout: json_bytes, stderr: vec![] });
+            }
+            Ok(CommandOutput { returncode: 0, stdout: vec![], stderr: vec![] })
+        };
+
+        let worker_res = json!({
+            "wechat_version": "4.1.16",
+            "layout": base_layout
+        });
+
+        let res = calibrate_accept(
+            None,
+            Some("wechat-host"),
+            Some("~/.wechat-rpa/layout"),
+            Some(&worker_res),
+            Some(&mut fake_runner),
+        );
+
+        assert!(res.is_err(), "版本不匹配必须报错");
+        let write_cmds: Vec<_> = commands.iter().filter(|c| {
+            c.contains("cp ") || c.contains("mv ") || c.contains("cat >") || c.contains("rm ")
+        }).collect();
+        assert!(write_cmds.is_empty(), "版本不匹配时不得执行任何写入命令");
+    }
+
+    /// 7. test_accept_refuses_corrupt_candidate_with_zero_remote_writes
+    /// 损坏的 candidate JSON 拒绝 accept，写操作次数为 0
+    #[test]
+    fn test_accept_refuses_corrupt_candidate_with_zero_remote_writes() {
+        let base_layout = load_default_layout();
+        let version = base_layout["wechat_version"].as_str().unwrap();
+
+        let mut commands = Vec::new();
+        let mut fake_runner = |_host: &str, cmd: &str, _input: Option<&[u8]>| {
+            commands.push(cmd.to_string());
+            if cmd.starts_with("cat ") {
+                return Ok(CommandOutput { returncode: 0, stdout: b"{broken json".to_vec(), stderr: vec![] });
+            }
+            Ok(CommandOutput { returncode: 0, stdout: vec![], stderr: vec![] })
+        };
+
+        let worker_res = json!({
+            "wechat_version": version,
+            "layout": base_layout
+        });
+
+        let res = calibrate_accept(
+            None,
+            Some("wechat-host"),
+            Some("~/.wechat-rpa/layout"),
+            Some(&worker_res),
+            Some(&mut fake_runner),
+        );
+
+        assert!(res.is_err(), "损坏的 candidate JSON 必须报错");
+        let write_cmds: Vec<_> = commands.iter().filter(|c| {
+            c.contains("cp ") || c.contains("mv ") || c.contains("cat >") || c.contains("rm ")
+        }).collect();
+        assert!(write_cmds.is_empty(), "损坏 JSON 时不得执行任何写入命令");
+    }
+
+    /// 8. test_accept_executes_backup_then_mv_atomically
+    /// 单条原子命令：先备份当前激活文件，再将候选 mv 到激活文件，cp 先于 mv
+    #[test]
+    fn test_accept_executes_backup_then_mv_atomically() {
+        let base_layout = load_default_layout();
+        let version = base_layout["wechat_version"].as_str().unwrap();
+
+        let mut updated_layout = base_layout.clone();
+        updated_layout["regions"]["input"]["y"] = json!(492.0);
+        updated_layout["regions"]["input"]["h"] = json!(148.0);
+        updated_layout["regions"]["chat"]["h"] = json!(432.0);
+
+        let mut commands = Vec::new();
+        let mut fake_runner = |_host: &str, cmd: &str, _input: Option<&[u8]>| {
+            commands.push(cmd.to_string());
+            if cmd.starts_with("cat ") {
+                let json_bytes = serde_json::to_vec(&updated_layout).unwrap();
+                return Ok(CommandOutput { returncode: 0, stdout: json_bytes, stderr: vec![] });
+            }
+            Ok(CommandOutput { returncode: 0, stdout: vec![], stderr: vec![] })
+        };
+
+        let worker_res = json!({
+            "wechat_version": version,
+            "layout": base_layout
+        });
+
+        let res = calibrate_accept(
+            None,
+            Some("wechat-host"),
+            Some("~/.wechat-rpa/layout"),
+            Some(&worker_res),
+            Some(&mut fake_runner),
+        ).unwrap();
+
+        assert_eq!(res["accepted"], true);
+
+        let atomic_cmds: Vec<_> = commands.iter().filter(|c| c.contains("cp ") && c.contains("mv ")).collect();
+        assert_eq!(atomic_cmds.len(), 1, "必须包含恰好一条原子 cp+mv 命令");
+
+        let cmd = &atomic_cmds[0];
+        let cp_pos = cmd.find("cp ").unwrap();
+        let mv_pos = cmd.find("mv ").unwrap();
+        assert!(cp_pos < mv_pos, "cp 必须先于 mv 执行");
+        assert!(cmd.contains(".bak-"), "必须包含 .bak- 备份标记");
+        assert!(cmd.contains("chmod 600"), "必须包含 chmod 600");
+    }
+
+    /// 9. test_cli_calibrate_command
+    /// 命令行 control calibrate 正确委托给运行中的机器人并输出差异
+    #[test]
+    fn test_cli_calibrate_command() {
+        let env = TempDir::new();
+        let state_dir = env.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let cfg_path = env.path().join("config.json");
+        let cfg = json!({
+            "schema_version": 1,
+            "host": "local",
+            "account_id": "test",
+            "state_dir": state_dir.to_str().unwrap()
+        });
+        fs::write(&cfg_path, cfg.to_string()).unwrap();
+
+        let state_dir_clone = state_dir.clone();
+        let handle = std::thread::spawn(move || {
+            let req_file = state_dir_clone.join("calibrate-request.json");
+            let res_file = state_dir_clone.join("calibrate-result.json");
+            for _ in 0..100 {
+                if req_file.exists() {
+                    if let Ok(c) = fs::read_to_string(&req_file) {
+                        if let Ok(req) = serde_json::from_str::<Value>(&c) {
+                            let id = req["id"].as_str().unwrap();
+                            let res = json!({
+                                "id": id,
+                                "ok": true,
+                                "result": {
+                                    "candidate_json": "~/.wechat-rpa/layout/candidate-wechat-4.1.15.json",
+                                    "candidate_png": "~/.wechat-rpa/layout/candidate-wechat-4.1.15.png",
+                                    "differences": [
+                                        {"field": "input.y", "old": 496.0, "new": 500.0},
+                                        {"field": "input.h", "old": 144.0, "new": 140.0},
+                                        {"field": "chat.h", "old": 436.0, "new": 440.0},
+                                        {"field": "session_list.w", "old": 250.0, "new": 255.0}
+                                    ],
+                                    "missing": []
+                                }
+                            });
+                            fs::write(&res_file, res.to_string()).unwrap();
+                            return;
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control(
+            &["calibrate".into(), "--config".into(), cfg_path.to_str().unwrap().into(), "--timeout".into(), "3".into()],
+            &mut stdout,
+            &mut stderr,
+            Some(true),
+        );
+        handle.join().unwrap();
+        assert_eq!(code, 0);
+
+        let out_str = String::from_utf8(stdout).unwrap();
+        let last_line = out_str.lines().last().unwrap();
+        let res: Value = serde_json::from_str(last_line).unwrap();
+        assert!(res["candidate_json"].as_str().unwrap().contains("candidate-wechat-4.1.15.json"));
+        assert_eq!(res["differences"].as_array().unwrap().len(), 4);
+    }
+
+    /// 10. test_cli_calibrate_accept
+    /// 命令行 control calibrate --accept 正确返回 accepted
+    #[test]
+    fn test_cli_calibrate_accept() {
+        let env = TempDir::new();
+        let state_dir = env.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let cfg_path = env.path().join("config.json");
+        let cfg = json!({
+            "schema_version": 1,
+            "host": "local",
+            "account_id": "test",
+            "state_dir": state_dir.to_str().unwrap()
+        });
+        fs::write(&cfg_path, cfg.to_string()).unwrap();
+
+        let state_dir_clone = state_dir.clone();
+        let handle = std::thread::spawn(move || {
+            let req_file = state_dir_clone.join("calibrate-request.json");
+            let res_file = state_dir_clone.join("calibrate-result.json");
+            for _ in 0..100 {
+                if req_file.exists() {
+                    if let Ok(c) = fs::read_to_string(&req_file) {
+                        if let Ok(req) = serde_json::from_str::<Value>(&c) {
+                            let id = req["id"].as_str().unwrap();
+                            let res = json!({
+                                "id": id,
+                                "ok": true,
+                                "result": {
+                                    "accepted": true,
+                                    "version": "4.1.15"
+                                }
+                            });
+                            fs::write(&res_file, res.to_string()).unwrap();
+                            return;
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control(
+            &["calibrate".into(), "--accept".into(), "--config".into(), cfg_path.to_str().unwrap().into(), "--timeout".into(), "3".into()],
+            &mut stdout,
+            &mut stderr,
+            Some(true),
+        );
+        handle.join().unwrap();
+        assert_eq!(code, 0);
+
+        let out_str = String::from_utf8(stdout).unwrap();
+        let last_line = out_str.lines().last().unwrap();
+        let res: Value = serde_json::from_str(last_line).unwrap();
+        assert_eq!(res["accepted"], true);
+        assert_eq!(res["version"], "4.1.15");
+    }
+
+    /// 11. test_calibrate_never_clicks
+    /// Worker.swift 中的 calibrate 分支绝不调用任何点击、打字或滚动动作
+    #[test]
+    fn test_calibrate_never_clicks() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let worker_swift = fs::read_to_string(manifest_dir.join("native/bot/Worker.swift")).unwrap();
+
+        let cal_idx = worker_swift.find("operation == \"calibrate\"").expect("Worker.swift must have calibrate");
+        let branch = &worker_swift[cal_idx..];
+        let end_idx = branch.find("guard let recipient").expect("must bound calibrate branch");
+        let cal_block = &branch[..end_idx];
+
+        let forbidden = ["botActions", "click(", "rightClick(", "key(", "act(", "scroll("];
+        for term in forbidden {
+            assert!(!cal_block.contains(term), "calibrate 分支不得调用 {}", term);
+        }
+    }
+
+    /// 12. test_default_paths_land_in_remote_home
+    /// 默认路径写入 HOME 下的 .wechat-rpa/layout，且不会在根下生成字面量 '~' 目录
+    /// 注：等价断言在本地环境测试，验证默认路径解析行为与 0600 权限
+    #[test]
+    fn test_default_paths_land_in_remote_home() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let env = TempDir::new();
+        let home = env.path().to_path_buf();
+        let layout_dir = home.join(".wechat-rpa").join("layout");
+        fs::create_dir_all(&layout_dir).unwrap();
+
+        let base_layout = load_default_layout();
+        let version = base_layout["wechat_version"].as_str().unwrap();
+
+        let worker_res = json!({
+            "wechat_version": version,
+            "layout_path": "x",
+            "layout": base_layout,
+            "measured": {"input_divider": 500.0, "list_border": 300.0},
+            "annotated_png_base64": "cG5n"
+        });
+
+        let config = json!({"host": "wechat-mac"});
+
+        let orig_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", &home) };
+
+        let res = run_calibrate(
+            Some(&config),
+            Some(&worker_res),
+            None,
+            None,
+            None,
+        );
+
+        if let Some(h) = orig_home {
+            unsafe { std::env::set_var("HOME", h) };
+        }
+
+        assert!(res.is_ok());
+        let cand_json = layout_dir.join(format!("candidate-wechat-{}.json", version));
+        assert!(cand_json.exists(), "candidate 文件必须存在于 layout 目录");
+
+        let cand_content: Value = serde_json::from_str(&fs::read_to_string(&cand_json).unwrap()).unwrap();
+        assert_eq!(cand_content["regions"]["input"]["y"], 500.0);
+
+        let mode = fs::metadata(&cand_json).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "candidate 文件模式必须为 0600");
+
+        assert!(!home.join("~").exists(), "绝不能创建名为 ~ 的字面量目录");
+    }
+
+    /// 13. test_accept_with_defaults_backs_up_then_replaces
+    /// 默认路径下 accept 完整流程：先备份已有文件为 .bak-*，然后更新激活布局
+    /// 注：等价断言在本地路径下完整验证
+    #[test]
+    fn test_accept_with_defaults_backs_up_then_replaces() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let env = TempDir::new();
+        let home = env.path().to_path_buf();
+        let layout_dir = home.join(".wechat-rpa").join("layout");
+        fs::create_dir_all(&layout_dir).unwrap();
+
+        let base_layout = load_default_layout();
+        let version = base_layout["wechat_version"].as_str().unwrap();
+
+        let active_json = layout_dir.join(format!("wechat-{}.json", version));
+        fs::write(&active_json, serde_json::to_string_pretty(&base_layout).unwrap()).unwrap();
+
+        let worker_res = json!({
+            "wechat_version": version,
+            "layout_path": "x",
+            "layout": base_layout,
+            "measured": {"input_divider": 500.0, "list_border": 300.0},
+            "annotated_png_base64": "cG5n"
+        });
+        let config = json!({"host": "wechat-mac"});
+
+        let orig_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", &home) };
+
+        let cal_res = run_calibrate(Some(&config), Some(&worker_res), None, None, None);
+        assert!(cal_res.is_ok());
+
+        let acc_res = calibrate_accept(Some(&config), None, None, Some(&worker_res), None);
+
+        if let Some(h) = orig_home {
+            unsafe { std::env::set_var("HOME", h) };
+        }
+
+        assert!(acc_res.is_ok());
+        let acc_val = acc_res.unwrap();
+        assert_eq!(acc_val["accepted"], true);
+
+        let new_active: Value = serde_json::from_str(&fs::read_to_string(&active_json).unwrap()).unwrap();
+        assert_eq!(new_active["regions"]["input"]["y"], 500.0);
+
+        let backups: Vec<_> = fs::read_dir(&layout_dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(&format!("wechat-{}.json.bak-", version)))
+            .collect();
+        assert_eq!(backups.len(), 1, "必须恰好产生 1 个备份");
+        let backup_content: Value = serde_json::from_str(&fs::read_to_string(backups[0].path()).unwrap()).unwrap();
+        assert_eq!(backup_content["regions"]["input"]["y"], 496.0);
+    }
+
+    /// 14. test_missing_host_is_refused
+    /// 缺少 host 时 run_calibrate 必须拒绝并报错
+    #[test]
+    fn test_missing_host_is_refused() {
+        let base_layout = load_default_layout();
+        let worker_res = json!({
+            "wechat_version": "4.1.15",
+            "layout": base_layout
+        });
+        let config = json!({});
+
+        let mut commands = Vec::new();
+        let mut fake_runner = |_host: &str, cmd: &str, _input: Option<&[u8]>| {
+            commands.push(cmd.to_string());
+            Ok(CommandOutput { returncode: 0, stdout: vec![], stderr: vec![] })
+        };
+
+        let res = run_calibrate(
+            Some(&config),
+            Some(&worker_res),
+            None,
+            None,
+            Some(&mut fake_runner),
+        );
+
+        assert!(res.is_err(), "缺少 host 时必须报错");
+        assert!(commands.is_empty(), "未执行任何命令");
+    }
+
+    /// 15. test_failed_remote_write_raises
+    /// 远端写失败（runner 返回非零）时 run_calibrate 抛出错误
+    #[test]
+    fn test_failed_remote_write_raises() {
+        let base_layout = load_default_layout();
+        let worker_res = json!({
+            "wechat_version": "4.1.15",
+            "layout": base_layout,
+            "measured": {"input_divider": 500.0}
+        });
+        let config = json!({"host": "wechat-mac"});
+
+        let mut failing_runner = |_host: &str, _cmd: &str, _input: Option<&[u8]>| {
+            Ok(CommandOutput { returncode: 1, stdout: vec![], stderr: b"denied".to_vec() })
+        };
+
+        let res = run_calibrate(
+            Some(&config),
+            Some(&worker_res),
+            None,
+            None,
+            Some(&mut failing_runner),
+        );
+
+        assert!(res.is_err(), "写失败必须报错");
+        let err_msg = res.unwrap_err().to_string();
+        assert!(err_msg.contains("remote write failed") || err_msg.contains("denied"));
+    }
+
+    /// 16. test_calibrate_refuses_while_bot_running
+    /// 机器人未运行（loaded 为 false）时拒绝校准并退出码 1
+    #[test]
+    fn test_calibrate_refuses_while_bot_running() {
+        let env = TempDir::new();
+        let cfg_path = env.path().join("none.json");
+        fs::write(&cfg_path, "{}").unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = execute_control(
+            &["calibrate".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &mut stdout,
+            &mut stderr,
+            Some(false),
+        );
+
+        assert_eq!(code, 1);
+        let err_str = String::from_utf8(stderr).unwrap();
+        assert!(err_str.contains("机器人未运行：请先 control start"));
+    }
+
+    /// 17. test_control_calibrate_round_trip
+    /// control calibrate 通过写入请求并轮询结果文件实现与机器人的闭环通信
+    #[test]
+    fn test_control_calibrate_round_trip() {
+        let env = TempDir::new();
+        let state_dir = env.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let cfg_path = env.path().join("config.json");
+        let cfg = json!({
+            "schema_version": 1,
+            "host": "wechat-mac",
+            "account_id": "fixture",
+            "state_dir": state_dir.to_str().unwrap()
+        });
+        fs::write(&cfg_path, cfg.to_string()).unwrap();
+
+        let state_dir_clone = state_dir.clone();
+        let bot_thread = std::thread::spawn(move || {
+            let req_path = state_dir_clone.join("calibrate-request.json");
+            let res_path = state_dir_clone.join("calibrate-result.json");
+            for _ in 0..50 {
+                if req_path.exists() {
+                    if let Ok(content) = fs::read_to_string(&req_path) {
+                        if let Ok(req) = serde_json::from_str::<Value>(&content) {
+                            let id = req["id"].as_str().unwrap();
+                            let result_payload = json!({
+                                "id": id,
+                                "ok": true,
+                                "result": {
+                                    "candidate_json": ".wechat-rpa/layout/candidate-wechat-4.1.15.json",
+                                    "candidate_png": ".wechat-rpa/layout/candidate-wechat-4.1.15.png",
+                                    "differences": [{"field": "input.y", "old": 496.0, "new": 500.0}],
+                                    "missing": []
+                                }
+                            });
+                            fs::write(&res_path, result_payload.to_string()).unwrap();
+                            let _ = fs::remove_file(&req_path);
+                            return;
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control(
+            &["calibrate".into(), "--config".into(), cfg_path.to_str().unwrap().into(), "--timeout".into(), "3".into()],
+            &mut stdout,
+            &mut stderr,
+            Some(true),
+        );
+        bot_thread.join().unwrap();
+        assert_eq!(code, 0);
+
+        let out_str = String::from_utf8(stdout).unwrap();
+        let last_line = out_str.lines().last().unwrap();
+        let res: Value = serde_json::from_str(last_line).unwrap();
+        assert!(res["candidate_json"].as_str().unwrap().contains("candidate-wechat-4.1.15.json"));
+        assert_eq!(res["differences"].as_array().unwrap().len(), 1);
+    }
+
+    /// 18. test_control_calibrate_requires_running_bot
+    /// 机器人未运行时退出码 1 且 stderr 提示 "机器人未运行：请先 control start"
+    #[test]
+    fn test_control_calibrate_requires_running_bot() {
+        let env = TempDir::new();
+        let state_dir = env.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let cfg_path = env.path().join("config.json");
+        let cfg = json!({
+            "schema_version": 1,
+            "host": "wechat-mac",
+            "account_id": "fixture",
+            "state_dir": state_dir.to_str().unwrap()
+        });
+        fs::write(&cfg_path, cfg.to_string()).unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control(
+            &["calibrate".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &mut stdout,
+            &mut stderr,
+            Some(false),
+        );
+
+        assert_eq!(code, 1);
+        let err_str = String::from_utf8(stderr).unwrap();
+        assert!(err_str.contains("机器人未运行：请先 control start"));
+    }
+
+    /// 19. test_anchors_measure_the_raw_capture
+    /// Worker.swift 中 calibrate 分支调用 measureAnchors(rawImage, scale:) 与 drawAnnotatedLayout(rawImage, scale:)
+    #[test]
+    fn test_anchors_measure_the_raw_capture() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let worker_swift = fs::read_to_string(manifest_dir.join("native/bot/Worker.swift")).unwrap();
+
+        let cal_idx = worker_swift.find("operation == \"calibrate\"").expect("Worker.swift must have calibrate");
+        let branch = &worker_swift[cal_idx..];
+        let end_idx = branch.find("return result").expect("must bound calibrate branch");
+        let cal_block = &branch[..end_idx];
+
+        assert!(cal_block.contains("measureAnchors(rawImage, scale:"), "必须使用 rawImage 测量");
+        assert!(cal_block.contains("drawAnnotatedLayout(rawImage, scale:"), "必须在 rawImage 上绘制标注");
+    }
+
+    /// 20. test_text_anchors_are_not_reported_missing
+    /// 文本锚点（如 title_text）不属于位置测量线，不能被判定为 missing
+    #[test]
+    fn test_text_anchors_are_not_reported_missing() {
+        let base_layout = load_default_layout();
+        let (_diffs, missing, _candidate) = derive_candidate_fields(
+            &base_layout,
+            &json!({"input_divider": 496.0, "list_border": 300.0}),
+        );
+        assert_eq!(missing, Vec::<String>::new(), "title_text 等非线锚点不能被算作 missing");
+    }
+
+    // -------------------------------------------------------------
+    // tests/test_wechat_bot_service.py control 相关 4 项迁移
+    // -------------------------------------------------------------
+
+    /// 21. test_default_config_is_in_user_home
+    /// 默认配置和 base 目录必须位于用户 HOME 下的 .WeChatRPABot
+    #[test]
+    fn test_default_config_is_in_user_home() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let env = TempDir::new();
+        let home = env.path().to_path_buf();
+
+        let orig_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", &home) };
+
+        let (base, config, plist) = locations();
+
+        if let Some(h) = orig_home {
+            unsafe { std::env::set_var("HOME", h) };
+        }
+
+        assert_eq!(config, home.join(".WeChatRPABot/config.json"));
+        assert_eq!(base, config.parent().unwrap());
+        assert_eq!(plist, home.join("Library/LaunchAgents/local.wechat-rpa.bot.plist"));
+    }
+
+    /// 22. test_status_reads_configured_state_after_config_move
+    /// status 命令必须读取配置中指定的 state_dir 目录下的 health.json
+    #[test]
+    fn test_status_reads_configured_state_after_config_move() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let env = TempDir::new();
+        let base = env.path().join(".WeChatRPABot");
+        fs::create_dir_all(&base).unwrap();
+
+        let custom_state = env.path().join("custom-state");
+        fs::create_dir_all(&custom_state).unwrap();
+
+        let config_path = base.join("config.json");
+        let cfg = json!({
+            "schema_version": 1,
+            "host": "local",
+            "account_id": "test",
+            "state_dir": custom_state.to_str().unwrap()
+        });
+        fs::write(&config_path, cfg.to_string()).unwrap();
+
+        let health = json!({"state": "watching", "pid": 123});
+        fs::write(custom_state.join("health.json"), health.to_string()).unwrap();
+
+        let orig_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", env.path()) };
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control(
+            &["status".into()],
+            &mut stdout,
+            &mut stderr,
+            Some(true),
+        );
+
+        if let Some(h) = orig_home {
+            unsafe { std::env::set_var("HOME", h) };
+        }
+
+        assert_eq!(code, 0);
+        let out: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(out["health"], health);
+    }
+
+    /// 23. test_stop_waits_until_launchd_task_is_unloaded
+    /// stop 命令依次执行 disable 和 bootout，并等待 loaded 变为 false
+    #[test]
+    fn test_stop_waits_until_launchd_task_is_unloaded() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let env = TempDir::new();
+        let orig_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", env.path()) };
+
+        let state_sequence = [true, true, false, false];
+        let mut state_idx = 0;
+        let mut loaded_fn = move || {
+            let val = state_sequence[state_idx.min(state_sequence.len() - 1)];
+            state_idx += 1;
+            val
+        };
+
+        let mut run_calls = Vec::new();
+        let mut cmd_runner = |_cmd: &str, args: &[&str]| {
+            run_calls.push(args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+            true
+        };
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &["stop".into()],
+            &mut stdout,
+            &mut stderr,
+            Some(&mut loaded_fn),
+            Some(&mut cmd_runner),
+        );
+
+        if let Some(h) = orig_home {
+            unsafe { std::env::set_var("HOME", h) };
+        }
+
+        assert_eq!(code, 0);
+        assert_eq!(run_calls.len(), 2);
+        assert_eq!(run_calls[0][0], "disable");
+        assert_eq!(run_calls[1][0], "bootout");
+
+        let out: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(out["status"], "stopped");
+        assert_eq!(out["label"], BOT_LABEL);
+    }
+
+    /// 24. test_start_reenables_and_loads_unloaded_task
+    /// start 命令依次执行 enable 和 bootstrap
+    #[test]
+    fn test_start_reenables_and_loads_unloaded_task() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let env = TempDir::new();
+        let orig_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", env.path()) };
+
+        let mut loaded_fn = || false;
+
+        let mut run_calls = Vec::new();
+        let mut cmd_runner = |_cmd: &str, args: &[&str]| {
+            run_calls.push(args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+            true
+        };
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &["start".into()],
+            &mut stdout,
+            &mut stderr,
+            Some(&mut loaded_fn),
+            Some(&mut cmd_runner),
+        );
+
+        if let Some(h) = orig_home {
+            unsafe { std::env::set_var("HOME", h) };
+        }
+
+        assert_eq!(code, 0);
+        assert_eq!(run_calls.len(), 2);
+        assert_eq!(run_calls[0][0], "enable");
+        assert_eq!(run_calls[1][0], "bootstrap");
+
+        let out: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(out["status"], "started");
+        assert_eq!(out["label"], BOT_LABEL);
     }
 }
