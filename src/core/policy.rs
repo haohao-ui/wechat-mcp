@@ -19,14 +19,20 @@ pub fn fingerprint(bubble: &Bubble) -> Fingerprint {
 }
 
 pub fn phash_distance(a: &str, b: &str) -> Result<u32> {
-    let va = match u64::from_str_radix(a.trim(), 16) {
-        Ok(v) => v,
-        Err(_) => bail!("invalid hex string in phash: {}", a),
+    let parse_hex = |s: &str| -> Result<u128> {
+        let trimmed = s.trim();
+        let hex_str = trimmed
+            .strip_prefix("0x")
+            .or_else(|| trimmed.strip_prefix("0X"))
+            .unwrap_or(trimmed);
+        if hex_str.is_empty() {
+            bail!("empty hex string in phash: {}", s);
+        }
+        u128::from_str_radix(hex_str, 16)
+            .map_err(|e| anyhow::anyhow!("invalid hex string in phash '{}': {}", s, e))
     };
-    let vb = match u64::from_str_radix(b.trim(), 16) {
-        Ok(v) => v,
-        Err(_) => bail!("invalid hex string in phash: {}", b),
-    };
+    let va = parse_hex(a)?;
+    let vb = parse_hex(b)?;
     Ok((va ^ vb).count_ones())
 }
 
@@ -914,6 +920,20 @@ mod tests {
     #[test]
     fn policy_test_phash_distance_invalid_hex() {
         assert!(phash_distance("invalid", "0000").is_err());
+        assert!(phash_distance("0000", "xyz").is_err());
+        assert!(phash_distance("", "0000").is_err());
+        assert!(phash_distance("0000", "").is_err());
+        assert!(phash_distance("0xZZ", "00").is_err());
         assert_eq!(phash_distance("0000", "0001").unwrap(), 1);
+        assert_eq!(phash_distance("0x0000", "0x0001").unwrap(), 1);
+        assert_eq!(phash_distance("0f0f", "0f00").unwrap(), 4);
+    }
+
+    #[test]
+    fn policy_test_echo_normalizes_fullwidth_and_newlines() {
+        assert!(echo_matches("收到～\n好的", "收到~\n  好的\t"));
+        assert!(echo_matches("全角　空格\r\n测试", "全角 空格 测试"));
+        assert!(echo_matches("客服　电话：１２３４５", "客服 电话: 12345"));
+        assert!(!echo_matches("收到～\n好的", "收到～\n不好"));
     }
 }
