@@ -2,6 +2,7 @@ mod accounts;
 mod adapters;
 mod article;
 mod clipboard;
+pub mod core;
 mod crm;
 mod desktop;
 mod domain;
