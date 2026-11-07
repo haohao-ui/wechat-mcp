@@ -1,6 +1,7 @@
 mod accounts;
 mod adapters;
 mod article;
+pub mod brain;
 mod clipboard;
 pub mod core;
 mod crm;
