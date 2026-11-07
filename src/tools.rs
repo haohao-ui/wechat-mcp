@@ -128,6 +128,7 @@ pub fn list_tools_with_legacy(legacy_enabled: bool) -> Value {
     tools.extend(crate::service_tools::list());
     tools.push(json!({"name":"upload_file","description":"把文件内容（base64）存到运行微信的这台电脑，返回本机路径，供 send_file 发送；≤10MB，文件名原样保留（不含路径），每次上传放在新的子目录，不会覆盖已有文件；只保存，不发送","inputSchema":{"type":"object","properties":{"name":{"type":"string","minLength":1,"maxLength":255},"content_base64":{"type":"string","minLength":4}},"required":["name","content_base64"],"additionalProperties":false}}));
     tools.push(crate::article::tool());
+    tools.extend(crate::core::brain_tools::tools());
     json!({ "tools": tools })
 }
 
@@ -289,5 +290,38 @@ mod tests {
             assert!(is_legacy_tool(name));
         }
         assert!(!is_legacy_tool("send_message"));
+    }
+
+    #[test]
+    fn list_tools_includes_brain_tools_and_preserves_existing() {
+        for legacy_enabled in [true, false] {
+            let list = list_tools_with_legacy(legacy_enabled);
+            let tools: Vec<&str> = list["tools"]
+                .as_array()
+                .expect("tools array")
+                .iter()
+                .map(|t| t["name"].as_str().expect("tool name"))
+                .collect();
+
+            // 新增的三个外部大脑 MCP 工具
+            assert!(tools.contains(&"next_turn"), "should include next_turn");
+            assert!(tools.contains(&"reply"), "should include reply");
+            assert!(tools.contains(&"resume_session"), "should include resume_session");
+
+            // 原有网关工具保持不变
+            for original in [
+                "list_accounts",
+                "send_message",
+                "send_file",
+                "list_conversations",
+                "get_messages",
+                "wait_for_message",
+                "upload_file",
+                "fetch_article",
+                "create_customer",
+            ] {
+                assert!(tools.contains(&original), "should keep original tool {original}");
+            }
+        }
     }
 }

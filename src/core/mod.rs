@@ -1,3 +1,4 @@
+pub mod brain_tools;
 pub mod config;
 pub mod control;
 pub mod delivery;
