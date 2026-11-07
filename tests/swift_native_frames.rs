@@ -145,6 +145,18 @@ fn wechat_ocr_bin() -> Option<&'static PathBuf> {
 
 use std::sync::Mutex;
 
+/// A Vision test that could not run here (load, no Vision, no swiftc). Locally it is reported and skipped;
+/// with CI=true or WECHAT_STRICT_VISION=1 it fails, so a skipped test is never counted as a pass in CI.
+fn skip_note(message: &str) {
+    let strict = std::env::var("CI").map(|v| v == "true").unwrap_or(false)
+        || std::env::var("WECHAT_STRICT_VISION").map(|v| v == "1").unwrap_or(false);
+    if strict {
+        panic!("{message} (strict mode: skipping is a failure)");
+    }
+    eprintln!("{message}");
+}
+
+
 static VISION_LOCK: Mutex<()> = Mutex::new(());
 
 enum RunResult {
@@ -229,7 +241,10 @@ fn run_bubbles(
     let _ = File::open(&stdout_path).and_then(|mut f| f.read_to_string(&mut stdout_str));
     let _ = File::open(&stderr_path).and_then(|mut f| f.read_to_string(&mut stderr_str));
 
-    if stderr_str.contains("vision warm-up failed") || stderr_str.contains("ANECompilerService") {
+    // A deterministic refusal (`invalid("…")`, e.g. invalid_ocr_engine) is a real result the test must check,
+    // even when it surfaces during warm-up; only a warm-up failure without a reason means Vision is busy.
+    let deterministic = stderr_str.contains("invalid(\"");
+    if !deterministic && (stderr_str.contains("vision warm-up failed") || stderr_str.contains("ANECompilerService")) {
         return RunResult::VisionBusy(stderr_str);
     }
 
@@ -347,15 +362,15 @@ fn test_missing_layout_is_refused() {
     let frame = match res {
         RunResult::Success(v) | RunResult::ErrorJson(v) => v,
         RunResult::Timeout => {
-            eprintln!("SKIPPED: test_missing_layout_is_refused timed out under heavy load");
+            skip_note(&format!("SKIPPED: test_missing_layout_is_refused timed out under heavy load"));
             return;
         }
         RunResult::VisionBusy(s) => {
-            eprintln!("SKIPPED: test_missing_layout_is_refused Vision busy: {}", s);
+            skip_note(&format!("SKIPPED: test_missing_layout_is_refused Vision busy: {}", s));
             return;
         }
         RunResult::Skipped(s) => {
-            eprintln!("SKIPPED: {}", s);
+            skip_note(&format!("SKIPPED: {}", s));
             return;
         }
     };
@@ -387,15 +402,15 @@ fn test_layout_drives_the_crop() {
     let frame = match res {
         RunResult::Success(v) => v,
         RunResult::Timeout => {
-            eprintln!("SKIPPED: test_layout_drives_the_crop timed out under heavy load");
+            skip_note(&format!("SKIPPED: test_layout_drives_the_crop timed out under heavy load"));
             return;
         }
         RunResult::VisionBusy(s) => {
-            eprintln!("SKIPPED: test_layout_drives_the_crop Vision busy: {}", s);
+            skip_note(&format!("SKIPPED: test_layout_drives_the_crop Vision busy: {}", s));
             return;
         }
         RunResult::Skipped(s) => {
-            eprintln!("SKIPPED: {}", s);
+            skip_note(&format!("SKIPPED: {}", s));
             return;
         }
         RunResult::ErrorJson(e) => panic!("unexpected error: {:?}", e),
@@ -417,15 +432,15 @@ fn test_frames_report_a_passing_layout_check() {
         let frame = match res {
             RunResult::Success(v) => v,
             RunResult::Timeout => {
-                eprintln!("SKIPPED: test_frames_report_a_passing_layout_check timed out on {}", name);
+                skip_note(&format!("SKIPPED: test_frames_report_a_passing_layout_check timed out on {}", name));
                 return;
             }
             RunResult::VisionBusy(s) => {
-                eprintln!("SKIPPED: test_frames_report_a_passing_layout_check Vision busy on {}: {}", name, s);
+                skip_note(&format!("SKIPPED: test_frames_report_a_passing_layout_check Vision busy on {}: {}", name, s));
                 return;
             }
             RunResult::Skipped(s) => {
-                eprintln!("SKIPPED: {}", s);
+                skip_note(&format!("SKIPPED: {}", s));
                 return;
             }
             RunResult::ErrorJson(e) => panic!("error for {}: {:?}", name, e),
@@ -467,15 +482,15 @@ fn test_layout_disagreeing_with_screen_is_refused() {
         let frame = match res {
             RunResult::Success(v) | RunResult::ErrorJson(v) => v,
             RunResult::Timeout => {
-                eprintln!("SKIPPED: test_layout_disagreeing_with_screen_is_refused timed out on {}", name);
+                skip_note(&format!("SKIPPED: test_layout_disagreeing_with_screen_is_refused timed out on {}", name));
                 continue;
             }
             RunResult::VisionBusy(s) => {
-                eprintln!("SKIPPED: test_layout_disagreeing_with_screen_is_refused Vision busy on {}: {}", name, s);
+                skip_note(&format!("SKIPPED: test_layout_disagreeing_with_screen_is_refused Vision busy on {}: {}", name, s));
                 continue;
             }
             RunResult::Skipped(s) => {
-                eprintln!("SKIPPED: {}", s);
+                skip_note(&format!("SKIPPED: {}", s));
                 return;
             }
         };
@@ -492,15 +507,15 @@ fn test_any_file_card_is_a_file_not_text() {
     let frame = match res {
         RunResult::Success(v) => v,
         RunResult::Timeout => {
-            eprintln!("SKIPPED: test_any_file_card_is_a_file_not_text timed out under heavy load");
+            skip_note(&format!("SKIPPED: test_any_file_card_is_a_file_not_text timed out under heavy load"));
             return;
         }
         RunResult::VisionBusy(s) => {
-            eprintln!("SKIPPED: test_any_file_card_is_a_file_not_text Vision busy: {}", s);
+            skip_note(&format!("SKIPPED: test_any_file_card_is_a_file_not_text Vision busy: {}", s));
             return;
         }
         RunResult::Skipped(s) => {
-            eprintln!("SKIPPED: {}", s);
+            skip_note(&format!("SKIPPED: {}", s));
             return;
         }
         RunResult::ErrorJson(e) => panic!("error: {:?}", e),
@@ -528,15 +543,15 @@ fn test_frames_parse_to_expected_bubbles() {
         let frame = match res {
             RunResult::Success(v) => v,
             RunResult::Timeout => {
-                eprintln!("SKIPPED: test_frames_parse_to_expected_bubbles timed out on {}", name);
+                skip_note(&format!("SKIPPED: test_frames_parse_to_expected_bubbles timed out on {}", name));
                 return;
             }
             RunResult::VisionBusy(s) => {
-                eprintln!("SKIPPED: test_frames_parse_to_expected_bubbles Vision busy on {}: {}", name, s);
+                skip_note(&format!("SKIPPED: test_frames_parse_to_expected_bubbles Vision busy on {}: {}", name, s));
                 return;
             }
             RunResult::Skipped(s) => {
-                eprintln!("SKIPPED: {}", s);
+                skip_note(&format!("SKIPPED: {}", s));
                 return;
             }
             RunResult::ErrorJson(e) => panic!("error for {}: {:?}", name, e),
@@ -574,6 +589,7 @@ fn test_frames_parse_to_expected_bubbles() {
 }
 
 #[test]
+#[ignore = "known gap: no image-bubble fixture committed yet (needs a redacted 测试群 screenshot with an image); never counted as a pass"]
 fn test_image_bubbles_carry_phash() {
     let cases = get_frame_cases();
     let mut images = Vec::new();
@@ -594,7 +610,7 @@ fn test_image_bubbles_carry_phash() {
         }
     }
     if images.is_empty() {
-        eprintln!("SKIPPED: test_image_bubbles_carry_phash (no image bubbles in committed fixtures yet)");
+        skip_note(&format!("SKIPPED: test_image_bubbles_carry_phash (no image bubbles in committed fixtures yet)"));
         return;
     }
     for b in images {
@@ -610,15 +626,15 @@ fn test_default_engine_reports_vision() {
     let frame = match res {
         RunResult::Success(v) => v,
         RunResult::Timeout => {
-            eprintln!("SKIPPED: test_default_engine_reports_vision timed out under heavy load");
+            skip_note(&format!("SKIPPED: test_default_engine_reports_vision timed out under heavy load"));
             return;
         }
         RunResult::VisionBusy(s) => {
-            eprintln!("SKIPPED: test_default_engine_reports_vision Vision busy: {}", s);
+            skip_note(&format!("SKIPPED: test_default_engine_reports_vision Vision busy: {}", s));
             return;
         }
         RunResult::Skipped(s) => {
-            eprintln!("SKIPPED: {}", s);
+            skip_note(&format!("SKIPPED: {}", s));
             return;
         }
         RunResult::ErrorJson(e) => panic!("error: {:?}", e),
@@ -644,15 +660,15 @@ fn test_invalid_engine_is_refused() {
     let frame1 = match res1 {
         RunResult::Success(v) | RunResult::ErrorJson(v) => v,
         RunResult::Timeout => {
-            eprintln!("SKIPPED: test_invalid_engine_is_refused timed out");
+            skip_note(&format!("SKIPPED: test_invalid_engine_is_refused timed out"));
             return;
         }
         RunResult::VisionBusy(s) => {
-            eprintln!("SKIPPED: test_invalid_engine_is_refused Vision busy: {}", s);
+            skip_note(&format!("SKIPPED: test_invalid_engine_is_refused Vision busy: {}", s));
             return;
         }
         RunResult::Skipped(s) => {
-            eprintln!("SKIPPED: {}", s);
+            skip_note(&format!("SKIPPED: {}", s));
             return;
         }
     };
@@ -671,15 +687,15 @@ fn test_invalid_engine_is_refused() {
     let frame2 = match res2 {
         RunResult::Success(v) | RunResult::ErrorJson(v) => v,
         RunResult::Timeout => {
-            eprintln!("SKIPPED: test_invalid_engine_is_refused timed out");
+            skip_note(&format!("SKIPPED: test_invalid_engine_is_refused timed out"));
             return;
         }
         RunResult::VisionBusy(s) => {
-            eprintln!("SKIPPED: test_invalid_engine_is_refused Vision busy: {}", s);
+            skip_note(&format!("SKIPPED: test_invalid_engine_is_refused Vision busy: {}", s));
             return;
         }
         RunResult::Skipped(s) => {
-            eprintln!("SKIPPED: {}", s);
+            skip_note(&format!("SKIPPED: {}", s));
             return;
         }
     };
@@ -696,15 +712,15 @@ fn test_unknown_theme_refused() {
     let frame = match res {
         RunResult::Success(v) | RunResult::ErrorJson(v) => v,
         RunResult::Timeout => {
-            eprintln!("SKIPPED: test_unknown_theme_refused timed out");
+            skip_note(&format!("SKIPPED: test_unknown_theme_refused timed out"));
             return;
         }
         RunResult::VisionBusy(s) => {
-            eprintln!("SKIPPED: test_unknown_theme_refused Vision busy: {}", s);
+            skip_note(&format!("SKIPPED: test_unknown_theme_refused Vision busy: {}", s));
             return;
         }
         RunResult::Skipped(s) => {
-            eprintln!("SKIPPED: {}", s);
+            skip_note(&format!("SKIPPED: {}", s));
             return;
         }
     };
@@ -717,7 +733,7 @@ fn test_cli_rejects_invalid_engine() {
     let bin = match wechat_ocr_bin() {
         Some(b) => b,
         None => {
-            eprintln!("SKIPPED: test_cli_rejects_invalid_engine swiftc not available");
+            skip_note(&format!("SKIPPED: test_cli_rejects_invalid_engine swiftc not available"));
             return;
         }
     };
