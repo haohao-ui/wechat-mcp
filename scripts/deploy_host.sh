@@ -154,7 +154,8 @@ if [ $APP -eq 1 ]; then
     launchctl bootout "gui/$UID/local.wechat-mcp.host" 2>/dev/null || true
     if pgrep -f "wechat-rpa/bin/wechat-mcp serve-core" >/dev/null; then
       echo "serve-core still running after host quit; stopping it" >&2
-      pkill -TERM -f "wechat-rpa/bin/wechat-mcp serve-core" || true
+      orphan=$(pgrep -f "wechat-rpa/bin/wechat-mcp serve-core" || true)
+      [ -n "$orphan" ] && kill -TERM $orphan
       for i in $(seq 1 60); do pgrep -f "wechat-rpa/bin/wechat-mcp serve-core" >/dev/null || break; sleep 1; done
     fi
     launchctl bootstrap "gui/$UID" "$PLIST"

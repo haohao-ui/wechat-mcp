@@ -60,7 +60,11 @@ pub const MODEL_RETRIES: usize = 2;
 pub const MODEL_RETRY_SECONDS: f64 = 30.0;
 pub const UPLOAD_EXTRA_SECONDS: f64 = 120.0;
 pub const MAX_MODEL_IMAGE_BYTES: u64 = 30 * 1024 * 1024;
-pub const GAP_SCROLL_PAGES: u32 = 5;
+/// 找回衔接点时最多向上滚动的格数。一格 = 布局里的 points_per_tick（4.1.15 为 90 点），不是一整屏。
+/// 微信一次最多发 9 张图、每张约 155 点高加间距，最坏约 1600 点 ≈ 18 格；取 24 留余量。
+/// 原来的 5 格（约 450 点）连 3 张图都翻不过去，多图会被整批当历史跳过（2026-11-08 实机）。
+/// 找到衔接点就停，平时不会多滚。
+pub const GAP_SCROLL_PAGES: u32 = 24;
 
 fn to_hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -967,6 +971,13 @@ impl BotService {
                 return Ok(());
             }
             let reason_text = format!("{}: visible history rebaselined without reply", ambiguous.unwrap());
+            // 这里会把画面上的消息当历史、不回复：必须留在 core.log 里，否则事后无法判断消息为什么没回
+            tracing::warn!(
+                recipient = %self.recipient,
+                visible = confirmed.bubbles.len(),
+                reason = %reason_text,
+                "rebaselined_without_reply"
+            );
             self.advance(confirmed)?;
             let mut d = Map::new();
             d.insert("reason".to_string(), json!(reason_text));
@@ -3526,7 +3537,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_service_unrecoverable_gap_scrolls_at_most_five_pages() {
+    async fn test_service_unrecoverable_gap_scrolls_at_most_gap_scroll_pages() {
         let td = TestDir::new();
         let cfg = fixture_config(td.path());
         let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
@@ -3542,7 +3553,7 @@ mod tests {
         svc.cycle(&client, &mut cap).await.unwrap();
 
         let ups: Vec<_> = cap.scroll_calls.lock().unwrap().iter().filter(|(d, _)| d == "up").cloned().collect();
-        assert!(ups.len() <= 5);
+        assert!(ups.len() <= GAP_SCROLL_PAGES as usize, "{}", ups.len());
     }
 
     #[tokio::test]
@@ -3675,6 +3686,57 @@ mod tests {
         svc.cycle(&client, &mut cap).await.unwrap();
 
         assert_eq!(prompt_count.load(Ordering::SeqCst), 3);
+    }
+
+    /// 2026-11-08 实机：一次发多张图，每张 155 高、每格滚动 90 点，原来最多 5 格翻不到之前的消息，
+    /// 整批被当成"历史"跳过。微信一次最多 9 张：必须能翻回衔接点并把 9 张都交给大脑。
+    #[tokio::test]
+    async fn test_service_nine_images_burst_recovered_by_scrolling() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        let prompt_count = Arc::new(AtomicUsize::new(0));
+        let pc = prompt_count.clone();
+        svc.brain = Some(Arc::new(move |turn| {
+            pc.store(turn.text.split('\n').count(), Ordering::SeqCst);
+            Box::pin(async { Ok(BrainReply { reply: "你好，我是AI客服助手。".to_string(), metadata: HashMap::new() }) })
+        }));
+
+        let a = test_bubble("a", "inbound_visual");
+        let b = test_bubble("b", "inbound_visual");
+        let images: Vec<Bubble> = (0..9u64)
+            .map(|i| {
+                let mut img = test_bubble("[图片]", "inbound_visual");
+                img.phash = Some(format!("{:016x}", 0x0123_4567_89ab_cdefu64.rotate_left((i * 7) as u32)));
+                img.digest = "image:61:38".to_string();
+                img.kind = Some("image".to_string());
+                img
+            })
+            .collect();
+        let mut content: Vec<(&Bubble, i64)> = vec![(&a, 40), (&b, 40)];
+        for img in &images {
+            content.push((img, 155));
+        }
+        svc.advance(test_frame(vec![a.clone(), b.clone()], "示例联系人甲")).unwrap();
+
+        let bottom = test_chat(&content, 0, 436);
+        let ups: Vec<Frame> = (1..=30).map(|k| test_chat(&content, k, 436)).collect();
+        let reply = test_bubble("你好，我是AI客服助手。", "outbound_visual");
+        let mut after_b = bottom.bubbles.clone();
+        after_b.push(reply);
+        let after = test_frame(after_b, "示例联系人甲");
+
+        let mut cap = MockCapture::new(vec![bottom.clone(), bottom.clone(), bottom.clone(), bottom.clone(), bottom.clone(), after]);
+        cap.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
+        let mut scroll_seq = ups;
+        scroll_seq.push(bottom);
+        cap.scroll_pages = scroll_seq;
+
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        assert_eq!(prompt_count.load(Ordering::SeqCst), 9, "9 张图都必须作为新消息交给大脑");
     }
 
     #[tokio::test]
