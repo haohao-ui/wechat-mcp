@@ -385,6 +385,11 @@ impl<'a> Capture for CaptureAdapter<'a> {
     }
 }
 
+/// 通讯录同步一次运行的安全上限。同步期间完全停掉对话监听、一口气做完：用户 2026-11-08 要求——
+/// 每 15 秒切回对话会与同步抢鼠标（点到对话里的联系人），续做时还找不到上次的位置。
+/// 只在异常卡住时才让出。
+pub const CONTACTS_SYNC_MAX_RUN: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+
 // ---------------------------------------------------------------------------
 // BotCoordinator: 对齐 coordinator.py
 // ---------------------------------------------------------------------------
@@ -1679,7 +1684,7 @@ impl BotCoordinator {
 
             let start_instant = std::time::Instant::now();
             let should_yield = move || {
-                start_instant.elapsed() >= std::time::Duration::from_secs(15)
+                start_instant.elapsed() >= CONTACTS_SYNC_MAX_RUN
             };
 
             match crate::core::contacts::sync::run_sync(
@@ -1759,7 +1764,7 @@ impl BotCoordinator {
             let now_ms = (now * 1000.0) as i64;
             let start_instant = std::time::Instant::now();
             let should_yield = move || {
-                start_instant.elapsed() >= std::time::Duration::from_secs(15)
+                start_instant.elapsed() >= CONTACTS_SYNC_MAX_RUN
             };
             let _ = crate::core::contacts::sync::run_sync(
                 capture,
@@ -2423,6 +2428,14 @@ mod tests {
             !result.to_string().contains("transport closed"),
             "续做前必须先重新连接: {result}"
         );
+    }
+
+    /// 同步期间不得每 15 秒切回对话（与同步抢鼠标）：运行上限至少 10 分钟，足够 70 人左右一次做完
+    #[test]
+    fn test_contacts_sync_runs_without_periodic_yield() {
+        assert!(CONTACTS_SYNC_MAX_RUN >= std::time::Duration::from_secs(600));
+        let src = include_str!("scheduler.rs");
+        assert!(!src.contains(&format!("from_secs({})", 15)), "不得再有 15 秒让出");
     }
 
     #[test]

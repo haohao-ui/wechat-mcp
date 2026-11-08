@@ -30,6 +30,29 @@ pub struct SyncReport {
     pub complete: bool,
 }
 
+/// 名字比对用的规范化：只保留汉字、字母、数字（小写）。去掉截断省略号、空白、表情、性别图标等
+fn name_key_for_match(text: &str) -> String {
+    text.chars()
+        .filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c) || c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+/// 列表行名字与资料卡名字是否指同一人：规范化后相等，或一方包含另一方且较短一方至少 2 个字
+/// （列表名字会被截断，资料卡名字可能带额外图标）
+fn names_match(row: &str, profile: &str) -> bool {
+    let a = name_key_for_match(row);
+    let b = name_key_for_match(profile);
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if a == b {
+        return true;
+    }
+    let (short, long) = if a.chars().count() <= b.chars().count() { (&a, &b) } else { (&b, &a) };
+    short.chars().count() >= 2 && long.contains(short.as_str())
+}
+
 /// 只保留汉字（去掉箭头、图标、标点、数字、空白），用于识别界面固有文字
 fn cjk_only(text: &str) -> String {
     text.chars().filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c)).collect()
@@ -422,11 +445,22 @@ async fn run_sync_inner(
                                 let f = parse_res.fields;
 
                                 // 错位保护：资料卡昵称或备注必须与该行名字一致
-                                let name_matched = (row_name == &f.nickname)
-                                    || f.remark.as_deref().map(|rmk| rmk == row_name).unwrap_or(false);
+                                let name_matched = names_match(row_name, &f.nickname)
+                                    || f.remark.as_deref().map(|rmk| names_match(row_name, rmk)).unwrap_or(false);
 
                                 if !name_matched {
-                                    info!(category = %cat_name, row_y = *row_y, profile_lines = prof_lines.len(), "contacts_sync_profile_name_mismatch");
+                                    let rk = name_key_for_match(row_name);
+                                    let nk = name_key_for_match(&f.nickname);
+                                    info!(
+                                        category = %cat_name,
+                                        row_y = *row_y,
+                                        profile_lines = prof_lines.len(),
+                                        row_len = rk.chars().count(),
+                                        nickname_len = nk.chars().count(),
+                                        has_remark = f.remark.is_some(),
+                                        has_wechat_id = f.wechat_id.is_some(),
+                                        "contacts_sync_profile_name_mismatch"
+                                    );
                                     state.unreadable_rows += 1;
                                 } else {
                                     let combined_tags = f.tags.clone();
@@ -1775,6 +1809,19 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(state_dir.join("contacts-sync-result.json")).unwrap()).unwrap();
         assert_eq!(result["complete"], false);
         assert!(result["error"].as_str().unwrap_or("").contains("layout_mismatch"), "{result}");
+    }
+
+    /// 实机：联系人分组每一行都"资料卡名字与列表名字不一致"、一个也没写入。列表名字会被截断（…），
+    /// 资料卡名字后可能多出性别图标等字符。比对时只看汉字/字母/数字，一方包含另一方（≥2 字）即视为同一人。
+    #[test]
+    fn test_row_and_profile_names_match_after_normalization() {
+        assert!(names_match("测试甲", "测试甲 ♂"));
+        assert!(names_match("很长的客户名字…", "很长的客户名字后面还有"));
+        assert!(names_match("Coffee 咖啡", "coffee咖啡"));
+        assert!(names_match("😀小王", "小王"));
+        assert!(!names_match("张三", "李四"));
+        assert!(!names_match("王", "王五")); // 不足 2 字不做包含匹配
+        assert!(!names_match("", "王五"));
     }
 
 }
