@@ -54,7 +54,7 @@ final class HostAppDelegate: NSObject, NSApplicationDelegate {
         termSource.resume()
         terminationSignal = termSource
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 760),
+            contentRect: NSRect(x: 0, y: 0, width: 860, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -64,7 +64,14 @@ final class HostAppDelegate: NSObject, NSApplicationDelegate {
 
         let controller = StatusPanelController(worker: worker, coreSupervisor: coreSupervisor)
         self.panelController = controller
-        window.contentViewController = controller
+
+        let shell = ShellViewController()
+        shell.register(page: OverviewPageController(context: controller), id: "overview", title: "总览")
+        shell.register(page: SessionsPageController(context: controller), id: "sessions", title: "会话")
+        shell.register(page: SettingsPageController(context: controller), id: "settings", title: "设置")
+        shell.register(page: LogsPageController(context: controller), id: "logs", title: "日志")
+
+        window.contentViewController = shell
 
         let menu = NSMenu()
         let appMenu = NSMenu()
