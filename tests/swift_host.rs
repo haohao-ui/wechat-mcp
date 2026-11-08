@@ -2154,3 +2154,15 @@ fn test_settings_fields_keep_validation_ranges() {
         err
     );
 }
+
+/// 新界面不再显示旧面板，但旧面板控制器的 viewDidLoad 负责读取配置并启动 5 秒定时器
+/// （定时器里调用 CoreSupervisor.checkAndReconcile：启动核心、崩溃后重启）。
+/// 不加载它，宿主启动后核心永远不会被拉起（2026-11-08 审查 Task 5 时发现）。
+#[test]
+fn test_host_loads_status_controller_so_core_supervision_runs() {
+    let src = fs::read_to_string("native/bootstrap/main.swift").unwrap();
+    let created = src.find("StatusPanelController(worker:").expect("controller created");
+    let shell = src.find("ShellViewController()").expect("shell created");
+    let load = src.find("_ = controller.view").expect("main.swift 必须访问 controller.view 以触发 viewDidLoad");
+    assert!(created < load && load < shell, "必须在创建页面之前加载控制器（页面需要它已读入的配置）");
+}
