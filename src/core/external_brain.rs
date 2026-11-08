@@ -33,6 +33,7 @@ pub struct PendingTurn {
     pub turn: BrainTurn,
     pub deadline_at: u64,
     pub claimed_by: Option<u64>,
+    pub claim_token: Option<String>,
     pub reply_sender: Option<oneshot::Sender<BrainReply>>,
     pub answered: bool,
 }
@@ -138,6 +139,7 @@ impl ExternalBrain {
                     turn: turn.clone(),
                     deadline_at,
                     claimed_by: None,
+                    claim_token: None,
                     reply_sender: Some(tx),
                     answered: false,
                 },
@@ -276,10 +278,13 @@ impl ExternalBrain {
 
                 if let Some(turn_id) = found_id {
                     if let Some(p) = state.pending.get_mut(&turn_id) {
+                        let token = format!("claim_{}", uuid::Uuid::new_v4());
                         p.claimed_by = Some(client_id);
+                        p.claim_token = Some(token.clone());
                         let mut turn_val = serde_json::to_value(&p.turn).unwrap();
                         if let Some(obj) = turn_val.as_object_mut() {
                             obj.insert("deadline_at".to_string(), json!(p.deadline_at));
+                            obj.insert("claim_token".to_string(), json!(token));
                         }
                         claimed_turn = Some(turn_val);
                     }
@@ -330,13 +335,23 @@ impl ExternalBrain {
         }
 
         let mut state = self.state.lock().await;
-        let Some(mut pending) = state.pending.remove(turn_id) else {
+        let Some(pending_ref) = state.pending.get(turn_id) else {
             bail!("unknown_turn");
         };
 
-        if pending.answered {
+        if pending_ref.answered {
             bail!("already_answered");
         }
+
+        if let Some(expected) = &pending_ref.claim_token {
+            if let Some(provided) = req.get("claim_token").and_then(Value::as_str) {
+                if provided != expected {
+                    bail!("invalid_claim_token");
+                }
+            }
+        }
+
+        let mut pending = state.pending.remove(turn_id).unwrap();
 
         let mut text = String::new();
         if action == "send" {
@@ -419,19 +434,9 @@ impl ExternalBrain {
         }))
     }
 
-    /// 当客户端连接断开时，放回由该客户端认领但未回答的轮次
-    pub async fn on_client_disconnect(&self, client_id: u64) {
-        let mut state = self.state.lock().await;
-        let mut reclaimed = false;
-        for (_, turn) in state.pending.iter_mut() {
-            if turn.claimed_by == Some(client_id) && !turn.answered {
-                turn.claimed_by = None;
-                reclaimed = true;
-            }
-        }
-        if reclaimed {
-            self.notify_new_turn.notify_waiters();
-        }
+    /// 认领不随客户端单次调用断开连接而释放（保留接口兼容）
+    pub async fn on_client_disconnect(&self, _client_id: u64) {
+        // 外部大脑基于 lease/token 机制：认领持续有效直至被回复或整体超时（deadline_at）。
     }
 }
 
@@ -525,8 +530,7 @@ async fn handle_client(brain: Arc<ExternalBrain>, client_id: u64, stream: UnixSt
         }
     }
 
-    // 连接断开时把其领取但未回复的轮次放回队列
-    brain.on_client_disconnect(client_id).await;
+    // 外部大脑工具调用属于短连接/单次调用，领取不随单次调用断开而释放
 }
 
 #[cfg(test)]
@@ -710,7 +714,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_disconnect_puts_claimed_turn_back_to_queue() {
+    async fn test_claim_persists_on_disconnect_and_mutually_excludes() {
         let (brain, td) = make_test_brain(BrainMode::External, TimeoutAction::Skip, 60);
         let b_fn = brain.brain_fn();
 
@@ -721,22 +725,49 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // client 1 通过 next_turn 领取
-        let req = json!({ "id": "1", "op": "next_turn", "wait_seconds": 1 });
-        let resp: Value = serde_json::from_str(&brain.dispatch_request(1, &req.to_string()).await.unwrap()).unwrap();
-        assert_eq!(resp["result"]["turn"]["turn_id"], "turn-reclaim");
+        // client 1 通过 next_turn 领取，返回包含 claim_token
+        let req1 = json!({ "id": "1", "op": "next_turn", "wait_seconds": 1 });
+        let resp1: Value = serde_json::from_str(&brain.dispatch_request(1, &req1.to_string()).await.unwrap()).unwrap();
+        assert_eq!(resp1["result"]["turn"]["turn_id"], "turn-reclaim");
+        let claim_token = resp1["result"]["turn"]["claim_token"].as_str().unwrap().to_string();
+        assert!(!claim_token.is_empty(), "must issue claim_token");
 
-        // client 2 此时调用 next_turn(0) 应该拿不到
+        // client 2 此时调用 next_turn(0) 互斥，拿不到该轮次
         let req2 = json!({ "id": "2", "op": "next_turn", "wait_seconds": 0 });
         let resp2: Value = serde_json::from_str(&brain.dispatch_request(2, &req2.to_string()).await.unwrap()).unwrap();
         assert_eq!(resp2["result"]["turn"], Value::Null);
 
-        // client 1 断开连接
+        // client 1 单次调用断开（触发 on_client_disconnect）
         brain.on_client_disconnect(1).await;
 
-        // client 2 再次调用 next_turn(0) 应该能重新拿到该 turn
+        // 领取不随单次调用断开而释放：client 2 再次调用 next_turn(0) 依然互斥拿不到！
         let resp3: Value = serde_json::from_str(&brain.dispatch_request(2, &req2.to_string()).await.unwrap()).unwrap();
-        assert_eq!(resp3["result"]["turn"]["turn_id"], "turn-reclaim");
+        assert_eq!(resp3["result"]["turn"], Value::Null, "turn must remain claimed across disconnects");
+
+        // client 2 伪造 claim_token 尝试 reply 应当被拒绝
+        let fake_reply = json!({
+            "id": "bad_rep",
+            "op": "reply",
+            "turn_id": "turn-reclaim",
+            "action": "skip",
+            "claim_token": "wrong_token_123"
+        });
+        let resp_bad: Value = serde_json::from_str(&brain.dispatch_request(2, &fake_reply.to_string()).await.unwrap()).unwrap();
+        assert_eq!(resp_bad["ok"], false);
+        assert_eq!(resp_bad["error"], "invalid_claim_token");
+
+        // client 1 携带正确的 claim_token 回复，成功被接收
+        let good_reply = json!({
+            "id": "good_rep",
+            "op": "reply",
+            "turn_id": "turn-reclaim",
+            "action": "send",
+            "text": "认领持久化测试正常",
+            "claim_token": claim_token
+        });
+        let resp_good: Value = serde_json::from_str(&brain.dispatch_request(1, &good_reply.to_string()).await.unwrap()).unwrap();
+        assert_eq!(resp_good["ok"], true);
+        assert_eq!(resp_good["result"]["accepted"], true);
 
         let _ = fs::remove_dir_all(td);
     }

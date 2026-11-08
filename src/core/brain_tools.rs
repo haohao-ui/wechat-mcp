@@ -60,6 +60,10 @@ pub fn tools() -> Vec<Value> {
                     "text": {
                         "type": "string",
                         "description": "回复文本内容（当 action 为 send 时）"
+                    },
+                    "claim_token": {
+                        "type": "string",
+                        "description": "认领该轮次时获得的 claim_token（可选，传入时校验归属）"
                     }
                 },
                 "required": ["turn_id", "action"],
@@ -141,7 +145,7 @@ fn prepare_request(name: &str, args: Value) -> Result<Value> {
         }
         TOOL_REPLY => {
             for key in object.keys() {
-                if !["turn_id", "action", "text"].contains(&key.as_str()) {
+                if !["turn_id", "action", "text", "claim_token"].contains(&key.as_str()) {
                     bail!("不支持的参数: {key}");
                 }
             }
@@ -172,6 +176,12 @@ fn prepare_request(name: &str, args: Value) -> Result<Value> {
                     .as_str()
                     .ok_or_else(|| anyhow!("text 必须是字符串"))?;
                 req["text"] = json!(text);
+            }
+            if let Some(token_val) = object.get("claim_token") {
+                let token = token_val
+                    .as_str()
+                    .ok_or_else(|| anyhow!("claim_token 必须是字符串"))?;
+                req["claim_token"] = json!(token);
             }
             Ok(req)
         }
