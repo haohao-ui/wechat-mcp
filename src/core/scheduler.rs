@@ -1352,6 +1352,9 @@ impl BotCoordinator {
             return Ok(());
         }
 
+        // 处理通讯录同步请求与增量同步
+        let _ = self.serve_contacts_sync().await;
+
         let rules = self.rules()?;
         let targets = rules.allowlist.clone();
 
@@ -1591,6 +1594,169 @@ impl BotCoordinator {
         }
 
         Ok(())
+    }
+
+    pub async fn serve_contacts_sync(&mut self) -> Result<()> {
+        let req_path = self.root.join("contacts-sync-request.json");
+        let res_path = self.root.join("contacts-sync-result.json");
+        let checkpoint_path = self.root.join("contacts-sync-checkpoint.json");
+
+        if req_path.exists() {
+            let req: Value = match read_json(&req_path) {
+                Ok(v) => v,
+                Err(_) => return Ok(()),
+            };
+
+            let req_id = req.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let mode_str = req.get("mode").and_then(|v| v.as_str()).unwrap_or("incremental");
+            let mode = if mode_str == "full" {
+                crate::core::contacts::sync::SyncMode::Full
+            } else {
+                crate::core::contacts::sync::SyncMode::Incremental
+            };
+            let created_at = req.get("created_at").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let now = (self.clock)();
+
+            struct DropFile(PathBuf);
+            impl Drop for DropFile {
+                fn drop(&mut self) {
+                    let _ = fs::remove_file(&self.0);
+                }
+            }
+            let _cleanup_guard = DropFile(req_path.clone());
+
+            if now - created_at > 600.0 {
+                write_private(
+                    &res_path,
+                    &json!({
+                        "id": req_id,
+                        "complete": false,
+                        "error": "expired",
+                    }),
+                )?;
+                return Ok(());
+            }
+
+            if self.capture.is_none() {
+                write_private(
+                    &res_path,
+                    &json!({
+                        "id": req_id,
+                        "complete": false,
+                        "error": "worker_not_connected",
+                    }),
+                )?;
+                return Ok(());
+            }
+
+            let capture = self.capture.as_mut().unwrap().as_mut();
+            let store = &self.history;
+            let account_id = &self.config.account_id;
+            let now_ms = (now * 1000.0) as i64;
+
+            let should_yield = || false;
+
+            match crate::core::contacts::sync::run_sync(
+                capture,
+                store,
+                account_id,
+                mode,
+                &checkpoint_path,
+                &should_yield,
+                now_ms,
+            ).await {
+                Ok(report) => {
+                    let res_val = json!({
+                        "id": req_id,
+                        "finished_at_ms": now_ms,
+                        "complete": report.complete,
+                        "per_category": report.per_category.iter().map(|(c, exp, syn)| {
+                            json!({"category": c, "expected": exp, "synced": syn})
+                        }).collect::<Vec<_>>(),
+                        "unreadable_rows": report.unreadable_rows,
+                        "needs_review": report.needs_review,
+                        "yielded": report.yielded,
+                    });
+                    write_private(&res_path, &res_val)?;
+                }
+                Err(e) => {
+                    write_private(
+                        &res_path,
+                        &json!({
+                            "id": req_id,
+                            "complete": false,
+                            "error": e.to_string(),
+                        }),
+                    )?;
+                }
+            }
+        }
+
+        let is_idle = self.pending.is_empty() && !self.sessions.values().any(|s| s.turn.is_some());
+        let now = (self.clock)();
+        let last_success = if res_path.exists() {
+            read_json::<Value>(&res_path)
+                .ok()
+                .filter(|v| v.get("complete").and_then(|c| c.as_bool()).unwrap_or(false))
+                .and_then(|v| v.get("finished_at_ms").and_then(|t| t.as_f64()))
+                .map(|ms| ms / 1000.0)
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
+
+        if should_daily_incremental_sync(is_idle, now, last_success) && self.capture.is_some() {
+            let capture = self.capture.as_mut().unwrap().as_mut();
+            let store = &self.history;
+            let account_id = &self.config.account_id;
+            let now_ms = (now * 1000.0) as i64;
+            let should_yield = || false;
+            let _ = crate::core::contacts::sync::run_sync(
+                capture,
+                store,
+                account_id,
+                crate::core::contacts::sync::SyncMode::Incremental,
+                &checkpoint_path,
+                &should_yield,
+                now_ms,
+            ).await;
+        }
+
+        Ok(())
+    }
+}
+
+#[repr(C)]
+struct SchedulerTm {
+    tm_sec: i32,
+    tm_min: i32,
+    tm_hour: i32,
+    tm_mday: i32,
+    tm_mon: i32,
+    tm_year: i32,
+    tm_wday: i32,
+    tm_yday: i32,
+    tm_isdst: i32,
+    tm_gmtoff: i64,
+    tm_zone: *const std::ffi::c_char,
+}
+
+unsafe extern "C" {
+    fn localtime_r(timep: *const i64, result: *mut SchedulerTm) -> *mut SchedulerTm;
+}
+
+pub fn should_daily_incremental_sync(is_idle: bool, now_secs: f64, last_sync_at: f64) -> bool {
+    if !is_idle {
+        return false;
+    }
+    if now_secs - last_sync_at < 20.0 * 3600.0 {
+        return false;
+    }
+    let t = now_secs as i64;
+    unsafe {
+        let mut tm: SchedulerTm = std::mem::zeroed();
+        localtime_r(&t, &mut tm);
+        tm.tm_hour >= 3
     }
 }
 
@@ -4738,5 +4904,13 @@ mod tests {
         for b in &batches {
             assert!(b.len() <= 50, "每批名字数量绝对不能超过50");
         }
+    }
+
+    #[test]
+    fn test_should_daily_incremental_sync() {
+        // Not idle
+        assert!(!should_daily_incremental_sync(false, 100000.0, 0.0));
+        // Idle but sync within 20 hours
+        assert!(!should_daily_incremental_sync(true, 100000.0, 90000.0));
     }
 }

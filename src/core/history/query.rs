@@ -121,6 +121,7 @@ pub struct HistoryQuery {
     path: PathBuf,
     conn: Connection,
     default_recent: i64,
+    allowlist: Option<HashSet<String>>,
 }
 
 impl HistoryQuery {
@@ -137,7 +138,13 @@ impl HistoryQuery {
             path,
             conn,
             default_recent: default_recent.unwrap_or(5),
+            allowlist: None,
         })
+    }
+
+    pub fn with_allowlist(mut self, allowed: HashSet<String>) -> Self {
+        self.allowlist = Some(allowed);
+        self
     }
 
     pub fn raw_connection(&self) -> &Connection {
@@ -240,6 +247,37 @@ impl HistoryQuery {
 
         let merged_from: Vec<String> = family.iter().filter(|&c| c != root).cloned().collect();
 
+        let profile_opt: Option<Value> = self
+            .conn
+            .query_row(
+                "SELECT category, wechat_id, nickname, remark, region, source, added_on, common_groups, enterprise, real_name, tags, friend_permission, identity, first_synced_at, last_synced_at, removed_at FROM contact_profiles WHERE contact_id = ?",
+                params![root],
+                |r| {
+                    let tags_str: String = r.get(10)?;
+                    let tags_val: Value = serde_json::from_str(&tags_str).unwrap_or_else(|_| json!([]));
+                    Ok(json!({
+                        "category": r.get::<_, String>(0)?,
+                        "wechat_id": r.get::<_, Option<String>>(1)?,
+                        "nickname": r.get::<_, String>(2)?,
+                        "remark": r.get::<_, Option<String>>(3)?,
+                        "region": r.get::<_, Option<String>>(4)?,
+                        "source": r.get::<_, Option<String>>(5)?,
+                        "added_on": r.get::<_, Option<String>>(6)?,
+                        "common_groups": r.get::<_, Option<i64>>(7)?,
+                        "enterprise": r.get::<_, Option<String>>(8)?,
+                        "real_name": r.get::<_, Option<String>>(9)?,
+                        "tags": tags_val,
+                        "friend_permission": r.get::<_, Option<String>>(11)?,
+                        "identity": r.get::<_, String>(12)?,
+                        "first_synced_at": r.get::<_, i64>(13)?,
+                        "last_synced_at": r.get::<_, i64>(14)?,
+                        "removed_at": r.get::<_, Option<i64>>(15)?,
+                    }))
+                },
+            )
+            .optional()
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+
         Ok(json!({
             "contact_id": contact_id,
             "account_id": account_id,
@@ -248,6 +286,7 @@ impl HistoryQuery {
             "merged_from": merged_from,
             "message_count": count,
             "last_observed_at": max_observed,
+            "profile": profile_opt,
         }))
     }
 
@@ -256,6 +295,16 @@ impl HistoryQuery {
         query: Option<&str>,
         cursor: Option<&str>,
         limit: Option<i64>,
+    ) -> Result<Value, QueryError> {
+        self.list_contacts_with_category(query, cursor, limit, None)
+    }
+
+    pub fn list_contacts_with_category(
+        &self,
+        query: Option<&str>,
+        cursor: Option<&str>,
+        limit: Option<i64>,
+        category: Option<&str>,
     ) -> Result<Value, QueryError> {
         let lim = check_limit(limit.unwrap_or(50), "contacts")?;
         let after: i64 = if let Some(cur) = cursor {
@@ -266,32 +315,47 @@ impl HistoryQuery {
         };
 
         let mut where_clause = "c.rowid > ? AND c.merged_into IS NULL".to_string();
-        let mut q_param = String::new();
+        let mut params_vec: Vec<rusqlite::types::Value> = vec![rusqlite::types::Value::Integer(after)];
+
         if let Some(q) = query {
             where_clause.push_str(" AND EXISTS (SELECT 1 FROM contact_names n WHERE n.contact_id=c.contact_id AND instr(n.name_key, ?) > 0)");
-            q_param = name_key(q);
+            params_vec.push(rusqlite::types::Value::Text(name_key(q)));
         }
+
+        if let Some(cat) = category {
+            where_clause.push_str(" AND EXISTS (SELECT 1 FROM contact_profiles cp WHERE cp.contact_id=c.contact_id AND cp.category=?)");
+            params_vec.push(rusqlite::types::Value::Text(cat.to_string()));
+        }
+
+        if let Some(ref allowed) = self.allowlist {
+            if allowed.is_empty() {
+                return Ok(json!({
+                    "items": [],
+                    "next_cursor": None::<String>,
+                }));
+            }
+            let marks = allowed.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            where_clause.push_str(&format!(" AND c.contact_id IN ({})", marks));
+            for cid in allowed {
+                params_vec.push(rusqlite::types::Value::Text(cid.clone()));
+            }
+        }
+
         let sql = format!(
             "SELECT c.rowid AS rid, c.contact_id FROM contacts c WHERE {} ORDER BY c.rowid LIMIT ?",
             where_clause
         );
+        params_vec.push(rusqlite::types::Value::Integer(lim + 1));
 
         let mut stmt = self.conn.prepare(&sql).map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+        let mapped = stmt
+            .query_map(rusqlite::params_from_iter(params_refs), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+
         let mut rows_vec = Vec::new();
-        if query.is_some() {
-            let mapped = stmt
-                .query_map(params![after, q_param, lim + 1], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-                .map_err(|e| QueryError::new("db_error", e.to_string()))?;
-            for r in mapped {
-                rows_vec.push(r.map_err(|e| QueryError::new("db_error", e.to_string()))?);
-            }
-        } else {
-            let mapped = stmt
-                .query_map(params![after, lim + 1], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-                .map_err(|e| QueryError::new("db_error", e.to_string()))?;
-            for r in mapped {
-                rows_vec.push(r.map_err(|e| QueryError::new("db_error", e.to_string()))?);
-            }
+        for r in mapped {
+            rows_vec.push(r.map_err(|e| QueryError::new("db_error", e.to_string()))?);
         }
 
         let has_more = rows_vec.len() > lim as usize;
@@ -328,7 +392,7 @@ impl HistoryQuery {
             let key = name_key(n);
             let mut stmt = self
                 .conn
-                .prepare("SELECT contact_id FROM contact_names WHERE name_key=? AND source IN ('config','alias')")
+                .prepare("SELECT contact_id FROM contact_names WHERE name_key=? AND source IN ('config','alias','addressbook')")
                 .map_err(|e| QueryError::new("db_error", e.to_string()))?;
             let mapped = stmt
                 .query_map(params![key], |r| r.get::<_, String>(0))
@@ -348,6 +412,12 @@ impl HistoryQuery {
         } else {
             contact_id.unwrap().to_string()
         };
+
+        if let Some(ref allowed) = self.allowlist {
+            if !allowed.contains(&target_cid) {
+                return Err(QueryError::not_found("unknown contact"));
+            }
+        }
 
         let (root, fam) = self._family(&target_cid)?;
         self._contact(&root, &fam)

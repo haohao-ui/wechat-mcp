@@ -596,7 +596,7 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
     if action == "-h" || action == "--help" {
         let _ = writeln!(
             stdout,
-            "Usage: wechat-mcp control <status|start|stop|pause|resume|resume-session|config-check|calibrate|migrate-history|history-status|merge-contact|unmerge-contact|history-backup> [--config <path>]"
+            "Usage: wechat-mcp control <status|start|stop|pause|resume|resume-session|config-check|calibrate|migrate-history|history-status|merge-contact|unmerge-contact|history-backup|contacts-list|mcp-info|contacts-sync> [--config <path>]"
         );
         return 0;
     }
@@ -1390,6 +1390,428 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                     let _ = writeln!(stderr, "history-backup error: {}", e);
                     1
                 }
+            }
+        }
+        "contacts-list" => {
+            let mut config_file: Option<PathBuf> = None;
+            let mut category_filter: Option<String> = None;
+            let mut idx = 1;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--config" if idx + 1 < args.len() => {
+                        config_file = Some(PathBuf::from(&args[idx + 1]));
+                        idx += 2;
+                    }
+                    "--category" if idx + 1 < args.len() => {
+                        category_filter = Some(args[idx + 1].clone());
+                        idx += 2;
+                    }
+                    "--json" => {
+                        idx += 1;
+                    }
+                    _ => {
+                        idx += 1;
+                    }
+                }
+            }
+            let config_path = config_file.unwrap_or(default_config_path);
+            let cfg = match BotConfig::load(&config_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = writeln!(stderr, "failed to load config ({}): {e:#}", config_path.display());
+                    return 2;
+                }
+            };
+            let store = match crate::core::history::store::HistoryStore::open(&cfg.state_dir) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = writeln!(stderr, "failed to open history store: {e:#}");
+                    return 1;
+                }
+            };
+
+            let sync_file = cfg.state_dir.join("contacts-sync-result.json");
+            let sync_val: Value = if sync_file.exists() {
+                match fs::read_to_string(&sync_file).ok().and_then(|c| serde_json::from_str(&c).ok()) {
+                    Some(v) => v,
+                    None => Value::Null,
+                }
+            } else {
+                Value::Null
+            };
+
+            let conn = store.connection();
+            let guard = match conn.lock() {
+                Ok(g) => g,
+                Err(_) => {
+                    let _ = writeln!(stderr, "history db lock error");
+                    return 1;
+                }
+            };
+
+            let mut stmt = match guard.prepare(
+                r#"SELECT
+                    c.contact_id,
+                    c.display_name,
+                    c.kind,
+                    p.category,
+                    p.wechat_id,
+                    p.nickname,
+                    p.remark,
+                    p.region,
+                    p.source,
+                    p.added_on,
+                    p.common_groups,
+                    p.enterprise,
+                    p.real_name,
+                    p.tags,
+                    p.friend_permission,
+                    p.identity,
+                    p.removed_at,
+                    m.cnt,
+                    m.max_obs
+                FROM contacts c
+                LEFT JOIN contact_profiles p ON c.contact_id = p.contact_id
+                LEFT JOIN (
+                    SELECT contact_id, COUNT(*) as cnt, MAX(observed_at) as max_obs
+                    FROM messages
+                    GROUP BY contact_id
+                ) m ON c.contact_id = m.contact_id
+                WHERE c.merged_into IS NULL
+                ORDER BY c.rowid"#
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = writeln!(stderr, "failed to prepare query: {e:#}");
+                    return 1;
+                }
+            };
+
+            let mapped = stmt.query_map([], |row| {
+                let cid: String = row.get(0)?;
+                let disp_name: String = row.get(1)?;
+                let kind: String = row.get(2)?;
+                let cat: Option<String> = row.get(3)?;
+                let wechat_id: Option<String> = row.get(4)?;
+                let nickname: Option<String> = row.get(5)?;
+                let remark: Option<String> = row.get(6)?;
+                let region: Option<String> = row.get(7)?;
+                let source: Option<String> = row.get(8)?;
+                let added_on: Option<String> = row.get(9)?;
+                let _common_groups: Option<i64> = row.get(10)?;
+                let enterprise: Option<String> = row.get(11)?;
+                let real_name: Option<String> = row.get(12)?;
+                let tags_str: Option<String> = row.get(13)?;
+                let _friend_perm: Option<String> = row.get(14)?;
+                let identity: Option<String> = row.get(15)?;
+                let removed_at: Option<i64> = row.get(16)?;
+                let cnt: Option<i64> = row.get(17)?;
+                let max_obs: Option<i64> = row.get(18)?;
+
+                let category = cat.unwrap_or_else(|| {
+                    if kind == "group" { "group".to_string() } else { "personal".to_string() }
+                });
+                let tags: Value = tags_str.as_deref().and_then(|s| serde_json::from_str(s).ok()).unwrap_or_else(|| json!([]));
+                let ident = identity.unwrap_or_else(|| if wechat_id.is_some() { "strong".to_string() } else { "weak".to_string() });
+
+                Ok((cid, disp_name, category, wechat_id, nickname, remark, region, source, added_on, tags, enterprise, real_name, ident, removed_at, cnt, max_obs))
+            });
+
+            let rows: Vec<_> = match mapped {
+                Ok(iter) => iter.filter_map(Result::ok).collect(),
+                Err(e) => {
+                    let _ = writeln!(stderr, "query error: {e:#}");
+                    return 1;
+                }
+            };
+
+            let mut contacts_out = Vec::new();
+            for (cid, disp_name, category, wechat_id, nickname, remark, region, source, added_on, tags, enterprise, real_name, identity, removed_at, cnt, max_obs) in rows {
+                if let Some(ref cf) = category_filter {
+                    if &category != cf {
+                        continue;
+                    }
+                }
+
+                let mut contact_all_names = vec![disp_name.clone()];
+                if let Some(ref nk) = nickname { contact_all_names.push(nk.clone()); }
+                if let Some(ref rm) = remark { contact_all_names.push(rm.clone()); }
+
+                let mut is_ignored = false;
+                let mut is_allowed = false;
+                for n in &contact_all_names {
+                    let d = crate::core::scheduler::decision(&cfg, n, None);
+                    if d == "ignored" {
+                        is_ignored = true;
+                        break;
+                    } else if d == "allowed" {
+                        is_allowed = true;
+                    }
+                }
+                let handling = if is_ignored {
+                    "ignored"
+                } else if is_allowed {
+                    "auto_reply"
+                } else {
+                    "record_only"
+                };
+
+                contacts_out.push(json!({
+                    "contact_id": cid,
+                    "category": category,
+                    "display_name": disp_name,
+                    "nickname": nickname,
+                    "remark": remark,
+                    "wechat_id": wechat_id,
+                    "identity": identity,
+                    "region": region,
+                    "source": source,
+                    "added_on": added_on,
+                    "tags": tags,
+                    "enterprise": enterprise,
+                    "real_name": real_name,
+                    "handling": handling,
+                    "removed": removed_at.is_some(),
+                    "last_message_at_ms": max_obs,
+                    "message_count": cnt.unwrap_or(0),
+                }));
+            }
+
+            let mut rev_stmt = match guard.prepare(
+                "SELECT id, reason, candidates, profile FROM contact_reviews WHERE account_id=? AND resolved_at IS NULL ORDER BY id"
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = writeln!(stderr, "failed to prepare review query: {e:#}");
+                    return 1;
+                }
+            };
+            let rev_mapped = rev_stmt.query_map([&cfg.account_id], |r| {
+                let id: i64 = r.get(0)?;
+                let reason: String = r.get(1)?;
+                let cand_str: String = r.get(2)?;
+                let prof_str: String = r.get(3)?;
+                let candidates: Value = serde_json::from_str(&cand_str).unwrap_or_else(|_| json!([]));
+                let prof: Value = serde_json::from_str(&prof_str).unwrap_or_else(|_| json!({}));
+                let name = prof.get("remark").and_then(|v| v.as_str())
+                    .or_else(|| prof.get("nickname").and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .to_string();
+                Ok(json!({
+                    "id": id,
+                    "reason": reason,
+                    "candidates": candidates,
+                    "name": name,
+                }))
+            });
+            let reviews: Vec<Value> = match rev_mapped {
+                Ok(iter) => iter.filter_map(Result::ok).collect(),
+                Err(_) => Vec::new(),
+            };
+
+            let out_obj = json!({
+                "account_id": cfg.account_id,
+                "sync": sync_val,
+                "contacts": contacts_out,
+                "reviews": reviews,
+            });
+
+            let _ = writeln!(stdout, "{}", serde_json::to_string_pretty(&out_obj).unwrap_or_default());
+            0
+        }
+        "mcp-info" => {
+            let mut config_file: Option<PathBuf> = None;
+            let mut idx = 1;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--config" if idx + 1 < args.len() => {
+                        config_file = Some(PathBuf::from(&args[idx + 1]));
+                        idx += 2;
+                    }
+                    _ => {
+                        idx += 1;
+                    }
+                }
+            }
+            let config_path = config_file.unwrap_or(default_config_path);
+            let cfg = match BotConfig::load(&config_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = writeln!(stderr, "failed to load config ({}): {e:#}", config_path.display());
+                    return 2;
+                }
+            };
+
+            let brain_val = json!({
+                "mode": cfg.brain.mode,
+                "external": {
+                    "timeout_seconds": cfg.brain.external.timeout_seconds,
+                    "timeout_action": cfg.brain.external.timeout_action,
+                    "queue_minutes": cfg.brain.external.queue_minutes,
+                }
+            });
+
+            let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"));
+            let tools_path = home.join(".wechat-rpa/bin/wechat-mcp");
+            let tools_ok = tools_path.exists() && tools_path.is_file();
+            let tools_val_str = if tools_path.exists() {
+                tools_path.to_string_lossy().to_string()
+            } else {
+                "~/.wechat-rpa/bin/wechat-mcp".to_string()
+            };
+
+            let sock_path = core_socket_file();
+            let sock_ok = std::os::unix::net::UnixStream::connect(&sock_path).is_ok();
+
+            let http_bind = "127.0.0.1";
+            let http_port = 8765;
+            let http_addr = format!("{}:{}", http_bind, http_port);
+            let http_ok = std::net::TcpStream::connect(&http_addr).is_ok();
+            let http_val_str = format!("http://{}", http_addr);
+
+            let endpoints = json!([
+                {
+                    "id": "tools",
+                    "label": "MCP 工具服务",
+                    "value": tools_val_str,
+                    "ok": tools_ok,
+                    "detail": ""
+                },
+                {
+                    "id": "core_sock",
+                    "label": "外部大脑接口",
+                    "value": sock_path.to_string_lossy().to_string(),
+                    "ok": sock_ok,
+                    "detail": ""
+                },
+                {
+                    "id": "history_http",
+                    "label": "聊天历史查询",
+                    "value": http_val_str,
+                    "ok": http_ok,
+                    "detail": ""
+                }
+            ]);
+
+            let tools_list = crate::tools::list_tools_with_legacy(true);
+            let mut all_tool_names: Vec<String> = tools_list["tools"]
+                .as_array()
+                .map(|arr| arr.iter().filter_map(|t| t["name"].as_str().map(|s| s.to_string())).collect())
+                .unwrap_or_default();
+            for h in crate::core::history::mcp_tools::ALL_HISTORY_TOOLS {
+                if !all_tool_names.contains(&h.to_string()) {
+                    all_tool_names.push(h.to_string());
+                }
+            }
+
+            let mut brain_tools = Vec::new();
+            let mut wechat_tools = Vec::new();
+            let mut customer_tools = Vec::new();
+            let mut history_tools = Vec::new();
+
+            for t in all_tool_names {
+                if matches!(t.as_str(), "next_turn" | "reply" | "resume_session") {
+                    brain_tools.push(t);
+                } else if t.starts_with("history_") {
+                    history_tools.push(t);
+                } else if ["customer", "followup", "conversation", "metrics", "listener"].iter().any(|k| t.contains(k)) {
+                    customer_tools.push(t);
+                } else {
+                    wechat_tools.push(t);
+                }
+            }
+
+            let tool_groups = json!([
+                {"title": "外部大脑", "tools": brain_tools},
+                {"title": "微信操作", "tools": wechat_tools},
+                {"title": "客户", "tools": customer_tools},
+                {"title": "聊天历史", "tools": history_tools}
+            ]);
+
+            let out_obj = json!({
+                "brain": brain_val,
+                "endpoints": endpoints,
+                "tool_groups": tool_groups,
+            });
+
+            let _ = writeln!(stdout, "{}", serde_json::to_string_pretty(&out_obj).unwrap_or_default());
+            0
+        }
+        "contacts-sync" => {
+            let mut config_file: Option<PathBuf> = None;
+            let mut full = false;
+            let mut wait_seconds: Option<u64> = None;
+            let mut idx = 1;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--config" if idx + 1 < args.len() => {
+                        config_file = Some(PathBuf::from(&args[idx + 1]));
+                        idx += 2;
+                    }
+                    "--full" => {
+                        full = true;
+                        idx += 1;
+                    }
+                    "--wait" if idx + 1 < args.len() => {
+                        wait_seconds = args[idx + 1].parse().ok();
+                        idx += 2;
+                    }
+                    _ => {
+                        idx += 1;
+                    }
+                }
+            }
+            let config_path = config_file.unwrap_or(default_config_path);
+            let cfg = match BotConfig::load(&config_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = writeln!(stderr, "failed to load config ({}): {e:#}", config_path.display());
+                    return 2;
+                }
+            };
+            let state_dir = cfg.state_dir.clone();
+            if let Err(e) = fs::create_dir_all(&state_dir) {
+                let _ = writeln!(stderr, "failed to create state dir: {e:#}");
+                return 1;
+            }
+
+            let req_id = format!("req_{}", uuid::Uuid::new_v4().simple());
+            let mode = if full { "full" } else { "incremental" };
+            let req_val = json!({
+                "id": req_id,
+                "mode": mode,
+                "created_at": now_secs(),
+            });
+            let req_path = state_dir.join("contacts-sync-request.json");
+            let res_path = state_dir.join("contacts-sync-result.json");
+
+            if let Err(e) = write_private(&req_path, &req_val) {
+                let _ = writeln!(stderr, "failed to write request file: {e:#}");
+                return 1;
+            }
+
+            if let Some(wait_sec) = wait_seconds {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_sec);
+                loop {
+                    if res_path.exists() {
+                        if let Ok(content) = fs::read_to_string(&res_path) {
+                            if let Ok(res_obj) = serde_json::from_str::<Value>(&content) {
+                                if res_obj.get("id").and_then(|v| v.as_str()) == Some(&req_id) {
+                                    let _ = writeln!(stdout, "{}", serde_json::to_string_pretty(&res_obj).unwrap_or_default());
+                                    return 0;
+                                }
+                            }
+                        }
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        let _ = writeln!(stderr, "contacts-sync wait timed out after {wait_sec}s");
+                        return 1;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            } else {
+                let _ = writeln!(stdout, "{}", json!({"status": "queued", "id": req_id, "mode": mode}));
+                0
             }
         }
         other => {
@@ -3339,5 +3761,155 @@ mod tests {
 
         // 不应报错 "机器人未运行：请先 control start"
         assert_eq!(code, 0, "Calibrate should succeed while serve-core is running: {}", String::from_utf8_lossy(&stderr));
+    }
+
+    #[test]
+    fn test_control_contacts_list_includes_ignore_and_allow_handling() {
+        let temp = TempDir::new();
+        let cfg_path = temp.path().join("config.json");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+
+        let cfg = json!({
+            "schema_version": 1,
+            "host": "local",
+            "account_id": "test-desktop",
+            "state_dir": state_dir.to_str().unwrap(),
+            "allowlist": [{"recipient": "甲备注", "kind": "private"}],
+            "ignorelist": [{"recipient": "乙备注", "kind": "private"}]
+        });
+        fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        let store = crate::core::history::store::HistoryStore::open(&state_dir).unwrap();
+        // Insert contacts with profiles
+        let p_allow = crate::core::history::store::ProfileInput {
+            category: "personal".to_string(),
+            wechat_id: Some("wxid_t1".to_string()),
+            nickname: "测试甲".to_string(),
+            remark: Some("甲备注".to_string()),
+            region: None,
+            source: None,
+            added_on: Some("2023-06-08".to_string()),
+            common_groups: None,
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+        };
+        store.upsert_profile("test-desktop", &p_allow, 1000).unwrap();
+
+        let p_ignore = crate::core::history::store::ProfileInput {
+            category: "personal".to_string(),
+            wechat_id: Some("wxid_t2".to_string()),
+            nickname: "测试乙".to_string(),
+            remark: Some("乙备注".to_string()),
+            region: None,
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+        };
+        store.upsert_profile("test-desktop", &p_ignore, 1000).unwrap();
+
+        // Contact without profile (only in chat)
+        store.ensure_contact("test-desktop", &json!({"recipient": "丙普通", "kind": "private"}), true).unwrap();
+
+        // Sync result file
+        let sync_res = json!({
+            "finished_at_ms": 1794115000000_i64,
+            "complete": true,
+            "per_category": [{"category": "personal", "expected": 2, "synced": 2}],
+            "unreadable_rows": 0,
+            "needs_review": 0
+        });
+        fs::write(state_dir.join("contacts-sync-result.json"), sync_res.to_string()).unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &["contacts-list".into(), "--json".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+
+        let out_val: Value = serde_json::from_slice(&stdout).expect("valid json output");
+        assert_eq!(out_val["account_id"], "test-desktop");
+        assert_eq!(out_val["sync"]["complete"], true);
+        assert_eq!(out_val["sync"]["finished_at_ms"], 1794115000000_i64);
+
+        let contacts = out_val["contacts"].as_array().expect("contacts array");
+        assert_eq!(contacts.len(), 3);
+
+        let c_allow = contacts.iter().find(|c| c["display_name"] == "甲备注").expect("甲备注");
+        assert_eq!(c_allow["handling"], "auto_reply");
+        assert_eq!(c_allow["wechat_id"], "wxid_t1");
+        assert_eq!(c_allow["identity"], "strong");
+        assert_eq!(c_allow["category"], "personal");
+        assert_eq!(c_allow["removed"], false);
+
+        let c_ignore = contacts.iter().find(|c| c["display_name"] == "乙备注").expect("乙备注");
+        assert_eq!(c_ignore["handling"], "ignored");
+
+        let c_record = contacts.iter().find(|c| c["display_name"] == "丙普通").expect("丙普通");
+        assert_eq!(c_record["handling"], "record_only");
+        assert_eq!(c_record["category"], "personal");
+        assert!(c_record["wechat_id"].is_null());
+    }
+
+    #[test]
+    fn test_control_mcp_info_lists_tool_groups() {
+        let temp = TempDir::new();
+        let cfg_path = temp.path().join("config.json");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+
+        let cfg = json!({
+            "schema_version": 1,
+            "host": "local",
+            "account_id": "test-desktop",
+            "state_dir": state_dir.to_str().unwrap(),
+            "allowlist": [{"recipient": "测试联系人", "kind": "private"}]
+        });
+        fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &["mcp-info".into(), "--json".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+
+        let out_val: Value = serde_json::from_slice(&stdout).expect("valid json output");
+        assert!(out_val.get("brain").is_some());
+        let endpoints = out_val["endpoints"].as_array().expect("endpoints array");
+        assert_eq!(endpoints.len(), 3);
+        assert!(endpoints.iter().any(|e| e["id"] == "tools"));
+        assert!(endpoints.iter().any(|e| e["id"] == "core_sock"));
+        assert!(endpoints.iter().any(|e| e["id"] == "history_http"));
+
+        let tool_groups = out_val["tool_groups"].as_array().expect("tool_groups array");
+        assert_eq!(tool_groups.len(), 4);
+        let titles: Vec<&str> = tool_groups.iter().map(|g| g["title"].as_str().unwrap()).collect();
+        assert_eq!(titles, vec!["外部大脑", "微信操作", "客户", "聊天历史"]);
+
+        let brain_group = tool_groups.iter().find(|g| g["title"] == "外部大脑").unwrap();
+        let brain_tools = brain_group["tools"].as_array().unwrap();
+        assert!(brain_tools.iter().any(|t| t == "next_turn"));
+        assert!(brain_tools.iter().any(|t| t == "reply"));
+        assert!(brain_tools.iter().any(|t| t == "resume_session"));
+
+        let hist_group = tool_groups.iter().find(|g| g["title"] == "聊天历史").unwrap();
+        let hist_tools = hist_group["tools"].as_array().unwrap();
+        assert!(hist_tools.iter().any(|t| t == "history_list_contacts"));
     }
 }
