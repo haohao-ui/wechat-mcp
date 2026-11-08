@@ -186,6 +186,33 @@ public struct ContactsPageLogic {
         return ContactsCategoryCounts(personal: personal, work: work, group: group, official: official, ignored: ignored)
     }
 
+    /// 分组的中文名（同步状态里不显示 work/personal 这类内部代码）
+    public static func categoryTitle(_ category: String) -> String {
+        switch category {
+        case "personal": return "联系人"
+        case "work": return "企业微信"
+        case "group": return "群聊"
+        case "official": return "公众号"
+        default: return category
+        }
+    }
+
+    /// 列表"微信号"一列：没有微信号就显示 —（原因放在详情里；列表里写说明文字会让联系人分组也显示成企业微信）
+    public static func listWechatText(_ item: ContactProfileItem) -> String {
+        if let w = item.wechatId, !w.isEmpty { return w }
+        return "—"
+    }
+
+    /// 详情里的微信号：没有时说明原因
+    public static func detailWechatText(_ item: ContactProfileItem) -> String {
+        if let w = item.wechatId, !w.isEmpty { return w }
+        switch item.category {
+        case "work": return "—（企业微信无此项）"
+        case "personal" where item.identity != nil: return "—（未读到）"
+        default: return "—"
+        }
+    }
+
     public static func applyHandling(
         config: [String: Any],
         name: String,
@@ -338,6 +365,8 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         mainStack.orientation = .vertical
         mainStack.alignment = .leading
         mainStack.spacing = 12
+        // 剩余高度全部给下方列表（默认按"重力区"排列不拉伸，列表只剩内容初始高度、后面的行被截掉）
+        mainStack.distribution = .fill
         mainStack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(mainStack)
 
@@ -386,11 +415,14 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         categorySegment.action = #selector(handleCategoryChanged)
         mainStack.addArrangedSubview(categorySegment)
 
-        // 4. 下方分栏视图：左侧表格，右侧详情
-        let splitView = NSSplitView()
-        splitView.isVertical = true
-        splitView.dividerStyle = .thin
-        splitView.translatesAutoresizingMaskIntoConstraints = false
+        // 4. 下方：左侧表格占剩余宽度，右侧详情面板固定宽度（选中联系人才显示；隐藏时表格占满整行）。
+        //    不用 NSSplitView：面板隐藏后再显示，分栏会把它留成 0 宽（实测被挤成一条）。
+        let contentRow = NSStackView()
+        contentRow.orientation = .horizontal
+        contentRow.alignment = .top
+        contentRow.distribution = .fill
+        contentRow.spacing = 12
+        contentRow.translatesAutoresizingMaskIntoConstraints = false
 
         // 左侧表格
         let tableScroll = NSScrollView()
@@ -400,23 +432,30 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         let colName = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("NameCol"))
         colName.title = "名字 / 备注"
         colName.width = 160
+        colName.minWidth = 110
         contactsTable.addTableColumn(colName)
 
         let colWx = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("WxCol"))
         colWx.title = "微信号"
         colWx.width = 110
+        colWx.minWidth = 74
         contactsTable.addTableColumn(colWx)
 
         let colMsgs = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("MsgsCol"))
         colMsgs.title = "消息数"
         colMsgs.width = 60
+        colMsgs.minWidth = 40
         contactsTable.addTableColumn(colMsgs)
 
         let colHandling = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("HandlingCol"))
         colHandling.title = "处理方式"
-        colHandling.width = 130
+        colHandling.width = 140
+        colHandling.minWidth = 130  // 放"自动回复"勾选框和"忽略"按钮，不能被压窄
         contactsTable.addTableColumn(colHandling)
 
+        contactsTable.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+        // 详情面板出现时表格变窄：列间距收紧，四列在最小宽度下仍能放下、不用横向滚动
+        contactsTable.intercellSpacing = NSSize(width: 6, height: contactsTable.intercellSpacing.height)
         contactsTable.dataSource = self
         contactsTable.delegate = self
         contactsTable.rowHeight = 32
@@ -425,9 +464,18 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         // 右侧详情
         setupDetailBox()
 
-        splitView.addArrangedSubview(tableScroll)
-        splitView.addArrangedSubview(detailBox)
-        mainStack.addArrangedSubview(splitView)
+        contentRow.addArrangedSubview(tableScroll)
+        contentRow.addArrangedSubview(detailBox)
+        // 详情面板：点了名字才出现，取消选择就收起
+        detailBox.isHidden = true
+        topBar.setContentHuggingPriority(.required, for: .vertical)
+        categorySegment.setContentHuggingPriority(.required, for: .vertical)
+        reviewNoticeBox.setContentHuggingPriority(.required, for: .vertical)
+        contentRow.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
+        tableScroll.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
+        tableScroll.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        detailBox.setContentHuggingPriority(.required, for: .horizontal)
+        mainStack.addArrangedSubview(contentRow)
 
         NSLayoutConstraint.activate([
             mainStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
@@ -435,9 +483,11 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
             mainStack.topAnchor.constraint(equalTo: view.topAnchor, constant: 16),
             mainStack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16),
             reviewNoticeBox.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
-            splitView.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
+            contentRow.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
+            contentRow.heightAnchor.constraint(greaterThanOrEqualToConstant: 240),
+            tableScroll.heightAnchor.constraint(equalTo: contentRow.heightAnchor),
             tableScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 380),
-            detailBox.widthAnchor.constraint(greaterThanOrEqualToConstant: 240)
+            detailBox.widthAnchor.constraint(equalToConstant: 230)
         ])
     }
 
@@ -514,7 +564,7 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         if let sync = payload.sync {
             var syncDesc = sync.complete ? "上次同步已完成" : "同步未完整"
             if let per = sync.perCategory, !per.isEmpty {
-                let parts = per.map { "\($0.category) \($0.synced)/\($0.expected)" }
+                let parts = per.map { "\(ContactsPageLogic.categoryTitle($0.category)) \($0.synced)/\($0.expected)" }
                 syncDesc += " (" + parts.joined(separator: ", ") + ")"
             }
             syncInfoLabel.stringValue = syncDesc
@@ -563,6 +613,7 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
     }
 
     private func clearDetail() {
+        detailBox.isHidden = true
         detailNameLabel.stringValue = "未选择联系人"
         detailWechatLabel.stringValue = "-"
         detailRemarkLabel.stringValue = "-"
@@ -576,8 +627,9 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
     }
 
     private func showDetail(for item: ContactProfileItem) {
+        detailBox.isHidden = false
         detailNameLabel.stringValue = item.displayName
-        detailWechatLabel.stringValue = item.wechatId ?? (item.identity == "weak" ? "（弱身份，无微信号）" : "-")
+        detailWechatLabel.stringValue = ContactsPageLogic.detailWechatText(item)
         detailRemarkLabel.stringValue = item.remark ?? "-"
         detailRegionLabel.stringValue = item.region ?? "-"
         detailSourceLabel.stringValue = item.source ?? "-"
@@ -711,7 +763,7 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
             cell.font = NSFont.systemFont(ofSize: 12)
             return cell
         case "WxCol":
-            let wx = item.wechatId ?? (item.identity == "weak" ? "（企微无微信号）" : "-")
+            let wx = ContactsPageLogic.listWechatText(item)
             let cell = NSTextField(labelWithString: wx)
             cell.font = NSFont.systemFont(ofSize: 11)
             cell.textColor = .secondaryLabelColor

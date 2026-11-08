@@ -82,7 +82,10 @@ func run() -> Int32 {
             let resp: [String: Any] = [
                 "ok": true,
                 "counts": countsDict,
-                "contact_count": payload.contacts.count
+                "contact_count": payload.contacts.count,
+                "list_wechat": payload.contacts.map { ContactsPageLogic.listWechatText($0) },
+                "detail_wechat": payload.contacts.map { ContactsPageLogic.detailWechatText($0) },
+                "titles": ["personal", "work", "group", "official"].map { ContactsPageLogic.categoryTitle($0) }
             ]
             let outData = try JSONSerialization.data(withJSONObject: resp, options: [.sortedKeys])
             print(String(data: outData, encoding: .utf8)!)
