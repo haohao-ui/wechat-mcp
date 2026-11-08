@@ -1,4 +1,5 @@
 pub mod backup;
+pub mod contacts;
 pub mod brain_tools;
 pub mod config;
 pub mod control;
