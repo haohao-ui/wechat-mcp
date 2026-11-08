@@ -311,3 +311,15 @@ fn contacts_operations_check_only_session_list_anchors() {
         assert!(l.contains("regions: [\"session_list\"]"), "通讯录操作只能核对会话列表区: {}", l.trim());
     }
 }
+
+/// 离开通讯录时若「通讯录管理」窗口还开着（实机：同步中断后窗口没关，机器人被"别的微信窗口"挡住、停摆），
+/// 必须先关掉它，再切回聊天页。
+#[test]
+fn contacts_leave_closes_manager_window_first() {
+    let src = std::fs::read_to_string("native/bot/Contacts.swift").unwrap();
+    let start = src.find("operation == \"contacts_leave\"").expect("contacts_leave");
+    let body = &src[start..(start + 1200).min(src.len())];
+    let close = body.find("closeManagerWindow(").expect("contacts_leave 必须先关闭通讯录管理窗口");
+    let gate = body.find("screenGate(").expect("gate");
+    assert!(close < gate, "必须在界面检查之前关闭管理窗口（否则被它挡住、检查失败）");
+}

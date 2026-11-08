@@ -417,6 +417,11 @@ func executeContactsOperation(operation: String, params: [String: Any], manage: 
     }
 
     if operation == "contacts_leave" {
+        // 「通讯录管理」窗口若还开着（例如同步中断），会被界面检查当成"别的微信窗口"挡住、机器人停摆：先关掉它
+        if let mgr = findManagerWindow() {
+            _ = try? closeManagerWindow(mgr)
+            pauseUI(0.3)
+        }
         let (window, _) = try readyWindow(manage: manage)
         try screenGate(window)
         let wx = window["x"] as! Double, wy = window["y"] as! Double
