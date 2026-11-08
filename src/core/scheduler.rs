@@ -656,8 +656,11 @@ impl BotCoordinator {
         Ok(())
     }
 
+    /// Disconnects the worker but keeps the injected capture client: serve-core builds it once and has no
+    /// factory, so dropping it here left every session without capture (device 2026-11-08). connect()
+    /// restarts it when it is not connected.
     pub async fn close_capture(&mut self) -> Result<()> {
-        if let Some(mut cap) = self.capture.take() {
+        if let Some(cap) = self.capture.as_mut() {
             if let Err(err) = cap.close().await {
                 self.log_event(
                     "capture_cleanup_failed",
@@ -2660,6 +2663,32 @@ mod tests {
             coord.connect("a").await.unwrap();
         });
         assert_eq!(coord.active_name.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn test_close_capture_keeps_client_so_next_connect_reconnects() {
+        // Device 2026-11-08: close_capture() dropped the injected WorkerClient; serve-core has no factory to
+        // build a new one, so after the first session switch every session paused with
+        // "no capture client configured". Closing must only disconnect; connect() restarts it.
+        let td = TestDir::new();
+        let allow = vec![
+            AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None },
+            AllowlistEntry { recipient: "b".to_string(), kind: "private".to_string(), aliases: None },
+        ];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        coord.capture = Some(Box::new(MockCoordinatorCapture::new()));
+        coord.tool_client = Some(Arc::new(MockToolClient::default()));
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.connect("a").await.unwrap();
+            coord.close_capture().await.unwrap();
+            assert!(coord.capture.is_some(), "closing must keep the capture client");
+            assert_eq!(coord.active_name, None);
+            coord.connect("b").await.unwrap();
+        });
+        assert_eq!(coord.active_name.as_deref(), Some("b"));
     }
 
     #[test]
