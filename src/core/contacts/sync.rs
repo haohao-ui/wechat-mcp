@@ -44,16 +44,7 @@ async fn collapse_all_groups(capture: &mut dyn CoordinatorCapture) -> Result<Vec
             .filter(|l| l.x < 115.0 && GROUP_TITLES_CJK.contains(&cjk_only(&l.text).as_str()))
             .map(|l| l.y)
             .collect();
-        let expanded = headers.iter().copied().find(|hy| {
-            let has_count = lines.iter().any(|l| (l.y - hy).abs() < 15.0 && l.x > 250.0
-                && !l.text.trim().is_empty() && l.text.trim().chars().all(|c| c.is_ascii_digit()));
-            let content_below = lines.iter().any(|l| {
-                l.y > hy + 15.0 && l.y < hy + 75.0
-                    && !GROUP_TITLES_CJK.contains(&cjk_only(&l.text).as_str())
-                    && !(l.x > 250.0 && l.text.trim().chars().all(|c| c.is_ascii_digit()))
-            });
-            !has_count && content_below
-        });
+        let expanded = headers.iter().copied().find(|hy| group_expanded(&lines, *hy));
         match expanded {
             Some(hy) => {
                 let _ = capture.call("contacts_click_list", json!({"x": 180.0, "y": hy})).await?;
@@ -65,6 +56,25 @@ async fn collapse_all_groups(capture: &mut dyn CoordinatorCapture) -> Result<Vec
 }
 
 const GROUP_TITLES_CJK: [&str; 4] = ["公众号服务号", "企业微信联系人", "联系人", "群聊"];
+
+/// 分组是否展开：只看标题正下方（约 110 点内）有没有字母索引行或联系人行。
+/// 不能看人数：实机展开后人数照样显示；标题到第一个联系人约 80 点，中间字母行可能识别不出。
+fn group_expanded(lines: &[OcrLine], header_y: f64) -> bool {
+    // 只看到下一个分组标题为止：收起的分组下面紧挨着的是下一个分组（它若展开，字母行会落在范围内）
+    let next_header = lines
+        .iter()
+        .filter(|l| l.x < 115.0 && l.y > header_y + 5.0 && GROUP_TITLES_CJK.contains(&cjk_only(&l.text).as_str()))
+        .map(|l| l.y)
+        .fold(f64::INFINITY, f64::min);
+    let upper = (header_y + 110.0).min(next_header - 5.0);
+    lines.iter().any(|l| {
+        l.y > header_y + 15.0
+            && l.y < upper
+            && !GROUP_TITLES_CJK.contains(&cjk_only(&l.text).as_str())
+            && !(l.x > 250.0 && l.text.trim().chars().all(|c| c.is_ascii_digit()))
+            && !cjk_only(&l.text).contains("通讯录管理")
+    })
+}
 
 /// 名字比对用的规范化：只保留汉字、字母、数字（小写）。去掉截断省略号、空白、表情、性别图标等
 fn name_key_for_match(text: &str) -> String {
@@ -185,6 +195,17 @@ pub async fn run_sync(
     should_yield: &(dyn Fn() -> bool + Send + Sync),
     now_ms: i64,
 ) -> Result<SyncReport> {
+    // 先独占微信（对话监控已停、网关等其他进程也不能在两次操作之间插进来），整个同步结束再释放
+    if let Err(e) = capture.call("contacts_lease_begin", json!({})).await {
+        let _ = capture.call("contacts_lease_end", json!({})).await;
+        if let Some(dir) = checkpoint.parent() {
+            let _ = write_private(
+                &dir.join("contacts-sync-result.json"),
+                &json!({"finished_at_ms": now_ms, "complete": false, "error": format!("desktop_busy: {e:#}")}),
+            );
+        }
+        return Err(e);
+    }
     let result = run_sync_inner(capture, store, account_id, mode, checkpoint, should_yield, now_ms).await;
     if let Err(e) = &result {
         // 出错不自动续做：清掉断点并写明错误，否则协调器每轮续做、立刻失败，形成死循环（实机 347 次，机器人停摆）
@@ -201,6 +222,10 @@ pub async fn run_sync(
         if let Err(e) = capture.call("contacts_leave", json!({})).await {
             tracing::warn!("contacts_leave after failed sync also failed: {e:#}");
         }
+    }
+    // 无论成败都释放独占
+    if let Err(e) = capture.call("contacts_lease_end", json!({})).await {
+        tracing::warn!("contacts_lease_end failed: {e:#}");
     }
     result
 }
@@ -304,21 +329,18 @@ async fn run_sync_inner(
         info!(category = %cat_name, header_found = header_line.is_some(), top_lines = top_lines.len(), "contacts_sync_group");
         if let Some(hl) = header_line {
             let hy = hl.y;
-            // 检查标题右侧是否有数量（收起状态）
-            let has_count = top_lines.iter().any(|l| {
-                (l.y - hy).abs() < 15.0 && l.x > 250.0 && l.text.trim().chars().all(|c| c.is_ascii_digit())
-            });
-
-            let mut cur_screen_lines = if has_count {
-                // c. 点击分组标题展开并确认
+            // c. 按内容判断是否展开；未展开就点标题展开，并确认（最多点两次）
+            let mut cur_screen_lines = top_lines.clone();
+            for _ in 0..2 {
+                if group_expanded(&cur_screen_lines, hy) {
+                    break;
+                }
                 let click_res = capture.call("contacts_click_list", json!({"x": 180.0, "y": hy})).await?;
-                click_res
+                cur_screen_lines = click_res
                     .get("lines")
                     .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    .unwrap_or_default()
-            } else {
-                top_lines
-            };
+                    .unwrap_or_default();
+            }
 
             // 恢复：一次滚到上次停下的位置（少一格，保证与上次最后一屏有重叠）
             let resume_ticks = state.scroll_ticks.get(&cat_name).copied().unwrap_or(0);
@@ -759,6 +781,8 @@ mod tests {
         pub header_open_clicks: usize,
         /// 模拟某个操作失败（如真机上的 layout_mismatch）
         pub fail_op: Option<String>,
+        /// 真机：分组展开后标题旁的人数仍然显示（不能用人数判断是否展开）
+        pub counts_always: bool,
     }
 
     impl VirtualContactsUi {
@@ -778,6 +802,7 @@ mod tests {
                 header_arrows: false,
                 header_open_clicks: 0,
                 fail_op: None,
+                counts_always: false,
             }
         }
 
@@ -825,7 +850,7 @@ mod tests {
                         w: 120.0,
                         h: 24.0,
                     });
-                    if !g.expanded {
+                    if !g.expanded || self.counts_always {
                         lines.push(OcrLine {
                             text: g.total_contacts().to_string(),
                             x: 272.0,
@@ -1962,6 +1987,53 @@ mod tests {
         );
         assert!(report.complete, "{report:?}");
         assert_eq!(ui.header_open_clicks, 0);
+    }
+
+    /// 实机：分组展开后人数照样显示，标题与第一个联系人之间隔着（可能没识别出的）字母行约 80 点。
+    /// 用人数判断展开会把收起的当成展开（不去点开、0 个联系人），把展开的当成收起（不收起、挤掉别的标题）。
+    #[tokio::test]
+    async fn test_expansion_judged_by_content_not_counts() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        let store = HistoryStore::open(&state_dir).unwrap();
+        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
+        let official = letter_group("official", "公众号、服务号", "号", &[("G", 6), ("H", 6)]);
+        let work = letter_group("work", "企业微信联系人", "企", &[("Q", 5)]);
+        let mut personal = letter_group("personal", "联系人", "人", &[("A", 4), ("B", 4)]);
+        personal.expanded = true; // 遗留展开，且人数照样显示
+        let mut ui = VirtualContactsUi::new(vec![official, work, personal]);
+        ui.header_arrows = true;
+        ui.counts_always = true;
+        let no_yield = || false;
+        let report = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+        assert_eq!(
+            report.per_category,
+            vec![("official".to_string(), 12, 12), ("work".to_string(), 5, 5), ("personal".to_string(), 8, 8)],
+            "{report:?}"
+        );
+        assert!(report.complete, "{report:?}");
+    }
+
+    /// 用户要求：初始化时先停对话监控、整个过程独占微信。同步第一步拿租约（在进入通讯录之前），
+    /// 最后一步释放（在离开通讯录之后），出错也必须释放。
+    #[tokio::test]
+    async fn test_sync_holds_exclusive_lease_for_whole_run() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        let store = HistoryStore::open(&state_dir).unwrap();
+        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
+        let personal = letter_group("personal", "联系人", "人", &[("A", 3)]);
+        let no_yield = || false;
+        for fail in [None, Some("contacts_headers".to_string())] {
+            let mut ui = VirtualContactsUi::new(vec![personal.clone()]);
+            ui.fail_op = fail.clone();
+            let _ = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await;
+            let ops: Vec<String> = ui.calls.lock().unwrap().iter().map(|(op, _)| op.clone()).collect();
+            assert_eq!(ops.first().map(String::as_str), Some("contacts_lease_begin"), "{fail:?}: {ops:?}");
+            assert_eq!(ops.last().map(String::as_str), Some("contacts_lease_end"), "{fail:?}: {ops:?}");
+            let leave = ops.iter().rposition(|o| o == "contacts_leave").expect("leave");
+            assert!(leave < ops.len() - 1, "先离开通讯录再释放租约");
+        }
     }
 
 }

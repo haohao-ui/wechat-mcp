@@ -616,7 +616,37 @@ func address(_ path: String) throws -> sockaddr_un {
     return value
 }
 
+/// 通讯录初始化期间的独占租约：持有桌面锁直到结束（用户 2026-11-08：先停对话监控、整个过程独占微信，
+/// 别的进程不能在两次操作之间插进来）。进程退出时系统自动释放 flock。
+var desktopLeaseFD: Int32 = -1
+
+func handleDesktopLease(_ operation: String) throws -> [String:Any] {
+    if operation == "contacts_lease_begin" {
+        if desktopLeaseFD >= 0 { return ["leased": true] }
+        let directory=FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/message-gateway")
+        try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
+        let fd=open(directory.appendingPathComponent("desktop.lock").path,O_CREAT|O_RDWR,0o600)
+        guard fd>=0 else { throw Failure.invalid("desktop_lock_unavailable") }
+        let end=Date().addingTimeInterval(30)
+        while flock(fd,LOCK_EX|LOCK_NB) != 0 {
+            guard errno==EWOULDBLOCK && Date()<end else { close(fd); throw Failure.invalid("desktop_busy") }
+            Thread.sleep(forTimeInterval:0.05)
+        }
+        desktopLeaseFD = fd
+        return ["leased": true]
+    }
+    // contacts_lease_end
+    if desktopLeaseFD >= 0 {
+        flock(desktopLeaseFD, LOCK_UN)
+        close(desktopLeaseFD)
+        desktopLeaseFD = -1
+    }
+    return ["leased": false]
+}
+
 func withDesktop<T>(_ operation: () throws -> T) throws -> T {
+    // 持有独占租约时本进程已拿着桌面锁：不再另开 fd 加锁（同进程不同 fd 的 flock 会互相阻塞）
+    if desktopLeaseFD >= 0 { return try operation() }
     let directory=FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/message-gateway")
     try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
     let fd=open(directory.appendingPathComponent("desktop.lock").path,O_CREAT|O_RDWR,0o600)
@@ -689,7 +719,13 @@ struct BotWorkerMain {
                         guard let request=try JSONSerialization.jsonObject(with:Data(line)) as? [String:Any] else { throw Failure.invalid("invalid_json") }
                         id=request["id"] ?? 0
                         resetOCRReport()
-                        let result=try withDesktop { try worker.request(request) }
+                        let op=request["operation"] as? String ?? ""
+                        let result: [String:Any]
+                        if op == "contacts_lease_begin" || op == "contacts_lease_end" {
+                            result = try handleDesktopLease(op)
+                        } else {
+                            result = try withDesktop { try worker.request(request) }
+                        }
                         response=["id":id,"protocol_version":1,"ok":true,"result":result,"ocr":ocrReport]
                     } catch { response=["id":id,"protocol_version":1,"ok":false,"error":String(describing:error),"ocr":ocrReport] }
                     var data=try JSONSerialization.data(withJSONObject:response,options:.sortedKeys);data.append(10)
