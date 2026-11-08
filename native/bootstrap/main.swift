@@ -64,6 +64,9 @@ final class HostAppDelegate: NSObject, NSApplicationDelegate {
 
         let controller = StatusPanelController(worker: worker, coreSupervisor: coreSupervisor)
         self.panelController = controller
+        // 旧面板不再显示，但它的 viewDidLoad 负责读取配置并启动 5 秒定时器
+        // （定时器里 CoreSupervisor.checkAndReconcile 负责启动核心、崩溃后重启）：必须加载。
+        _ = controller.view  // 触发 viewDidLoad（loadViewIfNeeded 需要 macOS 14，设备目标是 12）
 
         let shell = ShellViewController()
         shell.register(page: OverviewPageController(context: controller), id: "overview", title: "总览")
