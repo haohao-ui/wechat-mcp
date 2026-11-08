@@ -473,6 +473,8 @@ impl BotCoordinator {
                 .as_secs_f64()
         });
 
+        crate::core::contacts::sync::clean_stale_contacts_sync_pause(&root);
+
         let mut coord = Self {
             config_path,
             config: config.clone(),
@@ -1654,7 +1656,10 @@ impl BotCoordinator {
             let account_id = &self.config.account_id;
             let now_ms = (now * 1000.0) as i64;
 
-            let should_yield = || false;
+            let start_instant = std::time::Instant::now();
+            let should_yield = move || {
+                start_instant.elapsed() >= std::time::Duration::from_secs(15)
+            };
 
             match crate::core::contacts::sync::run_sync(
                 capture,
@@ -1705,12 +1710,19 @@ impl BotCoordinator {
             0.0
         };
 
-        if should_daily_incremental_sync(is_idle, now, last_success) && self.capture.is_some() {
+        let has_checkpoint = checkpoint_path.exists();
+        let should_sync = has_checkpoint || (should_daily_incremental_sync(is_idle, now, last_success) && crate::core::contacts::sync::should_attempt_daily_sync(&self.root, is_idle, now));
+
+        if should_sync && self.capture.is_some() {
+            let _ = crate::core::contacts::sync::record_daily_sync_attempt(&self.root, now);
             let capture = self.capture.as_mut().unwrap().as_mut();
             let store = &self.history;
             let account_id = &self.config.account_id;
             let now_ms = (now * 1000.0) as i64;
-            let should_yield = || false;
+            let start_instant = std::time::Instant::now();
+            let should_yield = move || {
+                start_instant.elapsed() >= std::time::Duration::from_secs(15)
+            };
             let _ = crate::core::contacts::sync::run_sync(
                 capture,
                 store,
