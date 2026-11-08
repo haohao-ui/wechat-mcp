@@ -39,9 +39,20 @@ final class HostAppDelegate: NSObject, NSApplicationDelegate {
     private let worker = SocketWorker()
     private let coreSupervisor = CoreSupervisor()
     private var panelController: StatusPanelController?
+    private var terminationSignal: DispatchSourceSignal?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         HostLogger.shared.log("微信客服助手启动，版本: \(hostAppVersion())")
+        // launchd 停止/重启宿主时发 SIGTERM。AppKit 默认直接退出、不走 applicationWillTerminate，
+        // 核心与桌面服务子进程会成为无人管理的孤儿（2026-11-08 实机）。改为走正常退出流程。
+        signal(SIGTERM, SIG_IGN)
+        let termSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        termSource.setEventHandler {
+            HostLogger.shared.log("收到 SIGTERM，正常退出并停止核心")
+            NSApplication.shared.terminate(nil)
+        }
+        termSource.resume()
+        terminationSignal = termSource
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 720, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
