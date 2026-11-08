@@ -114,6 +114,15 @@ pub fn parse_profile(lines: &[OcrLine], category: &str) -> ProfileParse {
             continue;
         }
 
+        // 字段名只出现在一行的最左边：同一行（y±6）左侧还有别的文字时，这一段是值，不是字段名
+        // （例如 "来源 | 企业微信" 中的"企业微信"不能被当成字段"企业"）。
+        let has_left_peer = lines.iter().enumerate().any(|(p_idx, peer)| {
+            p_idx != idx && (peer.y - line.y).abs() <= 6.0 && peer.x < line.x
+        });
+        if has_left_peer {
+            continue;
+        }
+
         for (prefix, field) in &prefixes {
             if let Some(val_str) = strip_prefix_and_colon(trimmed, prefix) {
                 used_line_indices.insert(idx);
@@ -320,16 +329,18 @@ pub fn parse_group_headers(lines: &[OcrLine]) -> Vec<(String, u32, f64)> {
             c == '▶' || c == '▼' || c == '▷' || c == '▽' || c == '>' || c == 'v' || c == '^' || c.is_whitespace()
         });
 
-        let category = if clean.contains("公众号") || clean.contains("服务号") {
-            Some("official")
-        } else if clean.contains("企业微信") {
-            Some("work")
-        } else if clean.contains("联系人") {
-            Some("personal")
-        } else if clean.contains("群聊") {
-            Some("group")
-        } else {
-            None
+        // 分组标题必须与微信的分组名完全一致（只比较汉字：箭头各种字形、标点、空白、数量都去掉），
+        // 否则名字里带"联系人""群聊"的联系人行会被误当成分组。
+        let normalized: String = clean
+            .chars()
+            .filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c))
+            .collect();
+        let category = match normalized.as_str() {
+            "公众号服务号" => Some("official"),
+            "企业微信联系人" => Some("work"),
+            "联系人" => Some("personal"),
+            "群聊" => Some("group"),
+            _ => None,
         };
 
         if let Some(cat) = category {
@@ -509,6 +520,38 @@ mod tests {
         assert_eq!(row.remark.as_deref(), Some("老张"));
         assert_eq!(row.tags, vec!["客户".to_string(), "VIP".to_string()]);
         assert_eq!(row.permission.as_deref(), Some("仅聊天"));
+    }
+
+    /// 识别结果里值行排在字段名行前面时（真实 OCR 顺序不保证），值"企业微信"不能被当成字段"企业"。
+    #[test]
+    fn test_value_starting_with_label_word_is_not_a_label() {
+        let lines = vec![
+            line("企业微信", 505.0, 340.0, 59.0, 14.0),
+            line("来源", 430.0, 341.0, 28.0, 14.0),
+            line("测试企业有限公司", 506.0, 369.0, 137.0, 15.0),
+            line("企业", 430.0, 367.0, 30.0, 15.0),
+        ];
+        let parsed = parse_profile(&lines, "work");
+        assert_eq!(parsed.fields.source.as_deref(), Some("企业微信"));
+        assert_eq!(parsed.fields.enterprise.as_deref(), Some("测试企业有限公司"));
+    }
+
+    /// 联系人名字里含"联系人""群聊"等字样时不能被当成分组标题。
+    #[test]
+    fn test_contact_named_like_group_is_not_a_header() {
+        let lines = vec![
+            line("> 公众号、服务号", 77.0, 113.0, 119.0, 15.0),
+            line("33", 272.0, 116.0, 14.0, 10.0),
+            line("群聊小助手", 133.0, 266.0, 80.0, 15.0),
+            line("我的联系人管家", 133.0, 320.0, 90.0, 15.0),
+            line("联系人", 76.0, 186.0, 62.0, 15.0),
+            line("22", 272.0, 188.0, 15.0, 10.0),
+        ];
+        let headers = parse_group_headers(&lines);
+        assert_eq!(
+            headers,
+            vec![("official".to_string(), 33, 113.0), ("personal".to_string(), 22, 186.0)]
+        );
     }
 
     #[test]
