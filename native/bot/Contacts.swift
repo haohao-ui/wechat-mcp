@@ -167,11 +167,13 @@ public func recognizeContactLines(image: CGImage, offsetX: Double = 0, offsetY: 
 
 /// 联系人行的头像位置（实测 2026-11-08：只有联系人行左侧有头像，字母行/分组标题没有；头像约 28 点高，
 /// 中心与名字同一高度）。在 x=78..122 这一竖条里找"与本行背景色不同"的连续像素段，只返回完整显示的头像（高 ≥ 22）中心 y。
-/// image 是列表区域的截图，offsetX/offsetY 是它在窗口内的左上角。背景色取同一行 x=290 处（选中行背景是灰的，也能比）。
+/// image 是列表区域的截图，offsetX/offsetY 是它在窗口内的左上角。
+/// 背景色取同一行 x=66（头像左边的空白；选中行的灰底也延伸到这里）。不能取右侧：滚动后 macOS 滚动条
+/// 盖在 x≈290，背景取错会把一大段连成一块、头像全丢（实机 2026-11-08 第二屏只认出 3 人）。
 public func contactAvatarRows(image: CGImage, offsetX: Double, offsetY: Double) -> [Double] {
     let rep = NSBitmapImageRep(cgImage: image)
     let x0 = max(0, Int(78 - offsetX)), x1 = min(image.width, Int(122 - offsetX))
-    let bgX = min(image.width - 1, max(0, Int(290 - offsetX)))
+    let bgX = min(image.width - 1, max(0, Int(66 - offsetX)))
     guard x1 > x0 else { return [] }
     func busy(_ y: Int) -> Bool {
         guard let bg = rep.colorAt(x: bgX, y: y) else { return false }

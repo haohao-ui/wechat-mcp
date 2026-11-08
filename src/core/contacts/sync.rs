@@ -377,10 +377,17 @@ fn lines_of(v: &serde_json::Value) -> Vec<OcrLine> {
     v.get("lines").and_then(|l| serde_json::from_value(l.clone()).ok()).unwrap_or_default()
 }
 
-/// 滚动后新屏相对旧屏移动了多少：用旧屏上识别出名字的行，在新屏找同名行（取最接近预期距离的）。
-/// 找不到同名行时：两屏头像和文字都没变 → 0（到底）；否则按预期距离。
-fn measure_shift(prev: &[(f64, Option<String>)], prev_screen: &Screen, next: &Screen, nominal: f64) -> f64 {
-    let mut best: Option<f64> = None;
+/// 滚动后新屏相对旧屏移动了多少：
+/// 1. 用旧屏上识别出名字的行，在新屏找同名行；
+/// 2. 找不到时用头像位置对齐（旧屏头像整体平移 d 后与新屏头像重合最多的 d）；
+/// 3. 两屏完全一样 → 0（到底）。都不行返回 None（跟丢了）。
+fn measure_shift(prev: &[(f64, Option<String>)], prev_screen: &Screen, next: &Screen, expect: f64) -> Option<f64> {
+    let same = prev_screen.avatars == next.avatars
+        && prev_screen.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>()
+            == next.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>();
+    if same {
+        return Some(0.0);
+    }
     for (py, name) in prev.iter().rev() {
         let Some(name) = name else { continue };
         let cand = next
@@ -389,23 +396,49 @@ fn measure_shift(prev: &[(f64, Option<String>)], prev_screen: &Screen, next: &Sc
             .filter(|l| l.x >= 115.0 && names_match(name, &l.text))
             .map(|l| py - line_center(l))
             .filter(|d| *d >= -2.0)
-            .min_by(|a, b| (a - nominal).abs().partial_cmp(&(b - nominal).abs()).unwrap_or(std::cmp::Ordering::Equal));
+            .min_by(|a, b| (a - expect).abs().partial_cmp(&(b - expect).abs()).unwrap_or(std::cmp::Ordering::Equal));
         if let Some(d) = cand {
-            best = Some(d.max(0.0));
-            break;
+            return Some(d.max(0.0));
         }
     }
-    if let Some(d) = best {
-        return d;
+    let mut best: Option<(usize, f64)> = None;
+    for pa in &prev_screen.avatars {
+        for na in &next.avatars {
+            let d = pa - na;
+            if d < 1.0 {
+                continue;
+            }
+            let hits = prev_screen
+                .avatars
+                .iter()
+                .filter(|p| next.avatars.iter().any(|n| (*p - d - n).abs() < 3.0))
+                .count();
+            if hits >= 2 && best.map_or(true, |(h, bd)| hits > h || (hits == h && (d - expect).abs() < (bd - expect).abs())) {
+                best = Some((hits, d));
+            }
+        }
     }
-    let same = prev_screen.avatars == next.avatars
-        && prev_screen.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>()
-            == next.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>();
-    if same {
-        0.0
-    } else {
-        nominal
+    best.map(|(_, d)| d)
+}
+
+/// 资料卡哪一行和列表名字最像（只用于日志，输出数字不输出名字）：(行号, 相同字数)
+fn best_profile_line(row: &str, prof: &[OcrLine]) -> (usize, usize) {
+    let rk: Vec<char> = name_key_for_match(row).chars().collect();
+    let mut best = (usize::MAX, 0usize);
+    for (i, l) in prof.iter().enumerate() {
+        let mut lk: Vec<char> = name_key_for_match(&l.text).chars().collect();
+        let mut common = 0;
+        for c in &rk {
+            if let Some(pos) = lk.iter().position(|x| x == c) {
+                lk.remove(pos);
+                common += 1;
+            }
+        }
+        if common > best.1 {
+            best = (i, common);
+        }
     }
+    best
 }
 
 /// 固定流程：收起所有分组 → 展开本分组 → 每屏按头像从上到下逐个点开采集 → 出现下一个分组标题或滚不动就结束 → 否则滚一屏
@@ -420,7 +453,8 @@ async fn sync_group(
     should_yield: &(dyn Fn() -> bool + Send + Sync),
     now_ms: i64,
 ) -> Result<GroupResult> {
-    const SCREEN_TICKS: u32 = 5; // 5 格 ≈ 450 点；列表可见约 560 点，相邻两屏有重叠
+    // 每格滚多少点事先不知道（实机 5 格就超过一屏、把人跳过去了）：先滚 1 格量出来，之后按实测算格数
+    let mut px_per_tick: Option<f64> = None;
     let mut r = GroupResult { ids: Vec::new(), unreadable: 0, needs_review: 0, stopped: false };
 
     // 1. 收起所有分组、回到顶部，找到本分组标题并展开（按标题下方内容确认，最多点两次）
@@ -507,6 +541,9 @@ async fn sync_group(
                     row_len = name.as_deref().map_or(0, |n| name_key_for_match(n).chars().count()),
                     nickname_len = name_key_for_match(&f.nickname).chars().count(),
                     has_wechat_id = f.wechat_id.is_some(),
+                    best_line = name.as_deref().map_or(-1, |n| { let (i, _) = best_profile_line(n, &prof); if i == usize::MAX { -1 } else { i as i64 } }),
+                    best_common = name.as_deref().map_or(0, |n| best_profile_line(n, &prof).1),
+                    nickname_common = name.as_deref().map_or(0, |n| best_profile_line(n, &[OcrLine { text: f.nickname.clone(), x: 0.0, y: 0.0, w: 0.0, h: 0.0 }]).1),
                     "contacts_sync_profile_name_mismatch"
                 );
                 r.unreadable += 1;
@@ -542,14 +579,30 @@ async fn sync_group(
         if next_visible {
             break;
         }
-        // 4. 滚一屏，量出实际滚动距离（到底时滚不满）
-        let next = screen_of(&capture.call("contacts_scroll_list", json!({"direction": "down", "ticks": SCREEN_TICKS})).await?);
-        let shift = measure_shift(&rows, &screen, &next, SCREEN_TICKS as f64 * 90.0);
-        info!(category, shift, "contacts_sync_scrolled");
-        if shift < 1.0 {
-            break; // 滚不动：到底
+        // 4. 滚动：让本屏最后一个联系人滚到列表上部（还留在屏幕上），这样绝不会跳过人
+        let last_y = rows.last().map(|(y, _)| *y).unwrap_or(400.0);
+        let ticks = match px_per_tick {
+            Some(px) if px > 1.0 => (((last_y - 130.0) / px).floor() as i64).max(1) as u32,
+            _ => 1,
+        };
+        let next = screen_of(&capture.call("contacts_scroll_list", json!({"direction": "down", "ticks": ticks})).await?);
+        let expect = px_per_tick.map_or(100.0, |px| px * ticks as f64);
+        let shift = measure_shift(&rows, &screen, &next, expect);
+        info!(category, ticks, shift = shift.unwrap_or(-1.0), "contacts_sync_scrolled");
+        match shift {
+            Some(d) if d < 1.0 => break, // 滚不动：到底
+            Some(d) => {
+                if px_per_tick.is_none() || ticks > 1 {
+                    px_per_tick = Some(d / ticks as f64);
+                }
+                done_until -= d;
+            }
+            None => {
+                // 跟丢了：宁可把本屏都再核一遍（按名字核对、按微信号更新，不会记错人），也不跳过
+                info!(category, "contacts_sync_lost_track");
+                done_until = 0.0;
+            }
         }
-        done_until -= shift;
         screen = next;
     }
     Ok(r)
@@ -640,6 +693,8 @@ mod tests {
         pub letters_unread: bool,
         /// 当前资料卡显示的是谁（点同一个人资料卡不变化）
         pub shown_profile: Option<String>,
+        /// 每格滚动的点数（真机事先未知）
+        pub tick_px: f64,
     }
 
     impl VirtualContactsUi {
@@ -662,6 +717,7 @@ mod tests {
                 counts_always: false,
                 letters_unread: false,
                 shown_profile: None,
+                tick_px: 90.0,
             }
         }
 
@@ -848,9 +904,9 @@ mod tests {
                 if dir == "down" {
                     // 与真机一致：滚到底就停住
                     let max_offset = (self.content_height() - 600.0).max(0.0);
-                    self.scroll_offset = (self.scroll_offset + ticks * 90.0).min(max_offset);
+                    self.scroll_offset = (self.scroll_offset + ticks * self.tick_px).min(max_offset);
                 } else {
-                    self.scroll_offset = (self.scroll_offset - ticks * 90.0).max(0.0);
+                    self.scroll_offset = (self.scroll_offset - ticks * self.tick_px).max(0.0);
                 }
                 let (lines, avatars) = self.render_list();
                 return Box::pin(async move { Ok(json!({"lines": lines, "avatars": avatars})) });
@@ -1724,6 +1780,27 @@ mod tests {
         assert_eq!(opens, 36, "每个人只点一次");
     }
 
+    /// 实机 2026-11-08：每格滚得比估计的多，5 格就超过一屏，第二屏开始跳人。
+    /// 每格距离事先未知（这里 140 点/格），也必须每人只点一次、一个不漏。
+    #[tokio::test]
+    async fn test_unknown_scroll_distance_never_skips_contacts() {
+        for tick_px in [40.0, 90.0, 140.0, 230.0] {
+            let temp = TestTempDir::new();
+            let state_dir = temp.path().join("state");
+            let store = HistoryStore::open(&state_dir).unwrap();
+            let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
+            let personal = letter_group("personal", "联系人", "人", &[("A", 2), ("K", 1), ("L", 1), ("M", 2), ("W", 6), ("X", 10)]);
+            let mut ui = VirtualContactsUi::new(vec![personal]);
+            ui.letters_unread = true;
+            ui.tick_px = tick_px;
+            let no_yield = || false;
+            let report = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+            assert!(report.complete, "tick_px={tick_px}: {report:?}");
+            let opens = ui.calls.lock().unwrap().iter().filter(|(op, _)| op == "contacts_open_row").count();
+            assert_eq!(opens, 22, "tick_px={tick_px}: 每人只点一次");
+        }
+    }
+
     /// 实机：联系人分组每一行都"资料卡名字与列表名字不一致"、一个也没写入。列表名字会被截断（…），
     /// 资料卡名字后可能多出性别图标等字符。比对时只看汉字/字母/数字，一方包含另一方（≥2 字）即视为同一人。
     #[test]
@@ -1764,8 +1841,10 @@ mod tests {
             .filter(|(op, p)| op == "contacts_scroll_list" && p["direction"] == "down")
             .map(|(_, p)| p["ticks"].as_u64().unwrap_or(1))
             .collect();
-        assert!(!downs.is_empty() && downs.iter().all(|t| *t >= 5), "应按整屏滚动: {downs:?}");
-        assert!(downs.len() <= 5, "22 人约 2~3 屏，滚动次数不应过多: {downs:?}");
+        // 第一次滚 1 格量出每格距离，之后每次把本屏最后一人滚到列表上部（一屏一滚）
+        assert_eq!(downs.first(), Some(&1), "{downs:?}");
+        assert!(downs.iter().skip(1).all(|t| *t >= 3), "之后应按整屏滚动: {downs:?}");
+        assert!(downs.len() <= 6, "22 人约 3 屏，滚动次数不应过多: {downs:?}");
     }
 
     /// 实机：开始时"企业微信联系人"处于展开状态（之前操作遗留），把"联系人"标题挤出第一屏，
