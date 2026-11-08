@@ -64,7 +64,7 @@ func run() -> Int32 {
                 print(String(data: outData, encoding: .utf8)!)
                 return 0
             case .failure(let err):
-                let resp: [String: Any] = ["ok": false, "error": err]
+                let resp: [String: Any] = ["ok": false, "error": err.message]
                 let outData = try JSONSerialization.data(withJSONObject: resp, options: [.sortedKeys])
                 print(String(data: outData, encoding: .utf8)!)
                 return 0
@@ -107,7 +107,7 @@ func run() -> Int32 {
                 print(String(data: outData, encoding: .utf8)!)
                 return 0
             case .failure(let err):
-                let resp: [String: Any] = ["ok": false, "error": err]
+                let resp: [String: Any] = ["ok": false, "error": err.message]
                 let outData = try JSONSerialization.data(withJSONObject: resp, options: [.sortedKeys])
                 print(String(data: outData, encoding: .utf8)!)
                 return 0

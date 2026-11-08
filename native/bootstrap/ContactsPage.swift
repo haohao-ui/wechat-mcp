@@ -2,7 +2,12 @@
 import Foundation
 import AppKit
 
-extension String: @retroactive Error {}
+/// 页面逻辑的校验错误（不要让 String 直接实现 Error：设备上的 Swift 5.7 不支持 @retroactive）
+public struct PageError: Error, CustomStringConvertible, Equatable {
+    public let message: String
+    public init(_ message: String) { self.message = message }
+    public var description: String { message }
+}
 
 public enum Handling: String, Codable {
     case autoReply = "auto_reply"
@@ -187,9 +192,9 @@ public struct ContactsPageLogic {
         kind: String,
         category: String,
         handling: Handling
-    ) -> Result<[String: Any], String> {
+    ) -> Result<[String: Any], PageError> {
         if handling == .autoReply && category == "official" {
-            return .failure("公众号、服务号不可加入自动回复")
+            return .failure(PageError("公众号、服务号不可加入自动回复"))
         }
 
         var formInputs: [String: Any] = [:]
@@ -231,7 +236,7 @@ public struct ContactsPageLogic {
             let updated = try ConfigFormLogic.buildUpdatedConfig(original: config, formInputs: formInputs)
             return .success(updated)
         } catch {
-            return .failure(error.localizedDescription)
+            return .failure(PageError(error.localizedDescription))
         }
     }
 }
@@ -685,7 +690,7 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         case .failure(let err):
             let alert = NSAlert()
             alert.messageText = "操作失败"
-            alert.informativeText = err
+            alert.informativeText = err.message
             alert.runModal()
         }
     }
