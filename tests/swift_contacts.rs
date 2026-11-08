@@ -354,3 +354,19 @@ fn open_row_waits_for_profile_to_change() {
     let wait = body.find("profileChanged(").expect("点击后要等资料卡画面变化");
     assert!(before < click && click < wait, "顺序：先记指纹、再点击、再等变化");
 }
+
+/// 用户要求：初始化通讯录时先停对话监控、整个过程独占微信，别的进程（网关等）不能在两次操作之间插进来。
+/// 桌面服务提供租约：begin 拿住桌面锁一直持有，end 释放；持有期间本进程的请求不再逐个加锁
+/// （同进程对同一文件另开 fd 加 flock 会互相阻塞），且租约操作不能放进 withDesktop 里执行。
+#[test]
+fn worker_supports_exclusive_desktop_lease() {
+    let src = std::fs::read_to_string("native/bot/Worker.swift").unwrap();
+    assert!(src.contains("\"contacts_lease_begin\""), "需要 contacts_lease_begin");
+    assert!(src.contains("\"contacts_lease_end\""), "需要 contacts_lease_end");
+    let wd = src.find("func withDesktop").unwrap();
+    let body = &src[wd..wd + 700];
+    assert!(body.contains("desktopLeaseFD"), "withDesktop 在持有租约时不再加锁");
+    let dispatch = src.find("let result=try withDesktop").or_else(|| src.find("withDesktop { try worker.request")).unwrap();
+    let lease = src.find("handleDesktopLease(").expect("租约请求单独处理");
+    assert!(lease < dispatch, "租约请求必须在 withDesktop 之前处理");
+}
