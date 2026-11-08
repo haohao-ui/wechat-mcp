@@ -2166,3 +2166,383 @@ fn test_host_loads_status_controller_so_core_supervision_runs() {
     let load = src.find("_ = controller.view").expect("main.swift 必须访问 controller.view 以触发 viewDidLoad");
     assert!(created < load && load < shell, "必须在创建页面之前加载控制器（页面需要它已读入的配置）");
 }
+
+
+
+fn host_task6_selftest_bin() -> Option<&'static PathBuf> {
+    static BIN: OnceLock<Option<PathBuf>> = OnceLock::new();
+    BIN.get_or_init(|| {
+        if !has_swiftc() {
+            return None;
+        }
+        let root = repo_root();
+        let out_dir = root.join("target").join("swift_test_bin");
+        fs::create_dir_all(&out_dir).ok()?;
+        let bin_path = out_dir.join("host_task6_selftest");
+
+        let files_to_compile = [
+            root.join("native").join("bootstrap").join("Probe.swift"),
+            root.join("native").join("bootstrap").join("Supervisor.swift"),
+            root.join("native").join("bootstrap").join("CoreSupervisor.swift"),
+            root.join("native").join("bootstrap").join("SocketWorker.swift"),
+            root.join("native").join("bootstrap").join("Actions.swift"),
+            root.join("native").join("bootstrap").join("StatusModel.swift"),
+            root.join("native").join("bootstrap").join("ConfigForm.swift"),
+            root.join("native").join("bootstrap").join("StatusPanel.swift"),
+            root.join("native").join("bootstrap").join("LogTail.swift"),
+            root.join("native").join("bootstrap").join("Permissions.swift"),
+            root.join("native").join("bootstrap").join("SettingsPage.swift"),
+            root.join("native").join("bootstrap").join("ContactsPage.swift"),
+            root.join("native").join("bootstrap").join("McpPage.swift"),
+            root.join("native").join("eyes").join("Screens.swift"),
+            root.join("tests").join("host_task6_selftest").join("main.swift"),
+        ];
+
+        for f in &files_to_compile {
+            if !f.exists() {
+                eprintln!("required Swift file does not exist: {}", f.display());
+                return None;
+            }
+        }
+
+        let mut cmd = Command::new("swiftc");
+        cmd.arg("-O");
+        for f in &files_to_compile {
+            cmd.arg(f);
+        }
+        cmd.arg("-o").arg(&bin_path);
+
+        let output = cmd.output().ok()?;
+        if !output.status.success() {
+            eprintln!(
+                "swiftc compilation of host_task6_selftest failed:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return None;
+        }
+        Some(bin_path)
+    })
+    .as_ref()
+}
+
+fn run_task6_cmd(command: &str, payload: &Value) -> Result<Value, String> {
+    let bin = host_task6_selftest_bin().ok_or_else(|| "host_task6_selftest binary not available".to_string())?;
+    let payload_str = serde_json::to_string(payload).unwrap();
+    let output = Command::new(bin)
+        .arg(command)
+        .arg(&payload_str)
+        .output()
+        .map_err(|e| format!("failed to execute host_task6_selftest: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "host_task6_selftest {} failed (code {:?}): {}",
+            command,
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    serde_json::from_slice(&output.stdout).map_err(|e| format!("invalid json output: {}", e))
+}
+
+#[test]
+fn test_apply_handling_ignore_moves_to_ignorelist() {
+    if !has_swiftc() {
+        eprintln!("swiftc not available, skipping test");
+        return;
+    }
+    let payload = serde_json::json!({
+        "config": {
+            "schema_version": 1,
+            "account_id": "test_acc",
+            "allowlist": [{"recipient": "张三", "kind": "private"}],
+            "ignorelist": []
+        },
+        "name": "李四",
+        "kind": "private",
+        "category": "personal",
+        "handling": "ignored"
+    });
+    let res = run_task6_cmd("apply_handling", &payload).expect("apply_handling failed");
+    assert_eq!(res["ok"], true);
+    let updated = &res["updated"];
+    let ignorelist = updated["ignorelist"].as_array().expect("ignorelist array");
+    assert!(ignorelist.iter().any(|item| item["recipient"] == "李四"), "李四 必须在 ignorelist 中");
+    let allowlist = updated["allowlist"].as_array().expect("allowlist array");
+    assert!(allowlist.iter().any(|item| item["recipient"] == "张三"), "张三 必须仍保留在 allowlist 中");
+}
+
+#[test]
+fn test_apply_handling_auto_reply_refuses_official() {
+    if !has_swiftc() {
+        eprintln!("swiftc not available, skipping test");
+        return;
+    }
+    let payload = serde_json::json!({
+        "config": {
+            "schema_version": 1,
+            "account_id": "test_acc",
+            "allowlist": [],
+            "ignorelist": []
+        },
+        "name": "微信运动",
+        "kind": "private",
+        "category": "official",
+        "handling": "auto_reply"
+    });
+    let res = run_task6_cmd("apply_handling", &payload).expect("apply_handling failed");
+    assert_eq!(res["ok"], false, "公众号不可加入自动回复");
+    let err = res["error"].as_str().unwrap();
+    assert!(
+        err.contains("公众号") || err.contains("official") || err.contains("服务号"),
+        "错误信息必须说明公众号不可加入自动回复，实际: {}",
+        err
+    );
+}
+
+#[test]
+fn test_apply_handling_unignore_restores_previous() {
+    if !has_swiftc() {
+        eprintln!("swiftc not available, skipping test");
+        return;
+    }
+    // 初始配置：张三在 allowlist
+    let initial_config = serde_json::json!({
+        "schema_version": 1,
+        "account_id": "test_acc",
+        "allowlist": [{"recipient": "张三", "kind": "private"}],
+        "ignorelist": []
+    });
+
+    // 1. 张三设为 ignored
+    let p1 = serde_json::json!({
+        "config": initial_config,
+        "name": "张三",
+        "kind": "private",
+        "category": "personal",
+        "handling": "ignored"
+    });
+    let r1 = run_task6_cmd("apply_handling", &p1).expect("apply_handling ignored failed");
+    assert_eq!(r1["ok"], true);
+    let conf_ignored = &r1["updated"];
+    let ignores = conf_ignored["ignorelist"].as_array().unwrap();
+    assert!(ignores.iter().any(|i| i["recipient"] == "张三"));
+
+    // 2. 张三取消忽略 (unignore)
+    let p2 = serde_json::json!({
+        "config": conf_ignored,
+        "name": "张三",
+        "kind": "private",
+        "category": "personal",
+        "handling": "unignore"
+    });
+    let r2 = run_task6_cmd("apply_handling", &p2).expect("apply_handling unignore failed");
+    assert_eq!(r2["ok"], true);
+    let conf_restored = &r2["updated"];
+    let restored_ignores = conf_restored["ignorelist"].as_array().unwrap();
+    assert!(!restored_ignores.iter().any(|i| i["recipient"] == "张三"), "取消忽略后不在 ignorelist");
+    let restored_allows = conf_restored["allowlist"].as_array().unwrap();
+    assert!(restored_allows.iter().any(|i| i["recipient"] == "张三"), "取消忽略后自动恢复在 allowlist 中");
+}
+
+#[test]
+fn test_contacts_page_parses_contacts_list_json() {
+    if !has_swiftc() {
+        eprintln!("swiftc not available, skipping test");
+        return;
+    }
+    // 合成符合契约的 contacts-list JSON
+    let sample_json = serde_json::json!({
+        "account_id": "test-desktop",
+        "sync": {
+            "finished_at_ms": 1794115000000i64,
+            "complete": true,
+            "per_category": [
+                {"category": "personal", "expected": 2, "synced": 2},
+                {"category": "work", "expected": 1, "synced": 1},
+                {"category": "official", "expected": 1, "synced": 1}
+            ],
+            "unreadable_rows": 0,
+            "needs_review": 0
+        },
+        "contacts": [
+            {
+                "contact_id": "c_1",
+                "category": "personal",
+                "display_name": "个人好友甲",
+                "nickname": "甲",
+                "remark": "个人好友甲",
+                "wechat_id": "wxid_p1",
+                "identity": "strong",
+                "region": "北京",
+                "source": "扫一扫",
+                "added_on": "2023-01-01",
+                "tags": ["好友"],
+                "enterprise": null,
+                "real_name": null,
+                "handling": "auto_reply",
+                "removed": false,
+                "last_message_at_ms": 1794115000000i64,
+                "message_count": 5
+            },
+            {
+                "contact_id": "c_2",
+                "category": "personal",
+                "display_name": "被忽略的朋友",
+                "nickname": "朋友乙",
+                "remark": "被忽略的朋友",
+                "wechat_id": "wxid_p2",
+                "identity": "strong",
+                "region": "上海",
+                "source": "名片",
+                "added_on": "2023-02-01",
+                "tags": [],
+                "enterprise": null,
+                "real_name": null,
+                "handling": "ignored",
+                "removed": false,
+                "last_message_at_ms": null,
+                "message_count": 0
+            },
+            {
+                "contact_id": "c_3",
+                "category": "work",
+                "display_name": "企微联系人丙",
+                "nickname": "丙",
+                "remark": null,
+                "wechat_id": null,
+                "identity": "weak",
+                "region": null,
+                "source": null,
+                "added_on": null,
+                "tags": ["客户"],
+                "enterprise": "某某企业",
+                "real_name": "李丙",
+                "handling": "record_only",
+                "removed": false,
+                "last_message_at_ms": null,
+                "message_count": 0
+            },
+            {
+                "contact_id": "c_4",
+                "category": "official",
+                "display_name": "服务号丁",
+                "nickname": "服务号丁",
+                "remark": null,
+                "wechat_id": "gh_ding",
+                "identity": "strong",
+                "region": null,
+                "source": null,
+                "added_on": null,
+                "tags": [],
+                "enterprise": null,
+                "real_name": null,
+                "handling": "record_only",
+                "removed": false,
+                "last_message_at_ms": null,
+                "message_count": 0
+            },
+            {
+                "contact_id": "c_5",
+                "category": "group",
+                "display_name": "技术交流群",
+                "nickname": null,
+                "remark": null,
+                "wechat_id": null,
+                "identity": "strong",
+                "region": null,
+                "source": null,
+                "added_on": null,
+                "tags": [],
+                "enterprise": null,
+                "real_name": null,
+                "handling": "auto_reply",
+                "removed": false,
+                "last_message_at_ms": 1794115100000i64,
+                "message_count": 100
+            }
+        ],
+        "reviews": []
+    });
+
+    let payload = serde_json::json!({
+        "json_str": sample_json.to_string()
+    });
+
+    let res = run_task6_cmd("parse_contacts_list", &payload).expect("parse_contacts_list failed");
+    assert_eq!(res["ok"], true);
+    assert_eq!(res["contact_count"], 5);
+
+    let counts = &res["counts"];
+    assert_eq!(counts["personal"], 2, "personal 计数必须为 2");
+    assert_eq!(counts["work"], 1, "work 计数必须为 1");
+    assert_eq!(counts["group"], 1, "group 计数必须为 1");
+    assert_eq!(counts["official"], 1, "official 计数必须为 1");
+    assert_eq!(counts["ignored"], 1, "ignored 计数必须为 1");
+}
+
+#[test]
+fn test_mcp_page_brain_settings_round_trip() {
+    if !has_swiftc() {
+        eprintln!("swiftc not available, skipping test");
+        return;
+    }
+    let initial_config = serde_json::json!({
+        "schema_version": 1,
+        "account_id": "test_acc",
+        "brain": {
+            "mode": "builtin"
+        }
+    });
+
+    let payload = serde_json::json!({
+        "config": initial_config,
+        "timeout_seconds": 120,
+        "timeout_action": "handoff",
+        "queue_minutes": 30
+    });
+
+    let res = run_task6_cmd("mcp_brain_settings", &payload).expect("mcp_brain_settings failed");
+    assert_eq!(res["ok"], true);
+    let updated = &res["updated"];
+    let brain = &updated["brain"];
+    assert_eq!(brain["mode"], "external");
+    let ext = &brain["external"];
+    assert_eq!(ext["timeout_seconds"], 120);
+    assert_eq!(ext["timeout_action"], "handoff");
+    assert_eq!(ext["queue_minutes"], 30);
+}
+
+#[test]
+fn test_contacts_and_mcp_pages_registered_in_shell_order() {
+    let src = fs::read_to_string("native/bootstrap/main.swift").expect("main.swift exists");
+    let overview_idx = src.find("\"overview\"").expect("overview registered");
+    let sessions_idx = src.find("\"sessions\"").expect("sessions registered");
+    let contacts_idx = src.find("\"contacts\"").expect("contacts registered");
+    let mcp_idx = src.find("\"mcp\"").expect("mcp registered");
+    let settings_idx = src.find("\"settings\"").expect("settings registered");
+    let logs_idx = src.find("\"logs\"").expect("logs registered");
+
+    assert!(overview_idx < sessions_idx, "总览在会话之前");
+    assert!(sessions_idx < contacts_idx, "会话在联系人之前");
+    assert!(contacts_idx < mcp_idx, "联系人在MCP之前");
+    assert!(mcp_idx < settings_idx, "MCP在设置之前");
+    assert!(settings_idx < logs_idx, "设置在日志之前");
+}
+
+#[test]
+fn test_settings_page_brain_and_allowlist_pointers() {
+    let settings_src = fs::read_to_string("native/bootstrap/SettingsPage.swift").expect("SettingsPage.swift exists");
+    assert!(
+        settings_src.contains("联系人") && settings_src.contains("MCP"),
+        "SettingsPage 必须包含指向联系人页和 MCP 页的说明"
+    );
+    assert!(
+        settings_src.contains("允许名单") || settings_src.contains("忽略名单"),
+        "SettingsPage 说明中必须包含允许名单/忽略名单"
+    );
+    assert!(
+        settings_src.contains("外部大脑") || settings_src.contains("大脑配置"),
+        "SettingsPage 说明中必须包含大脑配置"
+    );
+}
