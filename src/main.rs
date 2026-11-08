@@ -31,6 +31,15 @@ use tokio::{
 };
 use tracing::info;
 
+pub fn exit_code_for_serve_error(err: &anyhow::Error) -> i32 {
+    let err_str = format!("{:#}", err);
+    if err_str.contains("configuration error") || err_str.contains("failed to load config") {
+        2
+    } else {
+        1
+    }
+}
+
 fn main() -> Result<()> {
     // Environment changes must happen before the multi-threaded runtime starts its worker threads.
     core::serve::ensure_locale();
@@ -73,7 +82,8 @@ async fn async_main() -> Result<()> {
                     Ok(code) => std::process::exit(code),
                     Err(err) => {
                         eprintln!("{}", err);
-                        std::process::exit(2);
+                        let code = exit_code_for_serve_error(&err);
+                        std::process::exit(code);
                     }
                 }
             }
@@ -425,5 +435,27 @@ mod tests {
 
         // None
         assert_eq!(negotiate_protocol_version(None), ("2024-11-05", false));
+    }
+
+    #[test]
+    fn test_exit_code_distinguishes_config_and_runtime_errors() {
+        use anyhow::anyhow;
+
+        // 配置错误：必须返回退出码 2
+        let cfg_err = anyhow!("configuration error in /path/to/config.json: missing account_id");
+        assert_eq!(exit_code_for_serve_error(&cfg_err), 2);
+
+        let load_err = anyhow!("failed to load config from /path/to/config.json");
+        assert_eq!(exit_code_for_serve_error(&load_err), 2);
+
+        // 运行时临时错误（文件锁、端口绑定、socket 争用、数据库 IO）：必须返回退出码 1
+        let lock_err = anyhow!("state lock error in /path/to/state: Resource temporarily unavailable");
+        assert_eq!(exit_code_for_serve_error(&lock_err), 1);
+
+        let bind_err = anyhow!("failed to bind core.sock: Address already in use");
+        assert_eq!(exit_code_for_serve_error(&bind_err), 1);
+
+        let io_err = anyhow!("database io error: disk full");
+        assert_eq!(exit_code_for_serve_error(&io_err), 1);
     }
 }
