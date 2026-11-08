@@ -384,11 +384,16 @@ fn _name_with_conn(
         .optional()?;
 
     if let Some(existing_source) = existing {
-        let keep = if source == "observed" {
-            existing_source
-        } else {
-            source.to_string()
+        // 一个联系人的同一个名字只有一行、只记一个来源：来源只能升级不能降级。
+        // （原来"后来的覆盖前面的"：通讯录同步登记同名时把"允许名单"来源抹掉，
+        //   按允许名单就再也找不到这个人、又新建一条空联系人。）
+        let rank = |s: &str| match s {
+            "config" => 3,
+            "alias" => 2,
+            "addressbook" => 1,
+            _ => 0, // observed
         };
+        let keep = if rank(source) > rank(&existing_source) { source.to_string() } else { existing_source };
         conn.execute(
             "UPDATE contact_names SET source=?, last_seen_at=? WHERE contact_id=? AND raw_name=?",
             params![keep, stamp, contact_id, raw],
@@ -2793,6 +2798,26 @@ store.conn.close()
         };
         let out = f.store.upsert_profile("acct", &p, 1000).unwrap();
         assert!(matches!(out, UpsertOutcome::Updated(ref c) if *c == chat), "{out:?}");
+    }
+
+    /// 实机 2026-11-08：允许名单联系人接上通讯录资料后，同名的通讯录名字把"允许名单"来源覆盖掉；核心重启时
+    /// 按允许名单找不到它，又新建一条空联系人（列表里每人两条）。名字来源只能升级不能降级。
+    #[test]
+    fn test_addressbook_name_does_not_replace_config_source() {
+        let f = setup_fixture();
+        let entry = json!({"recipient": "示例客户乙", "kind": "private"});
+        let chat = f.store.ensure_contact("acct", &entry, false).unwrap();
+        let p = ProfileInput {
+            category: "personal".to_string(), wechat_id: Some("wxid_example_b".to_string()), nickname: "示例客户乙".to_string(),
+            remark: None, region: None, source: None, added_on: None, common_groups: None,
+            enterprise: None, real_name: None, tags: vec![], friend_permission: None,
+        };
+        assert!(matches!(f.store.upsert_profile("acct", &p, 1000).unwrap(), UpsertOutcome::Updated(ref c) if *c == chat));
+        // 核心重启后再按允许名单找：必须还是同一个联系人
+        assert_eq!(f.store.ensure_contact("acct", &entry, false).unwrap(), chat);
+        // 再同步一次也一样
+        assert!(matches!(f.store.upsert_profile("acct", &p, 2000).unwrap(), UpsertOutcome::Updated(ref c) if *c == chat));
+        assert_eq!(f.store.ensure_contact("acct", &entry, false).unwrap(), chat);
     }
 
     /// 聊天里出现过的人（还没有通讯录资料）仍按名字接上通讯录资料
