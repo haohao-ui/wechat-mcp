@@ -79,6 +79,8 @@ pub struct AttachmentImage {
     pub label: String,
     pub source: String,
     pub bubble: Bubble,
+    #[serde(default)]
+    pub media_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -151,6 +153,17 @@ pub struct TurnData {
     pub retry_at: f64,
 }
 
+pub type UnderstandFn = Arc<
+    dyn Fn(
+            Vec<crate::brain::understanding::ImageItem>,
+            String,
+            crate::core::config::ModelConfig,
+            usize,
+        ) -> Pin<Box<dyn Future<Output = Vec<Option<String>>> + Send>>
+        + Send
+        + Sync,
+>;
+
 pub struct BotService {
     pub config: BotConfig,
     pub root: PathBuf,
@@ -176,6 +189,9 @@ pub struct BotService {
     pub ownership: String,
     pub brain: Option<BrainFn>,
     pub routing_check: Option<Arc<dyn Fn() -> String + Send + Sync>>,
+    pub understand_fn: Option<UnderstandFn>,
+    pub max_model_image_bytes: Option<u64>,
+    pub model_retries: Option<usize>,
     last_health_log: Arc<std::sync::Mutex<Option<(String, String)>>>,
     last_health_log_at: Arc<std::sync::Mutex<f64>>,
 }
@@ -311,6 +327,9 @@ impl BotService {
             ownership: ownership_str,
             brain: None,
             routing_check,
+            understand_fn: None,
+            max_model_image_bytes: None,
+            model_retries: None,
             last_health_log: Arc::new(std::sync::Mutex::new(None)),
             last_health_log_at: Arc::new(std::sync::Mutex::new(0.0)),
         })
@@ -358,7 +377,7 @@ impl BotService {
         &self,
         incoming: &[Bubble],
         input_ids: &[String],
-        images: &[AttachmentImage],
+        images: &mut [AttachmentImage],
         files: &[AttachmentFile],
     ) {
         let Some(history) = &self.history else {
@@ -367,10 +386,12 @@ impl BotService {
         if input_ids.len() != incoming.len() {
             return;
         }
-        for item in images {
+        for item in images.iter_mut() {
             let mid = incoming.iter().zip(input_ids.iter()).find(|(b, _)| **b == item.bubble).map(|(_, m)| m);
             if let Some(message_id) = mid {
-                let _ = history.attach_media(message_id, &item.path, "image", None, &item.source, None);
+                if let Ok(id) = history.attach_media(message_id, &item.path, "image", None, &item.source, None) {
+                    item.media_id = Some(id);
+                }
             }
         }
         for item in files {
@@ -380,6 +401,108 @@ impl BotService {
                 let _ = history.finish_media_job(message_id, "done", None);
             }
         }
+    }
+
+    pub async fn understand_images(
+        &self,
+        text: &str,
+        images: &[AttachmentImage],
+        failed: &mut Vec<FailedAttachmentItem>,
+        context: &[ContextItem],
+    ) -> Result<(Vec<Value>, Vec<PathBuf>, usize)> {
+        let batch = self.config.images_per_model_call;
+        let config = self.config.model_config.clone();
+        let max_image_bytes = self.max_model_image_bytes.unwrap_or(30 * 1024 * 1024);
+
+        let mut notes = Vec::new();
+        let mut model_images = Vec::new();
+
+        if images.len() > batch && config.backend == "openai-compatible" {
+            let image_items: Vec<crate::brain::understanding::ImageItem> = images
+                .iter()
+                .map(|img| crate::brain::understanding::ImageItem {
+                    path: img.path.clone(),
+                    label: img.label.clone(),
+                })
+                .collect();
+
+            let found = if let Some(custom_fn) = &self.understand_fn {
+                custom_fn(image_items, text.to_string(), config.clone(), batch).await
+            } else {
+                crate::brain::understanding::understand(&image_items, text, &config, batch).await
+            };
+
+            for (item, note_opt) in images.iter().zip(found.into_iter()) {
+                match note_opt {
+                    None => {
+                        failed.push(FailedAttachmentItem {
+                            label: item.label.clone(),
+                            kind: "image".to_string(),
+                            reason: "model_failed".to_string(),
+                            detail: None,
+                        });
+                    }
+                    Some(note) => {
+                        notes.push(json!({
+                            "label": item.label,
+                            "notes": note,
+                        }));
+                        if let Some(history) = &self.history {
+                            if let Some(mid) = &item.media_id {
+                                let _ = history.set_understanding(mid, &note);
+                            }
+                        }
+                    }
+                }
+            }
+            model_images.clear();
+        } else {
+            let mut total = 0u64;
+            for item in images {
+                let size = match fs::metadata(&item.path) {
+                    Ok(m) => m.len(),
+                    Err(_) => 0,
+                };
+                if total + size > max_image_bytes {
+                    failed.push(FailedAttachmentItem {
+                        label: item.label.clone(),
+                        kind: "image".to_string(),
+                        reason: "too_large".to_string(),
+                        detail: None,
+                    });
+                    continue;
+                }
+                total += size;
+                model_images.push(item.path.clone());
+            }
+        }
+
+        let mut total: u64 = model_images
+            .iter()
+            .map(|p| fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+            .sum();
+        let current = model_images.len();
+
+        for item in context {
+            if let Some(media) = &item.media {
+                if media.kind.as_deref() == Some("image")
+                    && media.understanding.is_none()
+                    && media.path.is_some()
+                {
+                    let p = media.path.as_ref().unwrap();
+                    if model_images.len() < batch && p.is_file() {
+                        let size = fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+                        if total + size <= max_image_bytes {
+                            model_images.push(p.clone());
+                            total += size;
+                        }
+                    }
+                }
+            }
+        }
+
+        let earlier = model_images.len() - current;
+        Ok((notes, model_images, earlier))
     }
 
     pub fn limited(&self) -> bool {
@@ -1163,7 +1286,8 @@ impl BotService {
                     return Ok(());
                 }
 
-                if status_str == "generating" && failures < MODEL_RETRIES {
+                let max_retries = self.model_retries.unwrap_or(MODEL_RETRIES);
+                if status_str == "generating" && failures < max_retries {
                     let _ = fs::remove_file(&journal_path);
                     let mut retrying_turn = pending;
                     retrying_turn.model_failures = failures + 1;
@@ -1201,7 +1325,7 @@ impl BotService {
         input_ids: &[String],
         record: &mut Value,
     ) -> Result<Option<Frame>> {
-        let (fetch, images, files, failed) = if incoming.iter().any(|b| b.kind.as_deref().unwrap_or("text") != "text") {
+        let (fetch, mut images, files, mut failed) = if incoming.iter().any(|b| b.kind.as_deref().unwrap_or("text") != "text") {
             let snapshot = capture.frame().await?;
             self.policy.check_frame(&snapshot).map_err(|e| anyhow::anyhow!("{e:?}"))?;
             let fetch = relocate(incoming, &snapshot.bubbles);
@@ -1210,7 +1334,7 @@ impl BotService {
         } else {
             (incoming.to_vec(), Vec::new(), Vec::new(), Vec::new())
         };
-        self.archive_media(&fetch, input_ids, &images, &files);
+        self.archive_media(&fetch, input_ids, &mut images, &files);
 
         let media_meta: Vec<Value> = files.iter().map(|f| {
             json!({
@@ -1258,8 +1382,9 @@ impl BotService {
             };
             text_lines.push(format!("{}{}", prefix, b.text));
         }
-        let full_text = text_lines.join("
-");
+        let full_text = text_lines.join("\n");
+
+        let (notes, model_images, earlier) = self.understand_images(&full_text, &images, &mut failed, context_items).await?;
 
         let brain_turn = BrainTurn {
             turn_id: key.to_string(),
@@ -1272,9 +1397,9 @@ impl BotService {
             mode: "service".to_string(),
             chat_kind: if self.group { "group".to_string() } else { "private".to_string() },
             context: context_items.to_vec(),
-            images: images.iter().map(|i| i.path.clone()).collect(),
+            images: model_images,
             files: files.iter().map(|f| serde_json::to_value(f).unwrap()).collect(),
-            notes: Vec::new(),
+            notes,
             failed: failed.iter().map(|f| FailedAttachment {
                 label: f.label.clone(),
                 kind: Some(f.kind.clone()),
@@ -1282,7 +1407,7 @@ impl BotService {
                 hint: None,
             }).collect(),
             image_count: Some(images.len()),
-            earlier_images: 0,
+            earlier_images: earlier,
             max_attachment_mb: self.config.max_attachment_mb,
         };
 
@@ -1926,6 +2051,20 @@ mod tests {
             fs::write(&p, serde_json::to_string(&base).unwrap()).unwrap();
             assert!(BotConfig::load(&p).is_err());
         }
+    }
+
+    #[test]
+    fn test_swift_sources_use_max_bytes_and_no_received_10mb_constants() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let files = fs::read_to_string(root.join("native/bot/Files.swift")).unwrap();
+        let worker = fs::read_to_string(root.join("native/bot/Worker.swift")).unwrap();
+
+        assert!(!files.contains("10*1024*1024"), "Files.swift should not contain 10*1024*1024");
+        assert!(files.contains("maxBytes"), "Files.swift should contain maxBytes");
+
+        assert!(!worker.contains("10*1024*1024"), "Worker.swift should not contain 10*1024*1024");
+        assert!(worker.contains("max_bytes"), "Worker.swift should contain max_bytes");
+        assert!(worker.contains("invalid_max_bytes"), "Worker.swift should contain invalid_max_bytes");
     }
 
     // === SendRetryTests (8 tests) ===
@@ -2636,6 +2775,7 @@ mod tests {
                     label: "第1张图片".to_string(),
                     source: "chat_thumbnail".to_string(),
                     bubble: img_clone.clone(),
+                    media_id: None,
                 }],
                 Vec::new(),
                 Vec::new(),
@@ -4021,6 +4161,7 @@ mod tests {
                     label: "第1张图片".to_string(),
                     source: "original".to_string(),
                     bubble: img_clone.clone(),
+                    media_id: None,
                 }],
                 Vec::new(),
                 Vec::new(),
@@ -4271,5 +4412,640 @@ mod tests {
         let recovered: Value = read_json(&journal_path).unwrap();
         assert_eq!(recovered["status"], "not_sent");
         assert_eq!(recovered["closed_on_startup"], true);
+    }
+
+    #[tokio::test]
+    async fn test_history_failure_blocks_model_and_send() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let history = Arc::new(HistoryStore::open(td.path().join("h")).unwrap());
+        history.migrate().unwrap();
+        let entry = json!({"recipient": "示例联系人甲", "kind": "private"});
+        let cid = history.ensure_contact("fixture", &entry, false).unwrap();
+
+        let mut svc = BotService::new(cfg, None, Some(history.clone()), Some(cid), None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "示例联系人甲");
+        svc.advance(old.clone()).unwrap();
+
+        // 模拟 history 写入失败（设置为只读数据库）
+        history.connection().lock().unwrap().execute("PRAGMA query_only = ON", []).unwrap();
+
+        let new_f = test_frame(vec![test_bubble("old", "inbound_visual"), test_bubble("你好", "inbound_visual")], "示例联系人甲");
+        let client = MockToolClient::new_default();
+        let mut cap = MockCapture::new(vec![new_f]);
+
+        let brain_called = Arc::new(AtomicBool::new(false));
+        let bc = brain_called.clone();
+        svc.brain = Some(Arc::new(move |_| {
+            bc.store(true, Ordering::SeqCst);
+            Box::pin(async { Ok(BrainReply { reply: "好的".to_string(), metadata: HashMap::new() }) })
+        }));
+
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        assert!(!brain_called.load(Ordering::SeqCst));
+        assert_eq!(client.calls.lock().unwrap().len(), 0);
+        assert_eq!(svc.cursor.as_ref().unwrap().bubbles, old.bubbles);
+        let health: Value = read_json(td.path().join("health.json")).unwrap();
+        assert_eq!(health["state"], "history_write_failed");
+    }
+
+    #[test]
+    fn test_service_history_failure_blocks_model_and_send() {
+        test_history_failure_blocks_model_and_send();
+    }
+
+    #[tokio::test]
+    async fn test_history_read_failure_keeps_message_pending() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let history = Arc::new(HistoryStore::open(td.path().join("h")).unwrap());
+        history.migrate().unwrap();
+        let entry = json!({"recipient": "示例联系人甲", "kind": "private"});
+        let cid = history.ensure_contact("fixture", &entry, false).unwrap();
+
+        let mut svc = BotService::new(cfg, None, Some(history.clone()), Some(cid), None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "示例联系人甲");
+        svc.advance(old).unwrap();
+
+        let new_f = test_frame(vec![test_bubble("old", "inbound_visual"), test_bubble("你好，介绍一下你自己", "inbound_visual")], "示例联系人甲");
+
+        // 模拟 history 读取失败（通过删除 sends 表使 recent_context 失败，但 record_frame 正常）
+        history.connection().lock().unwrap().execute("DROP TABLE sends", []).unwrap();
+
+        let client = MockToolClient::new_default();
+        let mut cap = MockCapture::new(vec![new_f.clone(), new_f.clone(), new_f.clone()]);
+
+        let brain_called = Arc::new(AtomicBool::new(false));
+        let bc = brain_called.clone();
+        svc.brain = Some(Arc::new(move |_| {
+            bc.store(true, Ordering::SeqCst);
+            Box::pin(async { Ok(BrainReply { reply: "好的".to_string(), metadata: HashMap::new() }) })
+        }));
+
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        assert!(!brain_called.load(Ordering::SeqCst));
+        assert_eq!(svc.turn.as_ref().unwrap().bubbles[0].text, "你好，介绍一下你自己");
+
+        // 没有写入 send-*.json
+        let journals: Vec<_> = fs::read_dir(td.path()).unwrap().flatten().filter(|e| {
+            let n = e.file_name().to_string_lossy().to_string();
+            n.starts_with("send-") && n.ends_with(".json")
+        }).collect();
+        assert_eq!(journals.len(), 0);
+
+        let health: Value = read_json(td.path().join("health.json")).unwrap();
+        assert_eq!(health["state"], "history_write_failed");
+    }
+
+    #[test]
+    fn test_service_history_read_failure_keeps_message_pending() {
+        test_history_read_failure_keeps_message_pending();
+    }
+
+    #[tokio::test]
+    async fn test_scroll_recovered_messages_are_recorded_in_history() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let history = Arc::new(HistoryStore::open(td.path().join("h")).unwrap());
+        history.migrate().unwrap();
+        let entry = json!({"recipient": "示例联系人甲", "kind": "private"});
+        let cid = history.ensure_contact("fixture", &entry, false).unwrap();
+
+        let mut svc = BotService::new(cfg, None, Some(history.clone()), Some(cid.clone()), None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        svc.brain = Some(default_brain("你好，我是AI客服助手。"));
+
+        let a = test_bubble("a", "inbound_visual");
+        let b = test_bubble("b", "inbound_visual");
+        let c = test_bubble("c", "inbound_visual");
+        let tall = test_bubble("TALL", "inbound_visual");
+
+        let content = vec![(&a, 40i64), (&b, 40), (&c, 40), (&tall, 380)];
+        let base = test_frame(vec![a.clone(), b.clone()], "示例联系人甲");
+        svc.advance(base.clone()).unwrap();
+        history.record_frame(&cid, &serde_json::to_value(&base).unwrap(), None, None, false).unwrap();
+
+        let bottom = test_chat(&content, 0, 500);
+        let mut reply_bubbles = bottom.bubbles.clone();
+        reply_bubbles.push(test_bubble("你好，我是AI客服助手。", "outbound_visual"));
+        let reply_frame = test_frame(reply_bubbles, "示例联系人甲");
+
+        let p1 = test_chat(&content, 1, 500);
+        let p2 = test_chat(&content, 2, 500);
+
+        let client = MockToolClient::new_default();
+        let mut cap = MockCapture::new(vec![
+            bottom.clone(), bottom.clone(), bottom.clone(), bottom.clone(), reply_frame
+        ]);
+        cap.scroll_pages = vec![p1, p2, bottom];
+
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        let conn = history.connection();
+        let conn_guard = conn.lock().unwrap();
+        let mut stmt = conn_guard.prepare("SELECT text FROM messages WHERE contact_id=? ORDER BY seq").unwrap();
+        let texts: Vec<String> = stmt.query_map([&cid], |row| row.get(0)).unwrap().map(|r| r.unwrap()).collect();
+        assert!(texts.len() >= 4);
+        assert_eq!(&texts[..4], &["a", "b", "c", "TALL"]);
+    }
+
+    #[test]
+    fn test_service_scroll_recovered_messages_are_recorded_in_history() {
+        test_scroll_recovered_messages_are_recorded_in_history();
+    }
+
+    #[tokio::test]
+    async fn test_nine_image_turn_sends_one_reply() {
+        let td = TestDir::new();
+        let mut cfg = fixture_config(td.path());
+        cfg.model_config.backend = "openai-compatible".to_string();
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+
+        let mut imgs = Vec::new();
+        let mut items = Vec::new();
+        for n in 1..=9 {
+            let mut b = test_bubble("[图片]", "inbound_visual");
+            b.kind = Some("image".to_string());
+            b.digest = "image:50:40".to_string();
+            b.phash = Some(format!("{:016x}", (n as u64) * 0x0f0f0f0f0fu64));
+            let img_path = td.path().join(format!("{n}.png"));
+            fs::write(&img_path, format!("png-{n}")).unwrap();
+            items.push(AttachmentImage {
+                path: img_path,
+                label: format!("第{n}张图片"),
+                source: "original".to_string(),
+                bubble: b.clone(),
+                media_id: None,
+            });
+            imgs.push(b);
+        }
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "示例联系人甲");
+        svc.advance(old).unwrap();
+
+        let mut current_bubbles = vec![test_bubble("old", "inbound_visual")];
+        current_bubbles.extend(imgs);
+        let current = test_frame(current_bubbles.clone(), "示例联系人甲");
+
+        let mut sent_bubbles = current_bubbles.clone();
+        sent_bubbles.push(test_bubble("已收到", "outbound_visual"));
+        let sent_frame = test_frame(sent_bubbles, "示例联系人甲");
+
+        let understand_called = Arc::new(AtomicUsize::new(0));
+        let uc = understand_called.clone();
+        svc.understand_fn = Some(Arc::new(move |images, _, _, _| {
+            uc.fetch_add(1, Ordering::SeqCst);
+            let notes = images.iter().map(|i| Some(format!("要点{}", i.label))).collect();
+            Box::pin(async move { notes })
+        }));
+
+        let received_images = Arc::new(Mutex::new(Vec::new()));
+        let received_notes = Arc::new(Mutex::new(Vec::new()));
+        let ri = received_images.clone();
+        let rn = received_notes.clone();
+
+        svc.brain = Some(Arc::new(move |turn| {
+            *ri.lock().unwrap() = turn.images.clone();
+            *rn.lock().unwrap() = turn.notes.clone();
+            Box::pin(async { Ok(BrainReply { reply: "已收到".to_string(), metadata: HashMap::new() }) })
+        }));
+
+        let mut cap = MockCapture::new(vec![
+            current.clone(), current.clone(), current.clone(), current.clone(), sent_frame
+        ]);
+        cap.attachments_fn = Some(Arc::new(move |_, _| {
+            Ok((items.clone(), Vec::new(), Vec::new()))
+        }));
+
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        let sends: Vec<_> = client.calls.lock().unwrap().iter().filter(|(n, _)| n == "send_message").cloned().collect();
+        assert_eq!(sends.len(), 1);
+        assert_eq!(understand_called.load(Ordering::SeqCst), 1);
+        assert_eq!(received_images.lock().unwrap().len(), 0);
+        assert_eq!(received_notes.lock().unwrap().len(), 9);
+    }
+
+    #[test]
+    fn test_service_nine_image_turn_sends_one_reply() {
+        test_nine_image_turn_sends_one_reply();
+    }
+
+    #[tokio::test]
+    async fn test_few_images_go_to_the_model_directly() {
+        let td = TestDir::new();
+        let mut cfg = fixture_config(td.path());
+        cfg.model_config.backend = "openai-compatible".to_string();
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+
+        let mut imgs = Vec::new();
+        let mut items = Vec::new();
+        for n in 1..=3 {
+            let mut b = test_bubble("[图片]", "inbound_visual");
+            b.kind = Some("image".to_string());
+            b.digest = "image:50:40".to_string();
+            b.phash = Some(format!("{:016x}", (n as u64) * 0x0f0f0f0f0fu64));
+            let img_path = td.path().join(format!("{n}.png"));
+            fs::write(&img_path, format!("png-{n}")).unwrap();
+            items.push(AttachmentImage {
+                path: img_path,
+                label: format!("第{n}张图片"),
+                source: "original".to_string(),
+                bubble: b.clone(),
+                media_id: None,
+            });
+            imgs.push(b);
+        }
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "示例联系人甲");
+        svc.advance(old).unwrap();
+
+        let mut current_bubbles = vec![test_bubble("old", "inbound_visual")];
+        current_bubbles.extend(imgs);
+        let current = test_frame(current_bubbles.clone(), "示例联系人甲");
+
+        let mut sent_bubbles = current_bubbles.clone();
+        sent_bubbles.push(test_bubble("已收到", "outbound_visual"));
+        let sent_frame = test_frame(sent_bubbles, "示例联系人甲");
+
+        let understand_called = Arc::new(AtomicUsize::new(0));
+        let uc = understand_called.clone();
+        svc.understand_fn = Some(Arc::new(move |images, _, _, _| {
+            uc.fetch_add(1, Ordering::SeqCst);
+            let notes = images.iter().map(|i| Some(format!("要点{}", i.label))).collect();
+            Box::pin(async move { notes })
+        }));
+
+        let received_images = Arc::new(Mutex::new(Vec::new()));
+        let ri = received_images.clone();
+
+        svc.brain = Some(Arc::new(move |turn| {
+            *ri.lock().unwrap() = turn.images.clone();
+            Box::pin(async { Ok(BrainReply { reply: "已收到".to_string(), metadata: HashMap::new() }) })
+        }));
+
+        let mut cap = MockCapture::new(vec![
+            current.clone(), current.clone(), current.clone(), current.clone(), sent_frame
+        ]);
+        cap.attachments_fn = Some(Arc::new(move |_, _| {
+            Ok((items.clone(), Vec::new(), Vec::new()))
+        }));
+
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        assert_eq!(understand_called.load(Ordering::SeqCst), 0);
+        assert_eq!(received_images.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_service_few_images_go_to_the_model_directly() {
+        test_few_images_go_to_the_model_directly();
+    }
+
+    #[tokio::test]
+    async fn test_unsupported_file_reason_reaches_the_model() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+
+        let mut file_b = test_bubble("报价.xls", "inbound_visual");
+        file_b.kind = Some("file".to_string());
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "示例联系人甲");
+        svc.advance(old).unwrap();
+
+        let current = test_frame(vec![test_bubble("old", "inbound_visual"), file_b.clone()], "示例联系人甲");
+        let sent = test_frame(vec![test_bubble("old", "inbound_visual"), file_b, test_bubble("已收到", "outbound_visual")], "示例联系人甲");
+
+        let failed_received = Arc::new(Mutex::new(Vec::new()));
+        let fr = failed_received.clone();
+        svc.brain = Some(Arc::new(move |turn| {
+            *fr.lock().unwrap() = turn.failed.clone();
+            Box::pin(async { Ok(BrainReply { reply: "已收到".to_string(), metadata: HashMap::new() }) })
+        }));
+
+        let mut cap = MockCapture::new(vec![
+            current.clone(), current.clone(), current.clone(), current.clone(), sent
+        ]);
+        cap.attachments_fn = Some(Arc::new(move |_, _| {
+            Ok((
+                Vec::new(),
+                Vec::new(),
+                vec![FailedAttachmentItem {
+                    label: "报价.xls".to_string(),
+                    kind: "file".to_string(),
+                    reason: "unsupported_type".to_string(),
+                    detail: Some("unsupported_file_type".to_string()),
+                }],
+            ))
+        }));
+
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        let f = failed_received.lock().unwrap();
+        assert_eq!(f.last().unwrap().reason.as_deref(), Some("unsupported_type"));
+        let sends: Vec<_> = client.calls.lock().unwrap().iter().filter(|(n, _)| n == "send_message").cloned().collect();
+        assert_eq!(sends.len(), 1);
+    }
+
+    #[test]
+    fn test_service_unsupported_file_reason_reaches_the_model() {
+        test_unsupported_file_reason_reaches_the_model();
+    }
+
+    #[tokio::test]
+    async fn test_final_generation_failure_still_pauses() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        svc.model_retries = Some(0);
+
+        svc.brain = Some(Arc::new(|_| {
+            Box::pin(async { bail!("reply generation failed") })
+        }));
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "示例联系人甲");
+        svc.advance(old).unwrap();
+
+        let new_f = test_frame(vec![test_bubble("old", "inbound_visual"), test_bubble("你好", "inbound_visual")], "示例联系人甲");
+        let mut cap = MockCapture::new(vec![new_f.clone(), new_f.clone()]);
+        let client = MockToolClient::new_default();
+
+        let res = svc.cycle(&client, &mut cap).await;
+        assert!(res.is_err());
+        assert!(svc.paused);
+    }
+
+    #[test]
+    fn test_service_final_generation_failure_still_pauses() {
+        test_final_generation_failure_still_pauses();
+    }
+
+    #[tokio::test]
+    async fn test_media_is_fetched_from_the_current_frame() {
+        let td = TestDir::new();
+        let mut cfg = fixture_config(td.path());
+        cfg.turn_quiet_seconds = 10;
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        svc.brain = Some(default_brain("好的"));
+
+        let mut pdf = test_bubble("报价.pdf\n12KB", "inbound_visual");
+        pdf.kind = Some("file".to_string());
+        pdf.digest = "file:报价.pdf:12KB".to_string();
+        pdf.media_id = Some("1".repeat(64));
+        pdf.filename = Some("报价.pdf".to_string());
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "示例联系人甲");
+        svc.advance(old).unwrap();
+
+        let first = test_frame(vec![test_bubble("old", "inbound_visual"), pdf.clone()], "示例联系人甲");
+        let later = test_frame(vec![test_bubble("old", "inbound_visual"), pdf.clone(), test_bubble("帮我看看", "inbound_visual")], "示例联系人甲");
+
+        let mut pdf_now = pdf.clone();
+        pdf_now.media_id = Some("2".repeat(64));
+        let mut now = test_frame(vec![test_bubble("old", "inbound_visual"), pdf_now, test_bubble("帮我看看", "inbound_visual")], "示例联系人甲");
+        now.snapshot_id = Some("s-now".to_string());
+
+        let mut sent_bubbles = now.bubbles.clone();
+        sent_bubbles.push(test_bubble("好的", "outbound_visual"));
+        let sent = test_frame(sent_bubbles, "示例联系人甲");
+
+        let now_s = now.clone();
+        // at t=0
+        svc.clock = Arc::new(|| 0.0);
+        let client = MockToolClient::new_default();
+        let mut cap1 = MockCapture::new(vec![first.clone(), first]);
+        svc.cycle(&client, &mut cap1).await.unwrap();
+
+        // at t=3
+        svc.clock = Arc::new(|| 3.0);
+        let mut cap2 = MockCapture::new(vec![later.clone(), later.clone()]);
+        svc.cycle(&client, &mut cap2).await.unwrap();
+
+        // at t=14
+        svc.clock = Arc::new(|| 14.0);
+        let seen_items = Arc::new(Mutex::new(Vec::new()));
+        let seen_snapshot = Arc::new(Mutex::new(None));
+        let si = seen_items.clone();
+        let ss = seen_snapshot.clone();
+
+        let mut cap3 = MockCapture::new(vec![later.clone(), now_s.clone(), now_s, sent]);
+        cap3.attachments_fn = Some(Arc::new(move |items, snap| {
+            *si.lock().unwrap() = items.to_vec();
+            *ss.lock().unwrap() = snap.snapshot_id.clone();
+            Ok((Vec::new(), Vec::new(), Vec::new()))
+        }));
+
+        svc.cycle(&client, &mut cap3).await.unwrap();
+
+        let items = seen_items.lock().unwrap();
+        let file_mids: Vec<_> = items.iter().filter(|i| i.kind.as_deref() == Some("file")).map(|i| i.media_id.as_deref().unwrap_or("")).collect();
+        assert_eq!(file_mids, vec!["2".repeat(64).as_str()]);
+        assert_eq!(seen_snapshot.lock().unwrap().as_deref(), Some("s-now"));
+    }
+
+    #[test]
+    fn test_service_media_is_fetched_from_the_current_frame() {
+        test_media_is_fetched_from_the_current_frame();
+    }
+
+    #[tokio::test]
+    async fn test_model_is_told_this_turns_image_count_separately() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+
+        let mut imgs = Vec::new();
+        let mut items = Vec::new();
+        for n in 1..=3 {
+            let mut b = test_bubble("[图片]", "inbound_visual");
+            b.kind = Some("image".to_string());
+            b.digest = "image:50:40".to_string();
+            let p = td.path().join(format!("{n}.png"));
+            fs::write(&p, format!("png-{n}")).unwrap();
+            items.push(AttachmentImage {
+                path: p,
+                label: format!("第{n}张图片"),
+                source: "original".to_string(),
+                bubble: b.clone(),
+                media_id: None,
+            });
+            imgs.push(b);
+        }
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "示例联系人甲");
+        svc.advance(old).unwrap();
+
+        let mut current_bubbles = vec![test_bubble("old", "inbound_visual")];
+        current_bubbles.extend(imgs);
+        let current = test_frame(current_bubbles.clone(), "示例联系人甲");
+
+        let mut sent_bubbles = current_bubbles;
+        sent_bubbles.push(test_bubble("好的", "outbound_visual"));
+        let sent = test_frame(sent_bubbles, "示例联系人甲");
+
+        let turn_img_count = Arc::new(AtomicUsize::new(0));
+        let turn_earlier_count = Arc::new(AtomicUsize::new(0));
+        let tc = turn_img_count.clone();
+        let te = turn_earlier_count.clone();
+
+        svc.brain = Some(Arc::new(move |turn| {
+            tc.store(turn.image_count.unwrap_or(0), Ordering::SeqCst);
+            te.store(turn.earlier_images, Ordering::SeqCst);
+            Box::pin(async { Ok(BrainReply { reply: "好的".to_string(), metadata: HashMap::new() }) })
+        }));
+
+        let mut cap = MockCapture::new(vec![
+            current.clone(), current.clone(), current.clone(), current.clone(), sent
+        ]);
+        cap.attachments_fn = Some(Arc::new(move |_, _| {
+            Ok((items.clone(), Vec::new(), Vec::new()))
+        }));
+
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        assert_eq!(turn_img_count.load(Ordering::SeqCst), 3);
+        assert_eq!(turn_earlier_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn test_service_model_is_told_this_turns_image_count_separately() {
+        test_model_is_told_this_turns_image_count_separately();
+    }
+
+    #[tokio::test]
+    async fn test_earlier_context_images_follow_this_turns_and_are_counted() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+
+        let this_path = td.path().join("this.png");
+        let old_path = td.path().join("old.png");
+        fs::write(&this_path, b"xxxxxxxxxx").unwrap();
+        fs::write(&old_path, b"yyyyyyyyyy").unwrap();
+
+        let img = AttachmentImage {
+            path: this_path.clone(),
+            label: "第1张图片".to_string(),
+            source: "original".to_string(),
+            bubble: test_bubble("[图片]", "inbound_visual"),
+            media_id: None,
+        };
+
+        let old_context = ContextItem {
+            role: "customer".to_string(),
+            text: "[图片]".to_string(),
+            media: Some(crate::brain::ContextMedia {
+                kind: Some("image".to_string()),
+                path: Some(old_path.clone()),
+                understanding: None,
+                filename: None,
+            }),
+        };
+
+        let mut failed = Vec::new();
+        let (_notes, model_images, earlier) = svc.understand_images(
+            "[图片]",
+            &[img],
+            &mut failed,
+            &[old_context],
+        ).await.unwrap();
+
+        assert_eq!(model_images, vec![this_path, old_path]);
+        assert_eq!(earlier, 1);
+    }
+
+    #[test]
+    fn test_service_earlier_context_images_follow_this_turns_and_are_counted() {
+        test_earlier_context_images_follow_this_turns_and_are_counted();
+    }
+
+    #[tokio::test]
+    async fn test_images_over_the_request_size_are_named_not_paused() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        svc.max_model_image_bytes = Some(25); // 限制 25 字节
+
+        let mut imgs = Vec::new();
+        let mut items = Vec::new();
+        for n in 1..=3 {
+            let mut b = test_bubble("[图片]", "inbound_visual");
+            b.kind = Some("image".to_string());
+            b.digest = "image:50:40".to_string();
+            let p = td.path().join(format!("{n}.png"));
+            // 写入 11 字节：前两张共 22 字节 <= 25，第三张加上后 33 字节 > 25
+            fs::write(&p, format!("PNG_HDR_{n:03}")).unwrap();
+            items.push(AttachmentImage {
+                path: p,
+                label: format!("第{n}张图片"),
+                source: "original".to_string(),
+                bubble: b.clone(),
+                media_id: None,
+            });
+            imgs.push(b);
+        }
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "示例联系人甲");
+        svc.advance(old).unwrap();
+
+        let mut current_bubbles = vec![test_bubble("old", "inbound_visual")];
+        current_bubbles.extend(imgs);
+        let current = test_frame(current_bubbles.clone(), "示例联系人甲");
+
+        let mut sent_bubbles = current_bubbles;
+        sent_bubbles.push(test_bubble("好的", "outbound_visual"));
+        let sent = test_frame(sent_bubbles, "示例联系人甲");
+
+        let model_imgs = Arc::new(Mutex::new(Vec::new()));
+        let model_failed = Arc::new(Mutex::new(Vec::new()));
+        let mi = model_imgs.clone();
+        let mf = model_failed.clone();
+
+        svc.brain = Some(Arc::new(move |turn| {
+            *mi.lock().unwrap() = turn.images.clone();
+            *mf.lock().unwrap() = turn.failed.clone();
+            Box::pin(async { Ok(BrainReply { reply: "好的".to_string(), metadata: HashMap::new() }) })
+        }));
+
+        let mut cap = MockCapture::new(vec![
+            current.clone(), current.clone(), current.clone(), current.clone(), sent
+        ]);
+        cap.attachments_fn = Some(Arc::new(move |_, _| {
+            Ok((items.clone(), Vec::new(), Vec::new()))
+        }));
+
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        assert!(!svc.paused);
+        assert_eq!(model_imgs.lock().unwrap().len(), 2);
+        let failed = model_failed.lock().unwrap();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].label, "第3张图片");
+        assert_eq!(failed[0].kind.as_deref(), Some("image"));
+        assert_eq!(failed[0].reason.as_deref(), Some("too_large"));
+    }
+
+    #[test]
+    fn test_service_images_over_the_request_size_are_named_not_paused() {
+        test_images_over_the_request_size_are_named_not_paused();
     }
 }
