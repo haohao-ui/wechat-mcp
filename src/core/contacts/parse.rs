@@ -81,6 +81,21 @@ fn parse_digits(s: &str) -> Option<i64> {
     digits.parse::<i64>().ok()
 }
 
+/// 资料卡名字后面紧跟性别/企业图标，识别时常被读成末尾的一个符号（实测 2026-11-08：`_`、`＆`、`&`、`£`、`：`、空格）。
+/// 只去掉末尾的这类符号；名字中间的符号、成对括号的右半边都保留。
+pub fn strip_name_icon_suffix(text: &str) -> String {
+    const ICON_MISREADS: &[char] = &['_', '＿', '＆', '&', '£', '￡', '：', ':', '♂', '♀', '·', '•', ' ', '\u{3000}'];
+    let mut s = text.trim().to_string();
+    while let Some(last) = s.chars().last() {
+        if ICON_MISREADS.contains(&last) && s.chars().count() > 1 {
+            s.pop();
+        } else {
+            break;
+        }
+    }
+    s.trim_end().to_string()
+}
+
 pub fn parse_profile(lines: &[OcrLine], category: &str) -> ProfileParse {
     let mut wechat_id = None;
     let mut remark = None;
@@ -223,7 +238,7 @@ pub fn parse_profile(lines: &[OcrLine], category: &str) -> ProfileParse {
     nickname_candidates.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
     let nickname = nickname_candidates
         .first()
-        .map(|l| l.text.trim().to_string())
+        .map(|l| strip_name_icon_suffix(&l.text))
         .unwrap_or_default();
 
     let mut missing = Vec::new();
@@ -376,6 +391,26 @@ pub fn parse_group_headers(lines: &[OcrLine]) -> Vec<(String, u32, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 实机 2026-11-08：名字后的图标被识别成末尾符号，聊天联系人因此没接上带微信号的资料、列表名字多出符号
+    #[test]
+    fn test_strip_name_icon_suffix() {
+        for (raw, want) in [
+            ("示例客户甲_", "示例客户甲"),
+            ("示例员工＆", "示例员工"),
+            ("abc de &", "abc de"),
+            ("示例名字£", "示例名字"),
+            ("示例经理名字：", "示例经理名字"),
+            ("示例名 ", "示例名"),
+            ("abcdef._&", "abcdef."),
+            ("(示例）名字", "(示例）名字"),
+            ("「ab 示例」", "「ab 示例」"),
+            ("示例|名字", "示例|名字"),
+            ("_", "_"),
+        ] {
+            assert_eq!(strip_name_icon_suffix(raw), want, "{raw}");
+        }
+    }
 
     fn line(text: &str, x: f64, y: f64, w: f64, h: f64) -> OcrLine {
         OcrLine {

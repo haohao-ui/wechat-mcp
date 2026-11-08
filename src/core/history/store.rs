@@ -2780,6 +2780,21 @@ store.conn.close()
         assert_eq!(f.store.list_profiles("acct", Some("work")).unwrap().len(), 1);
     }
 
+    /// 实机 2026-11-08：允许名单里的私聊（聊天联系人）同步到带微信号的通讯录资料后没接上，列表里多出一条、
+    /// 原会话显示没有微信号。资料卡昵称末尾多一个空格（名字后的图标被识别成空格）。
+    #[test]
+    fn test_strong_profile_attaches_to_allowlisted_chat_contact() {
+        let f = setup_fixture();
+        let chat = f.store.ensure_contact("acct", &json!({"recipient": "示例客户甲", "kind": "private"}), false).unwrap();
+        let p = ProfileInput {
+            category: "personal".to_string(), wechat_id: Some("wxid_example_a".to_string()), nickname: "示例客户甲".to_string(),
+            remark: None, region: None, source: None, added_on: None, common_groups: None,
+            enterprise: None, real_name: None, tags: vec![], friend_permission: None,
+        };
+        let out = f.store.upsert_profile("acct", &p, 1000).unwrap();
+        assert!(matches!(out, UpsertOutcome::Updated(ref c) if *c == chat), "{out:?}");
+    }
+
     /// 聊天里出现过的人（还没有通讯录资料）仍按名字接上通讯录资料
     #[test]
     fn test_weak_profile_attaches_to_chat_contact_without_profile() {
