@@ -108,7 +108,10 @@ pub trait Capture: Send + Sync {
     fn scroll(&mut self, _direction: &str, _pages: u32) -> impl Future<Output = Result<Frame>> + Send {
         async move { bail!("scroll not supported") }
     }
-    fn download(&mut self, _media_id: &str) -> impl Future<Output = Result<PathBuf>> + Send {
+    fn download(&mut self, media_id: &str) -> impl Future<Output = Result<PathBuf>> + Send {
+        self.download_kind(media_id, "image")
+    }
+    fn download_kind(&mut self, _media_id: &str, _kind: &str) -> impl Future<Output = Result<PathBuf>> + Send {
         async move { bail!("download not supported") }
     }
     fn attachments(
@@ -870,7 +873,7 @@ impl BotService {
             let mid = row.get("bubble").and_then(|b| b.get("media_id")).and_then(|v| v.as_str());
             let message_id = row.get("message_id").and_then(|v| v.as_str());
             if kind == Some("image") && mid.is_some() && message_id.is_some() {
-                if let Ok(path) = capture.download(mid.unwrap()).await {
+                if let Ok(path) = capture.download_kind(mid.unwrap(), "image").await {
                     let _ = history.attach_media(message_id.unwrap(), &path, "image", None, "chat_thumbnail", None);
                 }
             }
@@ -1789,7 +1792,7 @@ mod tests {
         pub scroll_pages: Vec<Frame>,
         pub scroll_idx: usize,
         pub scroll_calls: Arc<Mutex<Vec<(String, u32)>>>,
-        pub download_fn: Option<Arc<dyn Fn(&str) -> Result<PathBuf> + Send + Sync>>,
+        pub download_fn: Option<Arc<dyn Fn(&str, &str) -> Result<PathBuf> + Send + Sync>>,
         pub attachments_fn: Option<Arc<dyn Fn(&[Bubble], &Frame) -> Result<(Vec<AttachmentImage>, Vec<AttachmentFile>, Vec<FailedAttachmentItem>)> + Send + Sync>>,
     }
 
@@ -1840,8 +1843,12 @@ mod tests {
         }
 
         async fn download(&mut self, media_id: &str) -> Result<PathBuf> {
+            self.download_kind(media_id, "image").await
+        }
+
+        async fn download_kind(&mut self, media_id: &str, kind: &str) -> Result<PathBuf> {
             if let Some(dfn) = &self.download_fn {
-                dfn(media_id)
+                dfn(media_id, kind)
             } else {
                 bail!("download not mocked");
             }
@@ -1855,7 +1862,7 @@ mod tests {
             if let Some(afn) = &self.attachments_fn {
                 afn(items, frame)
             } else {
-                Ok((Vec::new(), Vec::new(), Vec::new()))
+                bail!("attachments not mocked");
             }
         }
     }
@@ -3030,6 +3037,7 @@ mod tests {
         after_done.push(test_bubble("好的", "outbound_visual"));
         let after_f = test_frame(after_done, "午夜咖啡");
         let mut c3 = MockCapture::new(vec![done.clone(), done.clone(), done.clone(), after_f]);
+        c3.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
         svc.cycle(&client, &mut c3).await.unwrap();
 
         assert!(model_called.load(Ordering::SeqCst));
@@ -3576,6 +3584,7 @@ mod tests {
         let after = test_frame(after_b, "午夜咖啡");
 
         let mut cap = MockCapture::new(vec![bottom.clone(), bottom.clone(), bottom.clone(), bottom.clone(), bottom.clone(), after]);
+        cap.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
         let mut scroll_seq = ups;
         scroll_seq.push(bottom);
         cap.scroll_pages = scroll_seq;
