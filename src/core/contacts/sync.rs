@@ -30,6 +30,21 @@ pub struct SyncReport {
     pub complete: bool,
 }
 
+/// 只保留汉字（去掉箭头、图标、标点、数字、空白），用于识别界面固有文字
+fn cjk_only(text: &str) -> String {
+    text.chars().filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c)).collect()
+}
+
+fn group_title_cjk(category: &str) -> &'static str {
+    match category {
+        "official" => "公众号服务号",
+        "work" => "企业微信联系人",
+        "personal" => "联系人",
+        "group" => "群聊",
+        _ => "",
+    }
+}
+
 pub fn should_attempt_daily_sync(state_dir: &Path, is_idle: bool, now_sec: f64) -> bool {
     if !is_idle {
         return false;
@@ -282,8 +297,28 @@ async fn run_sync_inner(
                 let mut lines_sorted = cur_screen_lines.clone();
                 lines_sorted.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
 
+                // 本分组标题在这一屏上的位置（展开后滚动时标题吸顶）：联系人行一定在它下方
+                let own_header_y = lines_sorted
+                    .iter()
+                    .filter(|l| l.x < 115.0 && cjk_only(&l.text) == group_title_cjk(&cat_name))
+                    .map(|l| l.y)
+                    .fold(None, |acc: Option<f64>, y| Some(acc.map_or(y, |a| a.max(y))));
+
                 for l in &lines_sorted {
                     if l.y < 40.0 || l.y > 640.0 {
+                        continue;
+                    }
+                    if let Some(hy) = own_header_y {
+                        if l.y <= hy + 10.0 {
+                            continue;
+                        }
+                    }
+                    // 「通讯录管理」「搜索」带图标前缀、与联系人名字同列（x≈131），只能按文字排除：
+                    // 实机上它被当成联系人，"打开资料卡"点开了通讯录管理窗口（2026-11-08）
+                    let cjk = cjk_only(&l.text);
+                    if cjk.contains("通讯录管理") || cjk == "搜索"
+                        || ["公众号服务号", "企业微信联系人", "联系人", "群聊"].contains(&cjk.as_str())
+                    {
                         continue;
                     }
                     let txt = l.text.trim();
@@ -648,12 +683,12 @@ mod tests {
                 });
             }
 
-            // 通讯录管理按钮：center_y = 59.0
+            // 通讯录管理按钮：实测 x≈131、y≈59，识别结果带图标前缀字符（6 字），与联系人名字同列
             let mgr_y = 59.0 - self.scroll_offset;
             if mgr_y >= 40.0 && mgr_y <= 640.0 {
                 lines.push(OcrLine {
-                    text: "通讯录管理".to_string(),
-                    x: 100.0,
+                    text: "8通讯录管理".to_string(),
+                    x: 131.0,
                     y: mgr_y,
                     w: 80.0,
                     h: 20.0,
@@ -807,6 +842,12 @@ mod tests {
                 }
                 self.list_clicks.push((x, y));
                 let vy = y + self.scroll_offset;
+                if (vy - 59.0).abs() <= 15.0 {
+                    self.manager_open = true;
+                    self.calls.lock().unwrap().push(("contacts_manager_opened_by_click".to_string(), json!({"y": y})));
+                    let lines = self.render_list();
+                    return Box::pin(async move { Ok(json!({"lines": lines})) });
+                }
                 let mut cur_y = 90.0;
                 for g in &mut self.groups {
                     if vy >= cur_y && vy < cur_y + 40.0 {
@@ -831,6 +872,12 @@ mod tests {
                 }
                 self.row_open_clicks.push(y);
                 let vy = y + self.scroll_offset;
+                if (vy - 59.0).abs() <= 15.0 {
+                    // 点到「通讯录管理」按钮：真机会打开管理窗口
+                    self.manager_open = true;
+                    self.calls.lock().unwrap().push(("contacts_manager_opened_by_click".to_string(), json!({"y": y})));
+                    return Box::pin(async { Ok(json!({"lines": []})) });
+                }
                 let found = self.find_item_at_virtual_y(vy);
                 if let Some((_group, Some(item), false, false)) = found {
                     if let Some(ref mis) = item.misaligned_profile {
