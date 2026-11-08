@@ -23,6 +23,32 @@ fn build_contacts_test_bin(test_case: &str) -> Option<PathBuf> {
     let main = dir.join("main.swift");
 
     let main_code = match test_case {
+        "avatars" => r#"
+import Foundation
+import CoreGraphics
+// 列表截图（窗口内 x 60..300、y 40..640）：白底；联系人行左侧 28 高的头像；字母行只有小字；
+// 一行选中（灰底，整行）；刚滚动过，右侧 x≈286..294 有深色滚动条盖住上半段（实机 2026-11-08）。
+let W = 240, H = 600, offX = 60.0, offY = 40.0
+var px = [UInt8](repeating: 255, count: W * H * 4)
+let ctx = CGContext(data: &px, width: W, height: H, bitsPerComponent: 8, bytesPerRow: W * 4,
+                    space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+func fill(_ x: Double, _ yTop: Double, _ w: Double, _ h: Double, _ g: CGFloat) {
+    ctx.setFillColor(CGColor(red: g, green: g, blue: g, alpha: 1))
+    ctx.fill(CGRect(x: x - offX, y: Double(H) - (yTop - offY) - h, width: w, height: h))
+}
+fill(60, 310, 240, 54, 0.88)                       // 选中行灰底（y 310..364，头像中心 337）
+let centers: [Double] = [148, 202, 256, 337, 436, 490, 580]
+for c in centers { fill(82, c - 14, 28, 28, 0.35) } // 头像
+fill(92, 386, 40, 13, 0.3)                         // 字母/公司小标题（13 高，不是头像）
+fill(82, 626, 28, 14, 0.35)                        // 底部被截断的半个头像
+fill(286, 95, 8, 300, 0.45)                        // 滚动条
+let image = ctx.makeImage()!
+let got = contactAvatarRows(image: image, offsetX: offX, offsetY: offY)
+guard got.count == centers.count, zip(got, centers).allSatisfy({ abs($0 - $1) <= 1.0 }) else {
+    print("FAIL: avatars \(got) want \(centers)"); exit(1)
+}
+print("PASS: avatar_rows_verified")
+"#,
         "signature" => r#"
 import Foundation
 import CoreGraphics
@@ -369,4 +395,14 @@ fn worker_supports_exclusive_desktop_lease() {
     let dispatch = src.find("let result=try withDesktop").or_else(|| src.find("withDesktop { try worker.request")).unwrap();
     let lease = src.find("handleDesktopLease(").expect("租约请求单独处理");
     assert!(lease < dispatch, "租约请求必须在 withDesktop 之前处理");
+}
+
+/// 实机 2026-11-08：滚动后右侧滚动条盖住背景取样点，一大段被连成一块，第二屏只认出 3 个人、没采完就滚了。
+/// 头像识别必须不受滚动条、选中行灰底影响，字母行和半个头像不算。
+#[test]
+fn avatar_rows_ignore_scrollbar_and_letter_rows() {
+    let Some(bin) = build_contacts_test_bin("avatars") else { panic!("build failed") };
+    let out = Command::new(&bin).output().expect("run");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("PASS: avatar_rows_verified"), "{stdout}");
 }
