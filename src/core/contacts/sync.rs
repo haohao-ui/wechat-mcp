@@ -477,6 +477,12 @@ fn row_matches_profile(row: &str, prof: &[OcrLine], nickname: &str, remark: Opti
     })
 }
 
+/// 文字的短指纹（只用于日志比对两张资料卡是否相同，不含文字本身）
+fn short_fp(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes()).iter().take(3).map(|b| format!("{b:02x}")).collect()
+}
+
 /// 字形结构（只用于日志，不含文字本身）：在 other 里出现的字记 "="，其余汉字记 "c"、字母数字记 "a"，
 /// 空格记 "_"，@ … ( ) 原样保留，其他符号记 "."
 fn shape_against(text: &str, other: &str) -> String {
@@ -669,6 +675,9 @@ async fn sync_group(
                     outcome = kind,
                     cid_tail = cid_tail.as_str(),
                     row_shape = name.as_deref().map_or(String::new(), |n| shape_against(n, &input.nickname)),
+                    card_fp = short_fp(&prof.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n")).as_str(),
+                    nick_fp = short_fp(&input.nickname).as_str(),
+                    ent_fp = short_fp(input.enterprise.as_deref().unwrap_or("")).as_str(),
                     "contacts_sync_row_ok"
                 );
             }
