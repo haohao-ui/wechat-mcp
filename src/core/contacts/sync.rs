@@ -30,6 +30,42 @@ pub struct SyncReport {
     pub complete: bool,
 }
 
+/// 把所有展开的分组收起，让各分组标题都回到列表顶部一屏（实机：遗留的展开分组会把后面的标题挤出屏幕、
+/// 还会让上一个分组一路滚进下一个分组，把别的分组的人记错分类）。
+/// 判断展开：标题右侧没有人数，并且标题正下方紧跟着字母索引或联系人行。
+async fn collapse_all_groups(capture: &mut dyn CoordinatorCapture) -> Result<Vec<OcrLine>> {
+    let mut lines: Vec<OcrLine> = Vec::new();
+    for _ in 0..5 {
+        let _ = capture.call("contacts_scroll_list", json!({"direction": "up", "ticks": 20})).await;
+        let v = capture.call("contacts_headers", json!({})).await?;
+        lines = v.get("lines").and_then(|l| serde_json::from_value(l.clone()).ok()).unwrap_or_default();
+        let headers: Vec<f64> = lines
+            .iter()
+            .filter(|l| l.x < 115.0 && GROUP_TITLES_CJK.contains(&cjk_only(&l.text).as_str()))
+            .map(|l| l.y)
+            .collect();
+        let expanded = headers.iter().copied().find(|hy| {
+            let has_count = lines.iter().any(|l| (l.y - hy).abs() < 15.0 && l.x > 250.0
+                && !l.text.trim().is_empty() && l.text.trim().chars().all(|c| c.is_ascii_digit()));
+            let content_below = lines.iter().any(|l| {
+                l.y > hy + 15.0 && l.y < hy + 75.0
+                    && !GROUP_TITLES_CJK.contains(&cjk_only(&l.text).as_str())
+                    && !(l.x > 250.0 && l.text.trim().chars().all(|c| c.is_ascii_digit()))
+            });
+            !has_count && content_below
+        });
+        match expanded {
+            Some(hy) => {
+                let _ = capture.call("contacts_click_list", json!({"x": 180.0, "y": hy})).await?;
+            }
+            None => return Ok(lines),
+        }
+    }
+    Ok(lines)
+}
+
+const GROUP_TITLES_CJK: [&str; 4] = ["公众号服务号", "企业微信联系人", "联系人", "群聊"];
+
 /// 名字比对用的规范化：只保留汉字、字母、数字（小写）。去掉截断省略号、空白、表情、性别图标等
 fn name_key_for_match(text: &str) -> String {
     text.chars()
@@ -50,7 +86,13 @@ fn names_match(row: &str, profile: &str) -> bool {
         return true;
     }
     let (short, long) = if a.chars().count() <= b.chars().count() { (&a, &b) } else { (&b, &a) };
-    short.chars().count() >= 2 && long.contains(short.as_str())
+    if short.chars().count() >= 2 && long.contains(short.as_str()) {
+        return true;
+    }
+    // 同长度、4 字及以上，只差 1 个字：识别个别字出入（实机：长度相同却判为不一致）
+    let ac: Vec<char> = a.chars().collect();
+    let bc: Vec<char> = b.chars().collect();
+    ac.len() == bc.len() && ac.len() >= 4 && ac.iter().zip(&bc).filter(|(x, y)| x != y).count() <= 1
 }
 
 /// 只保留汉字（去掉箭头、图标、标点、数字、空白），用于识别界面固有文字
@@ -214,11 +256,7 @@ async fn run_sync_inner(
 
     // 2. 读取分组标题与期望数量
     if state.categories.is_empty() {
-        let headers_res = capture.call("contacts_headers", json!({})).await?;
-        let lines: Vec<OcrLine> = headers_res
-            .get("lines")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
+        let lines = collapse_all_groups(capture).await?;
         let parsed_headers = parse_group_headers(&lines);
         info!(lines = lines.len(), headers = parsed_headers.len(), "contacts_sync_headers");
         state.categories = parsed_headers;
@@ -250,17 +288,8 @@ async fn run_sync_inner(
             .entry(cat_name.clone())
             .or_default();
 
-        // a. 滚到顶
-        let _ = capture
-            .call("contacts_scroll_list", json!({"direction": "up", "ticks": 20}))
-            .await;
-
-        // b. 找到当前分组标题行位置
-        let top_headers_res = capture.call("contacts_headers", json!({})).await?;
-        let top_lines: Vec<OcrLine> = top_headers_res
-            .get("lines")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
+        // a/b. 收起所有展开的分组、回到顶部，读各分组标题位置
+        let top_lines = collapse_all_groups(capture).await?;
 
         let header_line = top_lines.iter().find(|l| {
             let t = l.text.trim();
@@ -335,12 +364,29 @@ async fn run_sync_inner(
                     .map(|l| l.y)
                     .fold(None, |acc: Option<f64>, y| Some(acc.map_or(y, |a| a.max(y))));
 
+                // 下一个分组的标题：它及以下的行属于别的分组，本分组到此为止
+                let next_header_y = lines_sorted
+                    .iter()
+                    .filter(|l| l.x < 115.0)
+                    .filter(|l| {
+                        let c = cjk_only(&l.text);
+                        GROUP_TITLES_CJK.contains(&c.as_str()) && c != group_title_cjk(&cat_name)
+                    })
+                    .filter(|l| own_header_y.map_or(true, |hy| l.y > hy))
+                    .map(|l| l.y)
+                    .fold(None, |acc: Option<f64>, y| Some(acc.map_or(y, |a: f64| a.min(y))));
+
                 for l in &lines_sorted {
                     if l.y < 40.0 || l.y > 640.0 {
                         continue;
                     }
                     if let Some(hy) = own_header_y {
                         if l.y <= hy + 10.0 {
+                            continue;
+                        }
+                    }
+                    if let Some(ny) = next_header_y {
+                        if l.y >= ny - 5.0 {
                             continue;
                         }
                     }
@@ -499,6 +545,9 @@ async fn run_sync_inner(
                     }
                 }
 
+                if next_header_y.is_some() {
+                    break 'screen_loop; // 已到下一个分组：本分组结束
+                }
                 // 这一屏点完，滚一整屏
                 let sig: Vec<(String, i64)> = contact_rows_on_screen.iter().map(|(n, y)| (n.clone(), *y as i64)).collect();
                 if prev_screen_sig.as_ref() == Some(&sig) {
@@ -1857,6 +1906,11 @@ mod tests {
         assert!(!names_match("张三", "李四"));
         assert!(!names_match("王", "王五")); // 不足 2 字不做包含匹配
         assert!(!names_match("", "王五"));
+        // 实机：同长度名字个别字识别有出入（4 字及以上允许差 1 个字）
+        assert!(names_match("测试客户甲乙", "测试客户甲已"));
+        assert!(names_match("咖啡小站", "咖啡小沾"));
+        assert!(!names_match("张三", "李三")); // 短名字不放宽
+        assert!(!names_match("咖啡小站", "茶饮大站")); // 差 2 个字不算
     }
 
     /// 用户要求（2026-11-08）：一屏里逐个点开采集，点完往下滚一整屏，不重复点。
@@ -1883,6 +1937,31 @@ mod tests {
             .collect();
         assert!(!downs.is_empty() && downs.iter().all(|t| *t >= 5), "应按整屏滚动: {downs:?}");
         assert!(downs.len() <= 5, "22 人约 2~3 屏，滚动次数不应过多: {downs:?}");
+    }
+
+    /// 实机：开始时"企业微信联系人"处于展开状态（之前操作遗留），把"联系人"标题挤出第一屏，
+    /// 只读到 2 个分组；处理完公众号后也找不到下一个分组标题。每个分组开始前必须先收起所有展开的分组。
+    #[tokio::test]
+    async fn test_groups_left_expanded_are_collapsed_before_each_group() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        let store = HistoryStore::open(&state_dir).unwrap();
+        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
+        let official = letter_group("official", "公众号、服务号", "号", &[("G", 6), ("H", 6)]);
+        let mut work = letter_group("work", "企业微信联系人", "企", &[("Q", 5), ("R", 5)]);
+        work.expanded = true; // 遗留的展开状态
+        let personal = letter_group("personal", "联系人", "人", &[("A", 4), ("B", 4)]);
+        let mut ui = VirtualContactsUi::new(vec![official, work, personal]);
+        ui.header_arrows = true;
+        let no_yield = || false;
+        let report = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+        assert_eq!(
+            report.per_category,
+            vec![("official".to_string(), 12, 12), ("work".to_string(), 10, 10), ("personal".to_string(), 8, 8)],
+            "{report:?}"
+        );
+        assert!(report.complete, "{report:?}");
+        assert_eq!(ui.header_open_clicks, 0);
     }
 
 }
