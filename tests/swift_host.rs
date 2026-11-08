@@ -2483,6 +2483,48 @@ fn test_contacts_page_parses_contacts_list_json() {
     assert_eq!(counts["ignored"], 1, "ignored 计数必须为 1");
 }
 
+/// 用户 2026-11-08 截图：微信号一列对没有微信号的人一律写"（企微无微信号）"，联系人分组里也会这样显示。
+/// 列表里没有微信号只显示 —，原因放在详情里；同步状态用中文分组名。
+#[test]
+fn test_contacts_page_wechat_id_text_and_titles() {
+    if !has_swiftc() {
+        eprintln!("swiftc not available, skipping test");
+        return;
+    }
+    let sample = serde_json::json!({
+        "account_id": "wxid_a",
+        "contacts": [
+            {"contact_id": "c1", "category": "work", "display_name": "企微甲", "identity": "weak", "handling": "record_only"},
+            {"contact_id": "c2", "category": "personal", "display_name": "个人乙", "identity": "weak", "handling": "record_only"},
+            {"contact_id": "c3", "category": "personal", "display_name": "个人丙", "wechat_id": "wxid_c", "identity": "strong", "handling": "record_only"},
+            {"contact_id": "c4", "category": "personal", "display_name": "聊天丁", "handling": "auto_reply"}
+        ]
+    });
+    let res = run_task6_cmd("parse_contacts_list", &serde_json::json!({"json_str": sample.to_string()})).expect("parse");
+    assert_eq!(res["list_wechat"], serde_json::json!(["—", "—", "wxid_c", "—"]));
+    let detail = res["detail_wechat"].as_array().unwrap();
+    assert!(detail[0].as_str().unwrap().contains("企业微信"));
+    assert!(!detail[1].as_str().unwrap().contains("企"), "联系人分组不能显示成企微: {}", detail[1]);
+    assert_eq!(res["titles"], serde_json::json!(["联系人", "企业微信", "群聊", "公众号"]));
+}
+
+/// 用户 2026-11-08 截图：企业微信 12 人列表只显示 7 行（列表没占满剩余高度、被截断）；详情面板一直显示。
+/// 列表必须占满剩余高度；详情面板默认隐藏，选中联系人才出现。
+#[test]
+fn test_contacts_page_list_fills_height_and_detail_on_select() {
+    let src = std::fs::read_to_string(repo_root().join("native/bootstrap/ContactsPage.swift")).unwrap();
+    assert!(src.contains("mainStack.distribution = .fill"), "主区域要把剩余高度分给列表");
+    assert!(src.contains("contentRow.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)"));
+    assert!(!src.contains("NSSplitView()"), "详情面板隐藏再显示时分栏会把它留成 0 宽");
+    let setup = &src[src.find("private func setupUI()").unwrap()..src.find("private func setupDetailBox()").unwrap()];
+    assert!(setup.contains("detailBox.isHidden = true"), "详情面板默认隐藏");
+    let show = &src[src.find("private func showDetail(").unwrap()..];
+    assert!(show[..400].contains("detailBox.isHidden = false"), "选中联系人才显示详情");
+    let clear = &src[src.find("private func clearDetail()").unwrap()..];
+    assert!(clear[..200].contains("detailBox.isHidden = true"), "取消选择收起详情");
+    assert!(!src.contains("企微无微信号"));
+}
+
 #[test]
 fn test_mcp_page_brain_settings_round_trip() {
     if !has_swiftc() {
