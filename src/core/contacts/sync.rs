@@ -421,6 +421,55 @@ fn measure_shift(prev: &[(f64, Option<String>)], prev_screen: &Screen, next: &Sc
     best.map(|(_, d)| d)
 }
 
+/// key 是否按顺序出现在 long 里（不要求连续）
+fn is_subsequence(key: &[char], long: &[char]) -> bool {
+    let mut it = long.iter();
+    key.iter().all(|c| it.any(|x| x == c))
+}
+
+/// 列表上这一行与点开的资料卡是不是同一个人。
+/// 1. 原规则（names_match）：规范化后相等、包含（≥2 字）、同长度差 1 字；
+/// 2. 列表名字 ≥4 字、按顺序全在资料卡名字里（实机：名字里的字母被识别成 "@"）；
+/// 3. 企业微信（实测 2026-11-08）：列表显示"名字…@企业"，资料卡第一行是完整名字、另有一行单独是"@企业"。
+///    按 @ 拆开：资料卡上有"@企业"行时，企业名必须对上（截断时按开头），名字要是资料卡名字的开头、允许差 1 字；
+///    资料卡上没有"@企业"行时，名字是资料卡名字的开头即可（≥2 字）。
+fn row_matches_profile(row: &str, prof: &[OcrLine], nickname: &str, remark: Option<&str>) -> bool {
+    let names: Vec<&str> = std::iter::once(nickname).chain(remark).filter(|n| !n.trim().is_empty()).collect();
+    if names.iter().any(|n| names_match(row, n)) {
+        return true;
+    }
+    let rk: Vec<char> = name_key_for_match(row).chars().collect();
+    if rk.len() >= 4 && names.iter().any(|n| is_subsequence(&rk, &name_key_for_match(n).chars().collect::<Vec<_>>())) {
+        return true;
+    }
+    let Some(at) = row.find(['@', '＠']) else { return false };
+    let name_part: Vec<char> = name_key_for_match(&row[..at]).chars().collect();
+    let company_row = name_key_for_match(&row[at..]);
+    if name_part.is_empty() {
+        return false;
+    }
+    let company_card = prof
+        .iter()
+        .map(|l| l.text.trim())
+        .find(|t| t.starts_with('@') || t.starts_with('＠'))
+        .map(name_key_for_match);
+    let company_ok = match &company_card {
+        Some(card) => !company_row.is_empty() && (card.starts_with(&company_row) || company_row.starts_with(card.as_str())),
+        None => false,
+    };
+    names.iter().any(|n| {
+        let nk: Vec<char> = name_key_for_match(n).chars().collect();
+        if nk.len() < name_part.len() {
+            return false;
+        }
+        let diff = name_part.iter().zip(&nk).filter(|(a, b)| a != b).count();
+        match &company_card {
+            Some(_) => company_ok && (diff == 0 || (diff == 1 && name_part.len() >= 2)),
+            None => diff == 0 && name_part.len() >= 2,
+        }
+    })
+}
+
 /// 字形结构（只用于日志，不含文字本身）：在 other 里出现的字记 "="，其余汉字记 "c"、字母数字记 "a"，
 /// 空格记 "_"，@ … ( ) 原样保留，其他符号记 "."
 fn shape_against(text: &str, other: &str) -> String {
@@ -554,9 +603,7 @@ async fn sync_group(
             }
             let f = parse_profile(&prof, category).fields;
             let matched = match name {
-                Some(name) => {
-                    names_match(name, &f.nickname) || f.remark.as_deref().map_or(false, |rmk| names_match(name, rmk))
-                }
+                Some(name) => row_matches_profile(name, &prof, &f.nickname, f.remark.as_deref()),
                 None => changed && !f.nickname.trim().is_empty(),
             };
             if !matched {
@@ -1834,6 +1881,35 @@ mod tests {
 
     /// 实机：联系人分组每一行都"资料卡名字与列表名字不一致"、一个也没写入。列表名字会被截断（…），
     /// 资料卡名字后可能多出性别图标等字符。比对时只看汉字/字母/数字，一方包含另一方（≥2 字）即视为同一人。
+    /// 实机 2026-11-08（字形结构日志）：企业微信列表显示"名字…@企业"（名字过长被截断），
+    /// 资料卡第一行是完整名字，下一行单独是"@企业"。按 @ 拆开分别核对。
+    #[test]
+    fn test_work_row_matches_card_by_name_prefix_and_company_line() {
+        let card = |nick: &str, company: &str| vec![line(nick, 520.0, 60.0), line(company, 520.0, 90.0), line("备注", 430.0, 200.0)];
+        // 名字截断
+        assert!(row_matches_profile("王小明…@腾讯科技", &card("王小明明白", "@腾讯科技"), "王小明明白", None));
+        // 企业名也被截断
+        assert!(row_matches_profile("王小明..@腾讯科", &card("王小明明白", "@腾讯科技有限公司"), "王小明明白", None));
+        // 名字有 1 个字识别不同，企业对得上
+        assert!(row_matches_profile("李西@某某公司", &card("李四", "@某某公司"), "李四", None));
+        assert!(row_matches_profile("季小 @某某公司", &card("李小", "@某某公司"), "李小", None));
+        // 企业对不上：不是同一人
+        assert!(!row_matches_profile("李西@某某公司", &card("李四", "@另一家公司"), "李四", None));
+        // 名字差太多：不是同一人
+        assert!(!row_matches_profile("张大山@某某公司", &card("李四光", "@某某公司"), "李四光", None));
+    }
+
+    /// 实机：名字里的英文字母在列表上被识别成 "@"，列表名字的字按顺序都在资料卡名字里（≥4 字）也算同一人
+    #[test]
+    fn test_row_chars_in_order_within_profile_name_match() {
+        let card = vec![line("春a夏秋冬东南西北xyz", 520.0, 60.0)];
+        assert!(row_matches_profile("春@夏秋冬东南…", &card, "春a夏秋冬东南西北xyz", None));
+        // 少于 4 个字不按此规则
+        assert!(!row_matches_profile("春冬", &card, "春a夏秋冬东南西北xyz", None));
+        // 顺序不对不算
+        assert!(!row_matches_profile("冬秋夏春", &card, "春a夏秋冬东南西北xyz", None));
+    }
+
     #[test]
     fn test_shape_log_hides_text() {
         assert_eq!(shape_against("张三@腾讯", "张三"), "==@cc");
