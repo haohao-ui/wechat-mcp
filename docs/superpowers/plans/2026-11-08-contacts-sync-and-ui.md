@@ -148,6 +148,55 @@
 - [ ] **Step 4:** PASS；全量 PASS；交叉编译 PASS。
 - [ ] **Step 5:** 提交 `feat(contacts): 通讯录全量/增量同步、控制命令与查询`。
 
+### 接口契约：`control contacts-list --json` 与 `control mcp-info --json`（Task 4 产出、Task 6 消费，2026-11-08 定稿）
+
+`wechat-mcp control contacts-list [--category C] --json` 标准输出一个 JSON 对象：
+
+```json
+{
+  "account_id": "test-desktop",
+  "sync": {"finished_at_ms": 1794115000000, "complete": true,
+           "per_category": [{"category": "personal", "expected": 22, "synced": 22}],
+           "unreadable_rows": 0, "needs_review": 0},
+  "contacts": [
+    {"contact_id": "c_…", "category": "personal", "display_name": "甲备注",
+     "nickname": "测试甲", "remark": "甲备注", "wechat_id": "wxid_t1", "identity": "strong",
+     "region": null, "source": null, "added_on": "2023-06-08", "tags": [],
+     "enterprise": null, "real_name": null,
+     "handling": "auto_reply", "removed": false,
+     "last_message_at_ms": 1794115000000, "message_count": 12}
+  ],
+  "reviews": [{"id": 1, "reason": "ambiguous_name", "candidates": ["c_…", "c_…"], "name": "重名丙"}]
+}
+```
+
+- `category`：official / work / personal / group；没有通讯录资料、只在聊天里见过的联系人也要列出：`category` 按 contacts.kind（group → group，其余 → personal），资料字段为 null。
+- `handling`：`auto_reply`（在 allowlist）/ `ignored`（在 ignorelist，优先）/ `record_only`（都不在）。按配置文件的名字匹配规则（与 `decision()` 相同的 name_key 与别名）。
+- `sync`：没同步过为 null。`last_message_at_ms`、`message_count` 来自 messages 表，没有则 null / 0。
+- 配置错误退出 2；状态目录或数据库打不开退出 1。
+
+`wechat-mcp control mcp-info --json`：
+
+```json
+{
+  "brain": {"mode": "builtin", "external": {"timeout_seconds": 120, "timeout_action": "skip", "queue_minutes": 30}},
+  "endpoints": [
+    {"id": "tools", "label": "MCP 工具服务", "value": "~/.wechat-rpa/bin/wechat-mcp", "ok": true, "detail": ""},
+    {"id": "core_sock", "label": "外部大脑接口", "value": "/Users/…/.wechat-rpa/core.sock", "ok": true, "detail": "最近一次领取：…"},
+    {"id": "history_http", "label": "聊天历史查询", "value": "http://127.0.0.1:8765", "ok": true, "detail": ""}
+  ],
+  "tool_groups": [
+    {"title": "外部大脑", "tools": ["next_turn", "reply", "resume_session"]},
+    {"title": "微信操作", "tools": ["…"]},
+    {"title": "客户", "tools": ["…"]},
+    {"title": "聊天历史", "tools": ["history_list_contacts", "…"]}
+  ]
+}
+```
+
+- `tool_groups` 从程序内实际的工具列表生成（网关 `tools::list_tools_with_legacy` 与历史 MCP 工具定义），不手写；分组规则：next_turn/reply/resume_session → 外部大脑；history_* → 聊天历史；名字含 customer/followup/conversation/metrics/listener → 客户；其余 → 微信操作。
+- `ok` 为实际连通性检查结果（文件存在可执行 / 套接字可连接 / HTTP 端口可连接）。
+
 ### Task 5: 宿主界面改版——框架、总览、会话、设置、日志（Swift）
 
 **Files:**
