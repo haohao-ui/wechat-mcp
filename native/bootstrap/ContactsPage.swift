@@ -370,7 +370,7 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         reviewNoticeBox.cornerRadius = 4
         reviewNoticeBox.translatesAutoresizingMaskIntoConstraints = false
         reviewNoticeLabel.font = NSFont.systemFont(ofSize: 12)
-        reviewNoticeBox.contentView = reviewNoticeLabel
+        reviewNoticeBox.setContent(reviewNoticeLabel)
         reviewNoticeBox.isHidden = true
         mainStack.addArrangedSubview(reviewNoticeBox)
 
@@ -474,7 +474,7 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         detailActionBtn.isEnabled = false
         stack.addArrangedSubview(detailActionBtn)
 
-        detailBox.contentView = stack
+        detailBox.setContent(stack)
     }
 
     private func updateTabs(counts: ContactsCategoryCounts) {

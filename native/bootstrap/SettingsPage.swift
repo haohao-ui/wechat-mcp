@@ -161,7 +161,7 @@ public final class SettingsPageController: NSViewController {
         let recheckBtn = NSButton(title: "重新检查权限", target: self, action: #selector(handleRecheckPermissions))
         permStack.addArrangedSubview(recheckBtn)
 
-        permBox.contentView = permStack
+        permBox.setContent(permStack)
         contentStack.addArrangedSubview(permBox)
 
         // 2. 账号与模型
@@ -175,7 +175,7 @@ public final class SettingsPageController: NSViewController {
         accGrid.translatesAutoresizingMaskIntoConstraints = false
         accGrid.rowSpacing = 6
         accGrid.columnSpacing = 12
-        accountBox.contentView = accGrid
+        accountBox.setContent(accGrid)
         contentStack.addArrangedSubview(accountBox)
 
         // 3. 回复节奏与附件配置
@@ -208,7 +208,7 @@ public final class SettingsPageController: NSViewController {
         noteLbl.textColor = .secondaryLabelColor
         paceStack.addArrangedSubview(noteLbl)
 
-        paceBox.contentView = paceStack
+        paceBox.setContent(paceStack)
         contentStack.addArrangedSubview(paceBox)
 
         // 4. 底部操作按钮

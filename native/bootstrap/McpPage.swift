@@ -209,7 +209,7 @@ public final class McpPageController: NSViewController {
         btnRow.addArrangedSubview(brainStatusMessageLabel)
         brainStack.addArrangedSubview(btnRow)
 
-        brainBox.contentView = brainStack
+        brainBox.setContent(brainStack)
         contentStack.addArrangedSubview(brainBox)
 
         // 2. 连接端点与连通性
@@ -261,10 +261,10 @@ public final class McpPageController: NSViewController {
         cfgStack.orientation = .vertical
         cfgStack.alignment = .leading
         cfgStack.spacing = 6
-        cfgBox.contentView = cfgStack
+        cfgBox.setContent(cfgStack)
 
         endStack.addArrangedSubview(cfgBox)
-        endBox.contentView = endStack
+        endBox.setContent(endStack)
         contentStack.addArrangedSubview(endBox)
 
         // 3. 可用工具按组列出
@@ -273,7 +273,7 @@ public final class McpPageController: NSViewController {
         toolsStack.alignment = .leading
         toolsStack.spacing = 8
         toolsStack.translatesAutoresizingMaskIntoConstraints = false
-        toolsBox.contentView = toolsStack
+        toolsBox.setContent(toolsStack)
         contentStack.addArrangedSubview(toolsBox)
 
         let document = FlippedView()
