@@ -87,10 +87,25 @@ pub fn build_prompt(turn: &Turn) -> Result<String> {
 
     let context_views: Vec<Value> = turn.context.iter().map(context_view).collect();
 
+    let sanitized_files: Vec<Value> = turn
+        .files
+        .iter()
+        .map(|f| {
+            if let Some(obj) = f.as_object() {
+                let mut clean = obj.clone();
+                clean.remove("path");
+                clean.remove("bubble");
+                Value::Object(clean)
+            } else {
+                f.clone()
+            }
+        })
+        .collect();
+
     let payload = json!({
         "message": turn.text,
         "recent_context": context_views,
-        "files": turn.files,
+        "files": sanitized_files,
         "image_count": turn.image_count.unwrap_or(turn.images.len()),
         "earlier_images": turn.earlier_images,
         "image_notes": turn.notes,
@@ -271,5 +286,38 @@ mod tests {
         );
         let hint120 = data120["unreadable"][0]["hint"].as_str().unwrap();
         assert!(hint120.contains("120MB"));
+    }
+
+    #[test]
+    fn test_build_prompt_sanitizes_files_path_and_bubble() {
+        use crate::brain::ContactInfo;
+        let turn = Turn {
+            turn_id: "t1".to_string(),
+            account_id: "acc".to_string(),
+            contact: ContactInfo { name: "用户".to_string(), kind: "private".to_string() },
+            text: "请看文件".to_string(),
+            mode: "service".to_string(),
+            chat_kind: "private".to_string(),
+            context: vec![],
+            images: vec![],
+            files: vec![json!({
+                "filename": "机密.pdf",
+                "label": "第1个文件",
+                "text": "正文内容",
+                "path": "/path/to/secret/机密.pdf",
+                "bubble": {"x": 100, "y": 200, "w": 300, "h": 50}
+            })],
+            notes: vec![],
+            failed: vec![],
+            image_count: None,
+            earlier_images: 0,
+            max_attachment_mb: 50,
+        };
+
+        let prompt = build_prompt(&turn).unwrap();
+        assert!(!prompt.contains("/path/to/secret"), "prompt 绝对不能包含本地文件系统路径");
+        assert!(!prompt.contains("\"bubble\""), "prompt 绝对不能包含气泡坐标等视觉几何信息");
+        assert!(prompt.contains("机密.pdf"));
+        assert!(prompt.contains("正文内容"));
     }
 }

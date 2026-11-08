@@ -94,6 +94,30 @@ pub struct AttachmentFile {
     pub content: Map<String, Value>,
 }
 
+pub fn model_view_file(file: &AttachmentFile) -> Value {
+    let mut map = Map::new();
+    map.insert("filename".to_string(), json!(file.filename));
+    map.insert("label".to_string(), json!(file.label));
+    map.insert("original_bytes".to_string(), json!(file.original_bytes));
+    for (k, v) in &file.content {
+        if k != "path" && k != "bubble" {
+            map.insert(k.clone(), v.clone());
+        }
+    }
+    Value::Object(map)
+}
+
+static SESSION_BRAIN_FACTORY: std::sync::RwLock<Option<Arc<dyn Fn() -> BrainFn + Send + Sync>>> =
+    std::sync::RwLock::new(None);
+
+pub fn register_default_brain_factory(factory: Option<Arc<dyn Fn() -> BrainFn + Send + Sync>>) {
+    *SESSION_BRAIN_FACTORY.write().unwrap() = factory;
+}
+
+pub fn get_default_brain() -> Option<BrainFn> {
+    SESSION_BRAIN_FACTORY.read().unwrap().as_ref().map(|f| f())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FailedAttachmentItem {
     pub label: String,
@@ -328,7 +352,7 @@ impl BotService {
             }),
             sleep: Arc::new(|d| Box::pin(tokio::time::sleep(d))),
             ownership: ownership_str,
-            brain: None,
+            brain: get_default_brain(),
             routing_check,
             understand_fn: None,
             max_model_image_bytes: None,
@@ -656,14 +680,13 @@ impl BotService {
         latest: &Frame,
         input_ids: &[String],
         send_key: Option<&str>,
-    ) -> bool {
+    ) -> Result<bool> {
         let mut source = None;
         if let Some(history) = &self.history {
             if let Some(cid) = &self.contact_id {
-                if let Ok(replied) = history.replied_after(cid, input_ids, send_key) {
-                    if replied {
-                        source = Some("history");
-                    }
+                let replied = history.replied_after(cid, input_ids, send_key)?;
+                if replied {
+                    source = Some("history");
                 }
             }
         }
@@ -680,9 +703,9 @@ impl BotService {
             let mut d = Map::new();
             d.insert("reason".to_string(), json!(format!("already replied ({s})")));
             let _ = self.health("watching", d);
-            true
+            Ok(true)
         } else {
-            false
+            Ok(false)
         }
     }
 
@@ -1046,7 +1069,7 @@ impl BotService {
     ) -> Result<(Option<&'static str>, Frame)> {
         let f = capture.frame().await?;
         self.policy.check_frame(&f).map_err(|e| anyhow::anyhow!("{e:?}"))?;
-        if self.replied_meanwhile(confirmed, &f, input_ids, Some(key)) {
+        if self.replied_meanwhile(confirmed, &f, input_ids, Some(key))? {
             return Ok((Some("already_replied"), f));
         }
         if self.stop.load(Ordering::SeqCst) {
@@ -1066,12 +1089,12 @@ impl BotService {
         confirmed: &Frame,
         reply: &str,
         key: &str,
-    ) -> (Option<Value>, Value, Option<String>) {
+    ) -> Result<(Option<Value>, Value, Option<String>)> {
         if let Some(map) = record.as_object_mut() {
             map.insert("status".to_string(), json!("attempting"));
             map.insert("attempted_at".to_string(), json!((self.clock)()));
         }
-        let _ = self.write_journal(journal_path, record);
+        self.write_journal(journal_path, record)?;
         let mut d = Map::new();
         d.insert("idempotency_key".to_string(), json!(key));
         let _ = self.health("sending", d);
@@ -1093,7 +1116,7 @@ impl BotService {
         let send_err_msg = res_result.as_ref().err().map(|e| format!("{e:#}"));
         let receipt = rec_result.unwrap_or_else(|_| json!({}));
         let res = res_result.ok();
-        (res, receipt, send_err_msg)
+        Ok((res, receipt, send_err_msg))
     }
 
     pub async fn process_turn(
@@ -1221,7 +1244,7 @@ impl BotService {
         let result = self.run_generation_and_send(client, capture, &key, &journal_path, &pending, &incoming, &confirmed, &context_items, &input_ids, &mut record).await;
 
         match result {
-            Ok(Some(after)) => {
+            Ok(Some(mut after)) => {
                 let reply_text = record.get("reply").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let shows_echo = |frame: &Frame| {
                     frame.bubbles.iter().any(|b| b.direction == "outbound_visual" && echo_matches(&b.text, &reply_text))
@@ -1236,7 +1259,16 @@ impl BotService {
                     }
                     (self.sleep)(Duration::from_secs(1)).await;
                     match capture.frame().await {
-                        Ok(frame) => echoed = shows_echo(&frame),
+                        Ok(frame) => {
+                            if self.policy.check_frame(&frame).is_ok() {
+                                if shows_echo(&frame) {
+                                    echoed = true;
+                                    after = frame;
+                                }
+                            } else {
+                                capture_errors += 1;
+                            }
+                        }
                         Err(_) => capture_errors += 1,
                     }
                 }
@@ -1401,7 +1433,7 @@ impl BotService {
             chat_kind: if self.group { "group".to_string() } else { "private".to_string() },
             context: context_items.to_vec(),
             images: model_images,
-            files: files.iter().map(|f| serde_json::to_value(f).unwrap()).collect(),
+            files: files.iter().map(model_view_file).collect(),
             notes,
             failed: failed.iter().map(|f| FailedAttachment {
                 label: f.label.clone(),
@@ -1414,7 +1446,8 @@ impl BotService {
             max_attachment_mb: self.config.max_attachment_mb,
         };
 
-        let brain_reply = if let Some(brain) = &self.brain {
+        let active_brain = self.brain.clone().or_else(get_default_brain);
+        let brain_reply = if let Some(brain) = &active_brain {
             brain(&brain_turn).await?
         } else {
             let builtin = crate::brain::builtin::BuiltinBrain::new(
@@ -1423,11 +1456,11 @@ impl BotService {
             builtin.reply(&brain_turn).await?
         };
 
-        let action = brain_reply
-            .metadata
-            .get("action")
-            .and_then(|v| v.as_str())
-            .unwrap_or("send");
+        let mut model_provenance = brain_reply.metadata.clone();
+        let action = model_provenance
+            .remove("action")
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "send".to_string());
 
         if action == "skip" {
             if let Some(map) = record.as_object_mut() {
@@ -1463,6 +1496,16 @@ impl BotService {
         if let Some(map) = record.as_object_mut() {
             map.insert("status".to_string(), json!("generated"));
             map.insert("reply".to_string(), json!(reply));
+            map.insert("model".to_string(), json!(model_provenance));
+            if let Some(secs) = model_provenance.get("seconds") {
+                if let Some(timings) = map.get_mut("timings").and_then(|t| t.as_object_mut()) {
+                    timings.insert("model_seconds".to_string(), secs.clone());
+                } else {
+                    let mut timings = Map::new();
+                    timings.insert("model_seconds".to_string(), secs.clone());
+                    map.insert("timings".to_string(), Value::Object(timings));
+                }
+            }
         }
         self.write_journal(journal_path, record)?;
 
@@ -1489,20 +1532,21 @@ impl BotService {
 
         if let Some(history) = &self.history {
             if let Some(cid) = &self.contact_id {
-                let _ = history.record_bot_reply(
+                let model_val = record.get("model").cloned().unwrap_or_else(|| json!({}));
+                history.record_bot_reply(
                     cid,
                     key,
                     &reply,
                     "generated",
-                    &json!({}),
+                    &model_val,
                     input_ids,
                     None,
                     None,
-                );
+                )?;
             }
         }
 
-        let (mut result, mut receipt, mut send_err) = self.try_send_once(client, journal_path, record, confirmed, &reply, key).await;
+        let (mut result, mut receipt, mut send_err) = self.try_send_once(client, journal_path, record, confirmed, &reply, key).await?;
 
         if send_err.is_none() && receipt.get("status").and_then(|v| v.as_str()) == Some("triggered") {
             if let Some(map) = record.as_object_mut() {
@@ -1517,7 +1561,23 @@ impl BotService {
         } else if is_not_sent(send_err.as_deref(), Some(&receipt)) {
             let mut succeeded = false;
             for delay in [5u64, 15u64] {
+                if self.stop.load(Ordering::SeqCst) {
+                    if let Some(map) = record.as_object_mut() {
+                        map.insert("status".to_string(), json!("stopped_before_send"));
+                    }
+                    self.write_journal(journal_path, record)?;
+                    self.keep_turn(pending.clone())?;
+                    return Ok(None);
+                }
                 (self.sleep)(Duration::from_secs(delay)).await;
+                if self.stop.load(Ordering::SeqCst) {
+                    if let Some(map) = record.as_object_mut() {
+                        map.insert("status".to_string(), json!("stopped_before_send"));
+                    }
+                    self.write_journal(journal_path, record)?;
+                    self.keep_turn(pending.clone())?;
+                    return Ok(None);
+                }
                 let (check_res, _) = self.verify_before_send(capture, confirmed, input_ids, key).await?;
                 if let Some(status) = check_res {
                     if let Some(map) = record.as_object_mut() {
@@ -1529,7 +1589,7 @@ impl BotService {
                     }
                     return Ok(None);
                 }
-                let (r, rec, err) = self.try_send_once(client, journal_path, record, confirmed, &reply, key).await;
+                let (r, rec, err) = self.try_send_once(client, journal_path, record, confirmed, &reply, key).await?;
                 result = r;
                 receipt = rec;
                 send_err = err;
@@ -1576,7 +1636,17 @@ impl BotService {
             for attempt_idx in 0..3 {
                 match capture.frame().await {
                     Ok(f) => {
-                        let _ = self.policy.check_frame(&f);
+                        if let Err(e) = self.policy.check_frame(&f) {
+                            consecutive_errs += 1;
+                            if consecutive_errs == 3 {
+                                outcome = EchoOutcome::Unverifiable(format!("{e:?}"));
+                                break;
+                            }
+                            if attempt_idx < 2 {
+                                (self.sleep)(Duration::from_secs(1)).await;
+                            }
+                            continue;
+                        }
                         let echoed = f.bubbles.iter().any(|b| {
                             b.direction == "outbound_visual" && echo_matches(&b.text, &reply)
                         });
@@ -1596,6 +1666,12 @@ impl BotService {
                             break;
                         }
                     }
+                }
+            }
+
+            if let EchoOutcome::NotSeen(None) = outcome {
+                if consecutive_errs > 0 {
+                    outcome = EchoOutcome::Unverifiable("echo frames failed verification".to_string());
                 }
             }
 
@@ -1628,7 +1704,23 @@ impl BotService {
                     }
                     self.write_journal(journal_path, record)?;
 
+                    if self.stop.load(Ordering::SeqCst) {
+                        if let Some(map) = record.as_object_mut() {
+                            map.insert("status".to_string(), json!("stopped_before_send"));
+                        }
+                        self.write_journal(journal_path, record)?;
+                        self.keep_turn(pending.clone())?;
+                        return Ok(None);
+                    }
                     (self.sleep)(Duration::from_secs(5)).await;
+                    if self.stop.load(Ordering::SeqCst) {
+                        if let Some(map) = record.as_object_mut() {
+                            map.insert("status".to_string(), json!("stopped_before_send"));
+                        }
+                        self.write_journal(journal_path, record)?;
+                        self.keep_turn(pending.clone())?;
+                        return Ok(None);
+                    }
                     let (check_res, _) = self.verify_before_send(capture, confirmed, input_ids, key).await?;
                     if let Some(status) = check_res {
                         if let Some(map) = record.as_object_mut() {
@@ -1641,7 +1733,7 @@ impl BotService {
                         return Ok(None);
                     }
 
-                    let (r, rec, err) = self.try_send_once(client, journal_path, record, confirmed, &reply, key).await;
+                    let (r, rec, err) = self.try_send_once(client, journal_path, record, confirmed, &reply, key).await?;
                     result = r;
                     receipt = rec;
                     send_err = err;
@@ -1680,6 +1772,7 @@ impl BotService {
         self.health("verifying_send", d)?;
 
         let final_frame = if let Some(f) = after_frame {
+            self.policy.check_frame(&f).map_err(|e| anyhow::anyhow!("{e:?}"))?;
             f
         } else {
             let f = capture.frame().await?;
@@ -1694,6 +1787,7 @@ impl BotService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use crate::core::config::AllowlistEntry;
     use std::collections::HashMap;
     use std::sync::atomic::AtomicUsize;
@@ -5056,5 +5150,453 @@ mod tests {
     #[test]
     fn test_service_images_over_the_request_size_are_named_not_paused() {
         test_images_over_the_request_size_are_named_not_paused();
+    }
+
+    #[tokio::test]
+    async fn test_attempting_journal_failure_blocks_send() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "午夜咖啡");
+        svc.advance(old).unwrap();
+
+        let new_f = test_frame(vec![test_bubble("old", "inbound_visual"), test_bubble("你好", "inbound_visual")], "午夜咖啡");
+        let client = MockToolClient::new_default();
+        let mut cap = MockCapture::new(vec![new_f.clone(), new_f.clone(), new_f]);
+
+        let state_path = td.path().to_path_buf();
+        svc.brain = Some(Arc::new(move |_| {
+            // 在模型生成后、写入 attempting journal 之前将状态目录设为只读，导致 write_journal 失败
+            let _ = fs::set_permissions(&state_path, fs::Permissions::from_mode(0o500));
+            Box::pin(async {
+                Ok(BrainReply {
+                    reply: "回复内容".to_string(),
+                    metadata: HashMap::new(),
+                })
+            })
+        }));
+
+        let res = svc.cycle(&client, &mut cap).await;
+        // 恢复目录权限供清理
+        let _ = fs::set_permissions(td.path(), fs::Permissions::from_mode(0o700));
+
+        // write_journal 失败必须向上传播错误并阻断发送，且 client 绝不能调用 send_message
+        assert!(res.is_err(), "write_journal 失败必须向上传播错误并阻断发送");
+        let calls = client.calls.lock().unwrap();
+        let sent = calls.iter().any(|(tool, _)| tool == "send_message");
+        assert!(!sent, "attempting journal 写入失败时绝对不能调用 send_message");
+    }
+
+    #[tokio::test]
+    async fn test_history_record_bot_reply_failure_blocks_send() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let history = Arc::new(HistoryStore::open(td.path().join("h")).unwrap());
+        history.migrate().unwrap();
+        let entry = json!({"recipient": "午夜咖啡", "kind": "private"});
+        let cid = history.ensure_contact("fixture", &entry, false).unwrap();
+
+        let mut svc = BotService::new(cfg, None, Some(history.clone()), Some(cid), None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "午夜咖啡");
+        svc.advance(old).unwrap();
+
+        let new_f = test_frame(vec![test_bubble("old", "inbound_visual"), test_bubble("你好", "inbound_visual")], "午夜咖啡");
+        let client = MockToolClient::new_default();
+        let mut cap = MockCapture::new(vec![new_f.clone(), new_f.clone(), new_f]);
+
+        let hist_clone = history.clone();
+        svc.brain = Some(Arc::new(move |_| {
+            // 在模型生成成功后、写入 record_bot_reply 之前将历史数据库设为只读
+            hist_clone.connection().lock().unwrap().execute("PRAGMA query_only = ON", []).unwrap();
+            Box::pin(async {
+                Ok(BrainReply {
+                    reply: "回复内容".to_string(),
+                    metadata: HashMap::new(),
+                })
+            })
+        }));
+
+        let res = svc.cycle(&client, &mut cap).await;
+        assert!(res.is_err(), "record_bot_reply 失败必须阻断发送并返回错误");
+        let calls = client.calls.lock().unwrap();
+        let sent = calls.iter().any(|(tool, _)| tool == "send_message");
+        assert!(!sent, "record_bot_reply 失败时绝对不能调用 send_message");
+    }
+
+    #[tokio::test]
+    async fn test_history_replied_after_failure_blocks_send() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let history = Arc::new(HistoryStore::open(td.path().join("h")).unwrap());
+        history.migrate().unwrap();
+        let entry = json!({"recipient": "午夜咖啡", "kind": "private"});
+        let cid = history.ensure_contact("fixture", &entry, false).unwrap();
+
+        let mut svc = BotService::new(cfg, None, Some(history.clone()), Some(cid), None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+
+        let f = test_frame(vec![test_bubble("你好", "inbound_visual")], "午夜咖啡");
+        // 损坏数据库破坏 replied_after 查询
+        let conn_arc = history.connection();
+        conn_arc.lock().unwrap().execute("DROP TABLE messages", []).unwrap();
+
+        let res = svc.replied_meanwhile(&f, &f, &["msg1".to_string()], Some("key1"));
+        assert!(res.is_err(), "replied_after 数据库查询失败必须向上传播 Err 而不能吞掉当作 false");
+    }
+
+    #[tokio::test]
+    async fn test_brain_files_strips_path_and_bubble() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "午夜咖啡");
+        svc.advance(old).unwrap();
+
+        let mut file_bubble = test_bubble("[文件] 财务报表.xlsx", "inbound_visual");
+        file_bubble.kind = Some("file".to_string());
+
+        let current = test_frame(vec![test_bubble("old", "inbound_visual"), file_bubble.clone()], "午夜咖啡");
+        let sent = test_frame(vec![test_bubble("old", "inbound_visual"), file_bubble.clone(), test_bubble("已收到", "outbound_visual")], "午夜咖啡");
+
+        let secret_file_path = td.path().join("confidential_local_file.xlsx");
+        fs::write(&secret_file_path, "confidential bytes").unwrap();
+
+        let mut content = serde_json::Map::new();
+        content.insert("text".to_string(), json!("表格第1行数据"));
+        content.insert("truncated".to_string(), json!(false));
+
+        let attachment_file = AttachmentFile {
+            filename: "财务报表.xlsx".to_string(),
+            label: "第1个文件".to_string(),
+            original_bytes: false,
+            path: secret_file_path,
+            bubble: file_bubble,
+            content,
+        };
+
+        let captured_files = Arc::new(Mutex::new(Vec::new()));
+        let cf = captured_files.clone();
+        svc.brain = Some(Arc::new(move |turn| {
+            *cf.lock().unwrap() = turn.files.clone();
+            Box::pin(async {
+                Ok(BrainReply {
+                    reply: "已收到".to_string(),
+                    metadata: HashMap::new(),
+                })
+            })
+        }));
+
+        let mut cap = MockCapture::new(vec![current.clone(), current.clone(), current.clone(), current.clone(), sent]);
+        let af = attachment_file.clone();
+        cap.attachments_fn = Some(Arc::new(move |_, _| {
+            Ok((Vec::new(), vec![af.clone()], Vec::new()))
+        }));
+
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        let files = captured_files.lock().unwrap();
+        assert_eq!(files.len(), 1, "必须向模型传递附件文件视图");
+        let file_obj = files[0].as_object().expect("file view 必须是 JSON 对象");
+        assert_eq!(file_obj.get("filename").and_then(|v| v.as_str()), Some("财务报表.xlsx"));
+        assert_eq!(file_obj.get("text").and_then(|v| v.as_str()), Some("表格第1行数据"));
+        assert!(!file_obj.contains_key("path"), "模型文件视图中绝对不能包含本机文件路径 path");
+        assert!(!file_obj.contains_key("bubble"), "模型文件视图中绝对不能包含屏幕气泡坐标与视觉几何 bubble");
+    }
+
+    #[tokio::test]
+    async fn test_model_provenance_persisted_to_journal_and_history() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let history = Arc::new(HistoryStore::open(td.path().join("h")).unwrap());
+        history.migrate().unwrap();
+        let entry = json!({"recipient": "午夜咖啡", "kind": "private"});
+        let cid = history.ensure_contact("fixture", &entry, false).unwrap();
+
+        let mut svc = BotService::new(cfg, None, Some(history.clone()), Some(cid), None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "午夜咖啡");
+        svc.advance(old).unwrap();
+
+        let current = test_frame(vec![test_bubble("old", "inbound_visual"), test_bubble("你好", "inbound_visual")], "午夜咖啡");
+        let sent = test_frame(vec![test_bubble("old", "inbound_visual"), test_bubble("你好", "inbound_visual"), test_bubble("好的，收到", "outbound_visual")], "午夜咖啡");
+
+        let mut brain_metadata = HashMap::new();
+        brain_metadata.insert("backend".to_string(), json!("codex-exec"));
+        brain_metadata.insert("model".to_string(), json!("gpt-4o"));
+        brain_metadata.insert("provider".to_string(), json!("openai"));
+        brain_metadata.insert("seconds".to_string(), json!(1.45));
+        brain_metadata.insert("action".to_string(), json!("send"));
+
+        svc.brain = Some(Arc::new(move |_| {
+            let meta = brain_metadata.clone();
+            Box::pin(async move {
+                Ok(BrainReply {
+                    reply: "好的，收到".to_string(),
+                    metadata: meta,
+                })
+            })
+        }));
+
+        let mut cap = MockCapture::new(vec![current.clone(), current.clone(), current.clone(), current.clone(), sent]);
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        // 检查 journal 中的 model provenance
+        let mut found_journal = false;
+        for entry in fs::read_dir(td.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.file_name().and_then(|n| n.to_str()).map(|s| s.starts_with("send-") && s.ends_with(".json")).unwrap_or(false) {
+                let data: Value = read_json(&path).unwrap();
+                let model = data.get("model").expect("journal 中必须记录 model 字段");
+                assert_eq!(model.get("backend").and_then(|v| v.as_str()), Some("codex-exec"));
+                assert_eq!(model.get("model").and_then(|v| v.as_str()), Some("gpt-4o"));
+                assert_eq!(model.get("provider").and_then(|v| v.as_str()), Some("openai"));
+                assert_eq!(model.get("seconds").and_then(|v| v.as_f64()), Some(1.45));
+                assert!(!model.as_object().unwrap().contains_key("action"), "model provenance 中不应包含控制字段 action");
+                assert_eq!(data.get("timings").and_then(|t| t.get("model_seconds")).and_then(|v| v.as_f64()), Some(1.45));
+                found_journal = true;
+                break;
+            }
+        }
+        assert!(found_journal, "必须生成 send-*.json journal");
+
+        // 检查 SQLite history 库中的 record_bot_reply (sends 表)
+        let conn_arc = history.connection();
+        let conn = conn_arc.lock().unwrap();
+        let saved_model_json: String = conn.query_row("SELECT model FROM sends", [], |r| r.get(0)).unwrap();
+        let saved_model: Value = serde_json::from_str(&saved_model_json).unwrap();
+        assert_eq!(saved_model.get("backend").and_then(|v| v.as_str()), Some("codex-exec"));
+        assert_eq!(saved_model.get("model").and_then(|v| v.as_str()), Some("gpt-4o"));
+        assert_eq!(saved_model.get("provider").and_then(|v| v.as_str()), Some("openai"));
+        assert_eq!(saved_model.get("seconds").and_then(|v| v.as_f64()), Some(1.45));
+    }
+
+    #[tokio::test]
+    async fn test_echo_frame_title_mismatch_never_marked_seen_or_cursor_advanced() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "午夜咖啡");
+        svc.advance(old).unwrap();
+
+        let current = test_frame(vec![test_bubble("old", "inbound_visual"), test_bubble("你好", "inbound_visual")], "午夜咖啡");
+
+        // 构造一个标题不匹配的恶意/错误回显帧：它虽然包含匹配的出站文本 "好的"，但来自其他群聊 "闲聊群"
+        let bad_title_frame = test_frame(
+            vec![
+                test_bubble("old", "inbound_visual"),
+                test_bubble("你好", "inbound_visual"),
+                test_bubble("好的", "outbound_visual"),
+            ],
+            "闲聊群", // 标题不匹配 policy！
+        );
+
+        svc.brain = Some(Arc::new(|_| {
+            Box::pin(async {
+                Ok(BrainReply {
+                    reply: "好的".to_string(),
+                    metadata: HashMap::new(),
+                })
+            })
+        }));
+
+        let client = MockToolClient {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            handler: Arc::new(|tool, _| {
+                if tool == "send_message" {
+                    // 模拟网关返回错误或非 triggered，使 turns 进入 echo_check 路径
+                    anyhow::bail!("send_message network timeout");
+                }
+                if tool == "get_send_status" {
+                    Ok(json!({"status": "unknown"}))
+                } else {
+                    Ok(json!({}))
+                }
+            }),
+        };
+
+        // capture 在发送后连续 3 次返回 bad_title_frame
+        let mut cap = MockCapture::new(vec![
+            current.clone(), current.clone(), current.clone(),
+            bad_title_frame.clone(), bad_title_frame.clone(), bad_title_frame.clone()
+        ]);
+
+        let _ = svc.cycle(&client, &mut cap).await;
+        // 绝不能标记为 triggered/Seen，游标绝不能推进到包含坏帧
+        assert_ne!(svc.cursor.as_ref().unwrap().title_lines, vec!["闲聊群".to_string()]);
+        // 检查 journal 中的 status 必须为 unknown 而非 triggered
+        for entry in fs::read_dir(td.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.file_name().and_then(|n| n.to_str()).map(|s| s.starts_with("send-") && s.ends_with(".json")).unwrap_or(false) {
+                let data: Value = read_json(&path).unwrap();
+                assert_eq!(data.get("status").and_then(|v| v.as_str()), Some("unknown"));
+                assert_ne!(data.get("client_echo_observed").and_then(|v| v.as_bool()), Some(true));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sigterm_arriving_during_model_generation_aborts_send() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "午夜咖啡");
+        svc.advance(old).unwrap();
+
+        let current = test_frame(vec![test_bubble("old", "inbound_visual"), test_bubble("你好", "inbound_visual")], "午夜咖啡");
+        let client = MockToolClient::new_default();
+        let mut cap = MockCapture::new(vec![current.clone(), current.clone(), current]);
+
+        let stop_flag = svc.stop.clone();
+        svc.brain = Some(Arc::new(move |_| {
+            // 模拟模型生成期间外部传入停止信号（SIGTERM/SIGINT），实时修改了共享 stop 标志
+            stop_flag.store(true, Ordering::SeqCst);
+            Box::pin(async {
+                Ok(BrainReply {
+                    reply: "回复内容".to_string(),
+                    metadata: HashMap::new(),
+                })
+            })
+        }));
+
+        let res = svc.cycle(&client, &mut cap).await;
+        assert!(res.is_ok(), "收到停止信号应安全退出并保留 turn");
+
+        // 验证 client 绝对没有发送消息
+        let calls = client.calls.lock().unwrap();
+        let sent = calls.iter().any(|(tool, _)| tool == "send_message");
+        assert!(!sent, "停止信号到达后绝对不能发送消息");
+
+        // 验证 journal 记录为 stopped_before_send
+        let mut found_journal = false;
+        for entry in fs::read_dir(td.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.file_name().and_then(|n| n.to_str()).map(|s| s.starts_with("send-") && s.ends_with(".json")).unwrap_or(false) {
+                let data: Value = read_json(&path).unwrap();
+                assert_eq!(data.get("status").and_then(|v| v.as_str()), Some("stopped_before_send"));
+                found_journal = true;
+                break;
+            }
+        }
+        assert!(found_journal, "必须生成 stopped_before_send journal");
+
+        // 验证 pending turn 被 keep_turn 保留在磁盘 turn.json 中
+        let turn_path = td.path().join("turn.json");
+        assert!(turn_path.exists(), "pending turn 必须保留在磁盘以便下次恢复");
+    }
+
+    #[tokio::test]
+    async fn test_delayed_echo_polling_rejects_mismatched_title_frame() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "午夜咖啡");
+        svc.advance(old).unwrap();
+
+        let current = test_frame(vec![test_bubble("old", "inbound_visual"), test_bubble("你好", "inbound_visual")], "午夜咖啡");
+        let after_no_echo = current.clone();
+
+        // 构造一个包含 echo 但标题不匹配的坏帧
+        let bad_title_echo_frame = test_frame(
+            vec![
+                test_bubble("old", "inbound_visual"),
+                test_bubble("你好", "inbound_visual"),
+                test_bubble("好的", "outbound_visual"),
+            ],
+            "其他联系人", // 标题不匹配
+        );
+
+        svc.brain = Some(Arc::new(|_| {
+            Box::pin(async {
+                Ok(BrainReply {
+                    reply: "好的".to_string(),
+                    metadata: HashMap::new(),
+                })
+            })
+        }));
+
+        let client = MockToolClient::new_default();
+        // 前4帧为正常接收、确认、发送前核对及初次回显检查帧，后续轮询帧为标题不匹配的坏帧
+        let mut cap = MockCapture::new(vec![
+            current.clone(),
+            current.clone(),
+            current.clone(),
+            after_no_echo.clone(),
+            bad_title_echo_frame.clone(),
+            bad_title_echo_frame.clone(),
+            bad_title_echo_frame.clone(),
+        ]);
+
+        let res = svc.cycle(&client, &mut cap).await;
+        assert!(res.is_ok(), "延迟轮询中即使外部窗口标题不符，也应忽略坏帧继续完成本轮");
+
+        // 检查 journal 中的 client_echo_observed 绝不能为 true（因为回显帧标题不符，被校验拒绝）
+        for entry in fs::read_dir(td.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.file_name().and_then(|n| n.to_str()).map(|s| s.starts_with("send-") && s.ends_with(".json")).unwrap_or(false) {
+                let data: Value = read_json(&path).unwrap();
+                assert_ne!(data.get("client_echo_observed").and_then(|v| v.as_bool()), Some(true), "标题不符的回显帧绝不能被认定为 client_echo_observed");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_external_mode_hot_added_session_uses_external_brain_on_first_sweep() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+
+        let external_called = Arc::new(AtomicBool::new(false));
+        let ec = external_called.clone();
+        let external_brain: BrainFn = Arc::new(move |_turn| {
+            ec.store(true, Ordering::SeqCst);
+            Box::pin(async {
+                Ok(BrainReply {
+                    reply: "来自外部大脑的回答".to_string(),
+                    metadata: HashMap::new(),
+                })
+            })
+        });
+
+        // 注册全局 brain factory（模拟 serve.rs 在 External 模式下的行为）
+        register_default_brain_factory(Some(Arc::new(move || external_brain.clone())));
+
+        // 模拟热加联系人：在 sweep 中动态创建新 child
+        let mut new_child = BotService::new(cfg, None, None, None, None, None).unwrap();
+        new_child.sleep = Arc::new(|_| Box::pin(async {}));
+
+        // 验证创建出来的 child.brain 立即就是 Some 而非 None
+        assert!(new_child.brain.is_some(), "热加会话在创建时必须已经注入 BrainFn");
+
+        // 模拟该会话从磁盘恢复了 pending turn，在首个 sweep 立即触发回复
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "午夜咖啡");
+        new_child.advance(old).unwrap();
+
+        let current = test_frame(vec![test_bubble("old", "inbound_visual"), test_bubble("你好", "inbound_visual")], "午夜咖啡");
+        let sent = test_frame(vec![test_bubble("old", "inbound_visual"), test_bubble("你好", "inbound_visual"), test_bubble("来自外部大脑的回答", "outbound_visual")], "午夜咖啡");
+
+        let mut cap = MockCapture::new(vec![current.clone(), current.clone(), current.clone(), current.clone(), sent]);
+        let client = MockToolClient::new_default();
+
+        let res = new_child.cycle(&client, &mut cap).await;
+        assert!(res.is_ok());
+
+        // 清理注册的 factory
+        register_default_brain_factory(None);
+
+        assert!(external_called.load(Ordering::SeqCst), "首个 sweep 中热加会话必须调用外部大脑，绝不能越过外部大脑退化到 builtin");
     }
 }
