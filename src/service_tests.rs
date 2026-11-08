@@ -91,6 +91,7 @@ fn gateway(store: Arc<Store>) -> (Gateway, Arc<TestAdapter>, Arc<TestAdapter>) {
             store,
             listeners: Listeners::default(),
             legacy_tools: true,
+            desktop_tools: crate::interaction::DesktopTools::default(),
         },
         a,
         b,

@@ -8,6 +8,7 @@ mod crm;
 mod desktop;
 mod domain;
 mod gateway;
+mod interaction;
 mod listeners;
 mod mcp;
 mod messaging;

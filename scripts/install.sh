@@ -993,7 +993,7 @@ install_binaries() {
     install -m 755 "$SRC_DIR/$t" "$BIN_DIR/$t"
   done
   # Older releases remain installable; native streaming is explicitly opt-in.
-  for optional in wechat_runtime wechat_overlay wechat_bubbles wechat_bot_worker rapidocr_server.py; do
+  for optional in desktop_helper wechat_runtime wechat_overlay wechat_bubbles wechat_bot_worker rapidocr_server.py; do
     if [[ -f "$SRC_DIR/$optional" ]]; then
       install -m 755 "$SRC_DIR/$optional" "$BIN_DIR/$optional"
     fi

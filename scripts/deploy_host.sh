@@ -68,7 +68,7 @@ remote "record version $APP_VERSION" "
 if [ $APP -eq 1 ] || [ $WORKER -eq 1 ]; then
   # A fresh source tree on the target; the calibrated layout maps in ~/.wechat-rpa/layout are never touched.
   SRC_TAR=$(mktemp -t wechat-src)
-  local_step "pack native sources" tar czf "$SRC_TAR" native/bootstrap native/common native/eyes native/action native/bot native/click native/wechat_bubbles.swift
+  local_step "pack native sources" tar czf "$SRC_TAR" native/bootstrap native/common native/eyes native/action native/bot native/click native/interaction native/wechat_bubbles.swift
   echo "--- upload sources"
   if [ $YES -eq 1 ]; then
     ssh -o BatchMode=yes -o LogLevel=ERROR "$HOST" 'rm -rf "$HOME/.wechat-rpa/src.new" && mkdir -p "$HOME/.wechat-rpa/src.new" && tar xzf - -C "$HOME/.wechat-rpa/src.new"' < "$SRC_TAR"
@@ -85,7 +85,8 @@ if [ $WORKER -eq 1 ]; then
     cd "$HOME/.wechat-rpa/src"
     swiftc -O -target x86_64-apple-macos12 -parse-as-library -D BOT_WORKER native/wechat_bubbles.swift native/common/*.swift native/eyes/*.swift native/action/*.swift native/bot/*.swift -o /tmp/wechat_bot_worker.$TS
     swiftc -O -target x86_64-apple-macos12 native/click/*.swift native/common/*.swift native/action/*.swift -o /tmp/wechat_click.$TS
-    for name in wechat_bot_worker wechat_click; do
+    swiftc -O -target x86_64-apple-macos12 native/interaction/*.swift native/common/Geometry.swift native/action/*.swift -o /tmp/desktop_helper.$TS
+    for name in wechat_bot_worker wechat_click desktop_helper; do
       dst="$HOME/.wechat-rpa/bin/$name"
       mkdir -p "$HOME/.wechat-rpa/bin"
       [ -f "$dst" ] && cp -p "$dst" "$dst.before-$TS"
@@ -93,6 +94,7 @@ if [ $WORKER -eq 1 ]; then
     done
     sign_file "$HOME/.wechat-rpa/bin/wechat_bot_worker"
     sign_file "$HOME/.wechat-rpa/bin/wechat_click"
+    sign_file "$HOME/.wechat-rpa/bin/desktop_helper"
     echo "worker and click installed and signed with $CERT_NAME; a running worker keeps its old binary until its connection ends"'
 fi
 

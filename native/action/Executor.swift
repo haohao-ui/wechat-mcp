@@ -6,19 +6,31 @@ import CoreGraphics
 protocol EventSink {
     func cursor() -> CGPoint
     func post(_ type: CGEventType, at point: CGPoint, button: CGMouseButton) throws
+    func post(_ type: CGEventType, at point: CGPoint, button: CGMouseButton, clickCount: Int) throws
+    func key(_ code: CGKeyCode, down: Bool, modifiers: CGEventFlags) throws
     func scroll(lines: Int32, at point: CGPoint) throws
     /// One key transition; `command` is the Command modifier state carried by the event.
     func key(_ code: CGKeyCode, down: Bool, command: Bool) throws
     func sleep(_ seconds: Double)
 }
 
+extension EventSink {
+    func post(_ type: CGEventType, at point: CGPoint, button: CGMouseButton, clickCount: Int) throws {
+        try post(type, at: point, button: button)
+    }
+    func key(_ code: CGKeyCode, down: Bool, modifiers: CGEventFlags) throws {
+        try key(code, down: down, command: modifiers.contains(.maskCommand))
+    }
+}
+
 enum ActionError: Error, CustomStringConvertible {
-    case targetNotReached, userInputDetected, eventFailed
+    case targetNotReached, userInputDetected, eventFailed, cancelled
     var description: String {
         switch self {
         case .targetNotReached: return "target_not_reached"
         case .userInputDetected: return "user_input_detected"
         case .eventFailed: return "mouse_event_failed"
+        case .cancelled: return "action_cancelled"
         }
     }
 }
@@ -30,6 +42,16 @@ struct SystemEventSink: EventSink {
         guard let event = CGEvent(mouseEventSource:nil, mouseType:type, mouseCursorPosition:point, mouseButton:button) else {
             throw ActionError.eventFailed
         }
+        event.post(tap:.cghidEventTap)
+    }
+    func post(_ type: CGEventType, at point: CGPoint, button: CGMouseButton, clickCount: Int) throws {
+        guard let event = CGEvent(mouseEventSource:nil, mouseType:type, mouseCursorPosition:point, mouseButton:button) else { throw ActionError.eventFailed }
+        event.setIntegerValueField(.mouseEventClickState, value: Int64(clickCount))
+        event.post(tap:.cghidEventTap)
+    }
+    func key(_ code: CGKeyCode, down: Bool, modifiers: CGEventFlags) throws {
+        guard let event = CGEvent(keyboardEventSource:nil, virtualKey:code, keyDown:down) else { throw ActionError.eventFailed }
+        event.flags = modifiers
         event.post(tap:.cghidEventTap)
     }
     func scroll(lines: Int32, at point: CGPoint) throws {
@@ -75,13 +97,17 @@ func distanceToSegment(_ p: CGPoint, _ a: CGPoint, _ b: CGPoint) -> Double {
 
 final class Executor {
     let sink: EventSink
+    let checkAllowed: () throws -> Void
     private var recent: [CGPoint] = []
     private var lastPosted: CGPoint? {
         get { recent.last }
         set { if let point = newValue { remember(point) } else { recent = [] } }
     }
 
-    init(sink: EventSink) { self.sink = sink }
+    init(sink: EventSink, checkAllowed: @escaping () throws -> Void = {}) {
+        self.sink = sink
+        self.checkAllowed = checkAllowed
+    }
 
     private func remember(_ point: CGPoint) {
         recent.append(point)
@@ -90,6 +116,7 @@ final class Executor {
 
     /// Throws userInputDetected when the pointer is off the path we recently posted.
     func checkPointer() throws {
+        try checkAllowed()
         guard let last = recent.last else { return }
         let here = sink.cursor()
         var nearest = distance(here, last)
@@ -97,13 +124,13 @@ final class Executor {
         if nearest > userInputThreshold { recent = []; throw ActionError.userInputDetected }
     }
 
-    func run(_ moves: [[TrajectoryPoint]]) throws {
+    func run(_ moves: [[TrajectoryPoint]], dragging: Bool = false) throws {
         for move in moves {
             var previous = 0.0
             for p in move {
                 sink.sleep(p.t - previous); previous = p.t
                 try checkPointer()
-                try sink.post(.mouseMoved, at:p.point, button:.left)
+                try sink.post(dragging ? .leftMouseDragged : .mouseMoved, at:p.point, button:.left)
                 lastPosted = p.point
             }
         }
@@ -111,17 +138,31 @@ final class Executor {
 
     /// Press and release at `point`. If someone moves the mouse while the button is down, the button is
     /// still released (never left stuck) and then userInputDetected is thrown.
-    func press(at point: CGPoint, button: CGMouseButton, dwell: Double, hold: Double) throws {
+    func press(at point: CGPoint, button: CGMouseButton, dwell: Double, hold: Double, clickCount: Int = 1) throws {
         let down: CGEventType = button == .right ? .rightMouseDown : .leftMouseDown
         let up: CGEventType = button == .right ? .rightMouseUp : .leftMouseUp
         sink.sleep(dwell)
         try checkPointer()
-        try sink.post(down, at:point, button:button)
+        var released = false
+        defer { if !released { try? sink.post(up, at:point, button:button, clickCount:clickCount) } }
+        try sink.post(down, at:point, button:button, clickCount:clickCount)
         sink.sleep(hold)
         let moved = distance(sink.cursor(), point) > userInputThreshold
-        try sink.post(up, at:point, button:button)
+        // Always release before reporting cancellation or focus loss.
+        try sink.post(up, at:point, button:button, clickCount:clickCount)
+        released = true
         lastPosted = point
         if moved { lastPosted = nil; throw ActionError.userInputDetected }
+        try checkAllowed()
+    }
+
+    func drag(_ moves: [[TrajectoryPoint]], from point: CGPoint, hold: Double) throws {
+        try checkPointer()
+        defer { try? sink.post(.leftMouseUp, at:sink.cursor(), button:.left) }
+        try sink.post(.leftMouseDown, at:point, button:.left)
+        sink.sleep(hold)
+        try run(moves, dragging:true)
+        try checkPointer()
     }
 
     func wheel(lines: Int32, at point: CGPoint) throws {
