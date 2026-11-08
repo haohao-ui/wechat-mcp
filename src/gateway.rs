@@ -104,6 +104,9 @@ impl Gateway {
         if name == crate::article::TOOL {
             return crate::article::execute(args).await;
         }
+        if crate::core::brain_tools::is_brain_tool(name) {
+            return crate::core::brain_tools::execute(name, args).await;
+        }
         if crm::is_tool(name)
             || crate::listeners::is_tool(name)
             || name == "capture_customer_context"
@@ -1045,5 +1048,297 @@ mod tests {
         assert_eq!(resp2["isError"], false);
         assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
         assert_eq!(resp2["structuredContent"]["data"]["replayed"], true);
+    }
+
+    static CONTRACT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[tokio::test]
+    async fn brain_tools_dispatched_via_gateway() {
+        let _guard = CONTRACT_TEST_LOCK.lock().await;
+        let prev_env = std::env::var("WECHAT_CORE_SOCK").ok();
+        let missing = format!("/tmp/nonexistent_core_{}.sock", uuid::Uuid::new_v4());
+        unsafe {
+            std::env::set_var("WECHAT_CORE_SOCK", &missing);
+        }
+
+        let store = Store::memory();
+        let accounts = AccountRegistry::default();
+        let gateway = Gateway {
+            accounts,
+            store,
+            listeners: Listeners::default(),
+            legacy_tools: false,
+        };
+
+        let resp = gateway
+            .call("next_turn", json!({"wait_seconds": 0}))
+            .await;
+        // 未接入网关时会返回 "未知工具: next_turn"
+        // 接入网关后由于 core.sock 未启动应返回 "core_not_running"
+        let err_text = resp["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            !err_text.contains("未知工具"),
+            "brain tools must be dispatched by gateway, but got: {err_text}"
+        );
+        assert!(
+            err_text.contains("core_not_running"),
+            "expected core_not_running but got: {err_text}"
+        );
+
+        if let Some(prev) = prev_env {
+            unsafe { std::env::set_var("WECHAT_CORE_SOCK", prev); }
+        } else {
+            unsafe { std::env::remove_var("WECHAT_CORE_SOCK"); }
+        }
+    }
+
+    async fn mcp_handle_request(gateway: &Gateway, request: Value, structured_content: bool) -> Value {
+        let id = request.get("id").cloned();
+        let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+        let result = match method {
+            "tools/call" => {
+                let params = request.get("params").and_then(Value::as_object).unwrap();
+                let name = params.get("name").and_then(Value::as_str).unwrap();
+                let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+                let mut res = gateway.call(name, args).await;
+                if !structured_content {
+                    if let Some(obj) = res.as_object_mut() {
+                        obj.remove("structuredContent");
+                    }
+                }
+                res
+            }
+            _ => panic!("unsupported method in test"),
+        };
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result
+        })
+    }
+
+    #[tokio::test]
+    async fn test_mcp_handle_request_through_gateway_to_core_sock_contract_and_mutex() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = CONTRACT_TEST_LOCK.lock().await;
+
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let td = std::env::temp_dir().join(format!("gw_contract_{pid}_{nanos}"));
+        std::fs::create_dir_all(&td).unwrap();
+        std::fs::set_permissions(&td, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let sock_path = td.join("core.sock");
+
+        // 真实绑定 core.sock
+        let listener = crate::core::external_brain::bind_core_socket(&sock_path).unwrap();
+
+        // 实例化真实的 ExternalBrain 并启动 socket server
+        let brain_cfg = crate::core::config::BrainConfig {
+            mode: crate::core::config::BrainMode::External,
+            external: crate::core::config::ExternalBrainConfig {
+                timeout_seconds: 30,
+                timeout_action: crate::core::config::TimeoutAction::Skip,
+                queue_minutes: 30,
+            },
+        };
+        let model_cfg = crate::core::config::ModelConfig {
+            backend: "codex-exec".to_string(),
+            base_url: None,
+            model: None,
+            api_key_file: None,
+            api_key_env: None,
+            supports_images: None,
+            timeout_seconds: None,
+            json_output: None,
+        };
+        let brain = crate::core::external_brain::ExternalBrain::new_with_socket(
+            &brain_cfg,
+            &model_cfg,
+            td.clone(),
+            sock_path.clone(),
+        );
+
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let server_handle = crate::core::external_brain::start_socket_server(
+            brain.clone(),
+            listener,
+            Some(stop_rx),
+        );
+
+        // 设置环境变量 WECHAT_CORE_SOCK 供 Gateway / brain_tools 发现
+        let prev_env = std::env::var("WECHAT_CORE_SOCK").ok();
+        unsafe {
+            std::env::set_var("WECHAT_CORE_SOCK", &sock_path);
+        }
+
+        // 构建真实的 Gateway
+        let store = Store::memory();
+        let accounts = AccountRegistry::default();
+        let gateway = Gateway {
+            accounts,
+            store,
+            listeners: Listeners::default(),
+            legacy_tools: false,
+        };
+
+        // 生产一轮待回复消息
+        let b_fn = brain.brain_fn();
+        let sample_turn = crate::brain::Turn {
+            turn_id: "turn-gw-1".to_string(),
+            account_id: "acc-gw".to_string(),
+            contact: crate::brain::ContactInfo {
+                name: "示例联系人甲".to_string(),
+                kind: "private".to_string(),
+            },
+            text: "来自客户的问题".to_string(),
+            mode: "service".to_string(),
+            chat_kind: "private".to_string(),
+            context: Vec::new(),
+            images: Vec::new(),
+            files: Vec::new(),
+            notes: Vec::new(),
+            failed: Vec::new(),
+            image_count: Some(0),
+            earlier_images: 0,
+            max_attachment_mb: 50,
+        };
+
+        let brain_handle = tokio::spawn(async move {
+            b_fn(&sample_turn).await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // 1. 客户端 1：通过 MCP handle_request 经 Gateway 调用 next_turn
+        let req1 = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "next_turn",
+                "arguments": { "wait_seconds": 1 }
+            }
+        });
+        let resp1 = mcp_handle_request(&gateway, req1, true).await;
+        assert_eq!(resp1["result"]["isError"], false);
+        let turn_data = &resp1["result"]["structuredContent"]["turn"];
+        assert_eq!(turn_data["turn_id"], "turn-gw-1");
+        assert_eq!(turn_data["contact"]["name"], "示例联系人甲");
+        assert_eq!(turn_data["text"], "来自客户的问题");
+        let claim_token = turn_data["claim_token"].as_str().expect("必须包含 claim_token").to_string();
+        assert!(!claim_token.is_empty());
+        assert!(turn_data["deadline_at"].as_u64().is_some());
+
+        // 2. 客户端 2：在客户端 1 单次调用断开后，连续发起 next_turn，验证互斥！
+        let req2 = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "next_turn",
+                "arguments": { "wait_seconds": 0 }
+            }
+        });
+        let resp2 = mcp_handle_request(&gateway, req2, true).await;
+        assert_eq!(resp2["result"]["isError"], false);
+        assert_eq!(
+            resp2["result"]["structuredContent"]["turn"],
+            Value::Null,
+            "轮次已被客户端 1 认领，客户端 2 连续 next_turn 必须互斥返回 Null"
+        );
+
+        // 3. 客户端 2：尝试用错误的 claim_token 抢答 reply，应当被拒绝
+        let fake_reply_req = json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "reply",
+                "arguments": {
+                    "turn_id": "turn-gw-1",
+                    "action": "send",
+                    "text": "恶意抢答",
+                    "claim_token": "bad_token_xyz"
+                }
+            }
+        });
+        let resp_fake = mcp_handle_request(&gateway, fake_reply_req, true).await;
+        assert_eq!(resp_fake["result"]["isError"], true);
+        assert!(resp_fake["result"]["content"][0]["text"].as_str().unwrap().contains("invalid_claim_token"));
+
+        // 4. 客户端 1：用正确的 claim_token 通过 MCP handle_request 经 Gateway 回复
+        let reply_req = json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "reply",
+                "arguments": {
+                    "turn_id": "turn-gw-1",
+                    "action": "send",
+                    "text": "网关契约测试成功回复",
+                    "claim_token": claim_token
+                }
+            }
+        });
+        let resp_reply = mcp_handle_request(&gateway, reply_req, true).await;
+        assert_eq!(resp_reply["result"]["isError"], false);
+        assert_eq!(resp_reply["result"]["structuredContent"]["accepted"], true);
+
+        // 检查后台 ExternalBrain 收到的回复与元数据
+        let brain_reply = brain_handle.await.unwrap().unwrap();
+        assert_eq!(brain_reply.reply, "网关契约测试成功回复");
+        assert_eq!(brain_reply.metadata.get("action").and_then(Value::as_str), Some("send"));
+
+        // 5. 再次 reply 应该被拒绝（已回答）
+        let dup_reply = mcp_handle_request(&gateway, json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "reply",
+                "arguments": {
+                    "turn_id": "turn-gw-1",
+                    "action": "skip"
+                }
+            }
+        }), true).await;
+        assert_eq!(dup_reply["result"]["isError"], true);
+
+        // 6. 测试 resume_session 工具通过 Gateway 正常执行
+        let session_dir = td.join("sessions").join("session_1");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let handoff_file = session_dir.join("handoff.json");
+        std::fs::write(&handoff_file, json!({"recipient": "示例联系人甲"}).to_string()).unwrap();
+        assert!(handoff_file.exists());
+
+        let resume_req = json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "resume_session",
+                "arguments": {
+                    "recipient": "示例联系人甲"
+                }
+            }
+        });
+        let resp_resume = mcp_handle_request(&gateway, resume_req, true).await;
+        assert_eq!(resp_resume["result"]["isError"], false);
+        assert_eq!(resp_resume["result"]["structuredContent"]["resumed"], "示例联系人甲");
+        assert!(!handoff_file.exists(), "handoff.json 必须已被清理以恢复自动回复");
+
+        // 清理资源
+        let _ = stop_tx.send(true);
+        server_handle.abort();
+        if let Some(prev) = prev_env {
+            unsafe { std::env::set_var("WECHAT_CORE_SOCK", prev); }
+        } else {
+            unsafe { std::env::remove_var("WECHAT_CORE_SOCK"); }
+        }
+        let _ = std::fs::remove_dir_all(&td);
     }
 }
