@@ -106,6 +106,17 @@ if [ $MCP -eq 1 ]; then
   else echo "[dry-run] ssh $HOST 'cat > ~/.wechat-rpa/bin/wechat-mcp' < target/x86_64-apple-darwin/release/wechat-mcp"; fi
   remote "sign wechat-mcp" '
     sign_file "$HOME/.wechat-rpa/bin/wechat-mcp"'
+  # 正在运行的 serve-core 仍是旧二进制：优雅停止，由宿主 CoreSupervisor 用新二进制拉起。
+  remote "restart serve-core on the new binary" '
+    old=$(pgrep -f "wechat-rpa/bin/wechat-mcp serve-core" || true)
+    if [ -z "$old" ]; then echo "serve-core not running; host will start it when enabled"; exit 0; fi
+    kill -TERM $old
+    for i in $(seq 1 60); do
+      new=$(pgrep -f "wechat-rpa/bin/wechat-mcp serve-core" || true)
+      if [ -n "$new" ] && [ "$new" != "$old" ]; then echo "serve-core restarted: $old -> $new"; exit 0; fi
+      sleep 1
+    done
+    echo "serve-core did not come back within 60s; check the host app" >&2; exit 1'
 fi
 
 if [ $APP -eq 1 ]; then
