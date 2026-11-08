@@ -271,10 +271,12 @@ async fn run_sync_inner(
             let _ = store.mark_missing(account_id, cat, &r.ids, now_ms);
         }
         let synced = r.ids.len() as u32;
+        // 分组人数里含微信官方号（微信团队、文件传输助手）：按真人核对
+        let expected = expected.saturating_sub(r.system);
         // 期望数与已同步数的差额都算"未读到"，不悄悄放过
         unreadable += r.unreadable.max(expected.saturating_sub(synced));
         needs_review += r.needs_review;
-        per_category.push((cat.clone(), *expected, synced));
+        per_category.push((cat.clone(), expected, synced));
         if r.stopped {
             stopped = true;
             break;
@@ -308,7 +310,12 @@ struct GroupResult {
     unreadable: u32,
     needs_review: u32,
     stopped: bool,
+    /// 本分组里的微信官方号个数（微信团队、文件传输助手）：记为 official，不算本分组的真人
+    system: u32,
 }
+
+/// 微信自带的官方号（实测出现在「联系人」分组里，计入了分组人数）：记为 official，不算真人联系人（用户 2026-11-08）
+const WECHAT_SYSTEM_IDS: [&str; 2] = ["weixin", "filehelper"];
 
 /// 一屏的识别结果：文字行 + 头像中心 y（动作组件按像素找的，只有联系人行有头像）
 struct Screen {
@@ -531,7 +538,7 @@ async fn sync_group(
 ) -> Result<GroupResult> {
     // 每格滚多少点事先不知道（实机 5 格就超过一屏、把人跳过去了）：先滚 1 格量出来，之后按实测算格数
     let mut px_per_tick: Option<f64> = None;
-    let mut r = GroupResult { ids: Vec::new(), unreadable: 0, needs_review: 0, stopped: false };
+    let mut r = GroupResult { ids: Vec::new(), unreadable: 0, needs_review: 0, stopped: false, system: 0 };
 
     // 1. 收起所有分组、回到顶部，找到本分组标题并展开（按标题下方内容确认，最多点两次）
     let top = collapse_all_groups(capture).await?;
@@ -576,14 +583,17 @@ async fn sync_group(
 
             if mode == SyncMode::Incremental {
                 if let Some(name) = name {
-                    if let Some(cid) = existing
-                        .iter()
-                        .find(|p| {
-                            p.get("nickname").and_then(|v| v.as_str()).map_or(false, |n| names_match(name, n))
-                                || p.get("remark").and_then(|v| v.as_str()).map_or(false, |n| names_match(name, n))
-                        })
-                        .and_then(|p| p.get("contact_id").and_then(|v| v.as_str()))
-                    {
+                    let found = existing.iter().find(|p| {
+                        p.get("nickname").and_then(|v| v.as_str()).map_or(false, |n| names_match(name, n))
+                            || p.get("remark").and_then(|v| v.as_str()).map_or(false, |n| names_match(name, n))
+                    });
+                    if found.map_or(false, |p| {
+                        p.get("wechat_id").and_then(|v| v.as_str()).map_or(false, |w| WECHAT_SYSTEM_IDS.contains(&w))
+                    }) {
+                        r.system += 1;
+                        continue;
+                    }
+                    if let Some(cid) = found.and_then(|p| p.get("contact_id").and_then(|v| v.as_str())) {
                         if !r.ids.iter().any(|x| x == cid) {
                             r.ids.push(cid.to_string());
                         }
@@ -627,9 +637,9 @@ async fn sync_group(
                 r.unreadable += 1;
                 continue;
             }
-            info!(category, row_y = *y, row_named = name.is_some(), has_wechat_id = f.wechat_id.is_some(), "contacts_sync_row_ok");
+            let is_system = f.wechat_id.as_deref().map_or(false, |w| WECHAT_SYSTEM_IDS.contains(&w));
             let input = ProfileInput {
-                category: category.to_string(),
+                category: if is_system { "official".to_string() } else { category.to_string() },
                 wechat_id: f.wechat_id,
                 nickname: f.nickname,
                 remark: f.remark,
@@ -642,7 +652,28 @@ async fn sync_group(
                 tags: f.tags,
                 friend_permission: f.friend_permission,
             };
-            match store.upsert_profile(account_id, &input, now_ms) {
+            let outcome = store.upsert_profile(account_id, &input, now_ms);
+            {
+                let (kind, cid_tail) = match &outcome {
+                    Ok(UpsertOutcome::Created(c)) => ("created", c.chars().rev().take(4).collect::<String>()),
+                    Ok(UpsertOutcome::Updated(c)) => ("updated", c.chars().rev().take(4).collect::<String>()),
+                    Ok(UpsertOutcome::NeedsReview { .. }) => ("needs_review", String::new()),
+                    Err(_) => ("error", String::new()),
+                };
+                info!(
+                    category,
+                    row_y = *y,
+                    row_named = name.is_some(),
+                    changed,
+                    has_wechat_id = input.wechat_id.is_some(),
+                    outcome = kind,
+                    cid_tail = cid_tail.as_str(),
+                    row_shape = name.as_deref().map_or(String::new(), |n| shape_against(n, &input.nickname)),
+                    "contacts_sync_row_ok"
+                );
+            }
+            match outcome {
+                Ok(UpsertOutcome::Created(_)) | Ok(UpsertOutcome::Updated(_)) if is_system => r.system += 1,
                 Ok(UpsertOutcome::Created(cid)) | Ok(UpsertOutcome::Updated(cid)) => {
                     if !r.ids.contains(&cid) {
                         r.ids.push(cid);
@@ -1859,6 +1890,37 @@ mod tests {
 
     /// 实机 2026-11-08：每格滚得比估计的多，5 格就超过一屏，第二屏开始跳人。
     /// 每格距离事先未知（这里 140 点/格），也必须每人只点一次、一个不漏。
+    /// 用户 2026-11-08：「联系人」分组的 22 人里有两个官方号——微信团队（weixin）、文件传输助手（filehelper）。
+    /// 照样记录，但归为官方（official），不算真人联系人；本分组应有数按真人核对。全量、增量都一样。
+    #[tokio::test]
+    async fn test_wechat_system_accounts_recorded_as_official_not_counted() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        let store = HistoryStore::open(&state_dir).unwrap();
+        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
+        let mut personal = letter_group("personal", "联系人", "人", &[("A", 2), ("W", 1)]);
+        let sys = |name: &str, id: &str| VirtualContactItem {
+            name: name.to_string(), remark: None, wechat_id: Some(id.to_string()), enterprise: None, real_name: None,
+            tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None,
+        };
+        personal.letter_sections.push(("W".to_string(), vec![sys("微信团队", "weixin")]));
+        personal.letter_sections.insert(1, ("F".to_string(), vec![sys("文件传输助手", "filehelper")]));
+        let mut ui = VirtualContactsUi::new(vec![personal]);
+        let no_yield = || false;
+        for (mode, now) in [(SyncMode::Full, 1000), (SyncMode::Incremental, 2000)] {
+            let report = run_sync(&mut ui, &store, "acct", mode, &checkpoint, &no_yield, now).await.unwrap();
+            assert!(report.complete, "{mode:?}: {report:?}");
+            assert_eq!(report.per_category, vec![("personal".to_string(), 3, 3)], "{mode:?}");
+        }
+        let profiles = store.list_profiles("acct", None).unwrap();
+        assert_eq!(profiles.len(), 5);
+        for id in ["weixin", "filehelper"] {
+            let p = profiles.iter().find(|p| p["wechat_id"] == id).expect(id);
+            assert_eq!(p["category"], "official", "{p:?}");
+            assert!(p["removed_at"].is_null(), "官方号不能被当成已删除: {p:?}");
+        }
+    }
+
     #[tokio::test]
     async fn test_unknown_scroll_distance_never_skips_contacts() {
         for tick_px in [40.0, 90.0, 140.0, 230.0] {
