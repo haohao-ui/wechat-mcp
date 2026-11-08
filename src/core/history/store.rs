@@ -308,6 +308,28 @@ fn family_conn(conn: &Connection, contact_id: &str) -> Result<Vec<String>> {
     Ok(result)
 }
 
+/// 两个微信号是否只差 ≤2 个字符（编辑距离）：用于区分"识别错字"和"另一个人"。
+fn wechat_ids_close(a: &str, b: &str) -> bool {
+    if a == b {
+        return false;
+    }
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if (a.len() as i64 - b.len() as i64).abs() > 2 {
+        return false;
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for i in 1..=a.len() {
+        let mut cur = vec![i; b.len() + 1];
+        for j in 1..=b.len() {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        prev = cur;
+    }
+    prev[b.len()] <= 2
+}
+
 fn _owners_conn(
     conn: &Connection,
     account_id: &str,
@@ -1330,6 +1352,18 @@ impl HistoryStore {
         let record_review = |reason: &str, candidates: &[String]| -> Result<()> {
             let cand_json = serde_json::to_string(candidates).unwrap_or_else(|_| "[]".to_string());
             let prof_json = serde_json::to_string(p).unwrap_or_else(|_| "{}".to_string());
+            // 同一待确认情况每次同步都会再遇到：已有未处理的同样记录就不再写
+            let exists: bool = conn
+                .query_row(
+                    "SELECT 1 FROM contact_reviews WHERE account_id=? AND reason=? AND candidates=? AND profile=? AND resolved_at IS NULL",
+                    params![account_id, reason, cand_json, prof_json],
+                    |_| Ok(true),
+                )
+                .optional()?
+                .unwrap_or(false);
+            if exists {
+                return Ok(());
+            }
             conn.execute(
                 "INSERT INTO contact_reviews(account_id, reason, candidates, profile, created_at, resolved_at) VALUES(?, ?, ?, ?, ?, NULL)",
                 params![account_id, reason, cand_json, prof_json, now_ms],
@@ -1441,44 +1475,51 @@ impl HistoryStore {
                 let owners = _owners_conn(&conn, account_id, &name_key(name), &["config", "alias", "observed", "addressbook"], true)?;
                 candidate_cids.extend(owners);
             }
+            let mut candidates: Vec<String> = candidate_cids.into_iter().collect();
+            candidates.sort();
 
-            if candidate_cids.len() > 1 {
-                let mut candidates: Vec<String> = candidate_cids.into_iter().collect();
-                candidates.sort();
-                record_review("ambiguous_name", &candidates)?;
-                return Ok(UpsertOutcome::NeedsReview {
-                    reason: "ambiguous_name".to_string(),
-                    candidates,
-                });
-            }
-
-            if candidate_cids.len() == 1 {
-                let target_cid = candidate_cids.into_iter().next().unwrap();
-                let existing_prof_wxid: Option<Option<String>> = conn
+            // 同名的已有联系人分三类：
+            // - 微信号与本次仅差 ≤2 个字符：更像识别错字 → 待确认，不覆盖；
+            // - 微信号明显不同：是另一个人（微信号是强身份），不影响本次建档；
+            // - 没有资料/微信号（只在聊天里见过）：可能就是本人。
+            let mut near = Vec::new();
+            let mut unprofiled = Vec::new();
+            let mut distinct = 0usize;
+            for cid in &candidates {
+                let prof_wxid: Option<Option<String>> = conn
                     .query_row(
                         "SELECT wechat_id FROM contact_profiles WHERE contact_id=?",
-                        params![&target_cid],
+                        params![cid],
                         |r| r.get(0),
                     )
                     .optional()?;
-
-                match existing_prof_wxid {
-                    Some(Some(old_wxid)) if old_wxid != wid => {
-                        record_review("wechat_id_conflict", &[target_cid.clone()])?;
-                        return Ok(UpsertOutcome::NeedsReview {
-                            reason: "wechat_id_conflict".to_string(),
-                            candidates: vec![target_cid],
-                        });
-                    }
-                    Some(_) => {
-                        update_profile_row(&target_cid)?;
-                        return Ok(UpsertOutcome::Updated(target_cid));
-                    }
-                    None => {
-                        insert_profile_row(&target_cid, false)?;
-                        return Ok(UpsertOutcome::Updated(target_cid));
-                    }
+                match prof_wxid.flatten().filter(|w| !w.trim().is_empty()) {
+                    Some(old) if wechat_ids_close(&old, wid) => near.push(cid.clone()),
+                    Some(_) => distinct += 1,
+                    None => unprofiled.push(cid.clone()),
                 }
+            }
+
+            if !near.is_empty() {
+                record_review("wechat_id_conflict", &near)?;
+                return Ok(UpsertOutcome::NeedsReview { reason: "wechat_id_conflict".to_string(), candidates: near });
+            }
+            if unprofiled.len() > 1 || (unprofiled.len() == 1 && distinct > 0) {
+                // 聊天记录该归谁说不清：不自动归属
+                record_review("ambiguous_name", &candidates)?;
+                return Ok(UpsertOutcome::NeedsReview { reason: "ambiguous_name".to_string(), candidates });
+            }
+            if let Some(target_cid) = unprofiled.into_iter().next() {
+                let has_profile: bool = conn
+                    .query_row("SELECT 1 FROM contact_profiles WHERE contact_id=?", params![&target_cid], |_| Ok(true))
+                    .optional()?
+                    .unwrap_or(false);
+                if has_profile {
+                    update_profile_row(&target_cid)?;
+                } else {
+                    insert_profile_row(&target_cid, false)?;
+                }
+                return Ok(UpsertOutcome::Updated(target_cid));
             }
 
             let cid = new_id("c_");
@@ -2633,6 +2674,47 @@ store.conn.close()
         let profiles = f.store.list_profiles("acct", None).unwrap();
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0]["wechat_id"].as_str().unwrap(), "wxid_a");
+    }
+
+    fn personal(wxid: &str, nick: &str) -> ProfileInput {
+        ProfileInput {
+            category: "personal".to_string(),
+            wechat_id: Some(wxid.to_string()),
+            nickname: nick.to_string(),
+            remark: None,
+            region: None,
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+        }
+    }
+
+    /// 两个不同的客户恰好同名、微信号明显不同：微信号是强身份，两个人都要建档，不能卡在待确认里。
+    #[test]
+    fn test_same_name_distinct_wechat_ids_are_two_people() {
+        let f = setup_fixture();
+        let a = f.store.upsert_profile("acct", &personal("wxid_alpha001", "同名戊"), 1000).unwrap();
+        assert!(matches!(a, UpsertOutcome::Created(_)), "{a:?}");
+        let b = f.store.upsert_profile("acct", &personal("wxid_zeta9999", "同名戊"), 2000).unwrap();
+        assert!(matches!(b, UpsertOutcome::Created(_)), "明显不同的微信号应当是另一个人: {b:?}");
+        assert_eq!(f.store.list_profiles("acct", None).unwrap().len(), 2);
+        assert!(f.store.pending_reviews("acct").unwrap().is_empty());
+    }
+
+    /// 同一待确认情况重复同步，不重复记录。
+    #[test]
+    fn test_repeated_review_is_not_duplicated() {
+        let f = setup_fixture();
+        f.store.upsert_profile("acct", &personal("wxid_t1abc", "复读己"), 1000).unwrap();
+        for t in [2000, 3000, 4000] {
+            let r = f.store.upsert_profile("acct", &personal("wxid_t1abd", "复读己"), t).unwrap();
+            assert!(matches!(r, UpsertOutcome::NeedsReview { .. }), "{r:?}");
+        }
+        assert_eq!(f.store.pending_reviews("acct").unwrap().len(), 1);
     }
 
     #[test]
