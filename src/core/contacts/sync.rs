@@ -305,6 +305,9 @@ struct CheckpointState {
     manager_done: bool,
     manager_rows: Vec<ManagerRow>,
     tag_members: HashMap<String, Vec<String>>,
+    /// 每个分组展开后已向下滚动的格数：恢复时一次滚回去，而不是逐屏重走（逐屏重走会耗尽让出预算、永远推进不了）
+    #[serde(default)]
+    scroll_ticks: HashMap<String, u32>,
 }
 
 pub async fn run_sync(
@@ -441,7 +444,25 @@ pub async fn run_sync(
                 top_lines
             };
 
+            // 恢复：一次滚到上次停下的位置（少一格，保证与上次最后一屏有重叠）
+            let resume_ticks = state.scroll_ticks.get(&cat_name).copied().unwrap_or(0);
+            if resume_ticks > 1 {
+                if let Ok(v) = capture
+                    .call("contacts_scroll_list", json!({"direction": "down", "ticks": resume_ticks - 1}))
+                    .await
+                {
+                    cur_screen_lines = v
+                        .get("lines")
+                        .and_then(|l| serde_json::from_value(l.clone()).ok())
+                        .unwrap_or_default();
+                    state.scroll_ticks.insert(cat_name.clone(), resume_ticks - 1);
+                }
+            }
+
             let mut no_new_rows_count = 0;
+            // 本轮（从顶部开始）按顺序看到的联系人名字；与断点里已处理的名字按出现次数比对，
+            // 已处理过的直接跳过，不再打开资料卡（恢复时不重做，保证每轮都有进展）
+            let mut pass_seen: Vec<String> = Vec::new();
 
             'screen_loop: loop {
                 if should_yield() {
@@ -459,6 +480,11 @@ pub async fn run_sync(
                         continue;
                     }
                     let txt = l.text.trim();
+                    // 联系人名字在 x≈133；分组标题（带箭头前缀）与字母索引在 x≈77–95：按位置排除，
+                    // 不依赖文字精确匹配（真机标题前有箭头字符，点到标题会收起分组）
+                    if l.x < 115.0 {
+                        continue;
+                    }
                     if txt == "搜索" || txt == "通讯录管理" {
                         continue;
                     }
@@ -478,10 +504,10 @@ pub async fn run_sync(
                 }
 
                 let screen_names: Vec<String> = contact_rows_on_screen.iter().map(|(n, _)| n.clone()).collect();
-                let max_overlap = screen_names.len().min(processed_names.len());
+                let max_overlap = screen_names.len().min(pass_seen.len());
                 let mut match_k = 0;
                 for k in (1..=max_overlap).rev() {
-                    let tail = &processed_names[processed_names.len() - k..];
+                    let tail = &pass_seen[pass_seen.len() - k..];
                     let head = &screen_names[..k];
                     if tail == head {
                         match_k = k;
@@ -489,7 +515,7 @@ pub async fn run_sync(
                     }
                 }
 
-                let new_rows = if processed_names.is_empty() {
+                let new_rows = if pass_seen.is_empty() {
                     &contact_rows_on_screen[..]
                 } else {
                     &contact_rows_on_screen[match_k..]
@@ -503,6 +529,12 @@ pub async fn run_sync(
                 } else {
                     no_new_rows_count = 0;
                     for (row_name, row_y) in new_rows {
+                        pass_seen.push(row_name.clone());
+                        let seen_in_pass = pass_seen.iter().filter(|n| *n == row_name).count();
+                        let already_done = processed_names.iter().filter(|n| *n == row_name).count();
+                        if seen_in_pass <= already_done {
+                            continue;
+                        }
                         if should_yield() {
                             yielded = true;
                             break 'outer;
@@ -603,6 +635,7 @@ pub async fn run_sync(
                 let scroll_res = capture
                     .call("contacts_scroll_list", json!({"direction": "down", "ticks": 1}))
                     .await?;
+                *state.scroll_ticks.entry(cat_name.clone()).or_insert(0) += 1;
                 cur_screen_lines = scroll_res
                     .get("lines")
                     .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -648,6 +681,7 @@ pub async fn run_sync(
 
         // 标记缺失
         let _ = store.mark_missing(account_id, &cat_name, seen_list, now_ms);
+        state.scroll_ticks.remove(&cat_name);
         state.category_index += 1;
     }
 
@@ -780,6 +814,10 @@ mod tests {
         pub manager_close_countdown: Option<usize>,
         pub list_clicks: Vec<(f64, f64)>,
         pub row_open_clicks: Vec<f64>,
+        /// 真机识别出的分组标题带展开箭头前缀（如 "> 联系人" / "∨ 联系人"）
+        pub header_arrows: bool,
+        /// 用"打开资料卡"点到了分组标题（真机上会把分组收起）
+        pub header_open_clicks: usize,
     }
 
     impl VirtualContactsUi {
@@ -796,6 +834,8 @@ mod tests {
                 manager_close_countdown: None,
                 list_clicks: Vec::new(),
                 row_open_clicks: Vec::new(),
+                header_arrows: false,
+                header_open_clicks: 0,
             }
         }
 
@@ -831,8 +871,13 @@ mod tests {
                 // 分组标题行高 40
                 let header_center_y = cur_y + 20.0 - self.scroll_offset;
                 if header_center_y >= 40.0 && header_center_y <= 640.0 {
+                    let title = if self.header_arrows {
+                        format!("{}{}", if g.expanded { "∨ " } else { "> " }, g.title)
+                    } else {
+                        g.title.clone()
+                    };
                     lines.push(OcrLine {
-                        text: g.title.clone(),
+                        text: title,
                         x: 80.0,
                         y: header_center_y,
                         w: 120.0,
@@ -1012,7 +1057,25 @@ mod tests {
                     }
                     return Box::pin(async move { Ok(json!({"lines": lines})) });
                 }
-                // 分组标题、字母行、或者空白区：无资料卡
+                // 点到分组标题：真机上会切换展开/收起（危险点击）
+                if let Some((_g, None, true, false)) = found {
+                    self.header_open_clicks += 1;
+                    let mut cur_y = 90.0;
+                    for g in &mut self.groups {
+                        if vy >= cur_y && vy < cur_y + 40.0 {
+                            g.expanded = !g.expanded;
+                            break;
+                        }
+                        cur_y += 40.0;
+                        if g.expanded {
+                            for (_letter, items) in &g.letter_sections {
+                                cur_y += 45.0 + 50.0 * items.len() as f64;
+                            }
+                        }
+                    }
+                    return Box::pin(async { Ok(json!({"lines": []})) });
+                }
+                // 字母行或空白区：无资料卡
                 return Box::pin(async { Ok(json!({"lines": []})) });
             }
             if op == "contacts_manager_open" {
@@ -1842,4 +1905,84 @@ mod tests {
         clean_stale_contacts_sync_pause(&state_dir);
         assert!(pause_file.exists(), "User manual pause must NOT be removed");
     }
+    fn letter_group(category: &str, title: &str, prefix: &str, sections: &[(&str, usize)]) -> VirtualGroup {
+        let mut n = 0;
+        let letter_sections = sections
+            .iter()
+            .map(|(letter, count)| {
+                let items = (0..*count)
+                    .map(|_| {
+                        n += 1;
+                        VirtualContactItem {
+                            name: format!("{prefix}{n:02}"),
+                            remark: None,
+                            wechat_id: Some(format!("wxid_{prefix}_{n:02}")),
+                            enterprise: None,
+                            real_name: None,
+                            tags: vec![],
+                            friend_permission: None,
+                            unreadable: false,
+                            misaligned_profile: None,
+                        }
+                    })
+                    .collect();
+                (letter.to_string(), items)
+            })
+            .collect();
+        VirtualGroup { category: category.to_string(), title: title.to_string(), letter_sections, expanded: false }
+    }
+
+    /// 真机每打开一张资料卡约 1.5 秒，15 秒预算只够约 10 个人。恢复时若从头把已处理的人重开一遍，
+    /// 进度永远停在前几个人。要求：反复让出/恢复能在有限轮内完成，且每个人的资料卡最多打开一次。
+    #[tokio::test]
+    async fn test_resume_progresses_without_reopening_processed_rows() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        let store = HistoryStore::open(&state_dir).unwrap();
+        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
+        let group = letter_group("personal", "联系人", "客", &[("A", 4), ("B", 5), ("C", 4), ("D", 5), ("E", 4)]);
+        let mut ui = VirtualContactsUi::new(vec![group]);
+
+        let mut done = false;
+        for run in 0..20 {
+            let opens_at_start = ui.row_open_clicks.len();
+            let budget = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let b = budget.clone();
+            // 每轮大约处理 3 个人后让出（模拟 15 秒时间预算）
+            let should_yield = move || b.fetch_add(1, Ordering::SeqCst) >= 6;
+            let report = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &should_yield, 1000 + run).await.unwrap();
+            assert!(ui.row_open_clicks.len() >= opens_at_start);
+            if report.complete {
+                assert_eq!(report.per_category, vec![("personal".to_string(), 22, 22)]);
+                done = true;
+                break;
+            }
+            assert!(report.yielded, "未完成时必须是让出: {report:?}");
+        }
+        assert!(done, "20 轮内必须完成（恢复后要从断点继续，不能每次从头重开）");
+        assert!(ui.row_open_clicks.len() <= 22, "每个人的资料卡最多打开一次，实际打开 {} 次", ui.row_open_clicks.len());
+        assert_eq!(store.list_profiles("acct", Some("personal")).unwrap().len(), 22);
+    }
+
+    /// 真机识别出的分组标题带箭头（"> 公众号、服务号"、展开后 "∨ 联系人"），不能被当成联系人去"打开资料卡"
+    /// ——真机上那一下会把分组收起。按位置区分：联系人名字 x≈133，分组标题与字母索引 x≈77–95。
+    #[tokio::test]
+    async fn test_headers_with_arrow_prefix_are_never_opened_as_contacts() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        let store = HistoryStore::open(&state_dir).unwrap();
+        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
+        let official = letter_group("official", "公众号、服务号", "号", &[("G", 3)]);
+        let personal = letter_group("personal", "联系人", "人", &[("A", 3), ("B", 4)]);
+        let mut ui = VirtualContactsUi::new(vec![official, personal]);
+        ui.header_arrows = true;
+
+        let no_yield = || false;
+        let report = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+
+        assert_eq!(ui.header_open_clicks, 0, "不得用打开资料卡点分组标题");
+        assert!(report.complete, "{report:?}");
+        assert_eq!(report.per_category, vec![("official".to_string(), 3, 3), ("personal".to_string(), 7, 7)]);
+    }
+
 }
