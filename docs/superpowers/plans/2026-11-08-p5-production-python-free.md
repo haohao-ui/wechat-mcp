@@ -151,3 +151,10 @@
 - tests/test_wechat_bot_service.py test_model_is_told_this_turns_image_count_separately
 - tests/test_wechat_bot_service.py test_earlier_context_images_follow_this_turns_and_are_counted
 - tests/test_wechat_bot_service.py test_images_over_the_request_size_are_named_not_paused
+
+### Task 9: Codex 生产链审查问题修复（2026-11-08）
+审查报告：`docs/reviews/2026-11-08-codex-production-flow-review.md`（16 项已确认 + A–F 待验证）。全部修复、真机验证后才可删除 Python。按文件归属分批（避免冲突）：
+- W1 一轮消息安全（turns.rs、serve.rs 信号、brain/builtin.rs）：#3 停止信号实时传入发送前检查；#4 发送前持久化失败必须阻断；#8 回显与推进游标的帧必须过 check_frame；#14 交给模型的文件只含 filename/正文/截断/状态；#15 写入模型 provenance；疑点 A（会话创建时注入 BrainFn）。
+- W2 外部大脑接线（gateway.rs、brain_tools.rs、external_brain.rs）：#1 网关分发 brain 工具 + 真实 handle_request→Gateway→core.sock 契约测试；#13 领取不随单次调用断开而释放（lease/token）。
+- W3 管理与校准（control.rs、scheduler.rs 校准段、main.rs、CoreSupervisor.swift、backup.rs）：#6 control 对接 core.enabled/宿主；#7 校准接上真实候选写入/接受；#12 历史维护命令；#9 区分配置错误(2)与运行错误；疑点 E、F。
+- W4（附件修复合并后）：#10 事件写生产日志；#11 后台媒体任务错误边界；#16 删除 dummy 摘要后门；#2 codex-exec 后端（实现或明确拒绝并改默认）；疑点 B、C、D。
