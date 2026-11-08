@@ -308,6 +308,41 @@ public struct AnyCodable: Codable {
     }
 }
 
+public func sessionStateHumanReadable(
+    state: String,
+    reason: String? = nil,
+    code: String? = nil,
+    handoff: Bool? = nil
+) -> String {
+    if handoff == true || state == "handoff" {
+        return "已转人工"
+    }
+    if state == "needs_recalibration" {
+        return "需要重新校准"
+    }
+    if state == "watching" || state == "listening" {
+        return "监听中"
+    }
+    if state == "replied" || state == "replying" {
+        return "正在回复"
+    }
+    if state == "waiting_for_wechat_window" {
+        let combined = "\(reason ?? "") \(code ?? "")"
+        if combined.contains("session_row_not_unique_or_missing") {
+            return "等待对方新消息（会话不在列表可见范围）"
+        } else if combined.contains("window_blocked") || combined.contains("blocking") {
+            return "等待中（有别的窗口挡住）"
+        } else {
+            let detail = code ?? reason ?? "窗口未就绪"
+            return "等待微信窗口中（\(detail)）"
+        }
+    }
+    if let r = reason, !r.isEmpty {
+        return "\(state) (\(r))"
+    }
+    return state
+}
+
 public func formatBytes(_ bytes: Int64) -> String {
     let gb = Double(bytes) / Double(1024 * 1024 * 1024)
     if gb >= 1.0 {
@@ -451,7 +486,8 @@ public func evaluate(_ s: StatusInput) -> [StatusItem] {
     } else if !handoffSessions.isEmpty {
         sessionsItem = StatusItem(key: "sessions", level: .yellow, reason: "会话【\(handoffSessions.joined(separator: ", "))】已转人工", fix: "点击「恢复自动回复」或处理会话")
     } else if let firstWaiting = waitingSessions.first {
-        sessionsItem = StatusItem(key: "sessions", level: .yellow, reason: "会话【\(firstWaiting.name)】处于 waiting_for_wechat_window: \(firstWaiting.code)", fix: "检查微信窗口是否可见且未被遮挡")
+        let desc = sessionStateHumanReadable(state: "waiting_for_wechat_window", reason: firstWaiting.code, code: firstWaiting.code, handoff: false)
+        sessionsItem = StatusItem(key: "sessions", level: .yellow, reason: "会话【\(firstWaiting.name)】处于 \(desc)", fix: "检查微信窗口是否可见且未被遮挡")
     } else {
         sessionsItem = StatusItem(key: "sessions", level: .green, reason: "所有会话状态正常 (\(s.sessions.count) 个)", fix: nil)
     }
