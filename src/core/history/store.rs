@@ -1526,17 +1526,21 @@ impl HistoryStore {
             insert_profile_row(&cid, true)?;
             Ok(UpsertOutcome::Created(cid))
         } else {
+            // 没被标记删除的排在前面：同名记录有多条时优先认在通讯录里的
             let mut stmt = conn.prepare(
-                "SELECT contact_id, enterprise FROM contact_profiles WHERE account_id=? AND category=? AND nickname=? AND (wechat_id IS NULL OR wechat_id='')"
+                "SELECT contact_id, enterprise FROM contact_profiles WHERE account_id=? AND category=? AND nickname=? AND (wechat_id IS NULL OR wechat_id='') ORDER BY removed_at IS NOT NULL, last_synced_at DESC"
             )?;
             let weak_rows = stmt.query_map(params![account_id, category, clean_nickname], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
             })?.filter_map(Result::ok).collect::<Vec<_>>();
             drop(stmt);
 
+            // 企业名比较只看汉字、字母、数字（实机：两次识别只差末尾一个标点）
+            let ent_key = |e: &str| -> String { e.chars().filter(|c| c.is_alphanumeric()).flat_map(|c| c.to_lowercase()).collect() };
+            let input_ent = p.enterprise.as_deref().map(ent_key).filter(|k| !k.is_empty());
             let matched_weak = weak_rows.into_iter().find(|(_, ent)| {
-                match (&p.enterprise, ent) {
-                    (Some(e1), Some(e2)) => e1 == e2,
+                match (&input_ent, ent.as_deref().map(ent_key).filter(|k| !k.is_empty())) {
+                    (Some(e1), Some(e2)) => *e1 == e2,
                     (None, None) => true,
                     _ => false,
                 }
@@ -2751,6 +2755,29 @@ store.conn.close()
         assert!(matches!(f.store.upsert_profile("acct", &mk("乙企业"), 2000).unwrap(), UpsertOutcome::Updated(ref c) if *c == b));
         let profiles = f.store.list_profiles("acct", Some("work")).unwrap();
         assert_eq!(profiles.len(), 2);
+    }
+
+    /// 实机 2026-11-08：同一个人两次同步识别出的企业名只差末尾一个标点，被当成另一个人新建、旧记录标成已删除。
+    /// 企业名比较忽略标点和空格；有多条同名记录时优先认没被标记删除的。
+    #[test]
+    fn test_weak_match_ignores_enterprise_punctuation() {
+        let f = setup_fixture();
+        let mk = |ent: &str| ProfileInput {
+            category: "work".to_string(), wechat_id: None, nickname: "员工己".to_string(), remark: None,
+            region: None, source: None, added_on: None, common_groups: None,
+            enterprise: Some(ent.to_string()), real_name: None, tags: vec![], friend_permission: None,
+        };
+        let a = match f.store.upsert_profile("acct", &mk("某某科技有限公司"), 1000).unwrap() {
+            UpsertOutcome::Created(c) => c,
+            o => panic!("{o:?}"),
+        };
+        for ent in ["某某科技有限公司。", "某某科技 有限公司", "某某科技有限公司…"] {
+            assert!(
+                matches!(f.store.upsert_profile("acct", &mk(ent), 2000).unwrap(), UpsertOutcome::Updated(ref c) if *c == a),
+                "{ent}"
+            );
+        }
+        assert_eq!(f.store.list_profiles("acct", Some("work")).unwrap().len(), 1);
     }
 
     /// 聊天里出现过的人（还没有通讯录资料）仍按名字接上通讯录资料
