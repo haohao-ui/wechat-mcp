@@ -623,6 +623,7 @@ mod tests {
 
     #[test]
     fn test_resolve_gateway_db_path_fallback_service_sqlite3() {
+        let _env = crate::core::env_lock();
         let temp = TempDir::new("service_sqlite3_test");
         let orig_home = std::env::var("HOME").ok();
         let orig_gw = std::env::var("MESSAGE_GATEWAY_DB").ok();
