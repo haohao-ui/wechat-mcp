@@ -19,9 +19,9 @@ pub fn core_enabled_file() -> PathBuf {
     home.join(".wechat-rpa/core.enabled")
 }
 
+/// 与 serve-core 使用同一路径解析（含 WECHAT_CORE_SOCK 覆盖）
 pub fn core_socket_file() -> PathBuf {
-    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"));
-    home.join(".wechat-rpa/core.sock")
+    crate::core::external_brain::default_socket_path()
 }
 
 #[repr(C)]
@@ -622,55 +622,62 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             }
             let config_path = config_file.unwrap_or(default_config_path);
 
-            let core_enabled_path = core_enabled_file();
-            if let Some(parent) = core_enabled_path.parent() {
-                let _ = fs::create_dir_all(parent);
-                let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+            // 配置错误（缺失或无效）是退出码 2，且不打开开关
+            if let Err(e) = BotConfig::load(&config_path) {
+                let _ = writeln!(stderr, "config error ({}): {e:#}", config_path.display());
+                return 2;
             }
-            let _ = fs::write(&core_enabled_path, b"");
-            let _ = fs::set_permissions(&core_enabled_path, fs::Permissions::from_mode(0o600));
 
+            // 旧 Python 任务仍加载时，宿主 CoreSupervisor 会拒绝拉起 Rust 核心：先卸载并禁用它。
+            // 绝不 enable/bootstrap 旧任务。
             let uid = unsafe { getuid() };
             let domain = format!("gui/{uid}");
             let label = format!("{domain}/{BOT_LABEL}");
-
-            if let Some(ref mut runner) = launchctl_runner {
-                runner("launchctl", &["enable", &label]);
-            } else {
-                let _ = Command::new("launchctl").args(["enable", &label]).status();
-            }
-
-            let loaded_now = if let Some(ref mut lfn) = loaded_fn {
-                lfn()
-            } else {
-                loaded()
-            };
-
-            if !loaded_now {
-                if config_path.exists() {
-                    if let Err(e) = BotConfig::load(&config_path) {
-                        let _ = writeln!(stderr, "failed to load config: {}", e);
+            if is_loaded {
+                if let Some(ref mut runner) = launchctl_runner {
+                    runner("launchctl", &["disable", &label]);
+                    runner("launchctl", &["bootout", &label]);
+                } else {
+                    let _ = Command::new("launchctl").args(["disable", &label]).status();
+                    let _ = Command::new("launchctl").args(["bootout", &label]).status();
+                }
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                loop {
+                    let still = if let Some(ref mut lfn) = loaded_fn { lfn() } else { loaded() };
+                    if !still {
+                        break;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        let _ = writeln!(stderr, "legacy Python service {BOT_LABEL} is still loaded; core not enabled");
                         return 1;
                     }
-                }
-                let (_, _, plist_path) = locations();
-                let plist_str = plist_path.to_string_lossy();
-                if let Some(ref mut runner) = launchctl_runner {
-                    runner("launchctl", &["bootstrap", &domain, &plist_str]);
-                } else {
-                    let _ = Command::new("launchctl")
-                        .args(["bootstrap", &domain, &plist_str])
-                        .status();
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
 
+            let core_enabled_path = core_enabled_file();
+            if let Some(parent) = core_enabled_path.parent() {
+                if let Err(e) = fs::create_dir_all(parent) {
+                    let _ = writeln!(stderr, "cannot create {}: {e}", parent.display());
+                    return 1;
+                }
+                let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+            }
+            if let Err(e) = fs::write(&core_enabled_path, b"") {
+                let _ = writeln!(stderr, "cannot write {}: {e}", core_enabled_path.display());
+                return 1;
+            }
+            let _ = fs::set_permissions(&core_enabled_path, fs::Permissions::from_mode(0o600));
+
+            let core_running = std::os::unix::net::UnixStream::connect(core_socket_file()).is_ok();
             let _ = writeln!(
                 stdout,
                 "{}",
                 json!({
                     "status": "started",
-                    "label": BOT_LABEL,
-                    "core_enabled": true
+                    "core_enabled": true,
+                    "core_running": core_running,
+                    "note": if core_running { "serve-core is running" } else { "微信客服助手 will start serve-core within a few seconds; it must be running" },
                 })
             );
             0
@@ -732,13 +739,24 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 return 1;
             }
 
+            // 宿主看到开关关闭后会优雅停止核心（会先完成正在处理的一轮），等待 core.sock 关闭
+            let core_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let mut core_running = std::os::unix::net::UnixStream::connect(core_socket_file()).is_ok();
+            while core_running && std::time::Instant::now() < core_deadline {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                core_running = std::os::unix::net::UnixStream::connect(core_socket_file()).is_ok();
+            }
+            if core_running {
+                let _ = writeln!(stderr, "serve-core is still finishing its current turn; it will stop shortly");
+            }
             let _ = writeln!(
                 stdout,
                 "{}",
                 json!({
-                    "status": "stopped",
+                    "status": if core_running { "stopping" } else { "stopped" },
                     "label": BOT_LABEL,
-                    "core_enabled": false
+                    "core_enabled": false,
+                    "core_running": core_running
                 })
             );
             0
@@ -962,10 +980,9 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             0
         }
         "calibrate" => {
-            let core_enabled = core_enabled_file().exists();
-            let core_running = std::os::unix::net::UnixStream::connect(&core_socket_file()).is_ok();
-            let bot_running = is_loaded || core_running || core_enabled;
-            if !bot_running {
+            // 校准请求要由正在运行的机器人处理：只认真实运行的进程，开关文件本身不算
+            let core_running = std::os::unix::net::UnixStream::connect(core_socket_file()).is_ok();
+            if !(is_loaded || core_running) {
                 let _ = writeln!(stderr, "机器人未运行：请先 control start");
                 return 1;
             }
@@ -1123,7 +1140,7 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 Ok(c) => serde_json::to_value(&c).unwrap_or(Value::Null),
                 Err(e) => {
                     let _ = writeln!(stderr, "failed to load config: {}", e);
-                    return 1;
+                    return 2;
                 }
             };
             match crate::core::history::migrate::migrate(&config_val) {
@@ -1153,7 +1170,7 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 Ok(c) => c,
                 Err(e) => {
                     let _ = writeln!(stderr, "failed to load config: {}", e);
-                    return 1;
+                    return 2;
                 }
             };
             let store = match crate::core::history::store::HistoryStore::open(&cfg.state_dir) {
@@ -1226,7 +1243,7 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 Ok(c) => c,
                 Err(e) => {
                     let _ = writeln!(stderr, "failed to load config: {}", e);
-                    return 1;
+                    return 2;
                 }
             };
             let store = match crate::core::history::store::HistoryStore::open(&cfg.state_dir) {
@@ -1297,7 +1314,7 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 Ok(c) => c,
                 Err(e) => {
                     let _ = writeln!(stderr, "failed to load config: {}", e);
-                    return 1;
+                    return 2;
                 }
             };
             let store = match crate::core::history::store::HistoryStore::open(&cfg.state_dir) {
@@ -1354,7 +1371,7 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 Ok(c) => c,
                 Err(e) => {
                     let _ = writeln!(stderr, "failed to load config: {}", e);
-                    return 1;
+                    return 2;
                 }
             };
             let store = match crate::core::history::store::HistoryStore::open(&cfg.state_dir) {
@@ -1792,6 +1809,7 @@ mod tests {
 
     #[test]
     fn test_python_parity_golden_values() {
+        let _lock = crate::core::env_lock();
         let dir = TempDir::new();
         let (cfg_path, state_dir) = write_test_config(dir.path());
 
@@ -1920,6 +1938,7 @@ mod tests {
 
     #[test]
     fn test_control_resume_session_removes_handoff_and_validates() {
+        let _lock = crate::core::env_lock();
         let td = TempDir::new();
         let state_dir = td.path().join("state");
         let session_dir = state_dir.join("sessions").join("test_vip");
@@ -1984,7 +2003,6 @@ mod tests {
 
     use std::time::Duration;
 
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn load_default_layout() -> Value {
         let layout_path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2401,7 +2419,7 @@ mod tests {
     /// 注：等价断言在本地环境测试，验证默认路径解析行为与 0600 权限
     #[test]
     fn test_default_paths_land_in_remote_home() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::core::env_lock();
         let env = TempDir::new();
         let home = env.path().to_path_buf();
         let layout_dir = home.join(".wechat-rpa").join("layout");
@@ -2453,7 +2471,7 @@ mod tests {
     /// 注：等价断言在本地路径下完整验证
     #[test]
     fn test_accept_with_defaults_backs_up_then_replaces() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::core::env_lock();
         let env = TempDir::new();
         let home = env.path().to_path_buf();
         let layout_dir = home.join(".wechat-rpa").join("layout");
@@ -2652,7 +2670,7 @@ mod tests {
     /// 机器人未运行时退出码 1 且 stderr 提示 "机器人未运行：请先 control start"
     #[test]
     fn test_control_calibrate_requires_running_bot() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::core::env_lock();
         let env = TempDir::new();
         let orig_home = std::env::var("HOME").ok();
         unsafe { std::env::set_var("HOME", env.path()) };
@@ -2723,7 +2741,7 @@ mod tests {
     /// 默认配置和 base 目录必须位于用户 HOME 下的 .WeChatRPABot
     #[test]
     fn test_default_config_is_in_user_home() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::core::env_lock();
         let env = TempDir::new();
         let home = env.path().to_path_buf();
 
@@ -2745,7 +2763,7 @@ mod tests {
     /// status 命令必须读取配置中指定的 state_dir 目录下的 health.json
     #[test]
     fn test_status_reads_configured_state_after_config_move() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::core::env_lock();
         let env = TempDir::new();
         let base = env.path().join(".WeChatRPABot");
         fs::create_dir_all(&base).unwrap();
@@ -2791,7 +2809,7 @@ mod tests {
     /// stop 命令依次执行 disable 和 bootout，并等待 loaded 变为 false
     #[test]
     fn test_stop_waits_until_launchd_task_is_unloaded() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::core::env_lock();
         let env = TempDir::new();
         let orig_home = std::env::var("HOME").ok();
         unsafe { std::env::set_var("HOME", env.path()) };
@@ -2834,50 +2852,230 @@ mod tests {
         assert_eq!(out["label"], BOT_LABEL);
     }
 
-    /// 24. test_start_reenables_and_loads_unloaded_task
-    /// start 命令依次执行 enable 和 bootstrap
+    /// Unix 套接字路径有 104 字节上限，临时目录太长：用短路径并通过 WECHAT_CORE_SOCK 指过去。
+    struct ShortSock(PathBuf);
+    impl ShortSock {
+        fn new() -> Self {
+            let p = PathBuf::from(format!("/tmp/wcc-{}.sock", &uuid::Uuid::new_v4().simple().to_string()[..12]));
+            unsafe { std::env::set_var("WECHAT_CORE_SOCK", &p) };
+            ShortSock(p)
+        }
+    }
+    impl Drop for ShortSock {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+            unsafe { std::env::remove_var("WECHAT_CORE_SOCK") };
+        }
+    }
+
+    fn write_valid_home_config(home: &Path) {
+        let dir = home.join(".WeChatRPABot");
+        fs::create_dir_all(&dir).unwrap();
+        let state_dir = home.join("state");
+        let cfg = json!({
+            "schema_version": 1,
+            "account_id": "test_account",
+            "host": "local",
+            "state_dir": state_dir.to_str().unwrap(),
+            "allowlist": [{"recipient": "示例群", "kind": "group"}]
+        });
+        fs::write(dir.join("config.json"), serde_json::to_string(&cfg).unwrap()).unwrap();
+    }
+
+    /// 24. start 只打开 core.enabled 开关，绝不 enable/bootstrap 旧 Python 任务
     #[test]
-    fn test_start_reenables_and_loads_unloaded_task() {
-        let _lock = ENV_LOCK.lock().unwrap();
+    fn test_start_never_bootstraps_python_job() {
+        let _lock = crate::core::env_lock();
         let env = TempDir::new();
         let orig_home = std::env::var("HOME").ok();
         unsafe { std::env::set_var("HOME", env.path()) };
+        write_valid_home_config(env.path());
 
         let mut loaded_fn = || false;
-
-        let mut run_calls = Vec::new();
+        let mut run_calls: Vec<Vec<String>> = Vec::new();
         let mut cmd_runner = |_cmd: &str, args: &[&str]| {
             run_calls.push(args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
             true
         };
-
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let code = execute_control_full(
-            &["start".into()],
-            &mut stdout,
-            &mut stderr,
-            Some(&mut loaded_fn),
-            Some(&mut cmd_runner),
-        );
-
+        let code = execute_control_full(&["start".into()], &mut stdout, &mut stderr, Some(&mut loaded_fn), Some(&mut cmd_runner));
+        let enabled = env.path().join(".wechat-rpa/core.enabled").exists();
         if let Some(h) = orig_home {
             unsafe { std::env::set_var("HOME", h) };
         }
 
-        assert_eq!(code, 0);
-        assert_eq!(run_calls.len(), 2);
-        assert_eq!(run_calls[0][0], "enable");
-        assert_eq!(run_calls[1][0], "bootstrap");
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        assert!(enabled);
+        assert!(
+            !run_calls.iter().any(|c| c[0] == "enable" || c[0] == "bootstrap"),
+            "start 不得启用或加载旧 Python 任务: {run_calls:?}"
+        );
+    }
 
+    /// start 发现旧 Python 任务仍加载时先卸载并禁用它，否则宿主不会拉起 Rust 核心
+    #[test]
+    fn test_start_unloads_legacy_python_job_when_loaded() {
+        let _lock = crate::core::env_lock();
+        let env = TempDir::new();
+        let orig_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", env.path()) };
+        write_valid_home_config(env.path());
+
+        let seq = [true, false, false, false];
+        let mut i = 0;
+        let mut loaded_fn = move || {
+            let v = seq[i.min(seq.len() - 1)];
+            i += 1;
+            v
+        };
+        let mut run_calls: Vec<Vec<String>> = Vec::new();
+        let mut cmd_runner = |_cmd: &str, args: &[&str]| {
+            run_calls.push(args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+            true
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(&["start".into()], &mut stdout, &mut stderr, Some(&mut loaded_fn), Some(&mut cmd_runner));
+        if let Some(h) = orig_home {
+            unsafe { std::env::set_var("HOME", h) };
+        }
+
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        let verbs: Vec<&str> = run_calls.iter().map(|c| c[0].as_str()).collect();
+        assert!(verbs.contains(&"disable") && verbs.contains(&"bootout"), "{verbs:?}");
+        assert!(!verbs.contains(&"enable") && !verbs.contains(&"bootstrap"), "{verbs:?}");
+    }
+
+    /// 配置无效：退出码 2，且不打开 core.enabled
+    #[test]
+    fn test_start_rejects_invalid_config_with_exit_2() {
+        let _lock = crate::core::env_lock();
+        let env = TempDir::new();
+        let orig_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", env.path()) };
+        let dir = env.path().join(".WeChatRPABot");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("config.json"), "{ not json").unwrap();
+
+        let mut loaded_fn = || false;
+        let mut cmd_runner = |_cmd: &str, _args: &[&str]| true;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(&["start".into()], &mut stdout, &mut stderr, Some(&mut loaded_fn), Some(&mut cmd_runner));
+        let enabled = env.path().join(".wechat-rpa/core.enabled").exists();
+        if let Some(h) = orig_home {
+            unsafe { std::env::set_var("HOME", h) };
+        }
+
+        assert_eq!(code, 2);
+        assert!(!enabled, "配置无效时不得打开 core.enabled");
+    }
+
+    /// 配置文件缺失同样是配置错误
+    #[test]
+    fn test_start_rejects_missing_config_with_exit_2() {
+        let _lock = crate::core::env_lock();
+        let env = TempDir::new();
+        let orig_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", env.path()) };
+        let mut loaded_fn = || false;
+        let mut cmd_runner = |_cmd: &str, _args: &[&str]| true;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(&["start".into()], &mut stdout, &mut stderr, Some(&mut loaded_fn), Some(&mut cmd_runner));
+        let enabled = env.path().join(".wechat-rpa/core.enabled").exists();
+        if let Some(h) = orig_home {
+            unsafe { std::env::set_var("HOME", h) };
+        }
+        assert_eq!(code, 2);
+        assert!(!enabled);
+    }
+
+    /// 只有开关文件、核心并未运行时，校准必须拒绝（否则会连不上 core.sock 却报告成功路径）
+    #[test]
+    fn test_calibrate_requires_running_core_not_just_enabled_flag() {
+        let _lock = crate::core::env_lock();
+        let env = TempDir::new();
+        let orig_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", env.path()) };
+        write_valid_home_config(env.path());
+        let flag = env.path().join(".wechat-rpa/core.enabled");
+        fs::create_dir_all(flag.parent().unwrap()).unwrap();
+        fs::write(&flag, b"").unwrap();
+
+        let mut loaded_fn = || false;
+        let mut cmd_runner = |_cmd: &str, _args: &[&str]| true;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(&["calibrate".into()], &mut stdout, &mut stderr, Some(&mut loaded_fn), Some(&mut cmd_runner));
+        if let Some(h) = orig_home {
+            unsafe { std::env::set_var("HOME", h) };
+        }
+        assert_eq!(code, 1);
+        assert!(String::from_utf8_lossy(&stderr).contains("未运行"));
+    }
+
+    /// stop 删除开关后要等核心真正退出（core.sock 不再接受连接）才报告 stopped
+    #[test]
+    fn test_stop_waits_for_core_socket_to_close() {
+        let _lock = crate::core::env_lock();
+        let env = TempDir::new();
+        let orig_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", env.path()) };
+        let dir = env.path().join(".wechat-rpa");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("core.enabled"), b"").unwrap();
+        let sock = ShortSock::new();
+        let listener = std::os::unix::net::UnixListener::bind(&sock.0).unwrap();
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            drop(listener);
+        });
+
+        let mut loaded_fn = || false;
+        let mut cmd_runner = |_cmd: &str, _args: &[&str]| true;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let began = std::time::Instant::now();
+        let code = execute_control_full(&["stop".into()], &mut stdout, &mut stderr, Some(&mut loaded_fn), Some(&mut cmd_runner));
+        let waited = began.elapsed();
+        closer.join().unwrap();
+        if let Some(h) = orig_home {
+            unsafe { std::env::set_var("HOME", h) };
+        }
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        assert!(waited >= std::time::Duration::from_millis(500), "stop 没有等待核心退出: {waited:?}");
         let out: Value = serde_json::from_slice(&stdout).unwrap();
-        assert_eq!(out["status"], "started");
-        assert_eq!(out["label"], BOT_LABEL);
+        assert_eq!(out["status"], "stopped");
+        assert_eq!(out["core_running"], false);
+    }
+
+    /// 历史维护命令遇到无效配置：配置错误统一退出码 2（与运行错误 1 区分）
+    #[test]
+    fn test_history_commands_invalid_config_exit_2() {
+        let _lock = crate::core::env_lock();
+        let env = TempDir::new();
+        let cfg_path = env.path().join("config.json");
+        fs::write(&cfg_path, "{ broken").unwrap();
+        let c = cfg_path.to_str().unwrap().to_string();
+        for args in [
+            vec!["migrate-history".to_string(), "--config".into(), c.clone()],
+            vec!["history-status".to_string(), "--config".into(), c.clone()],
+            vec!["merge-contact".to_string(), "--source".into(), "a".into(), "--into".into(), "b".into(), "--config".into(), c.clone()],
+            vec!["unmerge-contact".to_string(), "1".into(), "--config".into(), c.clone()],
+            vec!["history-backup".to_string(), "--config".into(), c.clone()],
+        ] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let code = execute_control(&args, &mut stdout, &mut stderr, Some(false));
+            assert_eq!(code, 2, "{} 遇到无效配置应退出 2: {}", args[0], String::from_utf8_lossy(&stderr));
+        }
     }
 
     #[test]
     fn test_control_history_maintenance_commands_cli() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::core::env_lock();
         let env = TempDir::new();
         let state_dir = env.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
@@ -2987,11 +3185,12 @@ mod tests {
 
     #[test]
     fn test_control_start_and_stop_manage_core_enabled() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::core::env_lock();
         let env = TempDir::new();
         let orig_home = std::env::var("HOME").ok();
         unsafe { std::env::set_var("HOME", env.path()) };
 
+        write_valid_home_config(env.path());
         let core_enabled_path = env.path().join(".wechat-rpa/core.enabled");
         assert!(!core_enabled_path.exists());
 
@@ -3035,7 +3234,7 @@ mod tests {
 
     #[test]
     fn test_control_status_distinguishes_python_and_core() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::core::env_lock();
         let env = TempDir::new();
         let orig_home = std::env::var("HOME").ok();
         unsafe { std::env::set_var("HOME", env.path()) };
@@ -3066,15 +3265,17 @@ mod tests {
 
     #[test]
     fn test_control_calibrate_allows_running_core_when_python_not_loaded() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::core::env_lock();
         let env = TempDir::new();
         let orig_home = std::env::var("HOME").ok();
         unsafe { std::env::set_var("HOME", env.path()) };
 
-        // 模拟 core.enabled 存在（或正在运行），但 python loaded 为 false
+        // 核心真实在运行（core.sock 在监听），python loaded 为 false
         let core_enabled_path = env.path().join(".wechat-rpa/core.enabled");
         fs::create_dir_all(core_enabled_path.parent().unwrap()).unwrap();
         fs::write(&core_enabled_path, b"").unwrap();
+        let sock = ShortSock::new();
+        let _core_listener = std::os::unix::net::UnixListener::bind(&sock.0).unwrap();
 
         let state_dir = env.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
@@ -3137,6 +3338,6 @@ mod tests {
         }
 
         // 不应报错 "机器人未运行：请先 control start"
-        assert_eq!(code, 0, "Calibrate should succeed when core.enabled is present even if python is not loaded");
+        assert_eq!(code, 0, "Calibrate should succeed while serve-core is running: {}", String::from_utf8_lossy(&stderr));
     }
 }

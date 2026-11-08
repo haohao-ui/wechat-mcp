@@ -334,7 +334,6 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    static TEST_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     struct TempDir(PathBuf);
     impl TempDir {
@@ -416,7 +415,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_serve_core_graceful_shutdown() {
-        let _lock = TEST_ENV_LOCK.lock().await;
+        let _lock = crate::core::env_lock();
         let dir = TempDir::new();
         let (cfg_path, state_dir) = write_test_config(dir.path());
 
@@ -459,7 +458,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_serve_core_external_brain_socket_and_health() {
-        let _lock = TEST_ENV_LOCK.lock().await;
+        let _lock = crate::core::env_lock();
         let dir = TempDir::new();
         let state_dir = dir.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
@@ -572,7 +571,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_serve_core_auto_backup_on_idle() {
-        let _guard = TEST_ENV_LOCK.lock().await;
+        let _guard = crate::core::env_lock();
         let dir = TempDir::new();
         let (cfg_path, state_dir) = write_test_config(dir.path());
 
@@ -622,7 +621,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_history_http_launchd_plist() {
-        let _lock = TEST_ENV_LOCK.lock().await;
+        let _lock = crate::core::env_lock();
         let dir = TempDir::new();
         let (cfg_path, state_dir) = write_test_config(dir.path());
 
@@ -696,7 +695,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_os_signal_immediately_sets_shared_stop() {
-        let _guard = TEST_ENV_LOCK.lock().await;
+        let _guard = crate::core::env_lock();
         const SIGTERM: i32 = 15;
 
         install_signals();

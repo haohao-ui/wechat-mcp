@@ -1597,6 +1597,29 @@ impl BotCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 校准会把候选布局写到 $HOME/.wechat-rpa/layout：测试必须把 HOME 指到临时目录，
+    /// 否则会改写开发机（或运行测试的设备）上真实的布局文件。持有全局环境锁。
+    struct TempHome {
+        orig: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    impl TempHome {
+        fn new(path: &Path) -> Self {
+            let lock = crate::core::env_lock();
+            let orig = std::env::var("HOME").ok();
+            unsafe { std::env::set_var("HOME", path) };
+            TempHome { orig, _lock: lock }
+        }
+    }
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            match &self.orig {
+                Some(h) => unsafe { std::env::set_var("HOME", h) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+        }
+    }
     use serde_json::json;
     use std::fs;
 
@@ -3337,6 +3360,7 @@ mod tests {
     #[test]
     fn test_serve_calibration_real_candidate_writing_and_accept_flow() {
         let td = TestDir::new();
+        let _home = TempHome::new(td.path());
         let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
         let cfg_path = create_test_config(td.path(), allow);
         let mut coord = BotCoordinator::new(&cfg_path).unwrap();
@@ -3420,6 +3444,7 @@ mod tests {
     #[test]
     fn test_serve_calibration_writes_candidate_via_live_capture() {
         let td = TestDir::new();
+        let _home = TempHome::new(td.path());
         let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
         let cfg_path = create_test_config(td.path(), allow);
         let mut coord = BotCoordinator::new(&cfg_path).unwrap();
@@ -3464,6 +3489,7 @@ mod tests {
     #[test]
     fn test_serve_accept_uses_live_version() {
         let td = TestDir::new();
+        let _home = TempHome::new(td.path());
         let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
         let cfg_path = create_test_config(td.path(), allow);
         let mut coord = BotCoordinator::new(&cfg_path).unwrap();
@@ -3513,6 +3539,7 @@ mod tests {
     #[test]
     fn test_request_without_connection_reports_worker_not_connected() {
         let td = TestDir::new();
+        let _home = TempHome::new(td.path());
         let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
         let cfg_path = create_test_config(td.path(), allow);
         let mut coord = BotCoordinator::new(&cfg_path).unwrap();
@@ -3542,6 +3569,7 @@ mod tests {
     #[test]
     fn test_stale_request_expires() {
         let td = TestDir::new();
+        let _home = TempHome::new(td.path());
         let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
         let cfg_path = create_test_config(td.path(), allow);
         let mut coord = BotCoordinator::new(&cfg_path).unwrap();

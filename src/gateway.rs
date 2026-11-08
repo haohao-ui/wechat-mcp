@@ -1050,11 +1050,10 @@ mod tests {
         assert_eq!(resp2["structuredContent"]["data"]["replayed"], true);
     }
 
-    static CONTRACT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[tokio::test]
     async fn brain_tools_dispatched_via_gateway() {
-        let _guard = CONTRACT_TEST_LOCK.lock().await;
+        let _guard = crate::core::env_lock();
         let prev_env = std::env::var("WECHAT_CORE_SOCK").ok();
         let missing = format!("/tmp/nonexistent_core_{}.sock", uuid::Uuid::new_v4());
         unsafe {
@@ -1120,7 +1119,7 @@ mod tests {
     #[tokio::test]
     async fn test_mcp_handle_request_through_gateway_to_core_sock_contract_and_mutex() {
         use std::os::unix::fs::PermissionsExt;
-        let _guard = CONTRACT_TEST_LOCK.lock().await;
+        let _guard = crate::core::env_lock();
 
         let pid = std::process::id();
         let nanos = std::time::SystemTime::now()
