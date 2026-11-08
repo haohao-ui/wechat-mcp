@@ -1361,6 +1361,8 @@ impl BotCoordinator {
     pub async fn sweep(&mut self) -> Result<()> {
         let admin_pause = self.root.join("admin-pause.json");
         if admin_pause.exists() {
+            // 暂停只停自动回复：手动发起的通讯录同步（及其断点续做）照常处理，每日自动同步不跑
+            let _ = self.serve_contacts_sync_with(false).await;
             let mut d = Map::new();
             d.insert("reason".to_string(), json!("admin_pause"));
             self.health("paused", d)?;
@@ -1628,6 +1630,11 @@ impl BotCoordinator {
     }
 
     pub async fn serve_contacts_sync(&mut self) -> Result<()> {
+        self.serve_contacts_sync_with(true).await
+    }
+
+    /// allow_daily=false：只处理手动请求与断点续做（暂停期间），不触发每日自动同步
+    pub async fn serve_contacts_sync_with(&mut self, allow_daily: bool) -> Result<()> {
         let req_path = self.root.join("contacts-sync-request.json");
         let res_path = self.root.join("contacts-sync-result.json");
         let checkpoint_path = self.root.join("contacts-sync-checkpoint.json");
@@ -1744,7 +1751,7 @@ impl BotCoordinator {
         };
 
         let has_checkpoint = checkpoint_path.exists();
-        let should_sync = has_checkpoint || (should_daily_incremental_sync(is_idle, now, last_success) && crate::core::contacts::sync::should_attempt_daily_sync(&self.root, is_idle, now));
+        let should_sync = has_checkpoint || (allow_daily && should_daily_incremental_sync(is_idle, now, last_success) && crate::core::contacts::sync::should_attempt_daily_sync(&self.root, is_idle, now));
 
         if should_sync && self.capture.is_some() {
             if !self.ensure_capture_connected().await {
@@ -2448,6 +2455,28 @@ mod tests {
         assert!(!should_yield());
         stop.store(true, Ordering::SeqCst);
         assert!(should_yield(), "收到停止必须立即让出");
+    }
+
+    /// 实机：用户先「暂停自动回复」（停对话监控）再初始化通讯录，但暂停时 sweep 直接返回，
+    /// 同步请求排了 12 分钟没人处理。暂停只停自动回复，手动发起的同步照常处理。
+    #[test]
+    fn test_contacts_sync_request_runs_while_paused() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        coord.capture = Some(Box::new(MockCoordinatorCapture::new()));
+        write_private(&coord.root.join("admin-pause.json"), &json!({"paused": true, "at": (coord.clock)()})).unwrap();
+        write_private(
+            &coord.root.join("contacts-sync-request.json"),
+            &json!({"id": "req_p", "mode": "full", "created_at": (coord.clock)()}),
+        )
+        .unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async { coord.sweep().await.unwrap() });
+        assert!(!coord.root.join("contacts-sync-request.json").exists(), "暂停时手动同步请求也要处理");
+        assert!(coord.root.join("contacts-sync-result.json").exists());
+        assert!(coord.root.join("admin-pause.json").exists(), "用户的暂停标记必须保留");
     }
 
     #[test]
