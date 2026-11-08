@@ -426,12 +426,20 @@ pub struct BotCoordinator {
     pub logged_events: Arc<Mutex<Vec<Value>>>,
     /// 外部大脑模式下注入；热加会话创建时继承，避免首轮退化到 builtin。
     pub default_brain: Option<crate::core::turns::BrainFn>,
+    /// 配置文件里的账号名（状态目录归属）；config.account_id 是当前登录的微信账号
+    pub configured_account_id: String,
 }
 
 impl BotCoordinator {
     pub fn new(config_path: impl AsRef<Path>) -> Result<Self> {
+        Self::new_with_account(config_path, None)
+    }
+
+    /// account：当前登录的微信账号（wxid）。给出时聊天记录和联系人都挂在这个账号下；
+    /// 不给时沿用配置里的账号名（测试、未接微信时）。
+    pub fn new_with_account(config_path: impl AsRef<Path>, account: Option<String>) -> Result<Self> {
         let config_path = config_path.as_ref().to_path_buf();
-        let config = BotConfig::load(&config_path)?;
+        let mut config = BotConfig::load(&config_path)?;
         let root = config.state_dir.clone();
         if !root.exists() {
             fs::create_dir_all(&root)?;
@@ -456,6 +464,11 @@ impl BotCoordinator {
             }
         }
         write_private(&binding_path, &binding)?;
+        // 绑定文件按配置账号名校验（状态目录归属）；数据归属用当前登录的微信账号
+        let configured_account_id = config.account_id.clone();
+        if let Some(acc) = account.filter(|a| !a.is_empty()) {
+            config.account_id = acc;
+        }
 
         let sessions_dir = root.join("sessions");
         if sessions_dir.exists() {
@@ -511,6 +524,7 @@ impl BotCoordinator {
             session_title_mismatches: HashMap::new(),
             logged_events: Arc::new(Mutex::new(Vec::new())),
             default_brain: None,
+            configured_account_id,
         };
 
         let mut current = HashMap::new();
@@ -575,13 +589,14 @@ impl BotCoordinator {
     }
 
     pub fn rules(&self) -> Result<BotConfig> {
-        let value = BotConfig::load(&self.config_path)?;
+        let mut value = BotConfig::load(&self.config_path)?;
         if value.host != self.config.host
-            || value.account_id != self.config.account_id
+            || value.account_id != self.configured_account_id
             || value.state_dir != self.config.state_dir
         {
             bail!("account/host/state changes require a separate state directory and restart");
         }
+        value.account_id = self.config.account_id.clone();
         Ok(value)
     }
 
@@ -2091,6 +2106,35 @@ mod tests {
     // =========================================================================
     // 凡与 Python 必须逐字节一致的产物写成固定值测试
     // =========================================================================
+
+    /// 用户要求：数据归属当前登录的微信账号。按登录账号建的调度器：会话联系人挂在该账号下，
+    /// 每轮重读配置（rules）不能因为账号名和配置不同而报错；状态目录绑定仍按配置账号名。
+    #[test]
+    fn test_coordinator_uses_logged_in_wechat_account() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "u1".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow.clone());
+        let mut coord = BotCoordinator::new_with_account(&cfg_path, Some("wxid_a".to_string())).unwrap();
+        assert_eq!(coord.config.account_id, "wxid_a");
+        let rules = coord.rules().expect("rules 不能因账号覆盖而失败");
+        assert_eq!(rules.account_id, "wxid_a");
+        let cid = coord.session(&allow[0]).unwrap().contact_id.clone().unwrap();
+        let conn = coord.history.connection();
+        let acc: String = conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT account_id FROM contacts WHERE contact_id=?1", [&cid], |r| r.get(0))
+            .unwrap();
+        assert_eq!(acc, "wxid_a");
+        let binding: Value = read_json(&coord.root.join("coordinator-binding.json")).unwrap();
+        assert_eq!(binding["account_id"], "test-acc");
+
+        // 换号：同一状态目录可按另一个账号重建，两个号的联系人分别保留
+        drop(coord);
+        let mut coord_b = BotCoordinator::new_with_account(&cfg_path, Some("wxid_b".to_string())).unwrap();
+        let cid_b = coord_b.session(&allow[0]).unwrap().contact_id.clone().unwrap();
+        assert_ne!(cid, cid_b, "不同账号的同名会话是不同的联系人");
+    }
 
     #[test]
     fn test_golden_coordinator_binding_json() {

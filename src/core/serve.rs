@@ -81,9 +81,44 @@ async fn update_health_brain(coordinator_root: &Path, brain: &ExternalBrain) {
     }
 }
 
+/// 数据归属用哪个账号
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountSource {
+    /// 配置文件里的账号名（测试用）
+    Config,
+    /// 当前登录的微信账号：聊天记录和联系人都挂在它下面，换号自动切换（各账号数据分别保留）
+    WeChat,
+}
+
+enum CoreRunEnd {
+    Exit(i32),
+    AccountChanged,
+}
+
+const ACCOUNT_CHECK_SECONDS: f64 = 30.0;
+
+fn stop_requested(stop_rx: &Option<tokio::sync::watch::Receiver<bool>>) -> bool {
+    STOP_SIGNAL.load(Ordering::SeqCst) || stop_rx.as_ref().map_or(false, |rx| *rx.borrow())
+}
+
+fn now_secs() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+}
+
 pub async fn run_serve_core(
     config_path: &Path,
+    stop_rx: Option<tokio::sync::watch::Receiver<bool>>,
+) -> Result<i32> {
+    run_serve_core_with(config_path, stop_rx, AccountSource::Config).await
+}
+
+pub async fn run_serve_core_with(
+    config_path: &Path,
     mut stop_rx: Option<tokio::sync::watch::Receiver<bool>>,
+    source: AccountSource,
 ) -> Result<i32> {
     ensure_locale();
     install_signals();
@@ -96,6 +131,52 @@ pub async fn run_serve_core(
     let _core_lock = acquire_core_lock(&config.state_dir)
         .with_context(|| format!("state lock error in {}", config.state_dir.display()))?;
 
+    loop {
+        let account = match source {
+            AccountSource::Config => None,
+            AccountSource::WeChat => {
+                // 微信没运行或没登录：暂停等待，不往任何账号下写数据
+                let mut waited = false;
+                let acc = loop {
+                    if stop_requested(&stop_rx) {
+                        return Ok(0);
+                    }
+                    if let Some(acc) = crate::core::wechat_account::detect_logged_in_account() {
+                        break acc;
+                    }
+                    if !waited {
+                        waited = true;
+                        let _ = write_private(
+                            &config.state_dir.join("health.json"),
+                            &json!({"pid": std::process::id(), "state": "paused", "reason": "wechat_not_logged_in", "updated_at": now_secs()}),
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                };
+                // 第一次识别到账号：旧数据分不清属于哪个号，备份后清空，当前号从零开始（只做一次）
+                if crate::core::wechat_account::start_fresh_once(&config.state_dir, &config.account_id, &acc, now_secs())
+                    .context("account start-fresh failed")?
+                {
+                    eprintln!("wechat account bound: previous data backed up and cleared");
+                }
+                crate::core::wechat_account::record_current_account(&config.state_dir, &acc, now_secs())?;
+                Some(acc)
+            }
+        };
+        match run_core_for_account(config_path, &config, &mut stop_rx, source, account).await? {
+            CoreRunEnd::Exit(code) => return Ok(code),
+            CoreRunEnd::AccountChanged => continue,
+        }
+    }
+}
+
+async fn run_core_for_account(
+    config_path: &Path,
+    config: &BotConfig,
+    stop_rx: &mut Option<tokio::sync::watch::Receiver<bool>>,
+    source: AccountSource,
+    account: Option<String>,
+) -> Result<CoreRunEnd> {
     // 3. 构造外部大脑并启动 core.sock
     let external_brain = ExternalBrain::new(
         &config.brain,
@@ -112,7 +193,12 @@ pub async fn run_serve_core(
     );
 
     // 4. 运行调度器
-    let mut coordinator = BotCoordinator::new(config_path)?;
+    let mut coordinator = BotCoordinator::new_with_account(config_path, account.clone())?;
+    if let Some(acc) = &account {
+        coordinator.log_event("wechat_account", json!({"account_id": acc}));
+    }
+    let mut last_account_check = now_secs();
+    let mut account_changed = false;
     coordinator.reconcile_journals()?;
 
     // 有意泄漏一个 Arc 引用：信号处理器随时可能触发，指针必须在进程余生内有效，
@@ -212,6 +298,18 @@ pub async fn run_serve_core(
         if STOP_SIGNAL.load(Ordering::SeqCst) || coordinator.stop.load(Ordering::SeqCst) {
             coordinator.stop.store(true, Ordering::SeqCst);
             break;
+        }
+
+        // 定期看当前登录的是不是同一个微信号；换号了就按新账号重建（旧号数据原样保留）
+        if source == AccountSource::WeChat && now_secs() - last_account_check >= ACCOUNT_CHECK_SECONDS {
+            last_account_check = now_secs();
+            if let Some(now_acc) = crate::core::wechat_account::detect_logged_in_account() {
+                if Some(&now_acc) != account.as_ref() {
+                    coordinator.log_event("wechat_account_changed", json!({"from": account, "to": now_acc}));
+                    account_changed = true;
+                    break;
+                }
+            }
         }
 
         if config.brain.mode == BrainMode::External {
@@ -328,7 +426,10 @@ pub async fn run_serve_core(
 
     SHARED_STOP.store(std::ptr::null_mut(), Ordering::SeqCst);
 
-    Ok(0)
+    if account_changed {
+        return Ok(CoreRunEnd::AccountChanged);
+    }
+    Ok(CoreRunEnd::Exit(0))
 }
 
 #[cfg(test)]
