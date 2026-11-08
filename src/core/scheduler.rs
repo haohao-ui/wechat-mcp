@@ -428,6 +428,7 @@ pub struct BotCoordinator {
     pub default_brain: Option<crate::core::turns::BrainFn>,
     /// 配置文件里的账号名（状态目录归属）；config.account_id 是当前登录的微信账号
     pub configured_account_id: String,
+    pub(crate) account_detector: Option<Arc<dyn Fn() -> Option<String> + Send + Sync>>,
 }
 
 impl BotCoordinator {
@@ -525,6 +526,7 @@ impl BotCoordinator {
             logged_events: Arc::new(Mutex::new(Vec::new())),
             default_brain: None,
             configured_account_id,
+            account_detector: None,
         };
 
         let mut current = HashMap::new();
@@ -1657,8 +1659,13 @@ impl BotCoordinator {
         self.serve_contacts_sync_with(true).await
     }
 
-    /// allow_daily=false：只处理手动请求与断点续做（暂停期间），不触发每日自动同步
+    /// allow_daily=false：只处理手动请求（暂停期间），不触发每日自动同步
     pub async fn serve_contacts_sync_with(&mut self, allow_daily: bool) -> Result<()> {
+        use crate::core::contacts::sync::{account_state_path, write_sync_result};
+        let account_matches = || self.account_detector.as_ref().is_none_or(|detect| {
+            detect().as_deref() == Some(self.config.account_id.as_str())
+        });
+        if !account_matches() { return Ok(()); }
         let req_path = self.root.join("contacts-sync-request.json");
         let res_path = self.root.join("contacts-sync-result.json");
         let checkpoint_path = self.root.join("contacts-sync-checkpoint.json");
@@ -1687,9 +1694,13 @@ impl BotCoordinator {
             }
             let _cleanup_guard = DropFile(req_path.clone());
 
+            if req.get("account_id").and_then(Value::as_str) != Some(self.config.account_id.as_str()) {
+                write_private(&res_path, &json!({"id": req_id, "account_id": req.get("account_id"), "complete": false, "error": "account_mismatch"}))?;
+                return Ok(());
+            }
             if now - created_at > 600.0 {
-                write_private(
-                    &res_path,
+                write_sync_result(
+                    &self.root, &self.config.account_id,
                     &json!({
                         "id": req_id,
                         "complete": false,
@@ -1700,8 +1711,8 @@ impl BotCoordinator {
             }
 
             if self.capture.is_none() {
-                write_private(
-                    &res_path,
+                write_sync_result(
+                    &self.root, &self.config.account_id,
                     &json!({
                         "id": req_id,
                         "complete": false,
@@ -1721,9 +1732,12 @@ impl BotCoordinator {
             let account_id = &self.config.account_id;
             let now_ms = (now * 1000.0) as i64;
 
-            let should_yield = contacts_sync_yield_check(self.stop.clone(), std::time::Instant::now());
+            let stop_check = contacts_sync_yield_check(self.stop.clone(), std::time::Instant::now());
+            let detect = self.account_detector.clone();
+            let expected_account = self.config.account_id.clone();
+            let should_yield = move || stop_check() || detect.as_ref().is_some_and(|f| f().as_deref() != Some(expected_account.as_str()));
 
-            match crate::core::contacts::sync::run_sync(
+            let publish = match crate::core::contacts::sync::run_sync(
                 capture,
                 store,
                 account_id,
@@ -1744,27 +1758,30 @@ impl BotCoordinator {
                         "needs_review": report.needs_review,
                         "yielded": report.yielded,
                     });
-                    write_private(&res_path, &res_val)?;
+                    write_sync_result(&self.root, &self.config.account_id, &res_val)
                 }
                 Err(e) => {
-                    write_private(
-                        &res_path,
+                    write_sync_result(
+                        &self.root, &self.config.account_id,
                         &json!({
                             "id": req_id,
                             "complete": false,
                             "error": e.to_string(),
                         }),
-                    )?;
+                    )
                 }
-            }
+            };
             // 同步把微信切到过通讯录：断开重连，下一轮重新打开目标会话（不论成败）
-            let _ = self.close_connection().await;
+            let closed = self.close_connection().await;
+            publish?;
+            closed?;
         }
 
         let is_idle = self.pending.is_empty() && !self.sessions.values().any(|s| s.turn.is_some());
         let now = (self.clock)();
-        let last_success = if res_path.exists() {
-            read_json::<Value>(&res_path)
+        let success_path = account_state_path(&self.root, &self.config.account_id, "success");
+        let last_success = if success_path.exists() {
+            read_json::<Value>(&success_path)
                 .ok()
                 .filter(|v| v.get("complete").and_then(|c| c.as_bool()).unwrap_or(false))
                 .and_then(|v| v.get("finished_at_ms").and_then(|t| t.as_f64()))
@@ -1774,31 +1791,26 @@ impl BotCoordinator {
             0.0
         };
 
-        let has_checkpoint = checkpoint_path.exists();
-        let should_sync = has_checkpoint || (allow_daily && should_daily_incremental_sync(is_idle, now, last_success) && crate::core::contacts::sync::should_attempt_daily_sync(&self.root, is_idle, now));
+        // 老版本断点不能证明账号归属，不再触发自动续做。
+        if checkpoint_path.exists() { fs::remove_file(&checkpoint_path)?; }
+        let should_sync = allow_daily && should_daily_incremental_sync(is_idle, now, last_success)
+            && crate::core::contacts::sync::should_attempt_daily_sync(&self.root, &self.config.account_id, is_idle, now);
 
         if should_sync && self.capture.is_some() {
             if !self.ensure_capture_connected().await {
-                // 连不上：保留断点，下一轮再续做（不记失败、不清断点）
+                // 连不上不记录每日尝试，下一轮空闲时再试。
                 return Ok(());
             }
-            if !has_checkpoint {
-                let _ = crate::core::contacts::sync::record_daily_sync_attempt(&self.root, now);
-            }
-            // 续做沿用断点里的模式（全量初始化让出后仍按全量续做），没有断点则是每日增量
-            let resume_mode = read_json::<Value>(&checkpoint_path)
-                .ok()
-                .and_then(|v| v.get("mode").and_then(|m| m.as_str()).map(|m| m.to_string()));
-            let mode = if resume_mode.as_deref() == Some("full") {
-                crate::core::contacts::sync::SyncMode::Full
-            } else {
-                crate::core::contacts::sync::SyncMode::Incremental
-            };
+            crate::core::contacts::sync::record_daily_sync_attempt(&self.root, &self.config.account_id, now)?;
+            let mode = crate::core::contacts::sync::SyncMode::Incremental;
             let capture = self.capture.as_mut().unwrap().as_mut();
             let store = &self.history;
             let account_id = &self.config.account_id;
             let now_ms = (now * 1000.0) as i64;
-            let should_yield = contacts_sync_yield_check(self.stop.clone(), std::time::Instant::now());
+            let stop_check = contacts_sync_yield_check(self.stop.clone(), std::time::Instant::now());
+            let detect = self.account_detector.clone();
+            let expected_account = self.config.account_id.clone();
+            let should_yield = move || stop_check() || detect.as_ref().is_some_and(|f| f().as_deref() != Some(expected_account.as_str()));
             let _ = crate::core::contacts::sync::run_sync(
                 capture,
                 store,
@@ -2465,7 +2477,7 @@ mod tests {
         coord.active_name = Some("a".to_string());
         write_private(
             &coord.root.join("contacts-sync-request.json"),
-            &json!({"id": "req_t", "mode": "full", "created_at": (coord.clock)()}),
+            &json!({"id": "req_t", "account_id": coord.config.account_id, "mode": "full", "created_at": (coord.clock)()}),
         )
         .unwrap();
 
@@ -2476,31 +2488,46 @@ mod tests {
         assert!(coord.active_name.is_none(), "同步结束后必须断开连接，下一轮重新打开目标会话");
     }
 
-    /// 实机：同步让出后协调器按规则断开连接（以便重新打开目标会话），下一轮看到断点直接续做、没有先连上，
-    /// 第一步就 transport closed，被当成失败清掉断点——同步永远做不完。续做前必须先确保连接。
     #[test]
-    fn test_contacts_sync_resume_reconnects_before_continuing() {
+    fn test_legacy_checkpoint_does_not_resume_unscoped_sync() {
         let td = TestDir::new();
-        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
-        let cfg_path = create_test_config(td.path(), allow);
+        let cfg_path = create_test_config(td.path(), vec![AllowlistEntry { recipient:"a".into(),kind:"private".into(),aliases:None }]);
         let mut coord = BotCoordinator::new(&cfg_path).unwrap();
-        let mut cap = MockCoordinatorCapture::new();
-        cap.connected = false; // 上一轮同步结束后已断开
-        coord.capture = Some(Box::new(cap));
-        write_private(
-            &coord.root.join("contacts-sync-checkpoint.json"),
-            &json!({"category_index": 0, "categories": [["personal", 0, 186.0]]}),
-        )
-        .unwrap();
+        coord.capture = Some(Box::new(MockCoordinatorCapture::new()));
+        let checkpoint = coord.root.join("contacts-sync-checkpoint.json");
+        write_private(&checkpoint, &json!({"mode":"full"})).unwrap();
+        tokio::runtime::Runtime::new().unwrap().block_on(coord.serve_contacts_sync_with(false)).unwrap();
+        assert!(!checkpoint.exists());
+        assert!(!coord.root.join("contacts-sync-result.json").exists());
+    }
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async { coord.serve_contacts_sync().await.unwrap() });
-
+    #[test]
+    fn test_contacts_sync_rejects_request_for_another_account() {
+        let td = TestDir::new();
+        let cfg_path = create_test_config(td.path(), vec![AllowlistEntry { recipient:"a".into(),kind:"private".into(),aliases:None }]);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        write_private(&coord.root.join("contacts-sync-request.json"), &json!({
+            "id":"wrong-account", "account_id":"other", "mode":"incremental", "created_at":(coord.clock)()
+        })).unwrap();
+        tokio::runtime::Runtime::new().unwrap().block_on(coord.serve_contacts_sync_with(false)).unwrap();
         let result: Value = read_json(&coord.root.join("contacts-sync-result.json")).unwrap();
-        assert!(
-            !result.to_string().contains("transport closed"),
-            "续做前必须先重新连接: {result}"
-        );
+        assert_eq!(result["error"], "account_mismatch");
+        assert!(!coord.root.join("contacts-sync-request.json").exists());
+    }
+
+    #[test]
+    fn test_contacts_sync_waits_for_current_logged_in_account() {
+        let td = TestDir::new();
+        let cfg_path = create_test_config(td.path(), vec![AllowlistEntry { recipient:"a".into(),kind:"private".into(),aliases:None }]);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let req = coord.root.join("contacts-sync-request.json");
+        write_private(&req, &json!({"id":"pending", "account_id":coord.config.account_id,"created_at":(coord.clock)()})).unwrap();
+        for detected in [None, Some("other".to_string())] {
+            coord.account_detector = Some(Arc::new(move || detected.clone()));
+            tokio::runtime::Runtime::new().unwrap().block_on(coord.serve_contacts_sync_with(false)).unwrap();
+            assert!(req.exists());
+            assert!(!coord.root.join("contacts-sync-result.json").exists());
+        }
     }
 
     /// 同步期间不得每 15 秒切回对话（与同步抢鼠标）：运行上限至少 10 分钟，足够 70 人左右一次做完
@@ -2536,7 +2563,7 @@ mod tests {
         write_private(&coord.root.join("admin-pause.json"), &json!({"paused": true, "at": (coord.clock)()})).unwrap();
         write_private(
             &coord.root.join("contacts-sync-request.json"),
-            &json!({"id": "req_p", "mode": "full", "created_at": (coord.clock)()}),
+            &json!({"id": "req_p", "account_id": coord.config.account_id, "mode": "full", "created_at": (coord.clock)()}),
         )
         .unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();

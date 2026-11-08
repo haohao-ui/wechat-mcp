@@ -1,5 +1,6 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use sha2::{Digest, Sha256};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -119,11 +120,42 @@ fn group_title_cjk(category: &str) -> &'static str {
     }
 }
 
-pub fn should_attempt_daily_sync(state_dir: &Path, is_idle: bool, now_sec: f64) -> bool {
+/// 账号只进入摘要，既防止路径注入，也不在文件名泄露微信号。
+pub fn account_state_path(state_dir: &Path, account_id: &str, kind: &str) -> PathBuf {
+    let key = Sha256::digest(account_id.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>();
+    state_dir.join(format!("contacts-sync-{kind}-{key}.json"))
+}
+
+pub fn write_sync_result(state_dir: &Path, account_id: &str, result: &Value) -> Result<()> {
+    let mut result = result.clone();
+    result["account_id"] = json!(account_id);
+    write_private(&account_state_path(state_dir, account_id, "result"), &result)?;
+    if result["complete"] == true {
+        write_private(&account_state_path(state_dir, account_id, "success"), &result)?;
+    }
+    // 保留已有控制命令的响应位置，但消费者必须校验账号和请求 ID。
+    write_private(&state_dir.join("contacts-sync-result.json"), &result)
+}
+
+/// 只有分类、名字精确一致且唯一的有效强身份才可免开资料卡。
+fn incremental_contact<'a>(existing: &'a [Value], category: &str, name: &str) -> Option<&'a str> {
+    let key = crate::core::config::name_key(name);
+    let mut matches = existing.iter().filter(|p| {
+        p["category"] == category
+            && ["nickname", "remark"].iter().any(|field| {
+                p[*field].as_str().is_some_and(|n| crate::core::config::name_key(n) == key)
+            })
+    });
+    let first = matches.next()?;
+    if matches.next().is_some() || first["identity"] != "strong" || !first["removed_at"].is_null() { return None; }
+    first["contact_id"].as_str()
+}
+
+pub fn should_attempt_daily_sync(state_dir: &Path, account_id: &str, is_idle: bool, now_sec: f64) -> bool {
     if !is_idle {
         return false;
     }
-    let attempt_file = state_dir.join("contacts-sync-daily-attempt.json");
+    let attempt_file = account_state_path(state_dir, account_id, "daily-attempt");
     if attempt_file.exists() {
         if let Ok(content) = fs::read_to_string(&attempt_file) {
             if let Ok(v) = serde_json::from_str::<Value>(&content) {
@@ -136,7 +168,7 @@ pub fn should_attempt_daily_sync(state_dir: &Path, is_idle: bool, now_sec: f64) 
         }
     }
 
-    let res_file = state_dir.join("contacts-sync-result.json");
+    let res_file = account_state_path(state_dir, account_id, "result");
     if res_file.exists() {
         if let Ok(content) = fs::read_to_string(&res_file) {
             if let Ok(v) = serde_json::from_str::<Value>(&content) {
@@ -153,9 +185,9 @@ pub fn should_attempt_daily_sync(state_dir: &Path, is_idle: bool, now_sec: f64) 
     true
 }
 
-pub fn record_daily_sync_attempt(state_dir: &Path, now_sec: f64) -> Result<()> {
-    let attempt_file = state_dir.join("contacts-sync-daily-attempt.json");
-    write_private(&attempt_file, &json!({"last_attempt_sec": now_sec}))
+pub fn record_daily_sync_attempt(state_dir: &Path, account_id: &str, now_sec: f64) -> Result<()> {
+    let attempt_file = account_state_path(state_dir, account_id, "daily-attempt");
+    write_private(&attempt_file, &json!({"account_id": account_id, "last_attempt_sec": now_sec}))
 }
 
 pub fn clean_stale_contacts_sync_pause(state_dir: &Path) {
@@ -184,8 +216,8 @@ pub async fn run_sync(
     if let Err(e) = capture.call("contacts_lease_begin", json!({})).await {
         let _ = capture.call("contacts_lease_end", json!({})).await;
         if let Some(dir) = checkpoint.parent() {
-            let _ = write_private(
-                &dir.join("contacts-sync-result.json"),
+            let _ = write_sync_result(
+                dir, account_id,
                 &json!({"finished_at_ms": now_ms, "complete": false, "error": format!("desktop_busy: {e:#}")}),
             );
         }
@@ -196,8 +228,8 @@ pub async fn run_sync(
         // 出错不自动续做：清掉断点并写明错误，否则协调器每轮续做、立刻失败，形成死循环（实机 347 次，机器人停摆）
         let _ = fs::remove_file(checkpoint);
         if let Some(dir) = checkpoint.parent() {
-            let _ = write_private(
-                &dir.join("contacts-sync-result.json"),
+            let _ = write_sync_result(
+                dir, account_id,
                 &json!({"finished_at_ms": now_ms, "complete": false, "error": format!("{e:#}")}),
             );
         }
@@ -247,11 +279,12 @@ async fn run_sync_inner(
     }
     let _pause_guard = PauseGuard { pause_file: &pause_file, should_clean: !initially_paused };
 
+    anyhow::ensure!(!should_yield(), "contacts_sync_interrupted");
     capture.call("contacts_enter", json!({})).await?;
     let top = collapse_all_groups(capture).await?;
     let groups = parse_group_headers(&top);
     info!(lines = top.len(), headers = groups.len(), "contacts_sync_headers");
-    let existing = store.list_profiles(account_id, None).unwrap_or_default();
+    let existing = store.list_profiles(account_id, None)?;
 
     let mut per_category = Vec::new();
     let mut unreadable = 0u32;
@@ -266,9 +299,10 @@ async fn run_sync_inner(
             stopped = true;
             break;
         }
-        let r = sync_group(capture, store, account_id, cat, mode, &existing, should_yield, now_ms).await?;
-        if !r.stopped {
-            let _ = store.mark_missing(account_id, cat, &r.ids, now_ms);
+        let mut r = sync_group(capture, store, account_id, cat, mode, &existing, should_yield, now_ms).await?;
+        r.stopped |= should_yield();
+        if !r.stopped && r.unreadable == 0 && r.needs_review == 0 && r.ids.len() == *expected as usize {
+            store.mark_missing(account_id, cat, &r.ids, now_ms)?;
         }
         let synced = r.ids.len() as u32;
         // 期望数与已同步数的差额都算"未读到"，不悄悄放过
@@ -281,15 +315,16 @@ async fn run_sync_inner(
         }
     }
 
-    let _ = capture.call("contacts_leave", json!({})).await;
+    capture.call("contacts_leave", json!({})).await?;
 
     let complete = !stopped
-        && !groups.is_empty()
+        && !per_category.is_empty()
         && per_category.iter().all(|(_, e, s)| e == s)
-        && unreadable == 0;
+        && unreadable == 0
+        && needs_review == 0;
     let report = SyncReport { per_category: per_category.clone(), unreadable_rows: unreadable, needs_review, yielded: stopped, complete };
-    let _ = write_private(
-        &state_dir.join("contacts-sync-result.json"),
+    write_sync_result(
+        state_dir, account_id,
         &json!({
             "finished_at_ms": now_ms,
             "complete": complete,
@@ -298,7 +333,7 @@ async fn run_sync_inner(
             "needs_review": needs_review,
             "stopped": stopped,
         }),
-    );
+    )?;
     info!(complete, stopped, unreadable, needs_review, "sync finished");
     Ok(report)
 }
@@ -613,20 +648,23 @@ async fn sync_group(
 
             if mode == SyncMode::Incremental {
                 if let Some(name) = name {
-                    let found = existing.iter().find(|p| {
-                        p.get("nickname").and_then(|v| v.as_str()).map_or(false, |n| names_match(name, n))
-                            || p.get("remark").and_then(|v| v.as_str()).map_or(false, |n| names_match(name, n))
-                    });
-                    if let Some(cid) = found.and_then(|p| p.get("contact_id").and_then(|v| v.as_str())) {
+                    let unique_on_screen = rows.iter().filter(|(_, other)| {
+                        other.as_deref().is_some_and(|other| crate::core::config::name_key(other) == crate::core::config::name_key(name))
+                    }).count() == 1;
+                    if let Some(cid) = incremental_contact(existing, category, name).filter(|_| unique_on_screen) {
                         if !r.ids.iter().any(|x| x == cid) {
                             r.ids.push(cid.to_string());
+                            continue;
                         }
-                        continue;
                     }
                 }
             }
 
             let resp = capture.call("contacts_open_row", json!({"y": y})).await.unwrap_or_default();
+            if should_yield() {
+                r.stopped = true;
+                return Ok(r);
+            }
             let prof = lines_of(&resp);
             // 资料卡画面没变：只有本行名字和资料卡对得上才算（点的正好是已显示的那个人），否则不记
             let changed = resp.get("changed").and_then(|v| v.as_bool()).unwrap_or(true);
@@ -1719,7 +1757,7 @@ mod tests {
         let temp = TestTempDir::new();
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
-        let res_path = state_dir.join("contacts-sync-result.json");
+        let res_path = account_state_path(&state_dir, "test_acct", "result");
         let _attempt_path = state_dir.join("contacts-sync-daily-attempt.json");
 
         // 写入一次不完整同步结果
@@ -1730,11 +1768,11 @@ mod tests {
 
         // 检查在同一天（未跨天且未满20小时）是否会再次触发
         let now_sec = 1000000000.0 + 3600.0; // 1小时后
-        assert!(!should_attempt_daily_sync(&state_dir, true, now_sec));
+        assert!(!should_attempt_daily_sync(&state_dir, "test_acct", true, now_sec));
 
         // 记录当天 attempt
-        record_daily_sync_attempt(&state_dir, now_sec).unwrap();
-        assert!(!should_attempt_daily_sync(&state_dir, true, now_sec + 3600.0));
+        record_daily_sync_attempt(&state_dir, "test_acct", now_sec).unwrap();
+        assert!(!should_attempt_daily_sync(&state_dir, "test_acct", true, now_sec + 3600.0));
     }
 
     #[test]
@@ -2131,6 +2169,149 @@ mod tests {
             let leave = ops.iter().rposition(|o| o == "contacts_leave").expect("leave");
             assert!(leave < ops.len() - 1, "先离开通讯录再释放租约");
         }
+    }
+
+    fn fixture_profile(category: &str, name: &str, wid: Option<&str>, enterprise: Option<&str>) -> ProfileInput {
+        ProfileInput { category: category.into(), wechat_id: wid.map(str::to_string), nickname: name.into(),
+            remark: None, region: None, source: None, added_on: None, common_groups: None,
+            enterprise: enterprise.map(str::to_string), real_name: None, tags: vec![], friend_permission: None }
+    }
+
+    #[test]
+    fn test_incremental_matching_requires_category_unique_exact_active_strong_identity() {
+        let profiles = vec![
+            json!({"contact_id":"personal", "category":"personal", "nickname":"同名客户", "identity":"strong"}),
+            json!({"contact_id":"work", "category":"work", "nickname":"同名客户", "identity":"weak"}),
+        ];
+        assert_eq!(incremental_contact(&profiles, "personal", "同名客户"), Some("personal"));
+        assert_eq!(incremental_contact(&profiles, "work", "同名客户"), None);
+        assert_eq!(incremental_contact(&profiles, "personal", "同名"), None);
+        let mut duplicates = profiles.clone();
+        duplicates.push(profiles[0].clone());
+        assert_eq!(incremental_contact(&duplicates, "personal", "同名客户"), None);
+        let removed = vec![json!({"contact_id":"removed", "category":"personal", "nickname":"同名客户", "identity":"strong", "removed_at":1})];
+        assert_eq!(incremental_contact(&removed, "personal", "同名客户"), None);
+    }
+
+    #[test]
+    fn test_sync_state_and_daily_attempt_are_account_scoped() {
+        let temp = TestTempDir::new();
+        write_sync_result(temp.path(), "account-a", &json!({"complete":true,"finished_at_ms":1000000})).unwrap();
+        record_daily_sync_attempt(temp.path(), "account-a", 1000.0).unwrap();
+        assert!(!should_attempt_daily_sync(temp.path(), "account-a", true, 1001.0));
+        assert!(should_attempt_daily_sync(temp.path(), "account-b", true, 1001.0));
+        write_sync_result(temp.path(), "account-b", &json!({"complete":false,"finished_at_ms":1001000})).unwrap();
+        write_sync_result(temp.path(), "account-a", &json!({"complete":false,"finished_at_ms":1002000})).unwrap();
+        let success: Value = serde_json::from_slice(&fs::read(account_state_path(temp.path(), "account-a", "success")).unwrap()).unwrap();
+        assert_eq!(success["finished_at_ms"], 1000000);
+        assert_eq!(success["account_id"], "account-a");
+        assert!(!account_state_path(temp.path(), "account-b", "success").exists());
+        assert_eq!(account_state_path(temp.path(), "../account-a", "result").parent(), Some(temp.path()));
+    }
+
+    #[tokio::test]
+    async fn test_incomplete_sync_preserves_missing_contact_and_other_account() {
+        let temp = TestTempDir::new();
+        let store = HistoryStore::open(temp.path()).unwrap();
+        let p = fixture_profile("personal", "未读客户", Some("wxid_unread"), None);
+        store.upsert_profile("account-a", &p, 1).unwrap();
+        store.upsert_profile("account-b", &p, 1).unwrap();
+        let item = VirtualContactItem { name: p.nickname, remark: None, wechat_id: p.wechat_id,
+            enterprise: None, real_name: None, tags: vec![], friend_permission: None,
+            unreadable: false, misaligned_profile: Some(vec![]) };
+        let mut ui = VirtualContactsUi::new(vec![VirtualGroup { category:"personal".into(), title:"联系人".into(),
+            letter_sections:vec![("A".into(),vec![item])], expanded:false }]);
+        let report = run_sync(&mut ui, &store, "account-a", SyncMode::Full,
+            &temp.path().join("contacts-sync-checkpoint.json"), &||false, 2000).await.unwrap();
+        assert!(!report.complete);
+        for account in ["account-a", "account-b"] {
+            assert!(store.list_profiles(account,None).unwrap()[0]["removed_at"].is_null());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_incremental_reappearance_reopens_card_and_restores_contact() {
+        let temp = TestTempDir::new();
+        let store = HistoryStore::open(temp.path()).unwrap();
+        let p = fixture_profile("personal", "返回客户", Some("wxid_returned"), None);
+        store.upsert_profile("account-a", &p, 1).unwrap();
+        store.mark_missing("account-a", "personal", &[], 2).unwrap();
+        let item = VirtualContactItem { name:p.nickname, remark:None, wechat_id:p.wechat_id,
+            enterprise:None, real_name:None, tags:vec![], friend_permission:None, unreadable:false, misaligned_profile:None };
+        let mut ui = VirtualContactsUi::new(vec![VirtualGroup { category:"personal".into(), title:"联系人".into(),
+            letter_sections:vec![("A".into(),vec![item])], expanded:false }]);
+        let report = run_sync(&mut ui, &store, "account-a", SyncMode::Incremental,
+            &temp.path().join("contacts-sync-checkpoint.json"), &||false, 2000).await.unwrap();
+        assert!(report.complete, "{report:?}");
+        let profiles = store.list_profiles("account-a",None).unwrap();
+        assert_eq!(profiles.len(),1);
+        assert!(profiles[0]["removed_at"].is_null());
+        assert!(ui.calls.lock().unwrap().iter().any(|(op,_)|op=="contacts_open_row"));
+    }
+
+    #[tokio::test]
+    async fn test_account_change_during_card_read_cannot_write_or_mark_missing() {
+        let temp = TestTempDir::new();
+        let store = HistoryStore::open(temp.path()).unwrap();
+        let p = fixture_profile("personal", "切换测试", Some("wxid_change"), None);
+        store.upsert_profile("account-a", &p, 1).unwrap();
+        let item = VirtualContactItem { name:p.nickname, remark:None, wechat_id:p.wechat_id,
+            enterprise:None, real_name:None, tags:vec![], friend_permission:None, unreadable:false, misaligned_profile:None };
+        let mut ui = VirtualContactsUi::new(vec![VirtualGroup { category:"personal".into(), title:"联系人".into(),
+            letter_sections:vec![("A".into(),vec![item])], expanded:false }]);
+        let calls = ui.calls.clone();
+        let account_changed = move || calls.lock().unwrap().iter().any(|(op,_)|op=="contacts_open_row");
+        let report = run_sync(&mut ui, &store, "account-a", SyncMode::Full,
+            &temp.path().join("contacts-sync-checkpoint.json"), &account_changed, 2000).await.unwrap();
+        assert!(!report.complete);
+        assert!(report.yielded);
+        let profiles = store.list_profiles("account-a", None).unwrap();
+        assert_eq!(profiles[0]["last_synced_at"], 1);
+        assert!(profiles[0]["removed_at"].is_null());
+        assert!(store.list_profiles("account-b", None).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_incremental_same_name_work_contacts_keep_both_enterprises() {
+        let temp = TestTempDir::new();
+        let store = HistoryStore::open(temp.path()).unwrap();
+        let mut items = Vec::new();
+        for ent in ["测试企业甲", "测试企业乙"] {
+            let p = fixture_profile("work", "同名员工", None, Some(ent));
+            store.upsert_profile("account-a", &p, 1).unwrap();
+            items.push(VirtualContactItem { name:p.nickname,remark:None,wechat_id:None,
+                enterprise:p.enterprise,real_name:None,tags:vec![],friend_permission:None,unreadable:false,misaligned_profile:None });
+        }
+        let mut ui = VirtualContactsUi::new(vec![VirtualGroup { category:"work".into(), title:"企业微信联系人".into(),
+            letter_sections:vec![("A".into(),items)], expanded:false }]);
+        let report = run_sync(&mut ui, &store, "account-a", SyncMode::Incremental,
+            &temp.path().join("contacts-sync-checkpoint.json"), &||false, 2000).await.unwrap();
+        assert!(report.complete, "{report:?}");
+        assert_eq!(report.per_category, vec![("work".into(),2,2)]);
+        let profiles = store.list_profiles("account-a",None).unwrap();
+        assert_eq!(profiles.len(),2);
+        assert!(profiles.iter().all(|p|p["removed_at"].is_null() && p["last_synced_at"]==2000));
+    }
+
+    #[tokio::test]
+    async fn test_incremental_does_not_reuse_another_accounts_same_name() {
+        let temp = TestTempDir::new();
+        let store = HistoryStore::open(temp.path()).unwrap();
+        let p = fixture_profile("personal", "跨号客户", Some("wxid_shared"), None);
+        store.upsert_profile("account-a", &p, 1).unwrap();
+        let item = VirtualContactItem { name:p.nickname,remark:None,wechat_id:p.wechat_id,
+            enterprise:None,real_name:None,tags:vec![],friend_permission:None,unreadable:false,misaligned_profile:None };
+        let mut ui = VirtualContactsUi::new(vec![VirtualGroup { category:"personal".into(), title:"联系人".into(),
+            letter_sections:vec![("A".into(),vec![item])], expanded:false }]);
+        let report = run_sync(&mut ui, &store, "account-b", SyncMode::Incremental,
+            &temp.path().join("contacts-sync-checkpoint.json"), &||false, 2000).await.unwrap();
+        assert!(report.complete, "{report:?}");
+        let a = store.list_profiles("account-a",None).unwrap();
+        let b = store.list_profiles("account-b",None).unwrap();
+        assert_eq!(a[0]["last_synced_at"],1);
+        assert_eq!(b.len(),1);
+        assert_eq!(b[0]["last_synced_at"],2000);
+        assert_ne!(a[0]["contact_id"],b[0]["contact_id"]);
     }
 
 }

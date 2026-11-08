@@ -1432,7 +1432,7 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
 
             // 只列当前登录微信账号的联系人（换号后各账号的联系人分别保留）
             let account_id = crate::core::wechat_account::effective_account_id(&cfg.state_dir, &cfg.account_id);
-            let sync_file = cfg.state_dir.join("contacts-sync-result.json");
+            let sync_file = crate::core::contacts::sync::account_state_path(&cfg.state_dir, &account_id, "result");
             let sync_val: Value = if sync_file.exists() {
                 match fs::read_to_string(&sync_file).ok().and_then(|c| serde_json::from_str(&c).ok()) {
                     Some(v) => v,
@@ -1784,9 +1784,11 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
 
             let req_id = format!("req_{}", uuid::Uuid::new_v4().simple());
             let mode = if full { "full" } else { "incremental" };
+            let request_account = crate::core::wechat_account::effective_account_id(&state_dir, &cfg.account_id);
             let req_val = json!({
                 "id": req_id,
                 "mode": mode,
+                "account_id": request_account,
                 "created_at": now_secs(),
             });
             let req_path = state_dir.join("contacts-sync-request.json");
@@ -1803,7 +1805,8 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                     if res_path.exists() {
                         if let Ok(content) = fs::read_to_string(&res_path) {
                             if let Ok(res_obj) = serde_json::from_str::<Value>(&content) {
-                                if res_obj.get("id").and_then(|v| v.as_str()) == Some(&req_id) {
+                                if res_obj.get("id").and_then(|v| v.as_str()) == Some(&req_id)
+                                    && res_obj.get("account_id").and_then(Value::as_str) == Some(request_account.as_str()) {
                                     let _ = writeln!(stdout, "{}", serde_json::to_string_pretty(&res_obj).unwrap_or_default());
                                     return 0;
                                 }
@@ -3855,7 +3858,7 @@ mod tests {
             "unreadable_rows": 0,
             "needs_review": 0
         });
-        fs::write(state_dir.join("contacts-sync-result.json"), sync_res.to_string()).unwrap();
+        crate::core::contacts::sync::write_sync_result(&state_dir, "test-desktop", &sync_res).unwrap();
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -3910,6 +3913,7 @@ mod tests {
         let store = crate::core::history::store::HistoryStore::open(&state_dir).unwrap();
         store.ensure_contact("wxid_a", &json!({"recipient": "甲号的客户", "kind": "private"}), true).unwrap();
         store.ensure_contact("wxid_b", &json!({"recipient": "乙号的客户", "kind": "private"}), true).unwrap();
+        crate::core::contacts::sync::write_sync_result(&state_dir, "wxid_a", &json!({"complete":true,"finished_at_ms":1000})).unwrap();
         crate::core::wechat_account::record_current_account(&state_dir, "wxid_b", 1.0).unwrap();
 
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
@@ -3920,6 +3924,7 @@ mod tests {
         assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
         let out: Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(out["account_id"], "wxid_b");
+        assert!(out["sync"].is_null(), "乙号不能显示甲号的同步成功状态");
         let names: Vec<&str> = out["contacts"].as_array().unwrap().iter().filter_map(|c| c["display_name"].as_str()).collect();
         assert_eq!(names, vec!["乙号的客户"]);
     }
