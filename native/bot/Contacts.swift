@@ -229,7 +229,7 @@ func executeContactsOperation(operation: String, params: [String: Any], manage: 
     if operation == "contacts_headers" {
         let (window, _) = try readyWindow(manage: manage)
         try screenGate(window)
-        let normImage = try checkedScreen(window)
+        let normImage = try checkedScreen(window, regions: ["session_list"])  // 通讯录页无输入框/标题锚点
         let listCrop = CGRect(x: spec.list.x, y: spec.list.y, width: spec.list.w, height: spec.list.h)
         guard let cropped = normImage.cropping(to: listCrop) else { throw Failure.invalid("bitmap_failed") }
         let lines = try recognizeContactLines(image: cropped, offsetX: spec.list.x, offsetY: spec.list.y)
@@ -253,7 +253,7 @@ func executeContactsOperation(operation: String, params: [String: Any], manage: 
         let wx = window["x"] as! Double, wy = window["y"] as! Double
         try act { try botActions.click(CGRect(x: wx + x - 5, y: wy + y - 5, width: 10, height: 10)) }
         pauseUI(0.2)
-        let normImage = try checkedScreen(window)
+        let normImage = try checkedScreen(window, regions: ["session_list"])  // 通讯录页无输入框/标题锚点
         let listCrop = CGRect(x: spec.list.x, y: spec.list.y, width: spec.list.w, height: spec.list.h)
         guard let cropped = normImage.cropping(to: listCrop) else { throw Failure.invalid("bitmap_failed") }
         let lines = try recognizeContactLines(image: cropped, offsetX: spec.list.x, offsetY: spec.list.y)
@@ -272,7 +272,7 @@ func executeContactsOperation(operation: String, params: [String: Any], manage: 
         let linesPerTick = Int32(layout.scroll.linesPerTick)
         try act { try botActions.scroll(in: listRect, lines: direction == "up" ? linesPerTick : -linesPerTick, ticks: ticks) }
         pauseUI(0.2)
-        let normImage = try checkedScreen(window)
+        let normImage = try checkedScreen(window, regions: ["session_list"])  // 通讯录页无输入框/标题锚点
         let listCrop = CGRect(x: spec.list.x, y: spec.list.y, width: spec.list.w, height: spec.list.h)
         guard let cropped = normImage.cropping(to: listCrop) else { throw Failure.invalid("bitmap_failed") }
         let lines = try recognizeContactLines(image: cropped, offsetX: spec.list.x, offsetY: spec.list.y)
@@ -295,7 +295,7 @@ func executeContactsOperation(operation: String, params: [String: Any], manage: 
         let wx = window["x"] as! Double, wy = window["y"] as! Double
         try act { try botActions.click(CGRect(x: wx + 180.0 - 10, y: wy + y - 5, width: 20, height: 10)) }
         pauseUI(0.3)
-        let normImage = try checkedScreen(window)
+        let normImage = try checkedScreen(window, regions: ["session_list"])  // 通讯录页无输入框/标题锚点
         let profileCrop = CGRect(x: spec.profile.x, y: spec.profile.y, width: spec.profile.w, height: spec.profile.h)
         guard let cropped = normImage.cropping(to: profileCrop) else { throw Failure.invalid("bitmap_failed") }
         let rawLines = try recognizeContactLines(image: cropped, offsetX: spec.profile.x, offsetY: spec.profile.y)
