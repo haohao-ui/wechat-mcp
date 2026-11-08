@@ -324,7 +324,10 @@ impl WorkerClient {
         }
 
         if let Some(nav) = &self.navigator {
-            let _ = nav.get_messages(None).await;
+            // Python logs this failure (quiet_relaunch_failed); swallowing it hid why the worker never started.
+            if let Err(error) = nav.get_messages(None).await {
+                tracing::warn!("quiet_relaunch_get_messages_failed: {:#}", error);
+            }
             match self.connect(60).await {
                 Ok(()) => {
                     let rec = self.recipient.clone();
