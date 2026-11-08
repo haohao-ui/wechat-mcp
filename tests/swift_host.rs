@@ -2546,3 +2546,25 @@ fn test_settings_page_brain_and_allowlist_pointers() {
         "SettingsPage 说明中必须包含大脑配置"
     );
 }
+
+/// 页面读取 control 命令输出时不能先 waitUntilExit 再读管道：输出超过管道缓冲（约 64KB，
+/// 几百个联系人的 contacts-list 就会超过）时子进程卡在写、父进程卡在等，页面永远加载不出来。
+#[test]
+fn test_run_control_command_reads_large_output_without_deadlock() {
+    if !has_swiftc() {
+        eprintln!("swiftc not available, skipping test");
+        return;
+    }
+    let big = run_task6_cmd("run_control", &serde_json::json!({
+        "executable": "/bin/sh", "args": ["-c", "head -c 300000 /dev/zero | tr '\\0' x"], "timeout": 10
+    })).unwrap();
+    assert_eq!(big["status"], 0, "{big}");
+    assert_eq!(big["bytes"], 300000, "{big}");
+    assert_eq!(big["timed_out"], false, "{big}");
+
+    let hung = run_task6_cmd("run_control", &serde_json::json!({
+        "executable": "/bin/sh", "args": ["-c", "sleep 60"], "timeout": 1
+    })).unwrap();
+    assert_eq!(hung["timed_out"], true, "{hung}");
+    assert!(hung["seconds"].as_f64().unwrap() < 5.0, "{hung}");
+}

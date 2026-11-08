@@ -409,21 +409,9 @@ public final class McpPageController: NSViewController {
 
     public func loadMcpInfo() {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let rpaBin = (NSHomeDirectory() as NSString).appendingPathComponent(".wechat-rpa/bin/wechat-mcp")
-            let binToUse = FileManager.default.isExecutableFile(atPath: rpaBin) ? rpaBin : "wechat-mcp"
-
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: binToUse)
-            proc.arguments = ["control", "mcp-info", "--json"]
-            let pipe = Pipe()
-            proc.standardOutput = pipe
-            proc.standardError = Pipe()
-
+            let run = runControlCommand(executable: controlBinaryPath(), arguments: ["control", "mcp-info", "--json"], timeout: 20)
             do {
-                try proc.run()
-                proc.waitUntilExit()
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                if proc.terminationStatus == 0, let jsonStr = String(data: data, encoding: .utf8) {
+                if run.status == 0, !run.timedOut, let jsonStr = String(data: run.output, encoding: .utf8) {
                     let payload = try McpPageLogic.parseMcpInfoPayload(json: jsonStr)
                     DispatchQueue.main.async {
                         self?.applyMcpInfo(payload)

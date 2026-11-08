@@ -22,6 +22,18 @@ func run() -> Int32 {
             return 1
         }
 
+        if command == "run_control" {
+            let exe = dict["executable"] as? String ?? "/bin/sh"
+            let cmdArgs = dict["args"] as? [String] ?? []
+            let timeout = dict["timeout"] as? Double ?? 10
+            let began = Date()
+            let r = runControlCommand(executable: exe, arguments: cmdArgs, timeout: timeout)
+            let out: [String: Any] = ["status": Int(r.status), "bytes": r.output.count, "timed_out": r.timedOut,
+                                      "seconds": Date().timeIntervalSince(began)]
+            let data = try JSONSerialization.data(withJSONObject: out)
+            print(String(data: data, encoding: .utf8)!)
+            return 0
+        }
         if command == "apply_handling" {
             let config = dict["config"] as? [String: Any] ?? [:]
             let name = dict["name"] as? String ?? ""
