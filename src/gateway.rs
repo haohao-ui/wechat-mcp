@@ -18,6 +18,7 @@ pub struct Gateway {
     pub store: Arc<Store>,
     pub listeners: Listeners,
     pub legacy_tools: bool,
+    pub(crate) desktop_tools: crate::interaction::DesktopTools,
 }
 
 impl Gateway {
@@ -43,6 +44,7 @@ impl Gateway {
             store,
             listeners: Listeners::default(),
             legacy_tools: true,
+            desktop_tools: crate::interaction::DesktopTools::default(),
         })
     }
 
@@ -69,9 +71,15 @@ impl Gateway {
 
     pub async fn call(&self, name: &str, args: Value) -> Value {
         match self.execute(name, args).await {
-            Ok(data) => {
+            Ok(mut data) => {
+                let screenshot = if crate::interaction::is_tool(name) {
+                    data.as_object_mut().and_then(|obj|obj.remove("screenshot_base64")).and_then(|v|v.as_str().map(str::to_owned))
+                } else { None };
                 let mut result = make_tool_result(&data.to_string(), false);
                 result["structuredContent"] = data;
+                if let Some(png) = screenshot {
+                    result["content"].as_array_mut().unwrap().push(json!({"type":"image","mimeType":"image/png","data":png}));
+                }
                 result
             }
             Err(error) => make_tool_result(&format!("{error:#}"), true),
@@ -82,6 +90,9 @@ impl Gateway {
         let object = args
             .as_object()
             .ok_or_else(|| anyhow::anyhow!("arguments 必须是对象"))?;
+        if crate::interaction::is_tool(name) {
+            return self.desktop_tools.execute(name, args).await;
+        }
         if name == "list_accounts" {
             if !object.is_empty() {
                 bail!("list_accounts 不接受参数");
@@ -420,6 +431,7 @@ mod tests {
             store: Store::memory(),
             listeners: Listeners::default(),
             legacy_tools: true,
+            desktop_tools: crate::interaction::DesktopTools::default(),
         };
         let response = gateway.call("send_message", json!({"platform":"whatsapp","account_id":"personal","recipient":"r","message":"hello","idempotency_key":"routing-test"})).await;
         assert_eq!(response["isError"], false);
@@ -493,6 +505,7 @@ mod tests {
             store: Store::memory(),
             listeners: Listeners::default(),
             legacy_tools: true,
+            desktop_tools: crate::interaction::DesktopTools::default(),
         };
         let result = gateway
             .call(
@@ -523,6 +536,7 @@ mod tests {
             store: Store::memory(),
             listeners: Listeners::default(),
             legacy_tools: false,
+            desktop_tools: crate::interaction::DesktopTools::default(),
         };
         for args in [
             json!({"platform":"wechat","account_id":"local","recipient":"r","path":"Desktop/a.pdf","idempotency_key":"k1"}),
@@ -545,6 +559,7 @@ mod tests {
             store: Store::memory(),
             listeners: Listeners::default(),
             legacy_tools: false,
+            desktop_tools: crate::interaction::DesktopTools::default(),
         };
         for args in [
             json!({"name":"../a.pdf","content_base64":"aGk="}),
@@ -569,6 +584,7 @@ mod tests {
             store: Store::memory(),
             listeners: Listeners::default(),
             legacy_tools: true,
+            desktop_tools: crate::interaction::DesktopTools::default(),
         };
         for args in [
             json!({"platform":"wechat","recipient":"r","message":"m"}),
@@ -627,6 +643,7 @@ mod tests {
             store: Store::memory(),
             listeners: Listeners::default(),
             legacy_tools: false,
+            desktop_tools: crate::interaction::DesktopTools::default(),
         };
 
         for (tool, expected_unified) in [
@@ -668,6 +685,7 @@ mod tests {
             store: store.clone(),
             listeners: Listeners::default(),
             legacy_tools: false,
+            desktop_tools: crate::interaction::DesktopTools::default(),
         };
 
         crate::wechat::with_test_send_fault(
@@ -733,6 +751,7 @@ mod tests {
             store: store.clone(),
             listeners: Listeners::default(),
             legacy_tools: false,
+            desktop_tools: crate::interaction::DesktopTools::default(),
         };
 
         crate::wechat::with_test_send_fault(
@@ -788,6 +807,7 @@ mod tests {
             store: store.clone(),
             listeners: Listeners::default(),
             legacy_tools: false,
+            desktop_tools: crate::interaction::DesktopTools::default(),
         };
 
         crate::wechat::with_test_send_fault(
@@ -911,6 +931,7 @@ mod tests {
             store,
             listeners: Listeners::default(),
             legacy_tools: false,
+            desktop_tools: crate::interaction::DesktopTools::default(),
         };
 
         // 第 1 次发送：失败，记录 not_sent
@@ -963,6 +984,7 @@ mod tests {
             store,
             listeners: Listeners::default(),
             legacy_tools: false,
+            desktop_tools: crate::interaction::DesktopTools::default(),
         };
 
         // 第 1 次发送：失败，记录 unknown (delivery 不是 not_sent)
@@ -1014,6 +1036,7 @@ mod tests {
             store,
             listeners: Listeners::default(),
             legacy_tools: false,
+            desktop_tools: crate::interaction::DesktopTools::default(),
         };
 
         // 第 1 次发送：成功 triggered
@@ -1067,6 +1090,7 @@ mod tests {
             store,
             listeners: Listeners::default(),
             legacy_tools: false,
+            desktop_tools: crate::interaction::DesktopTools::default(),
         };
 
         let resp = gateway
@@ -1181,6 +1205,7 @@ mod tests {
             store,
             listeners: Listeners::default(),
             legacy_tools: false,
+            desktop_tools: crate::interaction::DesktopTools::default(),
         };
 
         // 生产一轮待回复消息

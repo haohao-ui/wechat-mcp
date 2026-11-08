@@ -8,6 +8,14 @@ use std::{
 pub struct ResourceLock {
     _file: File,
 }
+impl Drop for ResourceLock {
+    fn drop(&mut self) {
+        // Explicitly delimit the lease even if an in-process descriptor was duplicated.
+        // This does not establish the cause of any previously observed contention.
+        let _ = fs2::FileExt::unlock(&self._file);
+    }
+}
+
 impl ResourceLock {
     pub fn try_acquire(path: &Path) -> Result<Option<Self>> {
         if let Some(parent) = path.parent()
@@ -67,4 +75,17 @@ mod tests {
         assert!(ResourceLock::try_acquire(&path).unwrap().is_some());
         std::fs::remove_file(path).unwrap();
     }
+    #[test]
+    fn lease_drop_unlocks_even_when_a_duplicate_descriptor_remains_open() {
+        let path = std::env::temp_dir().join(format!("gateway-lock-{}",crate::storage::new_id()));
+        let first = ResourceLock::try_acquire(&path).unwrap().unwrap();
+        let duplicate = first._file.try_clone().unwrap();
+        drop(first);
+        let second = ResourceLock::try_acquire(&path).unwrap();
+        assert!(second.is_some());
+        drop(second);
+        drop(duplicate);
+        std::fs::remove_file(path).unwrap();
+    }
+
 }

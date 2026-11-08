@@ -4,6 +4,7 @@ cd "$(dirname "$0")/.."
 cargo build --release --locked
 swiftc native/wechat_ocr.swift -o target/release/wechat_ocr
 swiftc native/click/main.swift native/common/*.swift native/action/*.swift -o target/release/wechat_click
+swiftc -O -target "$(uname -m)-apple-macos12" native/interaction/*.swift native/common/Geometry.swift native/action/*.swift -o target/release/desktop_helper
 swiftc native/wechat_window.swift -o target/release/wechat_window
 swiftc -O -parse-as-library native/wechat_bubbles.swift native/common/*.swift native/eyes/*.swift -o target/release/wechat_bubbles
 target/release/wechat_window --self-test
