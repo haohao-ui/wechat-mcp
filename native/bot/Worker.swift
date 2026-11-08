@@ -419,6 +419,9 @@ final class CaptureWorker {
             }
             return result
         }
+        if isContactsOperation(operation) {
+            return try executeContactsOperation(operation: operation, params: params, manage: params["manage_window"] as? Bool ?? false)
+        }
         guard let recipient=params["recipient"] as? String,!recipient.isEmpty else { throw Failure.invalid("invalid_request") }
         // Exact match against the contact's configured name and aliases (OCR may drop emoji/symbols).
         let names=(params["accepted_names"] as? [String]) ?? [recipient]

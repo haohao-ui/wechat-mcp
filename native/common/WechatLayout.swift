@@ -10,6 +10,7 @@ public enum LayoutError: Error, CustomStringConvertible, Equatable {
     case missingRegion(String)
     case regionOutOfWindow(String)
     case invalidValue(String)
+    case missingContacts
 
     public var description: String {
         switch self {
@@ -25,6 +26,8 @@ public enum LayoutError: Error, CustomStringConvertible, Equatable {
             return "layout_region_out_of_window:\(name)"
         case .invalidValue(let field):
             return "layout_invalid_value:\(field)"
+        case .missingContacts:
+            return "layout_missing_contacts"
         }
     }
 }
@@ -110,6 +113,108 @@ public struct AnchorSpec: Codable, Equatable {
     }
 }
 
+public struct ContactsManagerColumnsSpec: Codable, Equatable {
+    public let nameX: Double
+    public let remarkX: Double
+    public let tagsX: Double
+    public let permissionX: Double
+
+    enum CodingKeys: String, CodingKey {
+        case nameX = "name_x"
+        case remarkX = "remark_x"
+        case tagsX = "tags_x"
+        case permissionX = "permission_x"
+    }
+
+    public init(nameX: Double, remarkX: Double, tagsX: Double, permissionX: Double) {
+        self.nameX = nameX
+        self.remarkX = remarkX
+        self.tagsX = tagsX
+        self.permissionX = permissionX
+    }
+}
+
+public struct ContactsManagerFilterSpec: Codable, Equatable {
+    public let x: Double
+    public let tagY: Double
+
+    enum CodingKeys: String, CodingKey {
+        case x
+        case tagY = "tag_y"
+    }
+
+    public init(x: Double, tagY: Double) {
+        self.x = x
+        self.tagY = tagY
+    }
+}
+
+public struct ContactsManagerSpec: Codable, Equatable {
+    public let firstRowY: Double
+    public let rowHeight: Double
+    public let rows: Int
+    public let columns: ContactsManagerColumnsSpec
+    public let filter: ContactsManagerFilterSpec
+
+    enum CodingKeys: String, CodingKey {
+        case firstRowY = "first_row_y"
+        case rowHeight = "row_height"
+        case rows
+        case columns
+        case filter
+    }
+
+    public init(firstRowY: Double, rowHeight: Double, rows: Int, columns: ContactsManagerColumnsSpec, filter: ContactsManagerFilterSpec) {
+        self.firstRowY = firstRowY
+        self.rowHeight = rowHeight
+        self.rows = rows
+        self.columns = columns
+        self.filter = filter
+    }
+}
+
+public struct ContactsLayoutSpec: Codable, Equatable {
+    public let navContacts: WindowPoint
+    public let navChats: WindowPoint
+    public let list: WindowRect
+    public let managerButton: WindowPoint
+    public let profile: WindowRect
+    public let profileForbidden: WindowRect
+    public let rowHeight: Double
+    public let manager: ContactsManagerSpec
+
+    enum CodingKeys: String, CodingKey {
+        case navContacts = "nav_contacts"
+        case navChats = "nav_chats"
+        case list
+        case managerButton = "manager_button"
+        case profile
+        case profileForbidden = "profile_forbidden"
+        case rowHeight = "row_height"
+        case manager
+    }
+
+    public init(
+        navContacts: WindowPoint,
+        navChats: WindowPoint,
+        list: WindowRect,
+        managerButton: WindowPoint,
+        profile: WindowRect,
+        profileForbidden: WindowRect,
+        rowHeight: Double,
+        manager: ContactsManagerSpec
+    ) {
+        self.navContacts = navContacts
+        self.navChats = navChats
+        self.list = list
+        self.managerButton = managerButton
+        self.profile = profile
+        self.profileForbidden = profileForbidden
+        self.rowHeight = rowHeight
+        self.manager = manager
+    }
+}
+
 public struct WechatLayout: Decodable, Equatable {
     public let schema: Int
     public let wechatVersion: String
@@ -120,6 +225,7 @@ public struct WechatLayout: Decodable, Equatable {
     public let menuLabels: [String: [String]]
     public let scroll: ScrollSpec
     public let anchors: [AnchorSpec]
+    public let contacts: ContactsLayoutSpec?
 
     enum CodingKeys: String, CodingKey {
         case schema
@@ -131,6 +237,7 @@ public struct WechatLayout: Decodable, Equatable {
         case menuLabels = "menu_labels"
         case scroll
         case anchors
+        case contacts
     }
 
     public init(
@@ -142,7 +249,8 @@ public struct WechatLayout: Decodable, Equatable {
         themes: [String: ThemeSpec],
         menuLabels: [String: [String]],
         scroll: ScrollSpec,
-        anchors: [AnchorSpec]
+        anchors: [AnchorSpec],
+        contacts: ContactsLayoutSpec? = nil
     ) {
         self.schema = schema
         self.wechatVersion = wechatVersion
@@ -153,6 +261,7 @@ public struct WechatLayout: Decodable, Equatable {
         self.menuLabels = menuLabels
         self.scroll = scroll
         self.anchors = anchors
+        self.contacts = contacts
     }
 
     public static func load(path: String) throws -> WechatLayout {
@@ -226,6 +335,13 @@ public struct WechatLayout: Decodable, Equatable {
             throw LayoutError.missingRegion(name)
         }
         return r
+    }
+
+    public func contactsSpec() throws -> ContactsLayoutSpec {
+        guard let spec = contacts else {
+            throw LayoutError.missingContacts
+        }
+        return spec
     }
 
     public static func path(forVersion v: String, directory: String) -> String? {
