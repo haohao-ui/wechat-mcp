@@ -143,6 +143,16 @@ func saveAttachment(_ item: [String:Any], window:[String:Any], destination:URL, 
             guard amount*multiplier<=Double(maxBytes) else { throw Failure.invalid("file_size_limit") }
         }
     }
+    // Before touching WeChat: the folders the save panel may drop the file into are privacy-protected.
+    // An unanswered permission prompt blocks file calls in the kernel while we hold the desktop lock
+    // (2026-11-08: a worker hung for 90+ minutes). Probe them with a time limit and fail clearly instead.
+    let home=FileManager.default.homeDirectoryForCurrentUser
+    let staging=home.appendingPathComponent("Documents/微信客服附件")
+    try bounded(seconds:3,label:"Documents") {
+        try FileManager.default.createDirectory(at:staging,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
+    }
+    let probed=try preflightFolders([staging,destination.deletingLastPathComponent()]+["Desktop","Downloads","Documents"].map { home.appendingPathComponent($0) })
+    let candidates=probed.usable
     // Right after a previous save the system save-panel service can still be reported as frontmost.
     let wechatIDs=["com.tencent.xinWeChat","com.tencent.WeChat"]
     _ = waitUntil(seconds:1.5) { wechatIDs.contains(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "") }
@@ -184,8 +194,6 @@ func saveAttachment(_ item: [String:Any], window:[String:Any], destination:URL, 
     guard NSWorkspace.shared.frontmostApplication?.processIdentifier==app.processIdentifier else { throw Failure.invalid("unexpected_save_dialog_owner") }
     // Cmd+Shift+G does not reach WeChat's out-of-process save panel (the path landed in the name field):
     // save in whatever folder the panel shows, under a unique name, and move the file right after.
-    let staging=FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents/微信客服附件")
-    try FileManager.default.createDirectory(at:staging,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
     // WeChat is sandboxed: its save panel is drawn by a separate system process whose controls are not
     // reliably in WeChat's accessibility tree. The name field has focus, so type the name and press Return.
     // A unique name never triggers "replace?" and can be found if the panel stayed in another folder.
@@ -201,23 +209,26 @@ func saveAttachment(_ item: [String:Any], window:[String:Any], destination:URL, 
     guard named else { throw Failure.invalid("save_name_not_set") }
     try key(36);pauseUI(0.5)
     saveDebugStep("5-after-return",root)
-    let home=FileManager.default.homeDirectoryForCurrentUser
-    let candidates=[staging,destination.deletingLastPathComponent()]+["Desktop","Downloads","Documents"].map { home.appendingPathComponent($0) }
     let deadline=Date().addingTimeInterval(10)
     while Date()<deadline {
         for folder in candidates {
             let found=folder.appendingPathComponent(staged)
-            guard FileManager.default.fileExists(atPath:found.path) else { continue }
-            let first=try FileManager.default.attributesOfItem(atPath:found.path)[.size] as? NSNumber
+            let label=folder.lastPathComponent
+            guard try bounded(seconds:5,label:label, { FileManager.default.fileExists(atPath:found.path) }) else { continue }
+            let first=try bounded(seconds:5,label:label, { try FileManager.default.attributesOfItem(atPath:found.path)[.size] as? NSNumber })
             pauseUI(0.3)
-            let second=try FileManager.default.attributesOfItem(atPath:found.path)[.size] as? NSNumber
+            let second=try bounded(seconds:5,label:label, { try FileManager.default.attributesOfItem(atPath:found.path)[.size] as? NSNumber })
             guard first==second && (second?.intValue ?? 0)>0 else { continue }
-            if FileManager.default.fileExists(atPath:destination.path) { try FileManager.default.removeItem(at:destination) }
-            try FileManager.default.moveItem(at:found,to:destination)
+            try bounded(seconds:5,label:destination.deletingLastPathComponent().lastPathComponent) {
+                if FileManager.default.fileExists(atPath:destination.path) { try FileManager.default.removeItem(at:destination) }
+                try FileManager.default.moveItem(at:found,to:destination)
+            }
             return
         }
         pauseUI(0.1)
     }
+    // A folder whose access was refused may be exactly where the panel saved: say so instead of "unknown".
+    if !probed.denied.isEmpty { throw Failure.invalid("download_completion_unknown:denied="+probed.denied.joined(separator:",")) }
     throw Failure.invalid("download_completion_unknown")
 }
 

@@ -147,6 +147,8 @@ pub async fn run_serve_core(
     );
 
     coordinator.tool_client = Some(mcp_client);
+    let mut worker_client = worker_client;
+    worker_client.stop = Some(coordinator.stop.clone());
     coordinator.capture = Some(Box::new(worker_client));
 
     if config.brain.mode == BrainMode::External {
