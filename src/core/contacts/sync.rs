@@ -197,6 +197,7 @@ async fn run_sync_inner(
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
         let parsed_headers = parse_group_headers(&lines);
+        info!(lines = lines.len(), headers = parsed_headers.len(), "contacts_sync_headers");
         state.categories = parsed_headers;
     }
 
@@ -248,6 +249,7 @@ async fn run_sync_inner(
             }
         });
 
+        info!(category = %cat_name, header_found = header_line.is_some(), top_lines = top_lines.len(), "contacts_sync_group");
         if let Some(hl) = header_line {
             let hy = hl.y;
             // 检查标题右侧是否有数量（收起状态）
@@ -357,6 +359,13 @@ async fn run_sync_inner(
                     }
                 }
 
+                info!(
+                    category = %cat_name,
+                    screen_lines = cur_screen_lines.len(),
+                    candidates = contact_rows_on_screen.len(),
+                    own_header = own_header_y.is_some(),
+                    "contacts_sync_screen"
+                );
                 let new_rows = if pass_seen.is_empty() {
                     &contact_rows_on_screen[..]
                 } else {
@@ -406,6 +415,7 @@ async fn run_sync_inner(
                                 .unwrap_or_default();
 
                             if prof_lines.is_empty() {
+                                info!(category = %cat_name, row_y = *row_y, "contacts_sync_profile_empty");
                                 state.unreadable_rows += 1;
                             } else {
                                 let parse_res = parse_profile(&prof_lines, &cat_name);
@@ -416,6 +426,7 @@ async fn run_sync_inner(
                                     || f.remark.as_deref().map(|rmk| rmk == row_name).unwrap_or(false);
 
                                 if !name_matched {
+                                    info!(category = %cat_name, row_y = *row_y, profile_lines = prof_lines.len(), "contacts_sync_profile_name_mismatch");
                                     state.unreadable_rows += 1;
                                 } else {
                                     let combined_tags = f.tags.clone();
