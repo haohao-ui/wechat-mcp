@@ -1,7 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::time::Duration;
 use anyhow::{Context, Result};
 use fs2::FileExt;
@@ -15,9 +15,16 @@ use crate::core::state::{read_json, write_private};
 use crate::core::worker_client::WorkerClient;
 
 static STOP_SIGNAL: AtomicBool = AtomicBool::new(false);
+static SHARED_STOP: AtomicPtr<AtomicBool> = AtomicPtr::new(std::ptr::null_mut());
 
 extern "C" fn handle_signal(_: i32) {
     STOP_SIGNAL.store(true, Ordering::SeqCst);
+    let ptr = SHARED_STOP.load(Ordering::SeqCst);
+    if !ptr.is_null() {
+        unsafe {
+            (*ptr).store(true, Ordering::SeqCst);
+        }
+    }
 }
 
 fn install_signals() {
@@ -108,6 +115,9 @@ pub async fn run_serve_core(
     let mut coordinator = BotCoordinator::new(config_path)?;
     coordinator.reconcile_journals()?;
 
+    let stop_ptr = &*coordinator.stop as *const AtomicBool as *mut AtomicBool;
+    SHARED_STOP.store(stop_ptr, Ordering::SeqCst);
+
     let home = std::env::var("HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -138,6 +148,10 @@ pub async fn run_serve_core(
     coordinator.capture = Some(Box::new(worker_client));
 
     if config.brain.mode == BrainMode::External {
+        let eb = external_brain.clone();
+        crate::core::turns::register_default_brain_factory(Some(std::sync::Arc::new(move || {
+            eb.brain_fn()
+        })));
         let brain_fn = external_brain.brain_fn();
         let targets = coordinator.config.allowlist.clone();
         for target in &targets {
@@ -310,6 +324,9 @@ pub async fn run_serve_core(
     if let Some(server) = history_server {
         server.shutdown();
     }
+
+    SHARED_STOP.store(std::ptr::null_mut(), Ordering::SeqCst);
+    crate::core::turns::register_default_brain_factory(None);
 
     Ok(0)
 }
@@ -677,5 +694,27 @@ mod tests {
         unsafe {
             std::env::remove_var("WECHAT_CORE_SOCK");
         }
+    }
+
+    #[tokio::test]
+    async fn test_os_signal_immediately_sets_shared_stop() {
+        let _guard = TEST_ENV_LOCK.lock().await;
+        const SIGTERM: i32 = 15;
+
+        install_signals();
+        let coordinator_stop = std::sync::Arc::new(AtomicBool::new(false));
+        let stop_ptr = &*coordinator_stop as *const AtomicBool as *mut AtomicBool;
+        SHARED_STOP.store(stop_ptr, Ordering::SeqCst);
+        STOP_SIGNAL.store(false, Ordering::SeqCst);
+
+        assert!(!coordinator_stop.load(Ordering::SeqCst));
+        // 执行信号处理器
+        handle_signal(SIGTERM);
+
+        assert!(STOP_SIGNAL.load(Ordering::SeqCst), "STOP_SIGNAL 必须被置为 true");
+        assert!(coordinator_stop.load(Ordering::SeqCst), "OS 信号到达时必须实时通过共享指针将 coordinator.stop 设为 true");
+
+        SHARED_STOP.store(std::ptr::null_mut(), Ordering::SeqCst);
+        STOP_SIGNAL.store(false, Ordering::SeqCst);
     }
 }
