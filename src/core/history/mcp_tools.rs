@@ -51,6 +51,7 @@ const TOOL_SPECS: &[(&str, ToolSpec)] = &[
                 ("query", "string"),
                 ("cursor", "string"),
                 ("limit", "integer"),
+                ("category", "string"),
             ],
             required: &[],
             order_enum: false,
@@ -236,7 +237,36 @@ pub fn open_query_from_config(config_path: Option<&Path>) -> Result<HistoryQuery
         .unwrap_or(5);
 
     let db_path = state_dir.join("history").join("history.sqlite3");
-    HistoryQuery::open(&db_path, Some(context_messages))
+    let mut query = HistoryQuery::open(&db_path, Some(context_messages))?;
+    if let Some(allowlist) = val.get("allowlist").and_then(|v| v.as_array()) {
+        let mut allowed_cids = HashSet::new();
+        let conn = query.raw_connection();
+        for entry in allowlist {
+            let mut names_to_check = Vec::new();
+            if let Some(r) = entry.get("recipient").and_then(|v| v.as_str()) {
+                names_to_check.push(r.to_string());
+            }
+            if let Some(aliases) = entry.get("aliases").and_then(|v| v.as_array()) {
+                for a in aliases {
+                    if let Some(s) = a.as_str() {
+                        names_to_check.push(s.to_string());
+                    }
+                }
+            }
+            for n in names_to_check {
+                let n_key = crate::core::history::names::name_key(&n);
+                if let Ok(mut stmt) = conn.prepare("SELECT contact_id FROM contact_names WHERE name_key=?") {
+                    if let Ok(rows) = stmt.query_map([&n_key], |r| r.get::<_, String>(0)) {
+                        for cid in rows.flatten() {
+                            allowed_cids.insert(cid);
+                        }
+                    }
+                }
+            }
+        }
+        query = query.with_allowlist(allowed_cids);
+    }
+    Ok(query)
 }
 
 /// 调用历史查询工具核心逻辑，参数校验与异常返回格式保持与 Python mcp_server.py 严格一致
@@ -287,7 +317,8 @@ pub fn call_tool(query: &HistoryQuery, name: &str, arguments: &Value) -> Result<
             let q = args_obj.get("query").and_then(|v| v.as_str());
             let cursor = args_obj.get("cursor").and_then(|v| v.as_str());
             let limit = args_obj.get("limit").and_then(|v| v.as_i64());
-            query.list_contacts(q, cursor, limit)
+            let category = args_obj.get("category").and_then(|v| v.as_str());
+            query.list_contacts_with_category(q, cursor, limit, category)
         }
         "get_contact" => {
             let contact_id = args_obj.get("contact_id").and_then(|v| v.as_str());
@@ -750,5 +781,101 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.code, "invalid_argument");
         assert!(err.message.contains("must be string"));
+    }
+
+    #[test]
+    fn test_history_list_contacts_category_filter_respects_allowlist() {
+        let f = TestFixture::setup(); // fixture has allowlist: [{"recipient": "🍓小美", "kind": "private"}]
+        let store = crate::core::history::store::HistoryStore::open(&f._state).unwrap();
+
+        // 1. 🍓小美 profile (allowlisted)
+        let p1 = crate::core::history::store::ProfileInput {
+            category: "personal".to_string(),
+            wechat_id: Some("wxid_xiaomei".to_string()),
+            nickname: "🍓小美".to_string(),
+            remark: None,
+            region: Some("北京".to_string()),
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+        };
+        store.upsert_profile("acct", &p1, 1000).unwrap();
+
+        // 2. 外部好友乙 (personal, NOT in allowlist)
+        let p2 = crate::core::history::store::ProfileInput {
+            category: "personal".to_string(),
+            wechat_id: Some("wxid_other".to_string()),
+            nickname: "外部好友乙".to_string(),
+            remark: None,
+            region: None,
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+        };
+        store.upsert_profile("acct", &p2, 1000).unwrap();
+
+        // 3. 公众号丙 (official, NOT in allowlist)
+        let p3 = crate::core::history::store::ProfileInput {
+            category: "official".to_string(),
+            wechat_id: Some("gh_official_c".to_string()),
+            nickname: "公众号丙".to_string(),
+            remark: None,
+            region: None,
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+        };
+        store.upsert_profile("acct", &p3, 1000).unwrap();
+
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "history_list_contacts",
+                "arguments": {
+                    "category": "personal"
+                }
+            }
+        });
+
+        let resp = handle_request(&req, Some(&f.config_path)).expect("response from mcp");
+        assert_eq!(resp["result"]["isError"], false);
+        let parsed: Value = serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let items = parsed["items"].as_array().expect("items array");
+
+        // 只能有🍓小美
+        assert_eq!(items.len(), 1, "Only allowlisted contact should be returned: {:?}", items);
+        assert_eq!(items[0]["display_name"], "🍓小美");
+        assert_eq!(items[0]["profile"]["wechat_id"], "wxid_xiaomei");
+        assert_eq!(items[0]["profile"]["category"], "personal");
+
+        // 验证 history_get_contact 也带 profile
+        let get_req = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "history_get_contact",
+                "arguments": {
+                    "name": "🍓小美"
+                }
+            }
+        });
+        let get_resp = handle_request(&get_req, Some(&f.config_path)).expect("response from mcp");
+        let get_parsed: Value = serde_json::from_str(get_resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(get_parsed["profile"]["wechat_id"], "wxid_xiaomei");
     }
 }
