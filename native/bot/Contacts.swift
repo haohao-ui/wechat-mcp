@@ -70,6 +70,21 @@ public func pickManagerWindow(_ windows: [[String: Any]]) -> [String: Any]? {
     return candidates.first?.win
 }
 
+/// 「通讯录管理」左栏筛选的点击位置（管理窗口内坐标）。
+/// 「全部」用布局里的固定位置；标签必须由调用方传入从左栏识别到的 y（标签间距与表格行高不同，不能按序号推算），
+/// 且必须在「标签」标题下方、窗口底边以内，否则返回 nil（拒绝点击）。
+public func managerFilterPoint(kind: String, y: Double?, windowHeight: Double, spec: ContactsManagerFilterSpec) -> WindowPoint? {
+    switch kind {
+    case "all":
+        return WindowPoint(x: spec.x, y: spec.allY)
+    case "tag":
+        guard let y = y, y >= spec.tagY + 20, y <= windowHeight - 20 else { return nil }
+        return WindowPoint(x: spec.x, y: y)
+    default:
+        return nil
+    }
+}
+
 /// Formats OCR lines ensuring none intersect the forbidden profile region.
 public func filterProfileForbiddenLines(lines: [[String: Any]], forbiddenRect: WindowRect) -> [[String: Any]] {
     return lines.filter { line in
@@ -368,20 +383,16 @@ func executeContactsOperation(operation: String, params: [String: Any], manage: 
         guard let kind = params["kind"] as? String, kind == "all" || kind == "tag" else {
             throw Failure.invalid("invalid_filter_kind")
         }
-        let index = (params["index"] as? Int) ?? 0
         guard let mgr = findManagerWindow() else {
             throw Failure.invalid("contacts_manager_missing")
         }
         let mx = mgr["x"] as? Double ?? 0
         let my = mgr["y"] as? Double ?? 0
-        let clickY: Double
-        if kind == "all" {
-            clickY = my + 50.0
-        } else {
-            clickY = my + spec.manager.filter.tagY + Double(index) * spec.manager.rowHeight
+        let mh = mgr["height"] as? Double ?? 560
+        guard let point = managerFilterPoint(kind: kind, y: (params["y"] as? NSNumber)?.doubleValue, windowHeight: mh, spec: spec.manager.filter) else {
+            throw Failure.invalid("contacts_filter_position_invalid")
         }
-        let clickX = mx + spec.manager.filter.x
-        try act { try botActions.click(CGRect(x: clickX - 5, y: clickY - 5, width: 10, height: 10)) }
+        try act { try botActions.click(CGRect(x: mx + point.x - 5, y: my + point.y - 5, width: 10, height: 10)) }
         pauseUI(0.2)
         let rawImage = try windowImage(mgr)
         let lines = try recognizeContactLines(image: rawImage, offsetX: 0, offsetY: 0)

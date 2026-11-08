@@ -23,6 +23,19 @@ fn build_contacts_test_bin(test_case: &str) -> Option<PathBuf> {
     let main = dir.join("main.swift");
 
     let main_code = match test_case {
+        "filter" => r#"
+import Foundation
+let spec = ContactsManagerFilterSpec(x: 40, tagY: 167, allY: 52)
+// 全部：固定位置
+guard let all = managerFilterPoint(kind: "all", y: nil, windowHeight: 560, spec: spec), all.x == 40, all.y == 52 else { print("FAIL: all"); exit(1) }
+// 标签：必须由调用方给出识别到的 y，且在标签标题下方、窗口内
+guard let tag = managerFilterPoint(kind: "tag", y: 208, windowHeight: 560, spec: spec), tag.x == 40, tag.y == 208 else { print("FAIL: tag 208"); exit(1) }
+guard managerFilterPoint(kind: "tag", y: nil, windowHeight: 560, spec: spec) == nil else { print("FAIL: tag without y"); exit(1) }
+guard managerFilterPoint(kind: "tag", y: 167, windowHeight: 560, spec: spec) == nil else { print("FAIL: tag header itself"); exit(1) }
+guard managerFilterPoint(kind: "tag", y: 600, windowHeight: 560, spec: spec) == nil else { print("FAIL: tag outside window"); exit(1) }
+guard managerFilterPoint(kind: "other", y: 208, windowHeight: 560, spec: spec) == nil else { print("FAIL: unknown kind"); exit(1) }
+print("PASS: manager_filter_point_verified")
+"#,
         "layout" => r#"
 import Foundation
 
@@ -262,4 +275,16 @@ fn manager_window_pick_prefers_titled_manager() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "run failed: {}", stdout);
     assert!(stdout.contains("PASS: manager_window_pick_verified"), "stdout: {stdout}");
+}
+
+/// 标签筛选的点击位置不能靠"标题 y + 序号 × 行高"推算（实测标签间距与表格行高不同，序号 0 会点到"标签"标题本身）。
+#[test]
+fn manager_filter_point_requires_observed_tag_y() {
+    let Some(bin) = build_contacts_test_bin("filter") else {
+        panic!("build contacts test failed");
+    };
+    let out = Command::new(&bin).output().expect("failed to run test bin");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "run failed: {}", stdout);
+    assert!(stdout.contains("PASS: manager_filter_point_verified"), "stdout: {stdout}");
 }

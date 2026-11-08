@@ -99,14 +99,14 @@
 - Test: `tests/swift_contacts.rs`（编译 `native/common/WechatLayout.swift` + `native/bot/Contacts.swift` 的纯函数部分 + 自测 main，同 `tests/swift_bounded.rs` 做法）
 
 **Interfaces:**
-- 布局 `contacts` 段（窗口内坐标，来自实测 §8/§8.1）：`{"nav_contacts":{"x":30,"y":169},"nav_chats":{"x":30,"y":121},"list":{"x":60,"y":40,"w":240,"h":600},"manager_button":{"x":180,"y":59},"profile":{"x":420,"y":50,"w":400,"h":390},"profile_forbidden":{"x":420,"y":440,"w":420,"h":120},"row_height":50,"manager":{"first_row_y":96,"row_height":48,"rows":10,"columns":{"name_x":300,"remark_x":385,"tags_x":500,"permission_x":620},"filter":{"x":40,"tag_y":167}}}`
+- 布局 `contacts` 段（窗口内坐标，来自实测 §8/§8.1）：`{"nav_contacts":{"x":30,"y":169},"nav_chats":{"x":30,"y":121},"list":{"x":60,"y":40,"w":240,"h":600},"manager_button":{"x":180,"y":59},"profile":{"x":420,"y":50,"w":400,"h":390},"profile_forbidden":{"x":420,"y":440,"w":420,"h":120},"row_height":50,"manager":{"first_row_y":96,"row_height":48,"rows":10,"columns":{"name_x":300,"remark_x":385,"tags_x":500,"permission_x":620},"filter":{"x":40,"tag_y":167,"all_y":52}}}`
 - Worker operations（请求/返回 JSON；`lines` 为 `[{text,x,y,w,h}]` 窗口内坐标，OCR 在本机完成）：
   - `contacts_enter` → `{ok}`：点导航「通讯录」，列表滚到顶。
   - `contacts_headers` → `{lines}`：列表区 OCR。
   - `contacts_click_list(x,y)` → `{lines}`：只允许点在 `list` 区域内（否则 `invalid("contacts_click_outside_list")`），点后返回列表区 OCR。
   - `contacts_scroll_list(direction, ticks)` → `{lines}`。
   - `contacts_open_row(y)` → `{lines}`：点 `list` 内该行（x=180），返回 `profile` 区 OCR（**不含** `profile_forbidden` 区）。
-  - `contacts_manager_open` → `{window:{x,y,w,h}}`；`contacts_manager_page` → `{lines, window}`；`contacts_manager_scroll(direction,ticks)` → `{lines, window}`；`contacts_manager_filter(kind:"all"|"tag", index)` → `{lines, window}`；`contacts_manager_close` → `{closed: bool}`（AX 关闭按钮）。管理窗口不存在时上述操作返回 `invalid("contacts_manager_missing")`。
+  - `contacts_manager_open` → `{window:{x,y,w,h}}`；`contacts_manager_page` → `{lines, window}`；`contacts_manager_scroll(direction,ticks)` → `{lines, window}`；`contacts_manager_filter(kind:"all"|"tag", y)` → `{lines, window}`（tag 必须传从管理窗口左栏识别到的该标签 y；Ruling 2026-11-08：标签间距≈40 与表格行高 48 不同，不能按序号推算）；`contacts_manager_close` → `{closed: bool}`（AX 关闭按钮）。管理窗口不存在时上述操作返回 `invalid("contacts_manager_missing")`。
   - `contacts_leave` → 点导航「聊天」。
   - 所有操作都在 `withDesktop` 内、`screenGate` 前置；任何点击坐标落在 `profile_forbidden` 区 → `invalid("contacts_forbidden_click")`（硬保护，单测覆盖）。
 - [ ] **Step 1: 写失败测试**（`tests/swift_contacts.rs`）

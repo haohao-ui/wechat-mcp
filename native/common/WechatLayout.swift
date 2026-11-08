@@ -136,16 +136,21 @@ public struct ContactsManagerColumnsSpec: Codable, Equatable {
 
 public struct ContactsManagerFilterSpec: Codable, Equatable {
     public let x: Double
+    /// 左栏「标签」标题的 y；具体标签在它下方，位置由识别结果给出
     public let tagY: Double
+    /// 左栏「全部」的 y
+    public let allY: Double
 
     enum CodingKeys: String, CodingKey {
         case x
         case tagY = "tag_y"
+        case allY = "all_y"
     }
 
-    public init(x: Double, tagY: Double) {
+    public init(x: Double, tagY: Double, allY: Double) {
         self.x = x
         self.tagY = tagY
+        self.allY = allY
     }
 }
 
