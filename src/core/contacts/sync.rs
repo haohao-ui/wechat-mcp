@@ -306,6 +306,12 @@ async fn run_sync_inner(
                 }
             }
 
+            // 一屏逐个点开采集，点完滚一整屏（用户 2026-11-08 要求）。已处理到的位置按几何换算，
+            // 不靠文字比对（识别稍有出入就会重复点同一行）
+            const SCREEN_TICKS: u32 = 5; // 5 格 ≈ 450 点，列表可见约 600 点，保留重叠
+            let mut seen_until_y: f64 = 0.0;
+            let mut last_row: Option<(String, f64)> = None;
+            let mut prev_screen_sig: Option<Vec<(String, i64)>> = None;
             let mut no_new_rows_count = 0;
             // 本轮（从顶部开始）按顺序看到的联系人名字；与断点里已处理的名字按出现次数比对，
             // 已处理过的直接跳过，不再打开资料卡（恢复时不重做，保证每轮都有进展）
@@ -370,18 +376,6 @@ async fn run_sync_inner(
                     contact_rows_on_screen.push((txt.to_string(), l.y));
                 }
 
-                let screen_names: Vec<String> = contact_rows_on_screen.iter().map(|(n, _)| n.clone()).collect();
-                let max_overlap = screen_names.len().min(pass_seen.len());
-                let mut match_k = 0;
-                for k in (1..=max_overlap).rev() {
-                    let tail = &pass_seen[pass_seen.len() - k..];
-                    let head = &screen_names[..k];
-                    if tail == head {
-                        match_k = k;
-                        break;
-                    }
-                }
-
                 info!(
                     category = %cat_name,
                     screen_lines = cur_screen_lines.len(),
@@ -389,11 +383,12 @@ async fn run_sync_inner(
                     own_header = own_header_y.is_some(),
                     "contacts_sync_screen"
                 );
-                let new_rows = if pass_seen.is_empty() {
-                    &contact_rows_on_screen[..]
-                } else {
-                    &contact_rows_on_screen[match_k..]
-                };
+                let new_rows_vec: Vec<(String, f64)> = contact_rows_on_screen
+                    .iter()
+                    .filter(|(_, y)| *y > seen_until_y + 5.0 && *y <= 600.0)
+                    .cloned()
+                    .collect();
+                let new_rows = &new_rows_vec[..];
 
                 if new_rows.is_empty() {
                     no_new_rows_count += 1;
@@ -499,17 +494,41 @@ async fn run_sync_inner(
 
                         processed_names.push(row_name.clone());
                     }
+                    if let Some(last) = new_rows.last() {
+                        last_row = Some(last.clone());
+                    }
                 }
 
-                // 滚一格继续
+                // 这一屏点完，滚一整屏
+                let sig: Vec<(String, i64)> = contact_rows_on_screen.iter().map(|(n, y)| (n.clone(), *y as i64)).collect();
+                if prev_screen_sig.as_ref() == Some(&sig) {
+                    break 'screen_loop; // 滚不动了：到底
+                }
+                prev_screen_sig = Some(sig);
                 let scroll_res = capture
-                    .call("contacts_scroll_list", json!({"direction": "down", "ticks": 1}))
+                    .call("contacts_scroll_list", json!({"direction": "down", "ticks": SCREEN_TICKS}))
                     .await?;
-                *state.scroll_ticks.entry(cat_name.clone()).or_insert(0) += 1;
+                *state.scroll_ticks.entry(cat_name.clone()).or_insert(0) += SCREEN_TICKS;
                 cur_screen_lines = scroll_res
                     .get("lines")
                     .and_then(|v| serde_json::from_value(v.clone()).ok())
                     .unwrap_or_default();
+                // 实际滚动距离：在新屏上找上一屏最后处理的那一行（到底时滚不满一屏）
+                let nominal = SCREEN_TICKS as f64 * 90.0;
+                let shift = match &last_row {
+                    Some((name, y)) => cur_screen_lines
+                        .iter()
+                        .filter(|l| l.x >= 115.0 && names_match(name, &l.text))
+                        .map(|l| *y - l.y)
+                        .filter(|d| *d >= 0.0)
+                        .min_by(|a, b| (a - nominal).abs().partial_cmp(&(b - nominal).abs()).unwrap_or(std::cmp::Ordering::Equal))
+                        .unwrap_or(nominal),
+                    None => nominal,
+                };
+                seen_until_y = last_row.as_ref().map(|(_, y)| *y - shift).unwrap_or(0.0);
+                if let Some((n, y)) = last_row.take() {
+                    last_row = Some((n, y - shift));
+                }
             }
 
             // 核对人数差额：如果已同步数 < 期望数，记录差额为 unreadable
@@ -808,6 +827,20 @@ mod tests {
             lines
         }
 
+        /// 列表内容总高度（虚拟坐标，从 0 起）
+        fn content_height(&self) -> f64 {
+            let mut cur_y = 90.0;
+            for g in &self.groups {
+                cur_y += 40.0;
+                if g.expanded {
+                    for (_l, items) in &g.letter_sections {
+                        cur_y += 45.0 + 50.0 * items.len() as f64;
+                    }
+                }
+            }
+            cur_y
+        }
+
         fn find_item_at_virtual_y(&self, vy: f64) -> Option<(&VirtualGroup, Option<&VirtualContactItem>, bool, bool)> {
             // 返回 (group, Option<item>, is_header, is_letter)
             let mut cur_y = 90.0;
@@ -872,7 +905,9 @@ mod tests {
                 let dir = params.get("direction").and_then(|v| v.as_str()).unwrap_or("down");
                 let ticks = params.get("ticks").and_then(|v| v.as_u64()).unwrap_or(1) as f64;
                 if dir == "down" {
-                    self.scroll_offset += ticks * 90.0;
+                    // 与真机一致：滚到底就停住
+                    let max_offset = (self.content_height() - 600.0).max(0.0);
+                    self.scroll_offset = (self.scroll_offset + ticks * 90.0).min(max_offset);
                 } else {
                     self.scroll_offset = (self.scroll_offset - ticks * 90.0).max(0.0);
                 }
@@ -1822,6 +1857,32 @@ mod tests {
         assert!(!names_match("张三", "李四"));
         assert!(!names_match("王", "王五")); // 不足 2 字不做包含匹配
         assert!(!names_match("", "王五"));
+    }
+
+    /// 用户要求（2026-11-08）：一屏里逐个点开采集，点完往下滚一整屏，不重复点。
+    /// 原实现每次只滚一格（90 点）、按文字判断是否处理过，识别稍有出入就重复点同一行。
+    #[tokio::test]
+    async fn test_each_row_opened_once_and_list_scrolls_by_screen() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        let store = HistoryStore::open(&state_dir).unwrap();
+        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
+        let personal = letter_group("personal", "联系人", "人", &[("A", 4), ("B", 5), ("C", 4), ("D", 5), ("E", 4)]);
+        let mut ui = VirtualContactsUi::new(vec![personal]);
+        let no_yield = || false;
+        let report = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+        assert!(report.complete, "{report:?}");
+        assert_eq!(ui.row_open_clicks.len(), 22, "每人只点开一次，实际 {} 次", ui.row_open_clicks.len());
+        let downs: Vec<u64> = ui
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(op, p)| op == "contacts_scroll_list" && p["direction"] == "down")
+            .map(|(_, p)| p["ticks"].as_u64().unwrap_or(1))
+            .collect();
+        assert!(!downs.is_empty() && downs.iter().all(|t| *t >= 5), "应按整屏滚动: {downs:?}");
+        assert!(downs.len() <= 5, "22 人约 2~3 屏，滚动次数不应过多: {downs:?}");
     }
 
 }
