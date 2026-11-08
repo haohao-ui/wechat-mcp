@@ -198,6 +198,56 @@ ALTER TABLE media ADD COLUMN understanding TEXT;
 ALTER TABLE media ADD COLUMN understood_at INTEGER;
 "#,
     ),
+    (
+        4,
+        r#"
+CREATE TABLE contact_names_new(
+  id INTEGER PRIMARY KEY, contact_id TEXT NOT NULL REFERENCES contacts(contact_id),
+  account_id TEXT NOT NULL, raw_name TEXT NOT NULL, name_key TEXT NOT NULL,
+  source TEXT NOT NULL CHECK(source IN ('config','alias','observed','addressbook')),
+  first_seen_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL,
+  UNIQUE(contact_id, raw_name));
+INSERT INTO contact_names_new(id, contact_id, account_id, raw_name, name_key, source, first_seen_at, last_seen_at)
+  SELECT id, contact_id, account_id, raw_name, name_key, source, first_seen_at, last_seen_at FROM contact_names;
+DROP TABLE contact_names;
+ALTER TABLE contact_names_new RENAME TO contact_names;
+CREATE INDEX contact_names_key ON contact_names(account_id, name_key);
+
+CREATE TABLE contact_profiles(
+  contact_id TEXT PRIMARY KEY REFERENCES contacts(contact_id),
+  account_id TEXT NOT NULL,
+  wechat_id TEXT,
+  category TEXT NOT NULL CHECK(category IN ('official','work','personal','group')),
+  nickname TEXT NOT NULL,
+  remark TEXT,
+  region TEXT,
+  source TEXT,
+  added_on TEXT,
+  common_groups INTEGER,
+  enterprise TEXT,
+  real_name TEXT,
+  tags TEXT NOT NULL DEFAULT '[]',
+  friend_permission TEXT,
+  identity TEXT NOT NULL CHECK(identity IN ('strong','weak')),
+  first_synced_at INTEGER NOT NULL,
+  last_synced_at INTEGER NOT NULL,
+  removed_at INTEGER
+);
+CREATE UNIQUE INDEX contact_profiles_account_wechat ON contact_profiles(account_id, wechat_id) WHERE wechat_id IS NOT NULL AND wechat_id != '';
+CREATE INDEX contact_profiles_account_category ON contact_profiles(account_id, category);
+
+CREATE TABLE contact_reviews(
+  id INTEGER PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  candidates TEXT NOT NULL DEFAULT '[]',
+  profile TEXT NOT NULL DEFAULT '{}',
+  created_at INTEGER NOT NULL,
+  resolved_at INTEGER
+);
+CREATE INDEX contact_reviews_account ON contact_reviews(account_id);
+"#,
+    ),
 ];
 
 fn connect(path: &Path) -> Result<Connection> {
@@ -461,7 +511,7 @@ impl HistoryStore {
 
     pub fn resolve(&self, account_id: &str, raw_name: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
-        let owners = _owners_conn(&conn, account_id, &name_key(raw_name), &["config", "alias"], true)?;
+        let owners = _owners_conn(&conn, account_id, &name_key(raw_name), &["config", "alias", "addressbook"], true)?;
         if owners.len() == 1 {
             Ok(owners.into_iter().next())
         } else {
@@ -1264,6 +1314,335 @@ impl HistoryStore {
         found.reverse();
         Ok(found)
     }
+
+    pub fn upsert_profile(&self, account_id: &str, p: &ProfileInput, now_ms: i64) -> Result<UpsertOutcome> {
+        let clean_wechat_id = p.wechat_id.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty());
+        let clean_nickname = p.nickname.trim();
+        let clean_remark = p.remark.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty());
+        let category = &p.category;
+        let identity = if clean_wechat_id.is_some() { "strong" } else { "weak" };
+        let tags_json = serde_json::to_string(&p.tags).unwrap_or_else(|_| "[]".to_string());
+        let disp_name = clean_remark.unwrap_or(clean_nickname);
+        let kind = if category == "group" { "group" } else { "private" };
+
+        let conn = self.conn.lock().unwrap();
+
+        let record_review = |reason: &str, candidates: &[String]| -> Result<()> {
+            let cand_json = serde_json::to_string(candidates).unwrap_or_else(|_| "[]".to_string());
+            let prof_json = serde_json::to_string(p).unwrap_or_else(|_| "{}".to_string());
+            conn.execute(
+                "INSERT INTO contact_reviews(account_id, reason, candidates, profile, created_at, resolved_at) VALUES(?, ?, ?, ?, ?, NULL)",
+                params![account_id, reason, cand_json, prof_json, now_ms],
+            )?;
+            Ok(())
+        };
+
+        let write_names = |target_cid: &str| -> Result<()> {
+            _name_with_conn(&conn, target_cid, account_id, clean_nickname, "addressbook", now_ms)?;
+            if let Some(r) = clean_remark {
+                if r != clean_nickname {
+                    _name_with_conn(&conn, target_cid, account_id, r, "addressbook", now_ms)?;
+                }
+            }
+            Ok(())
+        };
+
+        let update_profile_row = |target_cid: &str| -> Result<()> {
+            conn.execute(
+                "UPDATE contacts SET display_name=?, updated_at=? WHERE contact_id=?",
+                params![disp_name, now_ms, target_cid],
+            )?;
+            conn.execute(
+                r#"UPDATE contact_profiles SET
+                    category=?, wechat_id=?, nickname=?, remark=?, region=?, source=?,
+                    added_on=?, common_groups=?, enterprise=?, real_name=?, tags=?,
+                    friend_permission=?, identity=?, last_synced_at=?, removed_at=NULL
+                   WHERE contact_id=?"#,
+                params![
+                    category,
+                    clean_wechat_id,
+                    clean_nickname,
+                    clean_remark,
+                    p.region.as_deref(),
+                    p.source.as_deref(),
+                    p.added_on.as_deref(),
+                    p.common_groups,
+                    p.enterprise.as_deref(),
+                    p.real_name.as_deref(),
+                    tags_json,
+                    p.friend_permission.as_deref(),
+                    identity,
+                    now_ms,
+                    target_cid,
+                ],
+            )?;
+            write_names(target_cid)?;
+            Ok(())
+        };
+
+        let insert_profile_row = |target_cid: &str, is_new_contact: bool| -> Result<()> {
+            if is_new_contact {
+                conn.execute(
+                    "INSERT INTO contacts(contact_id, account_id, kind, display_name, merged_into, created_at, updated_at) VALUES(?,?,?,?,NULL,?,?)",
+                    params![target_cid, account_id, kind, disp_name, now_ms, now_ms],
+                )?;
+            } else {
+                conn.execute(
+                    "UPDATE contacts SET display_name=?, updated_at=? WHERE contact_id=?",
+                    params![disp_name, now_ms, target_cid],
+                )?;
+            }
+            conn.execute(
+                r#"INSERT INTO contact_profiles(
+                    contact_id, account_id, wechat_id, category, nickname, remark, region, source,
+                    added_on, common_groups, enterprise, real_name, tags, friend_permission,
+                    identity, first_synced_at, last_synced_at, removed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)"#,
+                params![
+                    target_cid,
+                    account_id,
+                    clean_wechat_id,
+                    category,
+                    clean_nickname,
+                    clean_remark,
+                    p.region.as_deref(),
+                    p.source.as_deref(),
+                    p.added_on.as_deref(),
+                    p.common_groups,
+                    p.enterprise.as_deref(),
+                    p.real_name.as_deref(),
+                    tags_json,
+                    p.friend_permission.as_deref(),
+                    identity,
+                    now_ms,
+                    now_ms,
+                ],
+            )?;
+            write_names(target_cid)?;
+            Ok(())
+        };
+
+        if let Some(wid) = clean_wechat_id {
+            let existing_by_wxid: Option<String> = conn
+                .query_row(
+                    "SELECT contact_id FROM contact_profiles WHERE account_id=? AND wechat_id=?",
+                    params![account_id, wid],
+                    |r| r.get(0),
+                )
+                .optional()?;
+
+            if let Some(cid) = existing_by_wxid {
+                update_profile_row(&cid)?;
+                return Ok(UpsertOutcome::Updated(cid));
+            }
+
+            let mut candidate_cids = HashSet::new();
+            for name in [Some(clean_nickname), clean_remark].into_iter().flatten() {
+                let owners = _owners_conn(&conn, account_id, &name_key(name), &["config", "alias", "observed", "addressbook"], true)?;
+                candidate_cids.extend(owners);
+            }
+
+            if candidate_cids.len() > 1 {
+                let mut candidates: Vec<String> = candidate_cids.into_iter().collect();
+                candidates.sort();
+                record_review("ambiguous_name", &candidates)?;
+                return Ok(UpsertOutcome::NeedsReview {
+                    reason: "ambiguous_name".to_string(),
+                    candidates,
+                });
+            }
+
+            if candidate_cids.len() == 1 {
+                let target_cid = candidate_cids.into_iter().next().unwrap();
+                let existing_prof_wxid: Option<Option<String>> = conn
+                    .query_row(
+                        "SELECT wechat_id FROM contact_profiles WHERE contact_id=?",
+                        params![&target_cid],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+
+                match existing_prof_wxid {
+                    Some(Some(old_wxid)) if old_wxid != wid => {
+                        record_review("wechat_id_conflict", &[target_cid.clone()])?;
+                        return Ok(UpsertOutcome::NeedsReview {
+                            reason: "wechat_id_conflict".to_string(),
+                            candidates: vec![target_cid],
+                        });
+                    }
+                    Some(_) => {
+                        update_profile_row(&target_cid)?;
+                        return Ok(UpsertOutcome::Updated(target_cid));
+                    }
+                    None => {
+                        insert_profile_row(&target_cid, false)?;
+                        return Ok(UpsertOutcome::Updated(target_cid));
+                    }
+                }
+            }
+
+            let cid = new_id("c_");
+            insert_profile_row(&cid, true)?;
+            Ok(UpsertOutcome::Created(cid))
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT contact_id, enterprise FROM contact_profiles WHERE account_id=? AND category=? AND nickname=? AND (wechat_id IS NULL OR wechat_id='')"
+            )?;
+            let weak_rows = stmt.query_map(params![account_id, category, clean_nickname], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })?.filter_map(Result::ok).collect::<Vec<_>>();
+            drop(stmt);
+
+            let matched_weak = weak_rows.into_iter().find(|(_, ent)| {
+                match (&p.enterprise, ent) {
+                    (Some(e1), Some(e2)) => e1 == e2,
+                    (None, None) => true,
+                    _ => false,
+                }
+            });
+
+            if let Some((cid, _)) = matched_weak {
+                update_profile_row(&cid)?;
+                return Ok(UpsertOutcome::Updated(cid));
+            }
+
+            let mut candidate_cids = HashSet::new();
+            for name in [Some(clean_nickname), clean_remark].into_iter().flatten() {
+                let owners = _owners_conn(&conn, account_id, &name_key(name), &["config", "alias", "observed", "addressbook"], true)?;
+                candidate_cids.extend(owners);
+            }
+
+            if candidate_cids.len() > 1 {
+                let mut candidates: Vec<String> = candidate_cids.into_iter().collect();
+                candidates.sort();
+                record_review("ambiguous_name", &candidates)?;
+                return Ok(UpsertOutcome::NeedsReview {
+                    reason: "ambiguous_name".to_string(),
+                    candidates,
+                });
+            }
+
+            if candidate_cids.len() == 1 {
+                let target_cid = candidate_cids.into_iter().next().unwrap();
+                let has_profile: bool = conn
+                    .query_row(
+                        "SELECT 1 FROM contact_profiles WHERE contact_id=?",
+                        params![&target_cid],
+                        |_| Ok(true),
+                    )
+                    .optional()?
+                    .unwrap_or(false);
+
+                if has_profile {
+                    update_profile_row(&target_cid)?;
+                } else {
+                    insert_profile_row(&target_cid, false)?;
+                }
+                return Ok(UpsertOutcome::Updated(target_cid));
+            }
+
+            let cid = new_id("c_");
+            insert_profile_row(&cid, true)?;
+            Ok(UpsertOutcome::Created(cid))
+        }
+    }
+
+    pub fn mark_missing(&self, account_id: &str, category: &str, seen_contact_ids: &[String], now_ms: i64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        if seen_contact_ids.is_empty() {
+            let count = conn.execute(
+                "UPDATE contact_profiles SET removed_at=? WHERE account_id=? AND category=? AND removed_at IS NULL",
+                params![now_ms, account_id, category],
+            )?;
+            return Ok(count);
+        }
+        let marks = seen_contact_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "UPDATE contact_profiles SET removed_at=? WHERE account_id=? AND category=? AND removed_at IS NULL AND contact_id NOT IN ({})",
+            marks
+        );
+        let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::new();
+        params_vec.push(&now_ms);
+        params_vec.push(&account_id);
+        params_vec.push(&category);
+        for id in seen_contact_ids {
+            params_vec.push(id);
+        }
+        let count = conn.execute(&sql, rusqlite::params_from_iter(params_vec))?;
+        Ok(count)
+    }
+
+    pub fn list_profiles(&self, account_id: &str, category: Option<&str>) -> Result<Vec<Value>> {
+        let conn = self.conn.lock().unwrap();
+        let map_row = |r: &rusqlite::Row| -> rusqlite::Result<Value> {
+            let tags_str: String = r.get(12)?;
+            let tags_val: Value = serde_json::from_str(&tags_str).unwrap_or_else(|_| json!([]));
+            Ok(json!({
+                "contact_id": r.get::<_, String>(0)?,
+                "account_id": r.get::<_, String>(1)?,
+                "wechat_id": r.get::<_, Option<String>>(2)?,
+                "category": r.get::<_, String>(3)?,
+                "nickname": r.get::<_, String>(4)?,
+                "remark": r.get::<_, Option<String>>(5)?,
+                "region": r.get::<_, Option<String>>(6)?,
+                "source": r.get::<_, Option<String>>(7)?,
+                "added_on": r.get::<_, Option<String>>(8)?,
+                "common_groups": r.get::<_, Option<i64>>(9)?,
+                "enterprise": r.get::<_, Option<String>>(10)?,
+                "real_name": r.get::<_, Option<String>>(11)?,
+                "tags": tags_val,
+                "friend_permission": r.get::<_, Option<String>>(13)?,
+                "identity": r.get::<_, String>(14)?,
+                "first_synced_at": r.get::<_, i64>(15)?,
+                "last_synced_at": r.get::<_, i64>(16)?,
+                "removed_at": r.get::<_, Option<i64>>(17)?,
+            }))
+        };
+
+        let mut list = Vec::new();
+        if let Some(cat) = category {
+            let mut stmt = conn.prepare(
+                "SELECT contact_id, account_id, wechat_id, category, nickname, remark, region, source, added_on, common_groups, enterprise, real_name, tags, friend_permission, identity, first_synced_at, last_synced_at, removed_at FROM contact_profiles WHERE account_id=? AND category=? ORDER BY first_synced_at ASC"
+            )?;
+            let rows = stmt.query_map(params![account_id, cat], map_row)?;
+            for row in rows {
+                list.push(row?);
+            }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT contact_id, account_id, wechat_id, category, nickname, remark, region, source, added_on, common_groups, enterprise, real_name, tags, friend_permission, identity, first_synced_at, last_synced_at, removed_at FROM contact_profiles WHERE account_id=? ORDER BY first_synced_at ASC"
+            )?;
+            let rows = stmt.query_map(params![account_id], map_row)?;
+            for row in rows {
+                list.push(row?);
+            }
+        }
+        Ok(list)
+    }
+
+    pub fn pending_reviews(&self, account_id: &str) -> Result<Vec<Value>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, account_id, reason, candidates, profile, created_at FROM contact_reviews WHERE account_id=? AND resolved_at IS NULL ORDER BY id ASC"
+        )?;
+        let rows = stmt.query_map([account_id], |r| {
+            let cands_str: String = r.get(3)?;
+            let prof_str: String = r.get(4)?;
+            Ok(json!({
+                "id": r.get::<_, i64>(0)?,
+                "account_id": r.get::<_, String>(1)?,
+                "reason": r.get::<_, String>(2)?,
+                "candidates": serde_json::from_str::<Value>(&cands_str).unwrap_or_else(|_| json!([])),
+                "profile": serde_json::from_str::<Value>(&prof_str).unwrap_or_else(|_| json!({})),
+                "created_at": r.get::<_, i64>(5)?,
+            }))
+        })?;
+        let mut list = Vec::new();
+        for row in rows {
+            list.push(row?);
+        }
+        Ok(list)
+    }
 }
 
 pub fn compact(text: &str) -> String {
@@ -1318,6 +1697,32 @@ fn sequence_matcher_ratio(a: &[char], b: &[char]) -> f64 {
     }
     let matches = find_blocks(a, 0, a.len(), b, 0, b.len());
     2.0 * (matches as f64) / (total as f64)
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProfileInput {
+    pub category: String,
+    pub wechat_id: Option<String>,
+    pub nickname: String,
+    pub remark: Option<String>,
+    pub region: Option<String>,
+    pub source: Option<String>,
+    pub added_on: Option<String>,
+    pub common_groups: Option<i64>,
+    pub enterprise: Option<String>,
+    pub real_name: Option<String>,
+    pub tags: Vec<String>,
+    pub friend_permission: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpsertOutcome {
+    Created(String),
+    Updated(String),
+    NeedsReview {
+        reason: String,
+        candidates: Vec<String>,
+    },
 }
 
 #[cfg(test)]
@@ -2001,5 +2406,368 @@ store.conn.close()
             .status()
             .unwrap();
         assert!(status2.success(), "Python reader script failed");
+    }
+
+    #[test]
+    fn test_profile_migration_creates_table_and_addressbook_source() {
+        let f = setup_fixture();
+        let conn = f.store.connection();
+        let guard = conn.lock().unwrap();
+
+        // 1. 验证 contact_profiles 表存在
+        let exists: bool = guard
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='contact_profiles'",
+                [],
+                |_| Ok(true),
+            )
+            .optional()
+            .unwrap()
+            .unwrap_or(false);
+        assert!(exists, "contact_profiles table must exist after migration");
+
+        // 2. 验证 contact_names 可插入 source='addressbook'
+        let initial_count: i64 = guard
+            .query_row("SELECT COUNT(*) FROM contact_names", [], |r| r.get(0))
+            .unwrap();
+        guard
+            .execute(
+                "INSERT INTO contact_names(contact_id, account_id, raw_name, name_key, source, first_seen_at, last_seen_at) VALUES(?,?,?,?,?,?,?)",
+                params![&f.c, "acct", "通讯录好友", "通讯录好友", "addressbook", 1000, 1000],
+            )
+            .expect("should allow inserting source='addressbook'");
+        let count_after: i64 = guard
+            .query_row("SELECT COUNT(*) FROM contact_names", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count_after, initial_count + 1);
+    }
+
+    #[test]
+    fn test_upsert_new_personal_creates_contact_and_names() {
+        let f = setup_fixture();
+        let input = ProfileInput {
+            category: "personal".to_string(),
+            wechat_id: Some("wxid_t1".to_string()),
+            nickname: "测试甲".to_string(),
+            remark: Some("甲备注".to_string()),
+            region: Some("北京 海淀".to_string()),
+            source: Some("通过搜索添加".to_string()),
+            added_on: Some("2024-01-01".to_string()),
+            common_groups: Some(2),
+            enterprise: None,
+            real_name: None,
+            tags: vec!["朋友".to_string()],
+            friend_permission: Some("聊天、朋友圈".to_string()),
+        };
+        let outcome = f.store.upsert_profile("acct", &input, 1000).unwrap();
+        match outcome {
+            UpsertOutcome::Created(cid) => {
+                assert_eq!(f.store.resolve("acct", "甲备注").unwrap(), Some(cid.clone()));
+                assert_eq!(f.store.resolve("acct", "测试甲").unwrap(), Some(cid));
+            }
+            other => panic!("expected Created, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_upsert_same_wechat_id_updates_and_keeps_contact() {
+        let f = setup_fixture();
+        let input1 = ProfileInput {
+            category: "personal".to_string(),
+            wechat_id: Some("wxid_t1".to_string()),
+            nickname: "测试甲".to_string(),
+            remark: Some("甲备注".to_string()),
+            region: None,
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+        };
+        let cid = match f.store.upsert_profile("acct", &input1, 1000).unwrap() {
+            UpsertOutcome::Created(cid) => cid,
+            other => panic!("expected Created, got {:?}", other),
+        };
+
+        let input2 = ProfileInput {
+            category: "personal".to_string(),
+            wechat_id: Some("wxid_t1".to_string()),
+            nickname: "测试甲".to_string(),
+            remark: Some("新甲备注".to_string()),
+            region: None,
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+        };
+        let outcome2 = f.store.upsert_profile("acct", &input2, 2000).unwrap();
+        assert_eq!(outcome2, UpsertOutcome::Updated(cid.clone()));
+        assert_eq!(f.store.resolve("acct", "新甲备注").unwrap(), Some(cid));
+    }
+
+    #[test]
+    fn test_upsert_matches_existing_history_contact_by_unique_name() {
+        let f = setup_fixture();
+        // 已有聊过天的联系人"测试乙"（无资料）
+        let orig_cid = f.store.ensure_contact("acct", &json!({"recipient": "测试乙", "kind": "private"}), true).unwrap();
+        f.store.record_frame(&orig_cid, &fr(vec![bub("你好测试乙", "inbound_visual", "text")]), None, None, false).unwrap();
+        let msg_count_before: i64 = f.store.connection().lock().unwrap()
+            .query_row("SELECT COUNT(*) FROM messages WHERE contact_id=?", [&orig_cid], |r| r.get(0)).unwrap();
+        assert_eq!(msg_count_before, 1);
+
+        let input = ProfileInput {
+            category: "personal".to_string(),
+            wechat_id: Some("wxid_t2".to_string()),
+            nickname: "测试乙".to_string(),
+            remark: None,
+            region: None,
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+        };
+        let outcome = f.store.upsert_profile("acct", &input, 3000).unwrap();
+        assert_eq!(outcome, UpsertOutcome::Updated(orig_cid.clone()));
+
+        let msg_count_after: i64 = f.store.connection().lock().unwrap()
+            .query_row("SELECT COUNT(*) FROM messages WHERE contact_id=?", [&orig_cid], |r| r.get(0)).unwrap();
+        assert_eq!(msg_count_after, 1, "messages count must remain unchanged");
+    }
+
+    #[test]
+    fn test_upsert_ambiguous_name_needs_review() {
+        let f = setup_fixture();
+        // 创建两个不同联系人，都叫"重名丙"
+        let c1 = f.store.ensure_contact("acct", &json!({"recipient": "c1_display", "kind": "private"}), true).unwrap();
+        let c2 = f.store.ensure_contact("acct", &json!({"recipient": "c2_display", "kind": "private"}), true).unwrap();
+        f.store.observe_name(&c1, "重名丙").unwrap();
+        f.store.observe_name(&c2, "重名丙").unwrap();
+
+        let input = ProfileInput {
+            category: "personal".to_string(),
+            wechat_id: Some("wxid_bing".to_string()),
+            nickname: "重名丙".to_string(),
+            remark: None,
+            region: None,
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+        };
+        let outcome = f.store.upsert_profile("acct", &input, 4000).unwrap();
+        match outcome {
+            UpsertOutcome::NeedsReview { reason, mut candidates } => {
+                assert!(reason.contains("ambiguous") || reason.contains("conflict") || !reason.is_empty());
+                candidates.sort();
+                let mut expected = vec![c1, c2];
+                expected.sort();
+                assert_eq!(candidates, expected);
+            }
+            other => panic!("expected NeedsReview, got {:?}", other),
+        }
+
+        let reviews = f.store.pending_reviews("acct").unwrap();
+        assert!(!reviews.is_empty(), "pending_reviews must list ambiguous profile review");
+    }
+
+    #[test]
+    fn test_upsert_wechat_id_conflict_needs_review() {
+        let f = setup_fixture();
+        // 先建立一个已有微信号 wxid_a 的联系人，名字为冲突丁
+        let input_a = ProfileInput {
+            category: "personal".to_string(),
+            wechat_id: Some("wxid_a".to_string()),
+            nickname: "冲突丁".to_string(),
+            remark: None,
+            region: None,
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+        };
+        let outcome_a = f.store.upsert_profile("acct", &input_a, 1000).unwrap();
+        let cid_a = match outcome_a {
+            UpsertOutcome::Created(cid) => cid,
+            other => panic!("expected Created, got {:?}", other),
+        };
+
+        // 再来同名但是微信号不同的 wxid_b
+        let input_b = ProfileInput {
+            category: "personal".to_string(),
+            wechat_id: Some("wxid_b".to_string()),
+            nickname: "冲突丁".to_string(),
+            remark: None,
+            region: None,
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+        };
+        let outcome_b = f.store.upsert_profile("acct", &input_b, 2000).unwrap();
+        match outcome_b {
+            UpsertOutcome::NeedsReview { reason, candidates } => {
+                assert!(reason.contains("wechat_id") || reason.contains("conflict") || !reason.is_empty());
+                assert!(candidates.contains(&cid_a));
+            }
+            other => panic!("expected NeedsReview, got {:?}", other),
+        }
+
+        // 验证原微信号未被覆盖
+        let profiles = f.store.list_profiles("acct", None).unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0]["wechat_id"].as_str().unwrap(), "wxid_a");
+    }
+
+    #[test]
+    fn test_weak_identity_for_work_contact() {
+        let f = setup_fixture();
+        let input1 = ProfileInput {
+            category: "work".to_string(),
+            wechat_id: None,
+            nickname: "企微员工戊".to_string(),
+            remark: None,
+            region: None,
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: Some("某某企业".to_string()),
+            real_name: Some("员工戊".to_string()),
+            tags: vec![],
+            friend_permission: None,
+        };
+        let outcome1 = f.store.upsert_profile("acct", &input1, 1000).unwrap();
+        let cid = match outcome1 {
+            UpsertOutcome::Created(cid) => cid,
+            other => panic!("expected Created, got {:?}", other),
+        };
+
+        let profiles = f.store.list_profiles("acct", Some("work")).unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0]["identity"].as_str().unwrap(), "weak");
+
+        // 再次同步同名同企业
+        let input2 = ProfileInput {
+            category: "work".to_string(),
+            wechat_id: None,
+            nickname: "企微员工戊".to_string(),
+            remark: Some("备注戊".to_string()),
+            region: None,
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: Some("某某企业".to_string()),
+            real_name: Some("员工戊".to_string()),
+            tags: vec!["客户组".to_string()],
+            friend_permission: None,
+        };
+        let outcome2 = f.store.upsert_profile("acct", &input2, 2000).unwrap();
+        assert_eq!(outcome2, UpsertOutcome::Updated(cid));
+    }
+
+    #[test]
+    fn test_official_category_recorded() {
+        let f = setup_fixture();
+        let input = ProfileInput {
+            category: "official".to_string(),
+            wechat_id: Some("gh_test_official".to_string()),
+            nickname: "测试公众号".to_string(),
+            remark: None,
+            region: None,
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+        };
+        f.store.upsert_profile("acct", &input, 1000).unwrap();
+        let officials = f.store.list_profiles("acct", Some("official")).unwrap();
+        assert_eq!(officials.len(), 1);
+        assert_eq!(officials[0]["category"].as_str().unwrap(), "official");
+        assert_eq!(officials[0]["wechat_id"].as_str().unwrap(), "gh_test_official");
+    }
+
+    #[test]
+    fn test_mark_missing_sets_removed_at_not_deleting() {
+        let f = setup_fixture();
+        let p1 = ProfileInput {
+            category: "personal".to_string(),
+            wechat_id: Some("wxid_p1".to_string()),
+            nickname: "联系人一".to_string(),
+            remark: None,
+            region: None,
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+        };
+        let p2 = ProfileInput {
+            category: "personal".to_string(),
+            wechat_id: Some("wxid_p2".to_string()),
+            nickname: "联系人二".to_string(),
+            remark: None,
+            region: None,
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+        };
+        let cid1 = match f.store.upsert_profile("acct", &p1, 1000).unwrap() {
+            UpsertOutcome::Created(cid) => cid,
+            other => panic!("expected Created, got {:?}", other),
+        };
+        let cid2 = match f.store.upsert_profile("acct", &p2, 1000).unwrap() {
+            UpsertOutcome::Created(cid) => cid,
+            other => panic!("expected Created, got {:?}", other),
+        };
+
+        // 记录 p1 聊天消息
+        f.store.record_frame(&cid1, &fr(vec![bub("你好p1", "inbound_visual", "text")]), None, None, false).unwrap();
+
+        // mark_missing: 只有 cid1 出现，cid2 缺失
+        let missing_count = f.store.mark_missing("acct", "personal", &[cid1.clone()], 2000).unwrap();
+        assert_eq!(missing_count, 1);
+
+        // 验证 cid2 设置了 removed_at，但聊天记录和联系人未删除
+        let profiles = f.store.list_profiles("acct", Some("personal")).unwrap();
+        let prof1 = profiles.iter().find(|p| p["contact_id"] == cid1).unwrap();
+        let prof2 = profiles.iter().find(|p| p["contact_id"] == cid2).unwrap();
+        assert!(prof1["removed_at"].is_null());
+        assert_eq!(prof2["removed_at"].as_i64().unwrap(), 2000);
+
+        let msg_count: i64 = f.store.connection().lock().unwrap()
+            .query_row("SELECT COUNT(*) FROM messages WHERE contact_id=?", [&cid1], |r| r.get(0)).unwrap();
+        assert_eq!(msg_count, 1);
+
+        // 再次出现时清空 removed_at
+        let outcome2 = f.store.upsert_profile("acct", &p2, 3000).unwrap();
+        assert_eq!(outcome2, UpsertOutcome::Updated(cid2.clone()));
+        let profiles_after = f.store.list_profiles("acct", Some("personal")).unwrap();
+        let prof2_after = profiles_after.iter().find(|p| p["contact_id"] == cid2).unwrap();
+        assert!(prof2_after["removed_at"].is_null());
     }
 }
