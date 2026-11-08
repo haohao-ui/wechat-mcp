@@ -106,5 +106,53 @@
       "region": "title",
       "kind": "text_present"
     }
-  ]
+  ],
+  "contacts": {
+    "nav_contacts": {
+      "x": 30,
+      "y": 169
+    },
+    "nav_chats": {
+      "x": 30,
+      "y": 121
+    },
+    "list": {
+      "x": 60,
+      "y": 40,
+      "w": 240,
+      "h": 600
+    },
+    "manager_button": {
+      "x": 180,
+      "y": 59
+    },
+    "profile": {
+      "x": 420,
+      "y": 50,
+      "w": 400,
+      "h": 390
+    },
+    "profile_forbidden": {
+      "x": 420,
+      "y": 440,
+      "w": 420,
+      "h": 120
+    },
+    "row_height": 50,
+    "manager": {
+      "first_row_y": 96,
+      "row_height": 48,
+      "rows": 10,
+      "columns": {
+        "name_x": 300,
+        "remark_x": 385,
+        "tags_x": 500,
+        "permission_x": 620
+      },
+      "filter": {
+        "x": 40,
+        "tag_y": 167
+      }
+    }
+  }
 }
