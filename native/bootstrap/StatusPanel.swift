@@ -63,6 +63,11 @@ public final class StatusPanelController: NSViewController {
     private var latestItems: [StatusItem] = []
     private var latestBotState: String?
 
+    public var currentRawConfig: [String: Any] { rawConfigDict }
+    public var logDirectoryURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".wechat-rpa/logs", isDirectory: true)
+    }
+
     init(worker: SocketWorker, coreSupervisor: CoreSupervisor = CoreSupervisor()) {
         self.worker = worker
         self.coreSupervisor = coreSupervisor
@@ -834,9 +839,67 @@ public final class StatusPanelController: NSViewController {
             actionMessageLabel.stringValue = "配置保存被拒绝"
         }
     }
+
+    public func collectLatestStatus() -> ([StatusItem], StatusInput) {
+        let input = collectStatusInput()
+        let items = evaluate(input)
+        latestItems = items
+        latestBotState = input.bot.healthState
+        return (items, input)
+    }
+
+    public func pauseResumeBot() {
+        handleTogglePause()
+    }
+
+    public func restartDesktopService() {
+        handleRestartDesktopService()
+    }
+
+    public func restartBot() {
+        handleRestartBot()
+    }
+
+    public func repositionWechat() {
+        handleRestoreWechatWindow()
+    }
+
+    public func resumeHandoff(sessionName: String? = nil) {
+        if let name = sessionName {
+            handoffSessionNames = [name]
+        }
+        handleResumeHandoff()
+    }
+
+    public func openAttachments() {
+        handleOpenAttachments()
+    }
+
+    public func openLogs() {
+        handleOpenLogs()
+    }
+
+    public func copyDiagnostics() {
+        handleCopyDiagnostics()
+    }
+
+    public func persistConfig(_ newConfig: [String: Any]) throws {
+        guard let targetURL = currentConfigURL else {
+            throw ConfigFormError.writeFailed("配置路径无效")
+        }
+        let data = try JSONSerialization.data(withJSONObject: newConfig, options: [.prettyPrinted])
+        try ConfigFormLogic.saveConfig(
+            targetPath: targetURL,
+            newConfigData: data,
+            checker: ConfigFormLogic.defaultCheckConfig,
+            reloader: ConfigFormLogic.defaultReloadBot
+        )
+        rawConfigDict = newConfig
+        refresh()
+    }
 }
 
 /// A document view whose origin is the top-left corner, so scrolled content starts at the top.
-final class FlippedView: NSView {
-    override var isFlipped: Bool { true }
+public class FlippedView: NSView {
+    public override var isFlipped: Bool { true }
 }

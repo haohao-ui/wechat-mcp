@@ -1912,3 +1912,245 @@ fn test_host_turns_sigterm_into_orderly_terminate() {
     let plist = fs::read_to_string("native/bootstrap/local.wechat-mcp.host.plist").unwrap();
     assert!(plist.contains("<key>ExitTimeOut</key>"), "LaunchAgent 要给宿主足够时间停止核心");
 }
+
+fn host_task5_selftest_bin() -> Option<&'static PathBuf> {
+    static BIN: OnceLock<Option<PathBuf>> = OnceLock::new();
+    BIN.get_or_init(|| {
+        if !has_swiftc() {
+            return None;
+        }
+        let root = repo_root();
+        let out_dir = root.join("target").join("swift_test_bin");
+        fs::create_dir_all(&out_dir).ok()?;
+        let bin_path = out_dir.join("host_task5_selftest");
+
+        let files_to_compile = [
+            root.join("native").join("bootstrap").join("Probe.swift"),
+            root.join("native").join("bootstrap").join("Supervisor.swift"),
+            root.join("native").join("bootstrap").join("CoreSupervisor.swift"),
+            root.join("native").join("bootstrap").join("SocketWorker.swift"),
+            root.join("native").join("bootstrap").join("Actions.swift"),
+            root.join("native").join("bootstrap").join("StatusModel.swift"),
+            root.join("native").join("bootstrap").join("ConfigForm.swift"),
+            root.join("native").join("bootstrap").join("StatusPanel.swift"),
+            root.join("native").join("bootstrap").join("LogTail.swift"),
+            root.join("native").join("bootstrap").join("Permissions.swift"),
+            root.join("native").join("bootstrap").join("SettingsPage.swift"),
+            root.join("native").join("eyes").join("Screens.swift"),
+            root.join("tests").join("host_task5_selftest").join("main.swift"),
+        ];
+
+        for f in &files_to_compile {
+            if !f.exists() {
+                eprintln!("required Swift file does not exist: {}", f.display());
+                return None;
+            }
+        }
+
+        let mut cmd = Command::new("swiftc");
+        cmd.arg("-O");
+        for f in &files_to_compile {
+            cmd.arg(f);
+        }
+        cmd.arg("-o").arg(&bin_path);
+
+        let output = cmd.output().ok()?;
+        if !output.status.success() {
+            eprintln!(
+                "swiftc compilation of host_task5_selftest failed:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return None;
+        }
+        Some(bin_path)
+    })
+    .as_ref()
+}
+
+fn run_task5_cmd(command: &str, payload: &Value) -> Result<Value, String> {
+    let bin = host_task5_selftest_bin().ok_or_else(|| "host_task5_selftest binary not available".to_string())?;
+    let payload_str = serde_json::to_string(payload).unwrap();
+    let output = Command::new(bin)
+        .arg(command)
+        .arg(&payload_str)
+        .output()
+        .map_err(|e| format!("failed to execute host_task5_selftest: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "host_task5_selftest {} failed (code {:?}): {}",
+            command,
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    serde_json::from_slice(&output.stdout).map_err(|e| format!("invalid json output: {}", e))
+}
+
+#[test]
+fn test_log_tail_reads_only_new_lines_and_caps() {
+    if !has_swiftc() {
+        eprintln!("swiftc not available, skipping test");
+        return;
+    }
+    let td = TempDir::new("log_tail_test");
+    let log_file = td.path.join("test.log");
+
+    // 初始写 3 行
+    fs::write(&log_file, "line 1\nline 2\nline 3\n").unwrap();
+
+    let ops = serde_json::json!({
+        "file_path": log_file.to_str().unwrap(),
+        "max_lines": 500,
+        "operations": [
+            // 第一次 poll：应得 3 行
+            {"op": "poll"},
+            // 追加 2 行
+            {"op": "append", "lines": ["line 4", "line 5"]},
+            // 第二次 poll：应只增量读到 2 行
+            {"op": "poll"},
+            // 超过 500 行测试（写入 600 行），截断后 poll 只保留最近 500 行
+            {"op": "truncate", "lines": (1..=600).map(|i| format!("bulk line {}", i)).collect::<Vec<_>>()},
+            // 第三次 poll：截断后从头读，且 cap 到 500
+            {"op": "poll"}
+        ]
+    });
+
+    let res = run_task5_cmd("log_tail", &ops).expect("log_tail command failed");
+    assert_eq!(res["ok"], true);
+    let polls = res["polls"].as_array().expect("polls array");
+    assert_eq!(polls.len(), 3);
+
+    // 第一次 poll
+    let p1 = polls[0][0].as_array().unwrap();
+    assert_eq!(p1.len(), 3);
+    assert_eq!(p1[0], "line 1");
+    assert_eq!(p1[2], "line 3");
+
+    // 第二次 poll：只读新增的 2 行
+    let p2 = polls[1][0].as_array().unwrap();
+    assert_eq!(p2.len(), 2);
+    assert_eq!(p2[0], "line 4");
+    assert_eq!(p2[1], "line 5");
+
+    // 第三次 poll：截断后读，最多保留 500 行
+    let p3 = polls[2][0].as_array().unwrap();
+    assert_eq!(p3.len(), 500);
+    assert_eq!(p3[0], "bulk line 101");
+    assert_eq!(p3[499], "bulk line 600");
+}
+
+#[test]
+fn test_session_state_copy_for_missing_row() {
+    if !has_swiftc() {
+        eprintln!("swiftc not available, skipping test");
+        return;
+    }
+    // 1. 通过 StatusModel.evaluate 测试
+    let mut inp = default_status_input();
+    inp["sessions"] = serde_json::json!({
+        "测试群": {
+            "state": "waiting_for_wechat_window",
+            "reason": "session_row_not_unique_or_missing",
+            "code": "session_row_not_unique_or_missing"
+        }
+    });
+    let items = run_host_cmd("status", &inp).unwrap();
+    let session_item = items.as_array().unwrap().iter().find(|i| i["key"] == "sessions").unwrap();
+    let reason_text = session_item["reason"].as_str().unwrap();
+    assert!(
+        reason_text.contains("会话不在列表可见范围"),
+        "evaluate() sessions reason 必须含人话文案，实际为: {}",
+        reason_text
+    );
+
+    // 2. 通过 sessionStateHumanReadable 纯逻辑命令测试
+    let payload = serde_json::json!({
+        "state": "waiting_for_wechat_window",
+        "reason": "session_row_not_unique_or_missing",
+        "code": "session_row_not_unique_or_missing"
+    });
+    let res = run_task5_cmd("session_copy", &payload).expect("session_copy failed");
+    assert_eq!(res["ok"], true);
+    let text = res["text"].as_str().unwrap();
+    assert!(
+        text.contains("会话不在列表可见范围"),
+        "人话状态文案必须包含「会话不在列表可见范围」，实际为: {}",
+        text
+    );
+}
+
+#[test]
+fn test_every_legacy_panel_control_has_new_home() {
+    // 源码检查——spec §8.2 每一项（保存配置、重启桌面服务、重启机器人、放回标准位置、恢复自动回复、打开附件文件夹、打开日志文件夹、复制诊断信息、请求屏幕录制权限、请求辅助功能权限、自动管理微信主窗口、各配置字段键名）在新页面文件里都有对应调用。
+    let overview_src = fs::read_to_string("native/bootstrap/OverviewPage.swift").expect("OverviewPage.swift 必须存在");
+    let sessions_src = fs::read_to_string("native/bootstrap/SessionsPage.swift").expect("SessionsPage.swift 必须存在");
+    let settings_src = fs::read_to_string("native/bootstrap/SettingsPage.swift").expect("SettingsPage.swift 必须存在");
+    let logs_src = fs::read_to_string("native/bootstrap/LogsPage.swift").expect("LogsPage.swift 必须存在");
+    let perm_src = fs::read_to_string("native/bootstrap/Permissions.swift").expect("Permissions.swift 必须存在");
+    let shell_src = fs::read_to_string("native/bootstrap/Shell.swift").expect("Shell.swift 必须存在");
+
+    let all_new_src = format!("{}\n{}\n{}\n{}\n{}\n{}", overview_src, sessions_src, settings_src, logs_src, perm_src, shell_src);
+
+    // 1. 保存配置
+    assert!(all_new_src.contains("保存配置") || all_new_src.contains("saveConfig"), "必须包含保存配置操作");
+    // 2. 重启桌面服务
+    assert!(all_new_src.contains("重启桌面服务") || all_new_src.contains("restartDesktopService"), "必须包含重启桌面服务操作");
+    // 3. 重启机器人
+    assert!(all_new_src.contains("重启机器人") || all_new_src.contains("restartBot"), "必须包含重启机器人操作");
+    // 4. 放回标准位置
+    assert!(all_new_src.contains("放回标准位置") || all_new_src.contains("repositionWechat"), "必须包含微信放回标准位置操作");
+    // 5. 恢复自动回复
+    assert!(all_new_src.contains("恢复自动回复") || all_new_src.contains("resumeHandoff"), "必须包含恢复自动回复操作");
+    // 6. 打开附件文件夹
+    assert!(all_new_src.contains("打开附件文件夹") || all_new_src.contains("openAttachments"), "必须包含打开附件文件夹操作");
+    // 7. 打开日志文件夹
+    assert!(all_new_src.contains("打开日志文件夹") || all_new_src.contains("openLogs"), "必须包含打开日志文件夹操作");
+    // 8. 复制诊断信息
+    assert!(all_new_src.contains("复制诊断信息") || all_new_src.contains("copyDiagnostics"), "必须包含复制诊断信息操作");
+    // 9. 请求屏幕录制权限
+    assert!(all_new_src.contains("screen") && (all_new_src.contains("requestPermission") || all_new_src.contains("requestScreenRecording")), "必须包含请求屏幕录制权限");
+    // 10. 请求辅助功能权限
+    assert!(all_new_src.contains("accessibility") && (all_new_src.contains("requestPermission") || all_new_src.contains("requestAccessibility")), "必须包含请求辅助功能权限");
+    // 11. 自动管理微信主窗口
+    assert!(all_new_src.contains("manage_window") || all_new_src.contains("自动管理微信主窗口"), "必须包含自动管理微信主窗口控件");
+
+    // 12. 各配置字段键名
+    for key in &[
+        "cooldown_seconds",
+        "turn_quiet_seconds",
+        "turn_max_seconds",
+        "max_attachment_mb",
+        "max_replies_per_hour",
+        "context_messages",
+    ] {
+        assert!(settings_src.contains(key), "SettingsPage 必须包含配置字段键名: {}", key);
+    }
+}
+
+#[test]
+fn test_settings_fields_keep_validation_ranges() {
+    if !has_swiftc() {
+        eprintln!("swiftc not available, skipping test");
+        return;
+    }
+    // 设置页保存走 ConfigFormLogic，越界值（冷却 301）返回错误提示。
+    let payload = serde_json::json!({
+        "original_config": {
+            "schema_version": 1,
+            "account_id": "test_acc",
+            "cooldown_seconds": 15
+        },
+        "form_inputs": {
+            "cooldown_seconds": "301"
+        }
+    });
+    let res = run_task5_cmd("settings_validate", &payload).expect("settings_validate failed");
+    assert_eq!(res["ok"], false, "冷却 301 必须校验失败");
+    let err = res["error"].as_str().unwrap();
+    assert!(
+        err.contains("cooldown_seconds") || err.contains("冷却") || err.contains("300"),
+        "错误提示必须说明范围，实际: {}",
+        err
+    );
+}
