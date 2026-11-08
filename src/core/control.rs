@@ -1756,8 +1756,13 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                         wait_seconds = args[idx + 1].parse().ok();
                         idx += 2;
                     }
-                    _ => {
-                        idx += 1;
+                    other => {
+                        // 未知参数（含 --help）只打印用法：同步会在微信里逐个点开资料卡，不能被误触发
+                        let _ = writeln!(
+                            stderr,
+                            "Usage: wechat-mcp control contacts-sync [--full] [--wait SECONDS] [--config PATH]\nunknown argument: {other}"
+                        );
+                        return 2;
                     }
                 }
             }
@@ -3492,6 +3497,30 @@ mod tests {
             let mut stderr = Vec::new();
             let code = execute_control(&args, &mut stdout, &mut stderr, Some(false));
             assert_eq!(code, 2, "{} 遇到无效配置应退出 2: {}", args[0], String::from_utf8_lossy(&stderr));
+        }
+    }
+
+    /// 2026-11-08 实机：`contacts-sync --help` 被当成一次同步请求提交。未知参数只打印用法、退出 2、不提交请求。
+    #[test]
+    fn test_contacts_sync_unknown_argument_prints_usage_without_queueing() {
+        let _lock = crate::core::env_lock();
+        let env = TempDir::new();
+        let state_dir = env.path().join("state");
+        let cfg = json!({"schema_version": 1, "account_id": "t", "host": "local",
+                         "state_dir": state_dir.to_str().unwrap(),
+                         "allowlist": [{"recipient": "示例群", "kind": "group"}]});
+        let cfg_path = env.path().join("config.json");
+        fs::write(&cfg_path, cfg.to_string()).unwrap();
+        for bad in ["--help", "-h", "--ful", "now"] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let code = execute_control(
+                &["contacts-sync".into(), bad.into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+                &mut stdout, &mut stderr, Some(false),
+            );
+            assert_eq!(code, 2, "{bad}");
+            assert!(String::from_utf8_lossy(&stderr).contains("Usage"), "{bad}: 应打印用法");
+            assert!(!state_dir.join("contacts-sync-request.json").exists(), "{bad}: 不得提交同步请求");
         }
     }
 

@@ -342,11 +342,21 @@ public struct WechatLayout: Decodable, Equatable {
         return r
     }
 
+    /// 微信 4.1.15 通讯录界面的实测坐标（docs/observations §8/§8.1），与 native/layout/wechat-4.1.15.json 的
+    /// contacts 段逐字一致（测试比对）。设备上已校准的布局图只覆盖聊天界面、可能没有 contacts 段，此时回退到这里。
+    static let measuredContacts4115JSON = #"{"nav_contacts":{"x":30,"y":169},"nav_chats":{"x":30,"y":121},"list":{"x":60,"y":40,"w":240,"h":600},"manager_button":{"x":180,"y":59},"profile":{"x":420,"y":50,"w":400,"h":390},"profile_forbidden":{"x":420,"y":440,"w":420,"h":120},"row_height":50,"manager":{"first_row_y":96,"row_height":48,"rows":10,"columns":{"name_x":300,"remark_x":385,"tags_x":500,"permission_x":620},"filter":{"x":40,"tag_y":167,"all_y":52}}}"#
+
     public func contactsSpec() throws -> ContactsLayoutSpec {
-        guard let spec = contacts else {
-            throw LayoutError.missingContacts
+        if let spec = contacts {
+            return spec
         }
-        return spec
+        // 只给实测过的版本回退；其他版本宁可报缺失也不按猜测的坐标点击
+        if wechatVersion == "4.1.15",
+           let data = WechatLayout.measuredContacts4115JSON.data(using: .utf8),
+           let spec = try? JSONDecoder().decode(ContactsLayoutSpec.self, from: data) {
+            return spec
+        }
+        throw LayoutError.missingContacts
     }
 
     public static func path(forVersion v: String, directory: String) -> String? {

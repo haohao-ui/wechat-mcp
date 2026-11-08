@@ -94,21 +94,31 @@ do {
     exit(1)
 }
 
-// 2. 缺 contacts 段报 layout_missing_contacts
+// 2. 设备上已校准的布局图可能没有 contacts 段（校准只覆盖聊天界面）：
+//    4.1.15（实测过的版本）回退到内置坐标，且必须与仓库布局图完全一致；其他版本仍报 layout_missing_contacts。
 let rawData = try! Data(contentsOf: URL(fileURLWithPath: layoutPath))
 var dict = try! JSONSerialization.jsonObject(with: rawData) as! [String: Any]
+let repoSpec = try! layout.contactsSpec()
 dict.removeValue(forKey: "contacts")
-let strippedData = try! JSONSerialization.data(withJSONObject: dict)
-let strippedFile = FileManager.default.temporaryDirectory.appendingPathComponent("stripped-\(ProcessInfo.processInfo.processIdentifier).json")
-try! strippedData.write(to: strippedFile)
-
-guard let strippedLayout = try? WechatLayout.load(path: strippedFile.path) else {
-    print("FAIL: stripped layout failed to load")
+func stripped(_ version: String) -> WechatLayout {
+    var d = dict
+    d["wechat_version"] = version
+    let data = try! JSONSerialization.data(withJSONObject: d)
+    let file = FileManager.default.temporaryDirectory.appendingPathComponent("stripped-\(ProcessInfo.processInfo.processIdentifier)-\(version).json")
+    try! data.write(to: file)
+    return try! WechatLayout.load(path: file.path)
+}
+do {
+    let fallback = try stripped("4.1.15").contactsSpec()
+    guard fallback == repoSpec else { print("FAIL: builtin contacts spec differs from repo layout"); exit(1) }
+    print("PASS: layout_contacts_builtin_for_4115")
+} catch {
+    print("FAIL: 4.1.15 without contacts should fall back, got \(error)")
     exit(1)
 }
 do {
-    _ = try strippedLayout.contactsSpec()
-    print("FAIL: expected missing contacts error but succeeded")
+    _ = try stripped("4.2.0").contactsSpec()
+    print("FAIL: other versions must not guess contacts coordinates")
     exit(1)
 } catch let err as LayoutError {
     if err.description == "layout_missing_contacts" {
@@ -253,6 +263,7 @@ fn layout_contacts_section_parses() {
     assert!(out.status.success(), "run failed: {}", stdout);
     assert!(stdout.contains("PASS: layout_contacts_parsed"), "stdout: {stdout}");
     assert!(stdout.contains("PASS: layout_missing_contacts"), "stdout: {stdout}");
+    assert!(stdout.contains("PASS: layout_contacts_builtin_for_4115"), "stdout: {stdout}");
 }
 
 #[test]
@@ -287,4 +298,16 @@ fn manager_filter_point_requires_observed_tag_y() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "run failed: {}", stdout);
     assert!(stdout.contains("PASS: manager_filter_point_verified"), "stdout: {stdout}");
+}
+
+/// 通讯录页没有聊天输入框分隔线和会话标题：通讯录操作只能核对会话列表区（list_border），
+/// 否则在真机上每一步都报 layout_mismatch:input_divider（2026-11-08 实机首次同步）。
+#[test]
+fn contacts_operations_check_only_session_list_anchors() {
+    let src = std::fs::read_to_string("native/bot/Contacts.swift").unwrap();
+    let calls: Vec<&str> = src.lines().filter(|l| l.contains("checkedScreen(") && !l.trim_start().starts_with("//")).collect();
+    assert!(!calls.is_empty(), "通讯录操作应当截图核对");
+    for l in calls {
+        assert!(l.contains("regions: [\"session_list\"]"), "通讯录操作只能核对会话列表区: {}", l.trim());
+    }
 }

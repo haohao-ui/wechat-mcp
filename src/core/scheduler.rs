@@ -1695,6 +1695,8 @@ impl BotCoordinator {
                     )?;
                 }
             }
+            // 同步把微信切到过通讯录：断开重连，下一轮重新打开目标会话（不论成败）
+            let _ = self.close_connection().await;
         }
 
         let is_idle = self.pending.is_empty() && !self.sessions.values().any(|s| s.turn.is_some());
@@ -1732,6 +1734,8 @@ impl BotCoordinator {
                 &should_yield,
                 now_ms,
             ).await;
+            // 同上：断开重连，下一轮重新打开目标会话
+            let _ = self.close_connection().await;
         }
 
         Ok(())
@@ -2326,6 +2330,32 @@ mod tests {
         let mut coord = BotCoordinator::new(&cfg_path).unwrap();
         let child = coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
         assert!(child.root.exists());
+    }
+
+    /// 同步会把微信切到通讯录再切回聊天页；切回后右侧可能是别的会话（如没有输入框的公众号），
+    /// 机器人等待新消息时不会主动重试，会一直卡在 waiting_for_wechat_window（2026-11-08 实机）。
+    /// 同步结束（不论成败）都要断开当前连接，下一轮重新连接并打开目标会话。
+    #[test]
+    fn test_contacts_sync_request_closes_connection_so_target_chat_is_reopened() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let mut cap = MockCoordinatorCapture::new();
+        cap.connected = true;
+        coord.capture = Some(Box::new(cap));
+        coord.active_name = Some("a".to_string());
+        write_private(
+            &coord.root.join("contacts-sync-request.json"),
+            &json!({"id": "req_t", "mode": "full", "created_at": (coord.clock)()}),
+        )
+        .unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async { coord.serve_contacts_sync().await.unwrap() });
+
+        assert!(coord.root.join("contacts-sync-result.json").exists(), "同步请求应当已处理");
+        assert!(coord.active_name.is_none(), "同步结束后必须断开连接，下一轮重新打开目标会话");
     }
 
     #[test]

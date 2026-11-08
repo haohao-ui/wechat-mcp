@@ -319,6 +319,25 @@ pub async fn run_sync(
     should_yield: &(dyn Fn() -> bool + Send + Sync),
     now_ms: i64,
 ) -> Result<SyncReport> {
+    let result = run_sync_inner(capture, store, account_id, mode, checkpoint, should_yield, now_ms).await;
+    if result.is_err() {
+        // 进过通讯录后任何一步失败，都必须切回聊天页：否则微信停在通讯录页，机器人看不到聊天（2026-11-08 实机）
+        if let Err(e) = capture.call("contacts_leave", json!({})).await {
+            tracing::warn!("contacts_leave after failed sync also failed: {e:#}");
+        }
+    }
+    result
+}
+
+async fn run_sync_inner(
+    capture: &mut dyn CoordinatorCapture,
+    store: &HistoryStore,
+    account_id: &str,
+    mode: SyncMode,
+    checkpoint: &Path,
+    should_yield: &(dyn Fn() -> bool + Send + Sync),
+    now_ms: i64,
+) -> Result<SyncReport> {
     let state_dir = checkpoint.parent().unwrap_or_else(|| Path::new("."));
     let pause_file = state_dir.join("admin-pause.json");
     let initially_paused = pause_file.exists();
@@ -818,6 +837,8 @@ mod tests {
         pub header_arrows: bool,
         /// 用"打开资料卡"点到了分组标题（真机上会把分组收起）
         pub header_open_clicks: usize,
+        /// 模拟某个操作失败（如真机上的 layout_mismatch）
+        pub fail_op: Option<String>,
     }
 
     impl VirtualContactsUi {
@@ -836,6 +857,7 @@ mod tests {
                 row_open_clicks: Vec::new(),
                 header_arrows: false,
                 header_open_clicks: 0,
+                fail_op: None,
             }
         }
 
@@ -980,6 +1002,9 @@ mod tests {
             let calls = self.calls.clone();
             calls.lock().unwrap().push((op.to_string(), params.clone()));
 
+            if self.fail_op.as_deref() == Some(op) {
+                return Box::pin(async { bail!("private visual operation failed: invalid(\"layout_mismatch:input_divider\")") });
+            }
             if op == "contacts_enter" {
                 self.scroll_offset = 0.0;
                 return Box::pin(async { Ok(json!({"ok": true})) });
@@ -1983,6 +2008,27 @@ mod tests {
         assert_eq!(ui.header_open_clicks, 0, "不得用打开资料卡点分组标题");
         assert!(report.complete, "{report:?}");
         assert_eq!(report.per_category, vec![("official".to_string(), 3, 3), ("personal".to_string(), 7, 7)]);
+    }
+
+    /// 真机首次同步：进入通讯录后下一步失败，原实现直接返回、没有切回聊天页，微信停在通讯录页，机器人停摆。
+    /// 只要进过通讯录，无论成败都必须调用 contacts_leave。
+    #[tokio::test]
+    async fn test_failure_after_enter_always_leaves_contacts() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        let store = HistoryStore::open(&state_dir).unwrap();
+        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
+        let personal = letter_group("personal", "联系人", "人", &[("A", 2)]);
+        let mut ui = VirtualContactsUi::new(vec![personal]);
+        ui.fail_op = Some("contacts_headers".to_string());
+
+        let no_yield = || false;
+        let res = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await;
+        assert!(res.is_err(), "读分组失败应当返回错误");
+        let ops: Vec<String> = ui.calls.lock().unwrap().iter().map(|(op, _)| op.clone()).collect();
+        let enter = ops.iter().position(|o| o == "contacts_enter").expect("entered");
+        assert!(ops[enter..].iter().any(|o| o == "contacts_leave"), "进过通讯录就必须离开: {ops:?}");
+        assert!(!state_dir.join("admin-pause.json").exists(), "同步写的暂停标记必须清除");
     }
 
 }
