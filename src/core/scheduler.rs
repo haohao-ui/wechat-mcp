@@ -411,6 +411,8 @@ pub struct BotCoordinator {
     pub clock: Arc<dyn Fn() -> f64 + Send + Sync>,
     pub session_title_mismatches: HashMap<String, usize>,
     pub logged_events: Arc<Mutex<Vec<Value>>>,
+    /// 外部大脑模式下注入；热加会话创建时继承，避免首轮退化到 builtin。
+    pub default_brain: Option<crate::core::turns::BrainFn>,
 }
 
 impl BotCoordinator {
@@ -493,6 +495,7 @@ impl BotCoordinator {
             clock: default_clock,
             session_title_mismatches: HashMap::new(),
             logged_events: Arc::new(Mutex::new(Vec::new())),
+            default_brain: None,
         };
 
         let mut current = HashMap::new();
@@ -592,6 +595,7 @@ impl BotCoordinator {
                 Some(candidate_names(target)),
             )?;
             child.stop = self.stop.clone();
+            child.brain = self.default_brain.clone();
             child.had_incoming = false;
             self.sessions.insert(name.clone(), child);
         }
@@ -2048,6 +2052,36 @@ mod tests {
         let mut coord = BotCoordinator::new(&cfg_path).unwrap();
         let child = coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
         assert!(child.root.exists());
+    }
+
+    #[test]
+    fn test_hot_added_session_inherits_coordinator_default_brain() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let brain: crate::core::turns::BrainFn = Arc::new(|_turn| {
+            Box::pin(async {
+                Ok(crate::brain::BrainReply { reply: "外部".to_string(), metadata: HashMap::new() })
+            })
+        });
+        coord.default_brain = Some(brain);
+        let child = coord
+            .session(&AllowlistEntry { recipient: "hot".to_string(), kind: "private".to_string(), aliases: None })
+            .unwrap();
+        assert!(child.brain.is_some(), "热加会话必须继承协调器的外部大脑，不能退化到 builtin");
+    }
+
+    #[test]
+    fn test_session_without_default_brain_stays_builtin() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let child = coord
+            .session(&AllowlistEntry { recipient: "hot".to_string(), kind: "private".to_string(), aliases: None })
+            .unwrap();
+        assert!(child.brain.is_none());
     }
 
     #[test]
