@@ -1598,6 +1598,22 @@ impl BotCoordinator {
         Ok(())
     }
 
+    /// 同步前确保与桌面服务的连接：上一轮同步结束后会主动断开（以便重新打开目标会话），
+    /// 续做前必须先连上，否则第一步就 transport closed、被当成失败（2026-11-08 实机）。
+    async fn ensure_capture_connected(&mut self) -> bool {
+        match self.capture.as_mut() {
+            Some(cap) if cap.is_connected() => true,
+            Some(cap) => match cap.start().await {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!("contacts sync deferred: worker reconnect failed: {e:#}");
+                    false
+                }
+            },
+            None => false,
+        }
+    }
+
     pub async fn serve_contacts_sync(&mut self) -> Result<()> {
         let req_path = self.root.join("contacts-sync-request.json");
         let res_path = self.root.join("contacts-sync-result.json");
@@ -1651,6 +1667,11 @@ impl BotCoordinator {
                 return Ok(());
             }
 
+            if !self.ensure_capture_connected().await {
+                // 连不上：保留请求等下一轮，不当作失败
+                std::mem::forget(_cleanup_guard);
+                return Ok(());
+            }
             let capture = self.capture.as_mut().unwrap().as_mut();
             let store = &self.history;
             let account_id = &self.config.account_id;
@@ -1716,7 +1737,22 @@ impl BotCoordinator {
         let should_sync = has_checkpoint || (should_daily_incremental_sync(is_idle, now, last_success) && crate::core::contacts::sync::should_attempt_daily_sync(&self.root, is_idle, now));
 
         if should_sync && self.capture.is_some() {
-            let _ = crate::core::contacts::sync::record_daily_sync_attempt(&self.root, now);
+            if !self.ensure_capture_connected().await {
+                // 连不上：保留断点，下一轮再续做（不记失败、不清断点）
+                return Ok(());
+            }
+            if !has_checkpoint {
+                let _ = crate::core::contacts::sync::record_daily_sync_attempt(&self.root, now);
+            }
+            // 续做沿用断点里的模式（全量初始化让出后仍按全量续做），没有断点则是每日增量
+            let resume_mode = read_json::<Value>(&checkpoint_path)
+                .ok()
+                .and_then(|v| v.get("mode").and_then(|m| m.as_str()).map(|m| m.to_string()));
+            let mode = if resume_mode.as_deref() == Some("full") {
+                crate::core::contacts::sync::SyncMode::Full
+            } else {
+                crate::core::contacts::sync::SyncMode::Incremental
+            };
             let capture = self.capture.as_mut().unwrap().as_mut();
             let store = &self.history;
             let account_id = &self.config.account_id;
@@ -1729,7 +1765,7 @@ impl BotCoordinator {
                 capture,
                 store,
                 account_id,
-                crate::core::contacts::sync::SyncMode::Incremental,
+                mode,
                 &checkpoint_path,
                 &should_yield,
                 now_ms,
@@ -1970,6 +2006,10 @@ mod tests {
             Box::pin(async move { Ok(f) })
         }
         fn call<'a>(&'a mut self, op: &'a str, params: Value) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>> {
+            // 与真实 WorkerClient 一致：连接断开时通讯录操作返回 transport closed
+            if op.starts_with("contacts_") && !self.connected {
+                return Box::pin(async { anyhow::bail!("transport closed") });
+            }
             let op_str = op.to_string();
             Box::pin(async move {
                 self.calls.lock().unwrap().push((op_str.clone(), params));
@@ -2356,6 +2396,33 @@ mod tests {
 
         assert!(coord.root.join("contacts-sync-result.json").exists(), "同步请求应当已处理");
         assert!(coord.active_name.is_none(), "同步结束后必须断开连接，下一轮重新打开目标会话");
+    }
+
+    /// 实机：同步让出后协调器按规则断开连接（以便重新打开目标会话），下一轮看到断点直接续做、没有先连上，
+    /// 第一步就 transport closed，被当成失败清掉断点——同步永远做不完。续做前必须先确保连接。
+    #[test]
+    fn test_contacts_sync_resume_reconnects_before_continuing() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let mut cap = MockCoordinatorCapture::new();
+        cap.connected = false; // 上一轮同步结束后已断开
+        coord.capture = Some(Box::new(cap));
+        write_private(
+            &coord.root.join("contacts-sync-checkpoint.json"),
+            &json!({"category_index": 0, "categories": [["personal", 0, 186.0]]}),
+        )
+        .unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async { coord.serve_contacts_sync().await.unwrap() });
+
+        let result: Value = read_json(&coord.root.join("contacts-sync-result.json")).unwrap();
+        assert!(
+            !result.to_string().contains("transport closed"),
+            "续做前必须先重新连接: {result}"
+        );
     }
 
     #[test]
