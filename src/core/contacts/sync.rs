@@ -2,13 +2,13 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tracing::info;
 
 use crate::core::contacts::parse::{
-    parse_group_headers, parse_manager_page, parse_profile, ManagerColumns, ManagerRow, OcrLine,
+    parse_group_headers, parse_profile, OcrLine,
 };
 use crate::core::history::store::{HistoryStore, ProfileInput, UpsertOutcome};
 use crate::core::scheduler::CoordinatorCapture;
@@ -28,217 +28,6 @@ pub struct SyncReport {
     pub needs_review: u32,
     pub yielded: bool,
     pub complete: bool,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ManagerTableResult {
-    pub rows: Vec<ManagerRow>,
-    pub pages_count: usize,
-    pub tag_members: HashMap<String, Vec<String>>,
-}
-
-pub async fn read_manager_table(capture: &mut dyn CoordinatorCapture) -> Result<ManagerTableResult> {
-    // 1. 打开管理窗口
-    let mut opened = false;
-    for _ in 0..2 {
-        if capture.call("contacts_manager_open", json!({})).await.is_ok() {
-            opened = true;
-            break;
-        }
-    }
-    if !opened {
-        bail!("contacts_manager_missing");
-    }
-
-    let cols = ManagerColumns {
-        name_x: 300.0,
-        remark_x: 385.0,
-        tags_x: 500.0,
-        permission_x: 620.0,
-    };
-
-    async fn fetch_page(capture: &mut dyn CoordinatorCapture) -> Result<Vec<OcrLine>> {
-        match capture.call("contacts_manager_page", json!({})).await {
-            Ok(v) => {
-                let lines: Vec<OcrLine> = v.get("lines")
-                    .and_then(|l| serde_json::from_value(l.clone()).ok())
-                    .unwrap_or_default();
-                Ok(lines)
-            }
-            Err(e) => {
-                if e.to_string().contains("contacts_manager_missing") {
-                    capture.call("contacts_manager_open", json!({})).await?;
-                    let v = capture.call("contacts_manager_page", json!({})).await?;
-                    let lines: Vec<OcrLine> = v.get("lines")
-                        .and_then(|l| serde_json::from_value(l.clone()).ok())
-                        .unwrap_or_default();
-                    Ok(lines)
-                } else {
-                    bail!(e);
-                }
-            }
-        }
-    }
-
-    async fn scroll_down(capture: &mut dyn CoordinatorCapture, ticks: usize) -> Result<Vec<OcrLine>> {
-        match capture.call("contacts_manager_scroll", json!({"direction": "down", "ticks": ticks})).await {
-            Ok(v) => {
-                let lines: Vec<OcrLine> = v.get("lines")
-                    .and_then(|l| serde_json::from_value(l.clone()).ok())
-                    .unwrap_or_default();
-                Ok(lines)
-            }
-            Err(e) => {
-                if e.to_string().contains("contacts_manager_missing") {
-                    capture.call("contacts_manager_open", json!({})).await?;
-                    let v = capture.call("contacts_manager_page", json!({})).await?;
-                    let lines: Vec<OcrLine> = v.get("lines")
-                        .and_then(|l| serde_json::from_value(l.clone()).ok())
-                        .unwrap_or_default();
-                    Ok(lines)
-                } else {
-                    bail!(e);
-                }
-            }
-        }
-    }
-
-    // 读取第一页
-    let first_lines = fetch_page(capture).await?;
-
-    // 识别左侧标签项
-    let mut tags = Vec::new();
-    for l in &first_lines {
-        if l.x <= 150.0 && l.y >= 180.0 && l.text != "全部" && l.text != "标签" && l.text != "朋友权限" {
-            tags.push((l.text.clone(), l.y));
-        }
-    }
-
-    let mut collected_rows: Vec<ManagerRow> = Vec::new();
-    let mut pages_count = 0;
-    let mut current_lines = first_lines;
-
-    fn rows_equal(a: &[ManagerRow], b: &[ManagerRow]) -> bool {
-        if a.len() != b.len() {
-            return false;
-        }
-        for (r1, r2) in a.iter().zip(b.iter()) {
-            if r1.name != r2.name || r1.remark != r2.remark || r1.tags != r2.tags || r1.permission != r2.permission {
-                return false;
-            }
-        }
-        true
-    }
-
-    let mut prev_page_rows: Vec<ManagerRow> = Vec::new();
-
-    loop {
-        pages_count += 1;
-        let page_rows = parse_manager_page(&current_lines, 96.0, 48.0, 10, &cols);
-        let valid_page_rows: Vec<ManagerRow> = page_rows.into_iter().filter(|r| r.name.is_some()).collect();
-
-        if valid_page_rows.is_empty() {
-            break;
-        }
-
-        if !prev_page_rows.is_empty() && rows_equal(&valid_page_rows, &prev_page_rows) {
-            break;
-        }
-
-        if collected_rows.is_empty() {
-            collected_rows.extend(valid_page_rows.clone());
-        } else {
-            let max_overlap = valid_page_rows.len().min(collected_rows.len());
-            let mut match_k = 0;
-            for k in (1..=max_overlap).rev() {
-                let tail = &collected_rows[collected_rows.len() - k..];
-                let head = &valid_page_rows[..k];
-                if rows_equal(tail, head) {
-                    match_k = k;
-                    break;
-                }
-            }
-
-            if match_k == 0 && !collected_rows.is_empty() {
-                let appears_inside = collected_rows.windows(valid_page_rows.len())
-                    .any(|w| rows_equal(w, &valid_page_rows));
-                if appears_inside {
-                    prev_page_rows = valid_page_rows;
-                    current_lines = scroll_down(capture, 6).await?;
-                    continue;
-                }
-            }
-
-            for r in valid_page_rows.iter().skip(match_k) {
-                collected_rows.push(r.clone());
-            }
-        }
-
-        prev_page_rows = valid_page_rows;
-
-        if pages_count >= 200 {
-            break;
-        }
-
-        current_lines = scroll_down(capture, 6).await?;
-    }
-
-    // 收集各标签成员
-    let mut tag_members: HashMap<String, Vec<String>> = HashMap::new();
-    for (tag_name, tag_y) in &tags {
-        let filter_res = capture.call("contacts_manager_filter", json!({"kind": "tag", "y": tag_y})).await;
-        let mut cur_filter_lines: Vec<OcrLine> = match filter_res {
-            Ok(v) => v.get("lines").and_then(|l| serde_json::from_value::<Vec<OcrLine>>(l.clone()).ok()).unwrap_or_default(),
-            Err(_) => {
-                let _ = capture.call("contacts_manager_open", json!({})).await;
-                capture.call("contacts_manager_filter", json!({"kind": "tag", "y": tag_y})).await
-                    .ok().and_then(|v| v.get("lines").cloned()).and_then(|l| serde_json::from_value::<Vec<OcrLine>>(l).ok()).unwrap_or_default()
-            }
-        };
-
-        let mut members = Vec::new();
-        let mut f_pages = 0;
-        let mut prev_f_rows: Vec<ManagerRow> = Vec::new();
-
-        loop {
-            f_pages += 1;
-            let p_rows: Vec<ManagerRow> = parse_manager_page(&cur_filter_lines, 96.0, 48.0, 10, &cols)
-                .into_iter().filter(|r| r.name.is_some()).collect();
-
-            if p_rows.is_empty() || (!prev_f_rows.is_empty() && rows_equal(&p_rows, &prev_f_rows)) {
-                break;
-            }
-
-            for r in &p_rows {
-                if let Some(ref nm) = r.name {
-                    if !members.contains(nm) {
-                        members.push(nm.clone());
-                    }
-                }
-            }
-
-            prev_f_rows = p_rows;
-            if f_pages >= 200 {
-                break;
-            }
-
-            cur_filter_lines = scroll_down(capture, 6).await?;
-        }
-
-        tag_members.insert(tag_name.clone(), members);
-    }
-
-    if !tags.is_empty() {
-        let _ = capture.call("contacts_manager_filter", json!({"kind": "all", "y": 0.0})).await;
-    }
-
-    let _ = capture.call("contacts_manager_close", json!({})).await;
-
-    Ok(ManagerTableResult {
-        rows: collected_rows,
-        pages_count,
-        tag_members,
-    })
 }
 
 pub fn should_attempt_daily_sync(state_dir: &Path, is_idle: bool, now_sec: f64) -> bool {
@@ -302,9 +91,6 @@ struct CheckpointState {
     cat_progress: HashMap<String, Vec<String>>, // category -> list of processed contact names in order
     unreadable_rows: u32,
     needs_review: u32,
-    manager_done: bool,
-    manager_rows: Vec<ManagerRow>,
-    tag_members: HashMap<String, Vec<String>>,
     /// 每个分组展开后已向下滚动的格数：恢复时一次滚回去，而不是逐屏重走（逐屏重走会耗尽让出预算、永远推进不了）
     #[serde(default)]
     scroll_ticks: HashMap<String, u32>,
@@ -320,6 +106,16 @@ pub async fn run_sync(
     now_ms: i64,
 ) -> Result<SyncReport> {
     let result = run_sync_inner(capture, store, account_id, mode, checkpoint, should_yield, now_ms).await;
+    if let Err(e) = &result {
+        // 出错不自动续做：清掉断点并写明错误，否则协调器每轮续做、立刻失败，形成死循环（实机 347 次，机器人停摆）
+        let _ = fs::remove_file(checkpoint);
+        if let Some(dir) = checkpoint.parent() {
+            let _ = write_private(
+                &dir.join("contacts-sync-result.json"),
+                &json!({"finished_at_ms": now_ms, "complete": false, "error": format!("{e:#}")}),
+            );
+        }
+    }
     if result.is_err() {
         // 进过通讯录后任何一步失败，都必须切回聊天页：否则微信停在通讯录页，机器人看不到聊天（2026-11-08 实机）
         if let Err(e) = capture.call("contacts_leave", json!({})).await {
@@ -399,15 +195,7 @@ async fn run_sync_inner(
             .join(", ")
     );
 
-    // 3. 读取管理窗口表格与标签
-    if !state.manager_done {
-        if let Ok(mgr_res) = read_manager_table(capture).await {
-            state.manager_rows = mgr_res.rows;
-            state.tag_members = mgr_res.tag_members;
-            state.manager_done = true;
-        }
-    }
-
+    // 3. 不打开「通讯录管理」：那里没有每个人的详细资料，且读表格会耗尽让出预算（用户 2026-11-08 要求、实机验证）
     // 4. 逐分组展开、逐屏识别联系人行
     let existing_profiles = store.list_profiles(account_id, None).unwrap_or_default();
     let mut yielded = false;
@@ -561,25 +349,15 @@ async fn run_sync_inner(
 
                         let mut skip_open = false;
                         if mode == SyncMode::Incremental {
+                            // 增量：列表上的名字（备注或昵称）在库里已有资料就不点开，只点开新名字
                             if let Some(p) = existing_profiles.iter().find(|p| {
                                 p.get("nickname").and_then(|v| v.as_str()) == Some(row_name) ||
                                 p.get("remark").and_then(|v| v.as_str()) == Some(row_name)
                             }) {
-                                let mgr_match = state.manager_rows.iter().find(|r| {
-                                    r.name.as_deref() == Some(row_name) || r.remark.as_deref() == Some(row_name)
-                                });
-                                let remark_changed = if let Some(mr) = mgr_match {
-                                    let db_remark = p.get("remark").and_then(|v| v.as_str());
-                                    mr.remark.as_deref() != db_remark
-                                } else {
-                                    false
-                                };
-                                if !remark_changed {
-                                    skip_open = true;
-                                    if let Some(cid) = p.get("contact_id").and_then(|v| v.as_str()) {
-                                        if !seen_list.contains(&cid.to_string()) {
-                                            seen_list.push(cid.to_string());
-                                        }
+                                skip_open = true;
+                                if let Some(cid) = p.get("contact_id").and_then(|v| v.as_str()) {
+                                    if !seen_list.contains(&cid.to_string()) {
+                                        seen_list.push(cid.to_string());
                                     }
                                 }
                             }
@@ -605,14 +383,7 @@ async fn run_sync_inner(
                                 if !name_matched {
                                     state.unreadable_rows += 1;
                                 } else {
-                                    let mut combined_tags = f.tags.clone();
-                                    for (t_name, members) in &state.tag_members {
-                                        if members.contains(row_name) || members.contains(&f.nickname) {
-                                            if !combined_tags.contains(t_name) {
-                                                combined_tags.push(t_name.clone());
-                                            }
-                                        }
-                                    }
+                                    let combined_tags = f.tags.clone();
 
                                     let input = ProfileInput {
                                         category: cat_name.clone(),
@@ -764,6 +535,7 @@ async fn run_sync_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::contacts::parse::ManagerRow;
     use std::collections::HashMap;
     use std::future::Future;
     use std::path::PathBuf;
@@ -1322,31 +1094,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_manager_window_closed_midway_is_reopened() {
-        let temp = TestTempDir::new();
-        let state_dir = temp.path().join("state");
-        let store = HistoryStore::open(&state_dir).unwrap();
-        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
-
-        let p_items = vec![
-            VirtualContactItem { name: "张三".to_string(), remark: None, wechat_id: Some("wxid_p1".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
-        ];
-        let g_personal = VirtualGroup { category: "personal".to_string(), title: "联系人".to_string(), letter_sections: vec![("P".to_string(), p_items)], expanded: false };
-
-        let mut ui = VirtualContactsUi::new(vec![g_personal]);
-        ui.manager_rows = vec![
-            ManagerRow { row_y: 96.0, name: Some("张三".to_string()), remark: None, tags: vec![], permission: None }
-        ];
-        ui.manager_close_countdown = Some(1); // 模拟中途关闭
-
-        let no_yield = || false;
-        let report = run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
-        assert!(report.complete);
-        let open_calls = ui.calls.lock().unwrap().iter().filter(|(op, _)| op == "contacts_manager_open").count();
-        assert!(open_calls >= 2);
-    }
-
-    #[tokio::test]
     async fn test_incremental_only_opens_changed_rows() {
         let temp = TestTempDir::new();
         let state_dir = temp.path().join("state");
@@ -1779,112 +1526,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_manager_pages_overlap_and_stop_at_bottom() {
-        // 35 行，包含同名不同行
-        let mut rows = Vec::new();
-        for i in 1..=35 {
-            let nm = if i == 5 || i == 6 {
-                "同名张三".to_string()
-            } else {
-                format!("联系人{i:02}")
-            };
-            rows.push(ManagerRow {
-                row_y: 96.0 + 48.0 * ((i - 1) % 10) as f64,
-                name: Some(nm),
-                remark: Some(format!("备注{i:02}")),
-                tags: vec![],
-                permission: None,
-            });
-        }
-
-        let mut ui = VirtualContactsUi::new(vec![]);
-        ui.manager_rows = rows;
-
-        let result = read_manager_table(&mut ui).await.unwrap();
-        assert_eq!(result.rows.len(), 35, "Must collect all 35 rows");
-        let same_names: Vec<_> = result.rows.iter().filter(|r| r.name.as_deref() == Some("同名张三")).collect();
-        assert_eq!(same_names.len(), 2, "Same name different rows must not be merged");
-        assert!(result.pages_count <= 200, "Must stop at bottom within 200 pages");
-    }
-
-    #[tokio::test]
-    async fn test_manager_closed_midway_reopens_without_loss() {
-        let rows: Vec<ManagerRow> = (1..=25).map(|i| ManagerRow {
-            row_y: 96.0 + 48.0 * ((i - 1) % 10) as f64,
-            name: Some(format!("联系人{i:02}")),
-            remark: None,
-            tags: vec![],
-            permission: None,
-        }).collect();
-
-        let mut ui = VirtualContactsUi::new(vec![]);
-        ui.manager_rows = rows;
-        ui.manager_close_countdown = Some(2); // 在第2次交互时关闭
-
-        let result = read_manager_table(&mut ui).await.unwrap();
-        assert_eq!(result.rows.len(), 25);
-        let open_count = ui.calls.lock().unwrap().iter().filter(|(op, _)| op == "contacts_manager_open").count();
-        assert!(open_count >= 2, "Manager should reopen after closing midway");
-    }
-
-    #[tokio::test]
-    async fn test_tags_collected_by_observed_y() {
-        let temp = TestTempDir::new();
-        let state_dir = temp.path().join("state");
-        let store = HistoryStore::open(&state_dir).unwrap();
-        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
-
-        let mut ui = VirtualContactsUi::new(vec![
-            VirtualGroup {
-                category: "personal".to_string(),
-                title: "联系人".to_string(),
-                letter_sections: vec![
-                    ("T".to_string(), vec![
-                        VirtualContactItem {
-                            name: "标签好友甲".to_string(),
-                            remark: None,
-                            wechat_id: Some("wxid_tag1".to_string()),
-                            enterprise: None,
-                            real_name: None,
-                            tags: vec!["重要客户".to_string()],
-                            friend_permission: None,
-                            unreadable: false,
-                            misaligned_profile: None,
-                        },
-                    ]),
-                ],
-                expanded: false,
-            }
-        ]);
-
-        ui.manager_tags = vec![
-            ("重要客户".to_string(), 195.0),
-            ("合作伙伴".to_string(), 235.0),
-        ];
-        ui.manager_rows = vec![
-            ManagerRow {
-                row_y: 96.0,
-                name: Some("标签好友甲".to_string()),
-                remark: None,
-                tags: vec!["重要客户".to_string()],
-                permission: None,
-            }
-        ];
-
-        let no_yield = || false;
-        run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
-
-        // 检查 calls 是否通过 observed y 调用了 filter
-        let filter_calls: Vec<Value> = ui.calls.lock().unwrap().iter()
-            .filter(|(op, _)| op == "contacts_manager_filter")
-            .map(|(_, p)| p.clone())
-            .collect();
-
-        assert!(filter_calls.iter().any(|p| p["kind"] == "tag" && (p["y"].as_f64().unwrap_or(0.0) - 195.0).abs() < 1.0));
-        assert!(filter_calls.iter().any(|p| p["kind"] == "all"), "Must reset filter to all at end");
-    }
-
-    #[tokio::test]
     async fn test_daily_sync_attempted_at_most_once_per_day_even_if_incomplete() {
         let temp = TestTempDir::new();
         let state_dir = temp.path().join("state");
@@ -2029,6 +1670,53 @@ mod tests {
         let enter = ops.iter().position(|o| o == "contacts_enter").expect("entered");
         assert!(ops[enter..].iter().any(|o| o == "contacts_leave"), "进过通讯录就必须离开: {ops:?}");
         assert!(!state_dir.join("admin-pause.json").exists(), "同步写的暂停标记必须清除");
+    }
+
+    /// 用户要求（2026-11-08）：初始化通讯录不打开「通讯录管理」（那里没有每个人的详细资料），
+    /// 直接展开分组逐个点开联系人采集。实机上读管理表格耗尽了 15 秒预算、窗口没关上导致机器人停摆。
+    #[tokio::test]
+    async fn test_sync_never_opens_manager_window() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        let store = HistoryStore::open(&state_dir).unwrap();
+        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
+        let official = letter_group("official", "公众号、服务号", "号", &[("G", 2)]);
+        let personal = letter_group("personal", "联系人", "人", &[("A", 3), ("B", 2)]);
+        let mut ui = VirtualContactsUi::new(vec![official, personal]);
+        let no_yield = || false;
+        for mode in [SyncMode::Full, SyncMode::Incremental] {
+            let report = run_sync(&mut ui, &store, "acct", mode, &checkpoint, &no_yield, 1000).await.unwrap();
+            assert!(report.complete, "{mode:?}: {report:?}");
+        }
+        let ops: Vec<String> = ui.calls.lock().unwrap().iter().map(|(op, _)| op.clone()).collect();
+        assert!(!ops.iter().any(|o| o.starts_with("contacts_manager_")), "不得打开通讯录管理: {ops:?}");
+    }
+
+    /// 实机：断点续做时每一轮都立刻失败，断点还在，下一轮又续做——每秒一次的死循环（347 次），机器人停摆。
+    /// 同步出错后必须清掉断点并在结果里写明错误，不自动续做。
+    #[tokio::test]
+    async fn test_failed_sync_clears_checkpoint_to_avoid_retry_loop() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        let store = HistoryStore::open(&state_dir).unwrap();
+        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
+        let personal = letter_group("personal", "联系人", "人", &[("A", 4), ("B", 4)]);
+        let mut ui = VirtualContactsUi::new(vec![personal]);
+
+        let budget = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let b = budget.clone();
+        let yield_soon = move || b.fetch_add(1, Ordering::SeqCst) >= 3;
+        let first = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &yield_soon, 1000).await.unwrap();
+        assert!(first.yielded && checkpoint.exists(), "先让出留下断点: {first:?}");
+
+        ui.fail_op = Some("contacts_scroll_list".to_string());
+        let no_yield = || false;
+        assert!(run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &no_yield, 2000).await.is_err());
+        assert!(!checkpoint.exists(), "出错后必须清掉断点，否则协调器会每轮续做、陷入循环");
+        let result: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(state_dir.join("contacts-sync-result.json")).unwrap()).unwrap();
+        assert_eq!(result["complete"], false);
+        assert!(result["error"].as_str().unwrap_or("").contains("layout_mismatch"), "{result}");
     }
 
 }
