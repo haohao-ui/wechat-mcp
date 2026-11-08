@@ -289,6 +289,8 @@ pub trait CoordinatorCapture: Send + Sync {
     fn scroll<'a>(&'a mut self, direction: &'a str, amount: u32) -> Pin<Box<dyn Future<Output = Result<Frame>> + Send + 'a>>;
     fn call<'a>(&'a mut self, op: &'a str, params: Value) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>>;
     fn retarget<'a>(&'a mut self, recipient: &'a str, directory: &'a Path, names: &'a [String], group: bool) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+    /// Tells a disconnected capture which chat start() should open (Python builds the capture per session).
+    fn prepare_target(&mut self, _recipient: &str, _directory: &Path, _names: &[String], _group: bool) {}
     fn sessions<'a>(&'a mut self, names: &'a [String]) -> Pin<Box<dyn Future<Output = Result<Vec<SessionRow>>> + Send + 'a>>;
     fn download<'a>(&'a mut self, media_id: &'a str, kind: &'a str) -> Pin<Box<dyn Future<Output = Result<PathBuf>> + Send + 'a>>;
     fn last_switch(&self) -> Option<Value>;
@@ -711,6 +713,7 @@ impl BotCoordinator {
 
         if let Some(cap) = &mut self.capture {
             if !cap.is_connected() {
+                cap.prepare_target(recipient, &root, &names, group);
                 cap.start().await?;
             }
             cap.retarget(recipient, &root, &names, group).await?;
@@ -2663,6 +2666,42 @@ mod tests {
             coord.connect("a").await.unwrap();
         });
         assert_eq!(coord.active_name.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn test_connect_tells_a_disconnected_capture_its_target_before_start() {
+        // Device 2026-11-08: start() ran with an empty recipient (serve-core builds the client before any
+        // session), so its navigation fallback searched for "" and the worker never started.
+        struct Recorder { connected: bool, prepared: Arc<Mutex<Option<String>>>, at_start: Arc<Mutex<Option<String>>> }
+        impl CoordinatorCapture for Recorder {
+            fn prepare_target(&mut self, recipient: &str, _d: &Path, _n: &[String], _g: bool) {
+                *self.prepared.lock().unwrap() = Some(recipient.to_string());
+            }
+            fn start<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+                *self.at_start.lock().unwrap() = self.prepared.lock().unwrap().clone();
+                self.connected = true;
+                Box::pin(async { Ok(()) })
+            }
+            fn close<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> { Box::pin(async { Ok(()) }) }
+            fn frame<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<Frame>> + Send + 'a>> { Box::pin(async { bail!("unused") }) }
+            fn scroll<'a>(&'a mut self, _d: &'a str, _a: u32) -> Pin<Box<dyn Future<Output = Result<Frame>> + Send + 'a>> { Box::pin(async { bail!("unused") }) }
+            fn call<'a>(&'a mut self, _o: &'a str, _p: Value) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>> { Box::pin(async { Ok(json!({})) }) }
+            fn retarget<'a>(&'a mut self, _r: &'a str, _d: &'a Path, _n: &'a [String], _g: bool) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> { Box::pin(async { Ok(()) }) }
+            fn sessions<'a>(&'a mut self, _n: &'a [String]) -> Pin<Box<dyn Future<Output = Result<Vec<SessionRow>>> + Send + 'a>> { Box::pin(async { Ok(vec![]) }) }
+            fn download<'a>(&'a mut self, _m: &'a str, _k: &'a str) -> Pin<Box<dyn Future<Output = Result<PathBuf>> + Send + 'a>> { Box::pin(async { bail!("unused") }) }
+            fn last_switch(&self) -> Option<Value> { None }
+            fn ocr_status(&self) -> Option<OcrStatus> { None }
+            fn is_connected(&self) -> bool { self.connected }
+        }
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "测试群".to_string(), kind: "group".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let at_start = Arc::new(Mutex::new(None));
+        coord.capture = Some(Box::new(Recorder { connected: false, prepared: Arc::new(Mutex::new(None)), at_start: at_start.clone() }));
+        coord.tool_client = Some(Arc::new(MockToolClient::default()));
+        tokio::runtime::Runtime::new().unwrap().block_on(async { coord.connect("测试群").await.unwrap() });
+        assert_eq!(at_start.lock().unwrap().as_deref(), Some("测试群"), "start() must already know its target");
     }
 
     #[test]
