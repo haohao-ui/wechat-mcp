@@ -84,7 +84,7 @@ fn parse_digits(s: &str) -> Option<i64> {
 /// 资料卡名字后面紧跟性别/企业图标，识别时常被读成末尾的一个符号（实测 2026-11-08：`_`、`＆`、`&`、`£`、`：`、空格）。
 /// 只去掉末尾的这类符号；名字中间的符号、成对括号的右半边都保留。
 pub fn strip_name_icon_suffix(text: &str) -> String {
-    const ICON_MISREADS: &[char] = &['_', '＿', '＆', '&', '£', '￡', '：', ':', '♂', '♀', '·', '•', ' ', '\u{3000}'];
+    const ICON_MISREADS: &[char] = &['_', '＿', '＆', '&', '£', '￡', '：', ':', '，', ',', '、', '。', '♂', '♀', '·', '•', ' ', '\u{3000}'];
     let mut s = text.trim().to_string();
     while let Some(last) = s.chars().last() {
         if ICON_MISREADS.contains(&last) && s.chars().count() > 1 {
@@ -401,6 +401,7 @@ mod tests {
             ("abc de &", "abc de"),
             ("示例名字£", "示例名字"),
             ("示例经理名字：", "示例经理名字"),
+            ("示例跨境经理名字，", "示例跨境经理名字"),
             ("示例名 ", "示例名"),
             ("abcdef._&", "abcdef."),
             ("(示例）名字", "(示例）名字"),
