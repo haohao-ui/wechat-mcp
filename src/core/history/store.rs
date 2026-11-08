@@ -497,7 +497,22 @@ impl HistoryStore {
         let mut owners = HashSet::new();
         for n in &names {
             let set = _owners_conn(&conn, account_id, &name_key(n), &["config", "alias"], follow_merge)?;
-            owners.extend(set);
+            for cid in set {
+                let same_kind: bool = conn.query_row("SELECT kind=? FROM contacts WHERE contact_id=?", params![kind, cid], |r| r.get(0))?;
+                if same_kind { owners.insert(cid); }
+            }
+        }
+        // 通讯录先建档时没有 config/alias；仅复用同种会话且仍有效的唯一身份。
+        if owners.is_empty() {
+            for n in &names {
+                for cid in _owners_conn(&conn, account_id, &name_key(n), &["addressbook"], true)? {
+                    let eligible: bool = conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM contacts c JOIN contact_profiles p ON p.contact_id=c.contact_id WHERE c.contact_id=? AND c.kind=? AND p.removed_at IS NULL AND p.category!='official')",
+                        params![cid, kind], |r| r.get(0),
+                    )?;
+                    if eligible { owners.insert(cid); }
+                }
+            }
         }
 
         if owners.len() > 1 {
@@ -1343,6 +1358,14 @@ impl HistoryStore {
     }
 
     pub fn upsert_profile(&self, account_id: &str, p: &ProfileInput, now_ms: i64) -> Result<UpsertOutcome> {
+        let guard = self.conn.lock().unwrap();
+        let transaction = guard.unchecked_transaction()?;
+        let outcome = Self::upsert_profile_with_conn(&transaction, account_id, p, now_ms)?;
+        transaction.commit()?;
+        Ok(outcome)
+    }
+
+    fn upsert_profile_with_conn(conn: &Connection, account_id: &str, p: &ProfileInput, now_ms: i64) -> Result<UpsertOutcome> {
         let clean_wechat_id = p.wechat_id.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty());
         let clean_nickname = p.nickname.trim();
         let clean_remark = p.remark.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty());
@@ -1351,8 +1374,6 @@ impl HistoryStore {
         let tags_json = serde_json::to_string(&p.tags).unwrap_or_else(|_| "[]".to_string());
         let disp_name = clean_remark.unwrap_or(clean_nickname);
         let kind = if category == "group" { "group" } else { "private" };
-
-        let conn = self.conn.lock().unwrap();
 
         let record_review = |reason: &str, candidates: &[String]| -> Result<()> {
             let cand_json = serde_json::to_string(candidates).unwrap_or_else(|_| "[]".to_string());
@@ -1478,7 +1499,10 @@ impl HistoryStore {
             let mut candidate_cids = HashSet::new();
             for name in [Some(clean_nickname), clean_remark].into_iter().flatten() {
                 let owners = _owners_conn(&conn, account_id, &name_key(name), &["config", "alias", "observed", "addressbook"], true)?;
-                candidate_cids.extend(owners);
+                for cid in owners {
+                    let same_kind: bool = conn.query_row("SELECT c.kind=? AND NOT EXISTS(SELECT 1 FROM contact_profiles p WHERE p.contact_id=c.contact_id AND p.category!=?) FROM contacts c WHERE c.contact_id=?", params![kind, category, cid], |r| r.get(0))?;
+                    if same_kind { candidate_cids.insert(cid); }
+                }
             }
             let mut candidates: Vec<String> = candidate_cids.into_iter().collect();
             candidates.sort();
@@ -1559,7 +1583,10 @@ impl HistoryStore {
             let mut candidate_cids = HashSet::new();
             for name in [Some(clean_nickname), clean_remark].into_iter().flatten() {
                 let owners = _owners_conn(&conn, account_id, &name_key(name), &["config", "alias", "observed", "addressbook"], true)?;
-                candidate_cids.extend(owners);
+                for cid in owners {
+                    let same_kind: bool = conn.query_row("SELECT c.kind=? AND NOT EXISTS(SELECT 1 FROM contact_profiles p WHERE p.contact_id=c.contact_id AND p.category!=?) FROM contacts c WHERE c.contact_id=?", params![kind, category, cid], |r| r.get(0))?;
+                    if same_kind { candidate_cids.insert(cid); }
+                }
             }
             // 没有微信号时按名字只能认"还没有通讯录资料"的联系人（如聊天里出现过的人）。已有资料的同名者
             // 上面按"同名同企业"没对上，就是另一个人（实机：两个同名不同企业的企业微信联系人被并成一条）。
@@ -2818,6 +2845,73 @@ store.conn.close()
         // 再同步一次也一样
         assert!(matches!(f.store.upsert_profile("acct", &p, 2000).unwrap(), UpsertOutcome::Updated(ref c) if *c == chat));
         assert_eq!(f.store.ensure_contact("acct", &entry, false).unwrap(), chat);
+    }
+
+    #[test]
+    fn test_profile_does_not_attach_to_same_name_group() {
+        let f = setup_fixture();
+        let group = f.store.ensure_contact("acct", &json!({"recipient":"分类测试","kind":"group"}), false).unwrap();
+        let p = ProfileInput {
+            category:"personal".into(), wechat_id:Some("wxid_kind".into()), nickname:"分类测试".into(),
+            remark:None,region:None,source:None,added_on:None,common_groups:None,
+            enterprise:None,real_name:None,tags:vec![],friend_permission:None,
+        };
+        let cid = match f.store.upsert_profile("acct", &p, 1).unwrap() {
+            UpsertOutcome::Created(cid) => cid, other => panic!("{other:?}"),
+        };
+        assert_ne!(cid,group);
+    }
+
+    #[test]
+    fn test_allowlisting_addressbook_contact_reuses_identity_and_kind() {
+        let f = setup_fixture();
+        let p = ProfileInput {
+            category: "personal".into(), wechat_id: Some("wxid_fixture".into()), nickname: "同名测试".into(),
+            remark: None, region: None, source: None, added_on: None, common_groups: None,
+            enterprise: None, real_name: None, tags: vec![], friend_permission: None,
+        };
+        let cid = match f.store.upsert_profile("acct", &p, 1000).unwrap() {
+            UpsertOutcome::Created(cid) => cid, other => panic!("{other:?}"),
+        };
+        let entry = json!({"recipient": p.nickname, "kind": "private"});
+        assert_eq!(f.store.ensure_contact("acct", &entry, false).unwrap(), cid);
+        assert_eq!(f.store.ensure_contact("acct", &entry, false).unwrap(), cid);
+        let group = f.store.ensure_contact("acct", &json!({"recipient": p.nickname, "kind": "group"}), false).unwrap();
+        assert_ne!(group, cid);
+        assert_ne!(f.store.ensure_contact("other", &entry, false).unwrap(), cid);
+    }
+
+    #[test]
+    fn test_allowlisting_ambiguous_addressbook_name_does_not_create_contact() {
+        let f = setup_fixture();
+        for ent in ["企业甲", "企业乙"] {
+            f.store.upsert_profile("acct", &ProfileInput {
+                category: "work".into(), wechat_id: None, nickname: "重名测试".into(),
+                remark: None, region: None, source: None, added_on: None, common_groups: None,
+                enterprise: Some(ent.into()), real_name: None, tags: vec![], friend_permission: None,
+            }, 1000).unwrap();
+        }
+        assert!(f.store.ensure_contact("acct", &json!({"recipient":"重名测试","kind":"private"}), false).is_err());
+        assert_eq!(f.store.list_profiles("acct", None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_profile_name_failure_rolls_back_contact_and_profile() {
+        let f = setup_fixture();
+        f.store.connection().lock().unwrap().execute_batch(
+            "CREATE TRIGGER fail_name BEFORE INSERT ON contact_names BEGIN SELECT RAISE(ABORT, 'injected failure'); END;"
+        ).unwrap();
+        let p = ProfileInput {
+            category: "personal".into(), wechat_id: Some("wxid_atomic".into()), nickname: "事务测试".into(),
+            remark: None, region: None, source: None, added_on: None, common_groups: None,
+            enterprise: None, real_name: None, tags: vec![], friend_permission: None,
+        };
+        assert!(f.store.upsert_profile("atomic", &p, 1000).is_err());
+        let count: i64 = f.store.connection().lock().unwrap().query_row(
+            "SELECT count(*) FROM contacts WHERE account_id='atomic'", [], |r| r.get(0)
+        ).unwrap();
+        assert_eq!(count, 0);
+        assert!(f.store.list_profiles("atomic", None).unwrap().is_empty());
     }
 
     /// 聊天里出现过的人（还没有通讯录资料）仍按名字接上通讯录资料

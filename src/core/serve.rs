@@ -194,6 +194,9 @@ async fn run_core_for_account(
 
     // 4. 运行调度器
     let mut coordinator = BotCoordinator::new_with_account(config_path, account.clone())?;
+    if source == AccountSource::WeChat {
+        coordinator.account_detector = Some(std::sync::Arc::new(crate::core::wechat_account::detect_logged_in_account));
+    }
     if let Some(acc) = &account {
         coordinator.log_event("wechat_account", json!({"account_id": acc}));
     }
