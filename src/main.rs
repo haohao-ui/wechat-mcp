@@ -78,7 +78,7 @@ async fn async_main() -> Result<()> {
                     eprintln!("error: serve-core requires --config <path>");
                     std::process::exit(2);
                 };
-                match core::serve::run_serve_core(&cfg_path, None).await {
+                match core::serve::run_serve_core_with(&cfg_path, None, core::serve::AccountSource::WeChat).await {
                     Ok(code) => std::process::exit(code),
                     Err(err) => {
                         eprintln!("{}", err);

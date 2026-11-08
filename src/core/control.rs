@@ -1253,14 +1253,14 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                     return 1;
                 }
             };
-            let src_cid = match crate::core::history::migrate::resolve_contact(&store, &cfg.account_id, &src) {
+            let src_cid = match crate::core::history::migrate::resolve_contact(&store, &crate::core::wechat_account::effective_account_id(&cfg.state_dir, &cfg.account_id), &src) {
                 Ok(id) => id,
                 Err(_) => {
                     let _ = writeln!(stderr, "unknown contact: {}", src);
                     return 1;
                 }
             };
-            let dst_cid = match crate::core::history::migrate::resolve_contact(&store, &cfg.account_id, &dst) {
+            let dst_cid = match crate::core::history::migrate::resolve_contact(&store, &crate::core::wechat_account::effective_account_id(&cfg.state_dir, &cfg.account_id), &dst) {
                 Ok(id) => id,
                 Err(_) => {
                     let _ = writeln!(stderr, "unknown contact: {}", dst);
@@ -1430,6 +1430,8 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 }
             };
 
+            // 只列当前登录微信账号的联系人（换号后各账号的联系人分别保留）
+            let account_id = crate::core::wechat_account::effective_account_id(&cfg.state_dir, &cfg.account_id);
             let sync_file = cfg.state_dir.join("contacts-sync-result.json");
             let sync_val: Value = if sync_file.exists() {
                 match fs::read_to_string(&sync_file).ok().and_then(|c| serde_json::from_str(&c).ok()) {
@@ -1477,7 +1479,7 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                     FROM messages
                     GROUP BY contact_id
                 ) m ON c.contact_id = m.contact_id
-                WHERE c.merged_into IS NULL
+                WHERE c.merged_into IS NULL AND c.account_id = ?1
                 ORDER BY c.rowid"#
             ) {
                 Ok(s) => s,
@@ -1487,7 +1489,7 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 }
             };
 
-            let mapped = stmt.query_map([], |row| {
+            let mapped = stmt.query_map([&account_id], |row| {
                 let cid: String = row.get(0)?;
                 let disp_name: String = row.get(1)?;
                 let kind: String = row.get(2)?;
@@ -1586,7 +1588,7 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                     return 1;
                 }
             };
-            let rev_mapped = rev_stmt.query_map([&cfg.account_id], |r| {
+            let rev_mapped = rev_stmt.query_map([&account_id], |r| {
                 let id: i64 = r.get(0)?;
                 let reason: String = r.get(1)?;
                 let cand_str: String = r.get(2)?;
@@ -1610,7 +1612,7 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             };
 
             let out_obj = json!({
-                "account_id": cfg.account_id,
+                "account_id": account_id,
                 "sync": sync_val,
                 "contacts": contacts_out,
                 "reviews": reviews,
@@ -1901,7 +1903,6 @@ mod tests {
     fn write_test_config(dir: &Path) -> (PathBuf, PathBuf) {
         let state_dir = dir.join("state");
         fs::create_dir_all(&state_dir).unwrap();
-        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
         let cfg = json!({
             "schema_version": 1,
             "host": "local",
@@ -3889,6 +3890,38 @@ mod tests {
         assert_eq!(c_record["handling"], "record_only");
         assert_eq!(c_record["category"], "personal");
         assert!(c_record["wechat_id"].is_null());
+    }
+
+    /// 用户要求：联系人归属当前登录的微信账号；换号后各账号的联系人分别保留，列表只显示当前账号的
+    #[test]
+    fn test_contacts_list_shows_only_current_wechat_account() {
+        let temp = TempDir::new();
+        let cfg_path = temp.path().join("config.json");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let cfg = json!({
+            "schema_version": 1,
+            "host": "local",
+            "account_id": "test-desktop",
+            "state_dir": state_dir.to_str().unwrap(),
+            "allowlist": [{"recipient": "示例群", "kind": "group"}]
+        });
+        fs::write(&cfg_path, cfg.to_string()).unwrap();
+        let store = crate::core::history::store::HistoryStore::open(&state_dir).unwrap();
+        store.ensure_contact("wxid_a", &json!({"recipient": "甲号的客户", "kind": "private"}), true).unwrap();
+        store.ensure_contact("wxid_b", &json!({"recipient": "乙号的客户", "kind": "private"}), true).unwrap();
+        crate::core::wechat_account::record_current_account(&state_dir, "wxid_b", 1.0).unwrap();
+
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        let code = execute_control_full(
+            &["contacts-list".into(), "--json".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &mut stdout, &mut stderr, None, None,
+        );
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        let out: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(out["account_id"], "wxid_b");
+        let names: Vec<&str> = out["contacts"].as_array().unwrap().iter().filter_map(|c| c["display_name"].as_str()).collect();
+        assert_eq!(names, vec!["乙号的客户"]);
     }
 
     #[test]

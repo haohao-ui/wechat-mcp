@@ -690,7 +690,6 @@ async fn sync_group(
 mod tests {
     use super::*;
     use crate::core::contacts::parse::ManagerRow;
-    use std::collections::HashMap;
     use std::future::Future;
     use std::path::PathBuf;
     use std::pin::Pin;
