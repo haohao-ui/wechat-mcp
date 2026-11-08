@@ -470,6 +470,37 @@ fn row_matches_profile(row: &str, prof: &[OcrLine], nickname: &str, remark: Opti
     })
 }
 
+/// 资料卡一行的结构（只用于日志）：界面固有文字原样保留，其余汉字记 c、字母数字记 a、空格记 _，符号原样
+fn card_line_shape(text: &str) -> String {
+    const UI_WORDS: [&str; 16] = [
+        "企业", "实名", "来源", "备注", "添加备注名", "朋友圈", "视频号", "更多信息", "地区", "微信号",
+        "共同群聊", "添加时间", "发消息", "语音聊天", "视频聊天", "企业微信",
+    ];
+    let mut out = String::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        if let Some(w) = UI_WORDS.iter().filter(|w| rest.starts_with(**w)).max_by_key(|w| w.len()) {
+            out.push('[');
+            out.push_str(w);
+            out.push(']');
+            rest = &rest[w.len()..];
+            continue;
+        }
+        let ch = rest.chars().next().unwrap();
+        out.push(if ('\u{4e00}'..='\u{9fff}').contains(&ch) {
+            'c'
+        } else if ch.is_ascii_alphanumeric() {
+            'a'
+        } else if ch == ' ' {
+            '_'
+        } else {
+            ch
+        });
+        rest = &rest[ch.len_utf8()..];
+    }
+    out
+}
+
 /// 文字的短指纹（只用于日志比对两张资料卡是否相同，不含文字本身）
 fn short_fp(text: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -605,6 +636,14 @@ async fn sync_group(
                 continue;
             }
             let f = parse_profile(&prof, category).fields;
+            if category == "work" {
+                // 诊断：企业微信资料卡逐行结构（界面固有文字原样，其余只记字形），用于核对名字/企业的解析
+                let layout: Vec<String> = prof
+                    .iter()
+                    .map(|l| format!("{}@{},{}", card_line_shape(&l.text), l.x as i64, l.y as i64))
+                    .collect();
+                info!(category, row_y = *y, card = layout.join(" | ").as_str(), "contacts_sync_card_layout");
+            }
             let matched = match name {
                 Some(name) => row_matches_profile(name, &prof, &f.nickname, f.remark.as_deref()),
                 None => changed && !f.nickname.trim().is_empty(),
@@ -1963,6 +2002,13 @@ mod tests {
         assert!(!row_matches_profile("春冬", &card, "春a夏秋冬东南西北xyz", None));
         // 顺序不对不算
         assert!(!row_matches_profile("冬秋夏春", &card, "春a夏秋冬东南西北xyz", None));
+    }
+
+    #[test]
+    fn test_card_line_shape_keeps_ui_words_only() {
+        assert_eq!(card_line_shape("企业某某科技◎"), "[企业]cccc◎");
+        assert_eq!(card_line_shape("来源 企业微信"), "[来源]_[企业微信]");
+        assert_eq!(card_line_shape("@某某 Ab"), "@cc_aa");
     }
 
     #[test]
