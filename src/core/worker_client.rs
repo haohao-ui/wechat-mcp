@@ -253,6 +253,9 @@ impl WorkerClient {
         if self.owner_token.is_empty() {
             bail!("persistent worker requires stable ownership token");
         }
+        if self.recipient.trim().is_empty() {
+            bail!("worker start requires a target chat (prepare_target before start)");
+        }
 
         if !self.base_dir.exists() {
             bail!("unsafe_private_path: base directory does not exist");
@@ -793,6 +796,13 @@ impl CoordinatorCapture for WorkerClient {
 
     fn call<'a>(&'a mut self, op: &'a str, params: Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
         Box::pin(async move { self.call(op, params).await })
+    }
+
+    fn prepare_target(&mut self, recipient: &str, directory: &Path, names: &[String], group: bool) {
+        self.recipient = recipient.to_string();
+        self.names = names.to_vec();
+        self.group = group;
+        self.directory = directory.to_path_buf();
     }
 
     fn retarget<'a>(&'a mut self, recipient: &'a str, directory: &'a Path, names: &'a [String], group: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
