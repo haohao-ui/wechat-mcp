@@ -665,7 +665,7 @@ impl WorkerClient {
                     .get("sha256")
                     .and_then(|v| v.as_str())
                     .context("missing sha256")?;
-                if sha256_expected != "dummy" && sha256(&data) != sha256_expected {
+                if sha256(&data) != sha256_expected {
                     bail!("media digest mismatch");
                 }
                 if let Some(ext) = res.get("extension").and_then(|v| v.as_str()) {
@@ -791,7 +791,12 @@ impl WorkerClient {
         };
         item.insert("event".to_string(), json!(event));
         tracing::info!(event = %event, fields = %serde_json::to_string(&item).unwrap_or_default());
-        self.logged_events.lock().unwrap().push(Value::Object(item));
+        const MAX_LOGGED_EVENTS: usize = 256;
+        let mut events = self.logged_events.lock().unwrap();
+        if events.len() >= MAX_LOGGED_EVENTS {
+            events.remove(0);
+        }
+        events.push(Value::Object(item));
     }
 
     pub async fn attachments(
@@ -1518,7 +1523,7 @@ mod tests {
                         "size": size_30mb,
                         "bytes": test_b64_encode(&dummy_chunk),
                         "eof": eof,
-                        "sha256": "dummy",
+                        "sha256": "726ec6766f96dcdc1001a5dbf49603b18d59a023c7a62785dd3684e551ceabf3",
                         "extension": "txt"
                     }
                 })
@@ -1547,7 +1552,7 @@ mod tests {
                         "size": 50 * 1024 * 1024 + 1,
                         "bytes": test_b64_encode(b"x"),
                         "eof": true,
-                        "sha256": "dummy",
+                        "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
                         "extension": "txt"
                     }
                 })
@@ -1561,6 +1566,41 @@ mod tests {
         client2.connect(5).await.unwrap();
         let err = client2.download(&"b".repeat(64), "file").await.unwrap_err();
         assert!(err.to_string().contains("invalid media size/offset"));
+    }
+
+    #[tokio::test]
+    async fn test_download_rejects_corrupted_digest() {
+        let temp = TestDir::new();
+        let sock = temp.path().join("worker.sock");
+        let payload = b"correct payload";
+
+        let _server = MockWorkerServer::spawn(sock.clone(), move |req| {
+            let id = req["id"].as_u64().unwrap_or(1);
+            let op = req["operation"].as_str().unwrap_or("");
+            if op == "read_media" {
+                json!({
+                    "id": id,
+                    "protocol_version": 1,
+                    "ok": true,
+                    "result": {
+                        "offset": 0,
+                        "size": payload.len(),
+                        "bytes": test_b64_encode(payload),
+                        "eof": true,
+                        "sha256": "bad0000000000000000000000000000000000000000000000000000000000000",
+                        "extension": "txt"
+                    }
+                })
+            } else {
+                json!({"id": id, "protocol_version": 1, "ok": true, "result": {}})
+            }
+        })
+        .await;
+
+        let mut client = setup_test_client(&temp, sock, None);
+        client.connect(5).await.unwrap();
+        let err = client.download(&"c".repeat(64), "file").await.unwrap_err();
+        assert!(err.to_string().contains("media digest mismatch"));
     }
 
     #[tokio::test]
