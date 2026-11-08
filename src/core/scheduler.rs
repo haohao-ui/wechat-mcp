@@ -542,7 +542,18 @@ impl BotCoordinator {
             _ => Map::new(),
         };
         item.insert("event".to_string(), json!(event));
-        self.logged_events.lock().unwrap().push(Value::Object(item));
+        tracing::info!(
+            event = %event,
+            fields = %serde_json::to_string(&item).unwrap_or_default(),
+            "coordinator event: {}",
+            event
+        );
+        const MAX_LOGGED_EVENTS: usize = 256;
+        let mut events = self.logged_events.lock().unwrap();
+        if events.len() >= MAX_LOGGED_EVENTS {
+            events.remove(0);
+        }
+        events.push(Value::Object(item));
     }
 
     pub fn rules(&self) -> Result<BotConfig> {
@@ -1057,22 +1068,30 @@ impl BotCoordinator {
             }
         }
 
-        let probe_rows = match self.capture.as_mut().unwrap().sessions(&candidate_list).await {
-            Ok(rows) => rows,
-            Err(err) => {
-                self.log_event(
-                    "session_probe_failed",
-                    json!({
-                        "error_type": "ProbeError",
-                        "error": err.to_string().chars().take(200).collect::<String>(),
-                    }),
-                );
-                if !must_wait(&err.to_string()) {
-                    self.close_connection().await?;
+        const MAX_PROBE_BATCH_SIZE: usize = 50;
+        let mut probe_rows = Vec::new();
+        if !candidate_list.is_empty() {
+            for chunk in candidate_list.chunks(MAX_PROBE_BATCH_SIZE) {
+                match self.capture.as_mut().unwrap().sessions(chunk).await {
+                    Ok(rows) => {
+                        probe_rows.extend(rows);
+                    }
+                    Err(err) => {
+                        self.log_event(
+                            "session_probe_failed",
+                            json!({
+                                "error_type": "ProbeError",
+                                "error": err.to_string().chars().take(200).collect::<String>(),
+                            }),
+                        );
+                        if !must_wait(&err.to_string()) {
+                            self.close_connection().await?;
+                        }
+                        return Ok(names.iter().cloned().collect());
+                    }
                 }
-                return Ok(names.iter().cloned().collect());
             }
-        };
+        }
 
         let mut rows: HashMap<String, SessionRow> = HashMap::new();
         for row in probe_rows {
@@ -1227,73 +1246,95 @@ impl BotCoordinator {
         };
 
         if let Some(cap) = &mut self.capture {
-            let frame_res = cap.frame().await;
-            let frame = match frame_res {
-                Ok(f) => f,
-                Err(err) => {
-                    self.history
-                        .finish_media_job(&mid, "failed", Some(&err.to_string()))?;
-                    return Ok(());
-                }
-            };
-            let bubble = frame
-                .bubbles
-                .iter()
-                .find(|b| b.kind.as_deref() == Some("file") && b.digest == digest);
-            if bubble.is_none() {
-                self.history
-                    .finish_media_job(&mid, "gone", Some("not visible"))?;
-                return Ok(());
-            }
-            let bubble = bubble.unwrap();
-            let media_id = match &bubble.media_id {
-                Some(m) => m,
-                None => {
-                    self.history
-                        .finish_media_job(&mid, "failed", Some("missing media_id"))?;
-                    return Ok(());
-                }
-            };
-
             let max_bytes = self.config.max_attachment_mb * 1024 * 1024;
-            let info = cap
-                .call(
-                    "prepare_file",
-                    json!({
-                        "media_id": media_id,
-                        "snapshot_id": frame.snapshot_id,
-                        "max_bytes": max_bytes,
-                    }),
-                )
-                .await;
-            let info_val = match info {
-                Ok(val) => val,
-                Err(err) => {
-                    let gone = err.to_string().contains("file_snapshot_changed");
-                    self.history.finish_media_job(
+            let fetch_res: Result<(PathBuf, Option<String>)> = async {
+                let frame = cap.frame().await.context("failed to capture frame")?;
+                let bubble = frame
+                    .bubbles
+                    .iter()
+                    .find(|b| b.kind.as_deref() == Some("file") && b.digest == digest);
+                let bubble = match bubble {
+                    Some(b) => b,
+                    None => bail!("__bubble_gone__"),
+                };
+                let media_id = match &bubble.media_id {
+                    Some(m) => m,
+                    None => bail!("missing media_id"),
+                };
+
+                let info_val = cap
+                    .call(
+                        "prepare_file",
+                        json!({
+                            "media_id": media_id,
+                            "snapshot_id": frame.snapshot_id,
+                            "max_bytes": max_bytes,
+                        }),
+                    )
+                    .await
+                    .context("prepare_file failed")?;
+
+                let path = cap.download(media_id, "file").await.context("download file failed")?;
+                let filename = info_val.get("filename").and_then(|v| v.as_str()).map(|s| s.to_string());
+                Ok((path, filename))
+            }.await;
+
+            match fetch_res {
+                Ok((path, filename)) => {
+                    let attach_res = self.history.attach_media(
                         &mid,
-                        if gone { "gone" } else { "failed" },
-                        Some(&err.to_string()),
-                    )?;
-                    self.log_event(
-                        "history_file_download_failed",
-                        json!({"recipient": recipient, "gone": gone, "error": err.to_string()}),
+                        &path,
+                        "file",
+                        filename.as_deref(),
+                        "original",
+                        Some(max_bytes as usize),
                     );
-                    return Ok(());
+                    match attach_res {
+                        Ok(_) => {
+                            let _ = self.history.finish_media_job(&mid, "done", None);
+                            self.log_event("history_file_archived", json!({"recipient": recipient}));
+                        }
+                        Err(err) => {
+                            let err_str = err.to_string();
+                            let _ = self.history.finish_media_job(
+                                &mid,
+                                "failed",
+                                Some(&err_str.chars().take(200).collect::<String>()),
+                            );
+                            self.log_event(
+                                "history_file_download_failed",
+                                json!({
+                                    "recipient": recipient,
+                                    "gone": false,
+                                    "error": err_str.chars().take(200).collect::<String>()
+                                }),
+                            );
+                        }
+                    }
                 }
-            };
-            let path = cap.download(media_id, "file").await?;
-            let filename = info_val.get("filename").and_then(|v| v.as_str());
-            self.history.attach_media(
-                &mid,
-                &path,
-                "file",
-                filename,
-                "original",
-                Some(max_bytes as usize),
-            )?;
-            self.history.finish_media_job(&mid, "done", None)?;
-            self.log_event("history_file_archived", json!({"recipient": recipient}));
+                Err(err) => {
+                    let err_str = err.to_string();
+                    if err_str.contains("__bubble_gone__") {
+                        let _ = self.history.finish_media_job(&mid, "gone", Some("not visible"));
+                    } else {
+                        let gone = err_str.contains("file_snapshot_changed");
+                        let status = if gone { "gone" } else { "failed" };
+                        let _ = self.history.finish_media_job(
+                            &mid,
+                            status,
+                            Some(&err_str.chars().take(200).collect::<String>()),
+                        );
+                        self.log_event(
+                            "history_file_download_failed",
+                            json!({
+                                "recipient": recipient,
+                                "gone": gone,
+                                "error": err_str.chars().take(200).collect::<String>()
+                            }),
+                        );
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1647,6 +1688,8 @@ mod tests {
         ocr: Option<OcrStatus>,
         last_switch: Option<Value>,
         target_name: Option<String>,
+        download_error: Option<String>,
+        probe_batches: Arc<Mutex<Vec<Vec<String>>>>,
     }
 
     impl MockCoordinatorCapture {
@@ -1660,6 +1703,8 @@ mod tests {
                 ocr: None,
                 last_switch: None,
                 target_name: None,
+                download_error: None,
+                probe_batches: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -1715,11 +1760,18 @@ mod tests {
             self.target_name = Some(recipient.to_string());
             Box::pin(async move { Ok(()) })
         }
-        fn sessions<'a>(&'a mut self, _names: &'a [String]) -> Pin<Box<dyn Future<Output = Result<Vec<SessionRow>>> + Send + 'a>> {
+        fn sessions<'a>(&'a mut self, names: &'a [String]) -> Pin<Box<dyn Future<Output = Result<Vec<SessionRow>>> + Send + 'a>> {
+            self.probe_batches.lock().unwrap().push(names.to_vec());
             Box::pin(async move { Ok(self.rows.clone()) })
         }
         fn download<'a>(&'a mut self, _media_id: &'a str, _kind: &'a str) -> Pin<Box<dyn Future<Output = Result<PathBuf>> + Send + 'a>> {
-            Box::pin(async move { Ok(PathBuf::from("/tmp/downloaded")) })
+            let err = self.download_error.clone();
+            Box::pin(async move {
+                if let Some(e) = err {
+                    bail!("{}", e);
+                }
+                Ok(PathBuf::from("/tmp/downloaded"))
+            })
         }
         fn last_switch(&self) -> Option<Value> {
             self.last_switch.clone()
@@ -2975,6 +3027,81 @@ mod tests {
 
         let job = coord.history.next_media_job(&cid).unwrap();
         assert!(job.is_none());
+    }
+
+    #[test]
+    fn test_download_pending_media_error_boundary_records_failed_and_keeps_sweep_ok() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let child = coord.session(&AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }).unwrap();
+        let cid = child.contact_id.clone().unwrap();
+
+        let bubble = Bubble {
+            text: "f.txt".to_string(),
+            digest: "dig_file_error_test".to_string(),
+            direction: "inbound_visual".to_string(),
+            kind: Some("file".to_string()),
+            media_id: Some("m_error_123".to_string()),
+            phash: None,
+            filename: Some("f.txt".to_string()),
+            sender: None,
+            transfer_pending: None,
+            image_source: None,
+            x: None,
+            y: None,
+            width: None,
+            height: None,
+            extra: Map::new(),
+        };
+
+        let frame_model = test_frame(vec![bubble.clone()], "snap_test");
+        let frame_val = serde_json::to_value(&frame_model).unwrap();
+
+        coord.history.record_frame(
+            &cid,
+            &frame_val,
+            None,
+            None,
+            false,
+        ).unwrap();
+
+        let pending_job = coord.history.next_media_job(&cid).unwrap().expect("media job should be created");
+        let mid = pending_job["message_id"].as_str().unwrap().to_string();
+
+        coord.active_name = Some("a".to_string());
+        let mut cap = MockCoordinatorCapture::new();
+        cap.frame_val = frame_model;
+        cap.call_responses.insert("prepare_file".to_string(), json!({"filename": "f.txt"}));
+        cap.download_error = Some("simulated network error during download".to_string());
+        coord.capture = Some(Box::new(cap));
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            // 错误被内部错误边界捕获，不向外抛出 Err，sweep 不会中断
+            let res = coord.download_pending_media().await;
+            assert!(res.is_ok(), "download_pending_media must not fail the sweep on download error");
+        });
+
+        // 验证 logged_events 记录了 history_file_download_failed
+        let events = coord.logged_events.lock().unwrap().clone();
+        let failed_event = events.iter().find(|e| e["event"] == "history_file_download_failed");
+        assert!(failed_event.is_some(), "must log history_file_download_failed event");
+        let err_msg = failed_event.unwrap()["error"].as_str().unwrap_or("");
+        assert!(err_msg.contains("download file failed"), "error detail should describe download failure: {}", err_msg);
+
+        // 验证数据库中该 job 状态变为 pending（退避中）并且 attempts 计数增加到 1
+        let conn_arc = coord.history.connection();
+        let conn = conn_arc.lock().unwrap();
+        let (status, attempts, last_err): (String, i64, Option<String>) = conn.query_row(
+            "SELECT status, attempts, last_error FROM media_jobs WHERE message_id=?",
+            [&mid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        assert_eq!(status, "pending");
+        assert_eq!(attempts, 1);
+        assert!(last_err.unwrap().contains("download file failed"));
     }
 
     #[test]
@@ -4351,5 +4478,75 @@ mod tests {
         assert_eq!(turn.files.len(), 1, "好的 pdf 文件仍然成功进入 files");
         assert_eq!(turn.files[0]["filename"], "doc.pdf");
         assert_eq!(turn.files[0]["text"], "真实PDF文件正文内容");
+    }
+
+    #[test]
+    fn test_log_event_bounded_to_256() {
+        let temp = TestDir::new();
+        let cfg_path = temp.path().join("bot.json");
+        let spool = temp.path().join("spool");
+        let cfg = json!({
+            "schema_version": 1,
+            "host": "local",
+            "account_id": "test_acc",
+            "state_dir": spool.to_string_lossy(),
+            "allowlist": [{"recipient": "测试", "kind": "private"}]
+        });
+        std::fs::write(&cfg_path, serde_json::to_vec_pretty(&cfg).unwrap()).unwrap();
+        let coord = BotCoordinator::new(&cfg_path).unwrap();
+
+        for i in 0..300 {
+            coord.log_event("batch_event", json!({"index": i}));
+        }
+
+        let events = coord.logged_events.lock().unwrap().clone();
+        assert_eq!(events.len(), 256);
+        assert_eq!(events[0]["index"], 44);
+        assert_eq!(events[255]["index"], 299);
+    }
+
+    #[tokio::test]
+    async fn test_due_sessions_batches_names_up_to_50() {
+        let td = TestDir::new();
+        // 构造 105 个联系人，每个带 1 个名字，总计 105 个待探测名字
+        let mut allow = Vec::new();
+        let mut names = Vec::new();
+        for i in 0..105 {
+            let name = format!("user_{:03}", i);
+            allow.push(AllowlistEntry {
+                recipient: name.clone(),
+                kind: "private".to_string(),
+                aliases: None,
+            });
+            names.push(name);
+        }
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+
+        let mut cap = MockCoordinatorCapture::new();
+        for name in &names {
+            cap.rows.push(SessionRow {
+                name: name.clone(),
+                y: 100,
+                preview_digest: "d".to_string(),
+                preview_key: None,
+                preview_time: None,
+                red_pixels: 0,
+            });
+        }
+        let batches_ref = cap.probe_batches.clone();
+        coord.capture = Some(Box::new(cap));
+
+        let res = coord.due_sessions(&names).await.unwrap();
+        assert_eq!(res.len(), 105);
+
+        let batches = batches_ref.lock().unwrap().clone();
+        assert_eq!(batches.len(), 3, "105个名字按<=50每批分批，应分成3批");
+        assert_eq!(batches[0].len(), 50);
+        assert_eq!(batches[1].len(), 50);
+        assert_eq!(batches[2].len(), 5);
+        for b in &batches {
+            assert!(b.len() <= 50, "每批名字数量绝对不能超过50");
+        }
     }
 }
