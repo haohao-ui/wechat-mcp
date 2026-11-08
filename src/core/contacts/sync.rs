@@ -421,6 +421,33 @@ fn measure_shift(prev: &[(f64, Option<String>)], prev_screen: &Screen, next: &Sc
     best.map(|(_, d)| d)
 }
 
+/// 字形结构（只用于日志，不含文字本身）：在 other 里出现的字记 "="，其余汉字记 "c"、字母数字记 "a"，
+/// 空格记 "_"，@ … ( ) 原样保留，其他符号记 "."
+fn shape_against(text: &str, other: &str) -> String {
+    let mut pool: Vec<char> = name_key_for_match(other).chars().collect();
+    text.chars()
+        .map(|ch| {
+            let low = ch.to_lowercase().next().unwrap_or(ch);
+            if ('\u{4e00}'..='\u{9fff}').contains(&ch) || ch.is_ascii_alphanumeric() {
+                if let Some(pos) = pool.iter().position(|x| *x == low) {
+                    pool.remove(pos);
+                    '='
+                } else if ch.is_ascii_alphanumeric() {
+                    'a'
+                } else {
+                    'c'
+                }
+            } else if ch == ' ' {
+                '_'
+            } else if "@…()（）＠".contains(ch) {
+                ch
+            } else {
+                '.'
+            }
+        })
+        .collect()
+}
+
 /// 资料卡哪一行和列表名字最像（只用于日志，输出数字不输出名字）：(行号, 相同字数)
 fn best_profile_line(row: &str, prof: &[OcrLine]) -> (usize, usize) {
     let rk: Vec<char> = name_key_for_match(row).chars().collect();
@@ -544,6 +571,10 @@ async fn sync_group(
                     best_line = name.as_deref().map_or(-1, |n| { let (i, _) = best_profile_line(n, &prof); if i == usize::MAX { -1 } else { i as i64 } }),
                     best_common = name.as_deref().map_or(0, |n| best_profile_line(n, &prof).1),
                     nickname_common = name.as_deref().map_or(0, |n| best_profile_line(n, &[OcrLine { text: f.nickname.clone(), x: 0.0, y: 0.0, w: 0.0, h: 0.0 }]).1),
+                    row_shape = name.as_deref().map_or(String::new(), |n| shape_against(n, &f.nickname)),
+                    nick_shape = name.as_deref().map_or(String::new(), |n| shape_against(&f.nickname, n)),
+                    line0_shape = name.as_deref().map_or(String::new(), |n| prof.first().map_or(String::new(), |l| shape_against(&l.text, n))),
+                    line1_shape = name.as_deref().map_or(String::new(), |n| prof.get(1).map_or(String::new(), |l| shape_against(&l.text, n))),
                     "contacts_sync_profile_name_mismatch"
                 );
                 r.unreadable += 1;
@@ -1803,6 +1834,12 @@ mod tests {
 
     /// 实机：联系人分组每一行都"资料卡名字与列表名字不一致"、一个也没写入。列表名字会被截断（…），
     /// 资料卡名字后可能多出性别图标等字符。比对时只看汉字/字母/数字，一方包含另一方（≥2 字）即视为同一人。
+    #[test]
+    fn test_shape_log_hides_text() {
+        assert_eq!(shape_against("张三@腾讯", "张三"), "==@cc");
+        assert_eq!(shape_against("Ab 1…", "ab"), "==_a…");
+    }
+
     #[test]
     fn test_row_and_profile_names_match_after_normalization() {
         assert!(names_match("测试甲", "测试甲 ♂"));
