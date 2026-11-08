@@ -165,6 +165,39 @@ public func recognizeContactLines(image: CGImage, offsetX: Double = 0, offsetY: 
     return lines.sorted { ($0["y"] as? Double ?? 0) < ($1["y"] as? Double ?? 0) }
 }
 
+/// 联系人行的头像位置（实测 2026-11-08：只有联系人行左侧有头像，字母行/分组标题没有；头像约 28 点高，
+/// 中心与名字同一高度）。在 x=78..122 这一竖条里找"与本行背景色不同"的连续像素段，只返回完整显示的头像（高 ≥ 22）中心 y。
+/// image 是列表区域的截图，offsetX/offsetY 是它在窗口内的左上角。背景色取同一行 x=290 处（选中行背景是灰的，也能比）。
+public func contactAvatarRows(image: CGImage, offsetX: Double, offsetY: Double) -> [Double] {
+    let rep = NSBitmapImageRep(cgImage: image)
+    let x0 = max(0, Int(78 - offsetX)), x1 = min(image.width, Int(122 - offsetX))
+    let bgX = min(image.width - 1, max(0, Int(290 - offsetX)))
+    guard x1 > x0 else { return [] }
+    func busy(_ y: Int) -> Bool {
+        guard let bg = rep.colorAt(x: bgX, y: y) else { return false }
+        var n = 0
+        for x in x0..<x1 {
+            guard let c = rep.colorAt(x: x, y: y) else { continue }
+            let d = abs(c.redComponent - bg.redComponent) + abs(c.greenComponent - bg.greenComponent) + abs(c.blueComponent - bg.blueComponent)
+            if d > 0.12 { n += 1 }
+        }
+        return n >= 8
+    }
+    var rows: [Double] = []
+    var start = -1
+    for y in 0...image.height {
+        let b = y < image.height && busy(y)
+        if b && start < 0 { start = y }
+        if !b && start >= 0 {
+            let h = y - start
+            // 顶部/底部被截断的半个头像（h < 22）不算；完整头像约 28
+            if h >= 22 && h <= 40 && start > 0 && y < image.height { rows.append(offsetY + Double(start + y) / 2.0) }
+            start = -1
+        }
+    }
+    return rows
+}
+
 public func isContactsOperation(_ operation: String) -> Bool {
     return operation.hasPrefix("contacts_")
 }
@@ -255,7 +288,7 @@ func executeContactsOperation(operation: String, params: [String: Any], manage: 
         let listCrop = CGRect(x: spec.list.x, y: spec.list.y, width: spec.list.w, height: spec.list.h)
         guard let cropped = normImage.cropping(to: listCrop) else { throw Failure.invalid("bitmap_failed") }
         let lines = try recognizeContactLines(image: cropped, offsetX: spec.list.x, offsetY: spec.list.y)
-        return ["lines": lines]
+        return ["lines": lines, "avatars": contactAvatarRows(image: cropped, offsetX: spec.list.x, offsetY: spec.list.y)]
     }
 
     if operation == "contacts_click_list" {
@@ -279,7 +312,7 @@ func executeContactsOperation(operation: String, params: [String: Any], manage: 
         let listCrop = CGRect(x: spec.list.x, y: spec.list.y, width: spec.list.w, height: spec.list.h)
         guard let cropped = normImage.cropping(to: listCrop) else { throw Failure.invalid("bitmap_failed") }
         let lines = try recognizeContactLines(image: cropped, offsetX: spec.list.x, offsetY: spec.list.y)
-        return ["lines": lines]
+        return ["lines": lines, "avatars": contactAvatarRows(image: cropped, offsetX: spec.list.x, offsetY: spec.list.y)]
     }
 
     if operation == "contacts_scroll_list" {
@@ -298,7 +331,7 @@ func executeContactsOperation(operation: String, params: [String: Any], manage: 
         let listCrop = CGRect(x: spec.list.x, y: spec.list.y, width: spec.list.w, height: spec.list.h)
         guard let cropped = normImage.cropping(to: listCrop) else { throw Failure.invalid("bitmap_failed") }
         let lines = try recognizeContactLines(image: cropped, offsetX: spec.list.x, offsetY: spec.list.y)
-        return ["lines": lines]
+        return ["lines": lines, "avatars": contactAvatarRows(image: cropped, offsetX: spec.list.x, offsetY: spec.list.y)]
     }
 
     if operation == "contacts_open_row" {
@@ -326,15 +359,17 @@ func executeContactsOperation(operation: String, params: [String: Any], manage: 
         try act { try botActions.click(CGRect(x: wx + 180.0 - 10, y: wy + y - 5, width: 20, height: 10)) }
         var cropped = try profileImage()
         let deadline = Date().addingTimeInterval(2.0)
-        while !profileChanged(before, profileSignature(cropped)) && Date() < deadline {
+        var changed = profileChanged(before, profileSignature(cropped))
+        while !changed && Date() < deadline {
             pauseUI(0.15)
             cropped = try profileImage()
+            changed = profileChanged(before, profileSignature(cropped))
         }
         pauseUI(0.25)  // 资料卡切换有过渡，稍等稳定后再识别
         cropped = try profileImage()
         let rawLines = try recognizeContactLines(image: cropped, offsetX: spec.profile.x, offsetY: spec.profile.y)
         let safeLines = filterProfileForbiddenLines(lines: rawLines, forbiddenRect: spec.profileForbidden)
-        return ["lines": safeLines]
+        return ["lines": safeLines, "changed": changed]
     }
 
     if operation == "contacts_manager_open" {

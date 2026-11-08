@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -172,20 +171,6 @@ pub fn clean_stale_contacts_sync_pause(state_dir: &Path) {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct CheckpointState {
-    mode: Option<SyncMode>,
-    category_index: usize,
-    categories: Vec<(String, u32, f64)>, // (category, expected, header_y)
-    seen_ids_by_cat: HashMap<String, Vec<String>>,
-    cat_progress: HashMap<String, Vec<String>>, // category -> list of processed contact names in order
-    unreadable_rows: u32,
-    needs_review: u32,
-    /// 每个分组展开后已向下滚动的格数：恢复时一次滚回去，而不是逐屏重走（逐屏重走会耗尽让出预算、永远推进不了）
-    #[serde(default)]
-    scroll_ticks: HashMap<String, u32>,
-}
-
 pub async fn run_sync(
     capture: &mut dyn CoordinatorCapture,
     store: &HistoryStore,
@@ -240,466 +225,334 @@ async fn run_sync_inner(
     now_ms: i64,
 ) -> Result<SyncReport> {
     let state_dir = checkpoint.parent().unwrap_or_else(|| Path::new("."));
+    // 不再断点续做：中途停下就下次从头来（按微信号更新，重复跑不会重复记录）
+    let _ = fs::remove_file(checkpoint);
+
+    // 停对话监控：写暂停标记（用户已手动暂停则保留用户的标记）
     let pause_file = state_dir.join("admin-pause.json");
     let initially_paused = pause_file.exists();
-
     if !initially_paused {
-        let _ = write_private(
-            &pause_file,
-            &json!({"paused": true, "reason": "contacts_sync", "at_ms": now_ms}),
-        );
+        let _ = write_private(&pause_file, &json!({"paused": true, "reason": "contacts_sync", "at_ms": now_ms}));
     }
-
     struct PauseGuard<'a> {
         pause_file: &'a Path,
         should_clean: bool,
     }
     impl<'a> Drop for PauseGuard<'a> {
         fn drop(&mut self) {
-            if self.should_clean && self.pause_file.exists() {
+            if self.should_clean {
                 let _ = fs::remove_file(self.pause_file);
             }
         }
     }
-    let _pause_guard = PauseGuard {
-        pause_file: &pause_file,
-        should_clean: !initially_paused,
-    };
+    let _pause_guard = PauseGuard { pause_file: &pause_file, should_clean: !initially_paused };
 
-    let mut state: CheckpointState = if checkpoint.exists() {
-        fs::read_to_string(checkpoint)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
-    } else {
-        CheckpointState::default()
-    };
-    state.mode = Some(mode);
+    capture.call("contacts_enter", json!({})).await?;
+    let top = collapse_all_groups(capture).await?;
+    let groups = parse_group_headers(&top);
+    info!(lines = top.len(), headers = groups.len(), "contacts_sync_headers");
+    let existing = store.list_profiles(account_id, None).unwrap_or_default();
 
-    // 1. 进入通讯录
-    let _ = capture.call("contacts_enter", json!({})).await?;
-
-    // 2. 读取分组标题与期望数量
-    if state.categories.is_empty() {
-        let lines = collapse_all_groups(capture).await?;
-        let parsed_headers = parse_group_headers(&lines);
-        info!(lines = lines.len(), headers = parsed_headers.len(), "contacts_sync_headers");
-        state.categories = parsed_headers;
-    }
-
-    info!(
-        "sync categories found: {}",
-        state
-            .categories
-            .iter()
-            .map(|(c, count, _)| format!("{c}:{count}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-
-    // 3. 不打开「通讯录管理」：那里没有每个人的详细资料，且读表格会耗尽让出预算（用户 2026-11-08 要求、实机验证）
-    // 4. 逐分组展开、逐屏识别联系人行
-    let existing_profiles = store.list_profiles(account_id, None).unwrap_or_default();
-    let mut yielded = false;
-
-    'outer: while state.category_index < state.categories.len() {
-        let (cat_name, expected, _) = state.categories[state.category_index].clone();
-        let seen_list = state
-            .seen_ids_by_cat
-            .entry(cat_name.clone())
-            .or_default();
-        let processed_names = state
-            .cat_progress
-            .entry(cat_name.clone())
-            .or_default();
-
-        // a/b. 收起所有展开的分组、回到顶部，读各分组标题位置
-        let top_lines = collapse_all_groups(capture).await?;
-
-        let header_line = top_lines.iter().find(|l| {
-            let t = l.text.trim();
-            match cat_name.as_str() {
-                "official" => t.contains("公众号"),
-                "work" => t.contains("企业微信"),
-                "personal" => t == "联系人" || (t.contains("联系人") && !t.contains("企业微信")),
-                _ => false,
-            }
-        });
-
-        info!(category = %cat_name, header_found = header_line.is_some(), top_lines = top_lines.len(), "contacts_sync_group");
-        if let Some(hl) = header_line {
-            let hy = hl.y;
-            // c. 按内容判断是否展开；未展开就点标题展开，并确认（最多点两次）
-            let mut cur_screen_lines = top_lines.clone();
-            for _ in 0..2 {
-                if group_expanded(&cur_screen_lines, hy) {
-                    break;
-                }
-                let click_res = capture.call("contacts_click_list", json!({"x": 180.0, "y": hy})).await?;
-                cur_screen_lines = click_res
-                    .get("lines")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    .unwrap_or_default();
-            }
-
-            // 恢复：一次滚到上次停下的位置（少一格，保证与上次最后一屏有重叠）
-            let resume_ticks = state.scroll_ticks.get(&cat_name).copied().unwrap_or(0);
-            if resume_ticks > 1 {
-                if let Ok(v) = capture
-                    .call("contacts_scroll_list", json!({"direction": "down", "ticks": resume_ticks - 1}))
-                    .await
-                {
-                    cur_screen_lines = v
-                        .get("lines")
-                        .and_then(|l| serde_json::from_value(l.clone()).ok())
-                        .unwrap_or_default();
-                    state.scroll_ticks.insert(cat_name.clone(), resume_ticks - 1);
-                }
-            }
-
-            // 一屏逐个点开采集，点完滚一整屏（用户 2026-11-08 要求）。已处理到的位置按几何换算，
-            // 不靠文字比对（识别稍有出入就会重复点同一行）
-            const SCREEN_TICKS: u32 = 5; // 5 格 ≈ 450 点，列表可见约 600 点，保留重叠
-            let mut seen_until_y: f64 = 0.0;
-            let mut last_row: Option<(String, f64)> = None;
-            let mut prev_screen_sig: Option<Vec<(String, i64)>> = None;
-            let mut no_new_rows_count = 0;
-            // 本轮（从顶部开始）按顺序看到的联系人名字；与断点里已处理的名字按出现次数比对，
-            // 已处理过的直接跳过，不再打开资料卡（恢复时不重做，保证每轮都有进展）
-            let mut pass_seen: Vec<String> = Vec::new();
-
-            'screen_loop: loop {
-                if should_yield() {
-                    yielded = true;
-                    break 'outer;
-                }
-
-                // 识别当前屏幕属于联系人的行
-                let mut contact_rows_on_screen: Vec<(String, f64)> = Vec::new();
-                let mut lines_sorted = cur_screen_lines.clone();
-                lines_sorted.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
-
-                // 本分组标题在这一屏上的位置（展开后滚动时标题吸顶）：联系人行一定在它下方
-                let own_header_y = lines_sorted
-                    .iter()
-                    .filter(|l| l.x < 115.0 && cjk_only(&l.text) == group_title_cjk(&cat_name))
-                    .map(|l| l.y)
-                    .fold(None, |acc: Option<f64>, y| Some(acc.map_or(y, |a| a.max(y))));
-
-                // 下一个分组的标题：它及以下的行属于别的分组，本分组到此为止
-                let next_header_y = lines_sorted
-                    .iter()
-                    .filter(|l| l.x < 115.0)
-                    .filter(|l| {
-                        let c = cjk_only(&l.text);
-                        GROUP_TITLES_CJK.contains(&c.as_str()) && c != group_title_cjk(&cat_name)
-                    })
-                    .filter(|l| own_header_y.map_or(true, |hy| l.y > hy))
-                    .map(|l| l.y)
-                    .fold(None, |acc: Option<f64>, y| Some(acc.map_or(y, |a: f64| a.min(y))));
-
-                for l in &lines_sorted {
-                    if l.y < 40.0 || l.y > 640.0 {
-                        continue;
-                    }
-                    if let Some(hy) = own_header_y {
-                        if l.y <= hy + 10.0 {
-                            continue;
-                        }
-                    }
-                    if let Some(ny) = next_header_y {
-                        if l.y >= ny - 5.0 {
-                            continue;
-                        }
-                    }
-                    // 「通讯录管理」「搜索」带图标前缀、与联系人名字同列（x≈131），只能按文字排除：
-                    // 实机上它被当成联系人，"打开资料卡"点开了通讯录管理窗口（2026-11-08）
-                    let cjk = cjk_only(&l.text);
-                    if cjk.contains("通讯录管理") || cjk == "搜索"
-                        || ["公众号服务号", "企业微信联系人", "联系人", "群聊"].contains(&cjk.as_str())
-                    {
-                        continue;
-                    }
-                    let txt = l.text.trim();
-                    // 联系人名字在 x≈133；分组标题（带箭头前缀）与字母索引在 x≈77–95：按位置排除，
-                    // 不依赖文字精确匹配（真机标题前有箭头字符，点到标题会收起分组）
-                    if l.x < 115.0 {
-                        continue;
-                    }
-                    if txt == "搜索" || txt == "通讯录管理" {
-                        continue;
-                    }
-                    let is_group_title = ["公众号、服务号", "企业微信联系人", "联系人", "群聊"]
-                        .iter()
-                        .any(|gt| txt == *gt);
-                    if is_group_title {
-                        continue;
-                    }
-                    if txt.len() == 1 && txt.chars().all(|c| c.is_ascii_uppercase()) {
-                        continue;
-                    }
-                    if l.x > 250.0 && txt.chars().all(|c| c.is_ascii_digit()) {
-                        continue;
-                    }
-                    contact_rows_on_screen.push((txt.to_string(), l.y));
-                }
-
-                info!(
-                    category = %cat_name,
-                    screen_lines = cur_screen_lines.len(),
-                    candidates = contact_rows_on_screen.len(),
-                    own_header = own_header_y.is_some(),
-                    "contacts_sync_screen"
-                );
-                let new_rows_vec: Vec<(String, f64)> = contact_rows_on_screen
-                    .iter()
-                    .filter(|(_, y)| *y > seen_until_y + 5.0 && *y <= 600.0)
-                    .cloned()
-                    .collect();
-                let new_rows = &new_rows_vec[..];
-
-                if new_rows.is_empty() {
-                    no_new_rows_count += 1;
-                    if no_new_rows_count >= 2 {
-                        break 'screen_loop;
-                    }
-                } else {
-                    no_new_rows_count = 0;
-                    for (row_name, row_y) in new_rows {
-                        pass_seen.push(row_name.clone());
-                        let seen_in_pass = pass_seen.iter().filter(|n| *n == row_name).count();
-                        let already_done = processed_names.iter().filter(|n| *n == row_name).count();
-                        if seen_in_pass <= already_done {
-                            continue;
-                        }
-                        if should_yield() {
-                            yielded = true;
-                            break 'outer;
-                        }
-
-                        let mut skip_open = false;
-                        if mode == SyncMode::Incremental {
-                            // 增量：列表上的名字（备注或昵称）在库里已有资料就不点开，只点开新名字
-                            if let Some(p) = existing_profiles.iter().find(|p| {
-                                p.get("nickname").and_then(|v| v.as_str()) == Some(row_name) ||
-                                p.get("remark").and_then(|v| v.as_str()) == Some(row_name)
-                            }) {
-                                skip_open = true;
-                                if let Some(cid) = p.get("contact_id").and_then(|v| v.as_str()) {
-                                    if !seen_list.contains(&cid.to_string()) {
-                                        seen_list.push(cid.to_string());
-                                    }
-                                }
-                            }
-                        }
-
-                        if !skip_open {
-                            let open_res = capture.call("contacts_open_row", json!({"y": row_y})).await;
-                            let prof_lines: Vec<OcrLine> = open_res.ok()
-                                .and_then(|v| v.get("lines").cloned())
-                                .and_then(|v| serde_json::from_value(v).ok())
-                                .unwrap_or_default();
-
-                            if prof_lines.is_empty() {
-                                info!(category = %cat_name, row_y = *row_y, "contacts_sync_profile_empty");
-                                state.unreadable_rows += 1;
-                            } else {
-                                let parse_res = parse_profile(&prof_lines, &cat_name);
-                                let f = parse_res.fields;
-
-                                // 错位保护：资料卡昵称或备注必须与该行名字一致
-                                let name_matched = names_match(row_name, &f.nickname)
-                                    || f.remark.as_deref().map(|rmk| names_match(row_name, rmk)).unwrap_or(false);
-
-                                if !name_matched {
-                                    let rk = name_key_for_match(row_name);
-                                    let nk = name_key_for_match(&f.nickname);
-                                    info!(
-                                        category = %cat_name,
-                                        row_y = *row_y,
-                                        profile_lines = prof_lines.len(),
-                                        row_len = rk.chars().count(),
-                                        nickname_len = nk.chars().count(),
-                                        has_remark = f.remark.is_some(),
-                                        has_wechat_id = f.wechat_id.is_some(),
-                                        "contacts_sync_profile_name_mismatch"
-                                    );
-                                    state.unreadable_rows += 1;
-                                } else {
-                                    let combined_tags = f.tags.clone();
-
-                                    let input = ProfileInput {
-                                        category: cat_name.clone(),
-                                        wechat_id: f.wechat_id,
-                                        nickname: f.nickname,
-                                        remark: f.remark,
-                                        region: f.region,
-                                        source: f.source,
-                                        added_on: f.added_on,
-                                        common_groups: f.common_groups,
-                                        enterprise: f.enterprise,
-                                        real_name: f.real_name,
-                                        tags: combined_tags,
-                                        friend_permission: f.friend_permission,
-                                    };
-
-                                    match store.upsert_profile(account_id, &input, now_ms) {
-                                        Ok(UpsertOutcome::Created(cid)) | Ok(UpsertOutcome::Updated(cid)) => {
-                                            if !seen_list.contains(&cid) {
-                                                seen_list.push(cid);
-                                            }
-                                        }
-                                        Ok(UpsertOutcome::NeedsReview { .. }) => {
-                                            state.needs_review += 1;
-                                        }
-                                        Err(_) => {
-                                            state.unreadable_rows += 1;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        processed_names.push(row_name.clone());
-                    }
-                    if let Some(last) = new_rows.last() {
-                        last_row = Some(last.clone());
-                    }
-                }
-
-                if next_header_y.is_some() {
-                    break 'screen_loop; // 已到下一个分组：本分组结束
-                }
-                // 这一屏点完，滚一整屏
-                let sig: Vec<(String, i64)> = contact_rows_on_screen.iter().map(|(n, y)| (n.clone(), *y as i64)).collect();
-                if prev_screen_sig.as_ref() == Some(&sig) {
-                    break 'screen_loop; // 滚不动了：到底
-                }
-                prev_screen_sig = Some(sig);
-                let scroll_res = capture
-                    .call("contacts_scroll_list", json!({"direction": "down", "ticks": SCREEN_TICKS}))
-                    .await?;
-                *state.scroll_ticks.entry(cat_name.clone()).or_insert(0) += SCREEN_TICKS;
-                cur_screen_lines = scroll_res
-                    .get("lines")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    .unwrap_or_default();
-                // 实际滚动距离：在新屏上找上一屏最后处理的那一行（到底时滚不满一屏）
-                let nominal = SCREEN_TICKS as f64 * 90.0;
-                let shift = match &last_row {
-                    Some((name, y)) => cur_screen_lines
-                        .iter()
-                        .filter(|l| l.x >= 115.0 && names_match(name, &l.text))
-                        .map(|l| *y - l.y)
-                        .filter(|d| *d >= 0.0)
-                        .min_by(|a, b| (a - nominal).abs().partial_cmp(&(b - nominal).abs()).unwrap_or(std::cmp::Ordering::Equal))
-                        .unwrap_or(nominal),
-                    None => nominal,
-                };
-                seen_until_y = last_row.as_ref().map(|(_, y)| *y - shift).unwrap_or(0.0);
-                if let Some((n, y)) = last_row.take() {
-                    last_row = Some((n, y - shift));
-                }
-            }
-
-            // 核对人数差额：如果已同步数 < 期望数，记录差额为 unreadable
-            let synced_count = seen_list.len() as u32;
-            if synced_count < expected {
-                let missing = expected - synced_count;
-                if missing > state.unreadable_rows {
-                    state.unreadable_rows = missing;
-                }
-            }
-
-            // 收起分组
-            let _ = capture
-                .call("contacts_scroll_list", json!({"direction": "up", "ticks": 20}))
-                .await;
-            if let Ok(th_res) = capture.call("contacts_headers", json!({})).await {
-                let th_lines: Vec<OcrLine> = th_res
-                    .get("lines")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    .unwrap_or_default();
-                if let Some(target_hl) = th_lines.iter().find(|l| {
-                    let t = l.text.trim();
-                    match cat_name.as_str() {
-                        "official" => t.contains("公众号"),
-                        "work" => t.contains("企业微信"),
-                        "personal" => t == "联系人" || (t.contains("联系人") && !t.contains("企业微信")),
-                        _ => false,
-                    }
-                }) {
-                    let is_expanded = !th_lines.iter().any(|l| {
-                        (l.y - target_hl.y).abs() < 15.0 && l.x > 250.0 && l.text.trim().chars().all(|c| c.is_ascii_digit())
-                    });
-                    if is_expanded {
-                        let _ = capture.call("contacts_click_list", json!({"x": 180.0, "y": target_hl.y})).await;
-                    }
-                }
-            }
+    let mut per_category = Vec::new();
+    let mut unreadable = 0u32;
+    let mut needs_review = 0u32;
+    let mut stopped = false;
+    for (cat, expected, _) in &groups {
+        if cat == "official" {
+            info!("contacts_sync_skip_official");
+            continue; // 公众号/服务号不采集（用户 2026-11-08）
         }
-
-        // 标记缺失
-        let _ = store.mark_missing(account_id, &cat_name, seen_list, now_ms);
-        state.scroll_ticks.remove(&cat_name);
-        state.category_index += 1;
+        if should_yield() {
+            stopped = true;
+            break;
+        }
+        let r = sync_group(capture, store, account_id, cat, mode, &existing, should_yield, now_ms).await?;
+        if !r.stopped {
+            let _ = store.mark_missing(account_id, cat, &r.ids, now_ms);
+        }
+        let synced = r.ids.len() as u32;
+        // 期望数与已同步数的差额都算"未读到"，不悄悄放过
+        unreadable += r.unreadable.max(expected.saturating_sub(synced));
+        needs_review += r.needs_review;
+        per_category.push((cat.clone(), *expected, synced));
+        if r.stopped {
+            stopped = true;
+            break;
+        }
     }
 
-    // 5. 离开通讯录
     let _ = capture.call("contacts_leave", json!({})).await;
 
-    // 6. 核对结果
-    let mut per_category = Vec::new();
-    let mut all_match = true;
+    let complete = !stopped
+        && !groups.is_empty()
+        && per_category.iter().all(|(_, e, s)| e == s)
+        && unreadable == 0;
+    let report = SyncReport { per_category: per_category.clone(), unreadable_rows: unreadable, needs_review, yielded: stopped, complete };
+    let _ = write_private(
+        &state_dir.join("contacts-sync-result.json"),
+        &json!({
+            "finished_at_ms": now_ms,
+            "complete": complete,
+            "per_category": per_category.iter().map(|(c, e, s)| json!({"category": c, "expected": e, "synced": s})).collect::<Vec<_>>(),
+            "unreadable_rows": unreadable,
+            "needs_review": needs_review,
+            "stopped": stopped,
+        }),
+    );
+    info!(complete, stopped, unreadable, needs_review, "sync finished");
+    Ok(report)
+}
 
-    for (cat, exp, _) in &state.categories {
-        let synced = state
-            .seen_ids_by_cat
-            .get(cat)
-            .map(|v| v.len() as u32)
-            .unwrap_or(0);
-        per_category.push((cat.clone(), *exp, synced));
-        if synced != *exp {
-            all_match = false;
+struct GroupResult {
+    ids: Vec<String>,
+    unreadable: u32,
+    needs_review: u32,
+    stopped: bool,
+}
+
+/// 一屏的识别结果：文字行 + 头像中心 y（动作组件按像素找的，只有联系人行有头像）
+struct Screen {
+    lines: Vec<OcrLine>,
+    avatars: Vec<f64>,
+}
+
+fn screen_of(v: &Value) -> Screen {
+    Screen {
+        lines: lines_of(v),
+        avatars: v
+            .get("avatars")
+            .and_then(|a| a.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_f64()).collect())
+            .unwrap_or_default(),
+    }
+}
+
+fn line_center(l: &OcrLine) -> f64 {
+    l.y + l.h / 2.0
+}
+
+/// 本屏属于本分组的联系人行（从上到下）。
+/// 实测（2026-11-08 截图）：每个字母单独占一行（约 36 点高，字母常识别不出），联系人行约 54 点高；
+/// 只有联系人行左侧有头像，所以"行"按头像定，名字只用来核对。
+/// 只取本分组标题下方、下一个分组标题上方的头像；返回 (头像 y, 同一高度识别出的名字) 和下一个分组标题是否在本屏。
+fn group_rows(screen: &Screen, category: &str) -> (Vec<(f64, Option<String>)>, bool) {
+    let own = group_title_cjk(category);
+    let is_header = |l: &OcrLine| l.x < 115.0 && GROUP_TITLES_CJK.contains(&cjk_only(&l.text).as_str());
+    let own_header = screen
+        .lines
+        .iter()
+        .filter(|l| is_header(l) && cjk_only(&l.text) == own)
+        .map(line_center)
+        .fold(None, |acc: Option<f64>, y| Some(acc.map_or(y, |a: f64| a.max(y))));
+    let next_header = screen
+        .lines
+        .iter()
+        .filter(|l| is_header(l) && cjk_only(&l.text) != own)
+        .map(line_center)
+        .filter(|y| own_header.map_or(true, |h| *y > h))
+        .fold(None, |acc: Option<f64>, y| Some(acc.map_or(y, |a: f64| a.min(y))));
+    let mut rows: Vec<(f64, Option<String>)> = screen
+        .avatars
+        .iter()
+        .copied()
+        .filter(|y| own_header.map_or(true, |h| *y > h + 20.0))
+        .filter(|y| next_header.map_or(true, |n| *y < n - 20.0))
+        .map(|ay| {
+            let name = screen
+                .lines
+                .iter()
+                .filter(|l| l.x >= 115.0 && (line_center(l) - ay).abs() < 18.0)
+                .filter(|l| !is_header(l) && !cjk_only(&l.text).contains("通讯录管理"))
+                .filter(|l| !(l.x > 250.0 && l.text.trim().chars().all(|c| c.is_ascii_digit())))
+                .min_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|l| l.text.trim().to_string());
+            (ay, name)
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    (rows, next_header.is_some())
+}
+
+fn lines_of(v: &serde_json::Value) -> Vec<OcrLine> {
+    v.get("lines").and_then(|l| serde_json::from_value(l.clone()).ok()).unwrap_or_default()
+}
+
+/// 滚动后新屏相对旧屏移动了多少：用旧屏上识别出名字的行，在新屏找同名行（取最接近预期距离的）。
+/// 找不到同名行时：两屏头像和文字都没变 → 0（到底）；否则按预期距离。
+fn measure_shift(prev: &[(f64, Option<String>)], prev_screen: &Screen, next: &Screen, nominal: f64) -> f64 {
+    let mut best: Option<f64> = None;
+    for (py, name) in prev.iter().rev() {
+        let Some(name) = name else { continue };
+        let cand = next
+            .lines
+            .iter()
+            .filter(|l| l.x >= 115.0 && names_match(name, &l.text))
+            .map(|l| py - line_center(l))
+            .filter(|d| *d >= -2.0)
+            .min_by(|a, b| (a - nominal).abs().partial_cmp(&(b - nominal).abs()).unwrap_or(std::cmp::Ordering::Equal));
+        if let Some(d) = cand {
+            best = Some(d.max(0.0));
+            break;
         }
     }
+    if let Some(d) = best {
+        return d;
+    }
+    let same = prev_screen.avatars == next.avatars
+        && prev_screen.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>()
+            == next.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>();
+    if same {
+        0.0
+    } else {
+        nominal
+    }
+}
 
-    let complete = !yielded && all_match && state.unreadable_rows == 0;
+/// 固定流程：收起所有分组 → 展开本分组 → 每屏按头像从上到下逐个点开采集 → 出现下一个分组标题或滚不动就结束 → 否则滚一屏
+#[allow(clippy::too_many_arguments)]
+async fn sync_group(
+    capture: &mut dyn CoordinatorCapture,
+    store: &HistoryStore,
+    account_id: &str,
+    category: &str,
+    mode: SyncMode,
+    existing: &[serde_json::Value],
+    should_yield: &(dyn Fn() -> bool + Send + Sync),
+    now_ms: i64,
+) -> Result<GroupResult> {
+    const SCREEN_TICKS: u32 = 5; // 5 格 ≈ 450 点；列表可见约 560 点，相邻两屏有重叠
+    let mut r = GroupResult { ids: Vec::new(), unreadable: 0, needs_review: 0, stopped: false };
 
-    let report = SyncReport {
-        per_category: per_category.clone(),
-        unreadable_rows: state.unreadable_rows,
-        needs_review: state.needs_review,
-        yielded,
-        complete,
+    // 1. 收起所有分组、回到顶部，找到本分组标题并展开（按标题下方内容确认，最多点两次）
+    let top = collapse_all_groups(capture).await?;
+    let Some(hy) = top
+        .iter()
+        .find(|l| l.x < 115.0 && cjk_only(&l.text) == group_title_cjk(category))
+        .map(|l| l.y)
+    else {
+        info!(category, "contacts_sync_group_header_missing");
+        return Ok(r);
     };
-
-    // 保存结果
-    let result_file = state_dir.join("contacts-sync-result.json");
-    let result_val = json!({
-        "finished_at_ms": now_ms,
-        "complete": complete,
-        "per_category": per_category.iter().map(|(cat, exp, syn)| {
-            json!({"category": cat, "expected": exp, "synced": syn})
-        }).collect::<Vec<_>>(),
-        "unreadable_rows": state.unreadable_rows,
-        "needs_review": state.needs_review,
-    });
-    let _ = write_private(&result_file, &result_val);
-
-    // 断点处理
-    if yielded {
-        let _ = write_private(checkpoint, &serde_json::to_value(&state).unwrap_or_default());
-    } else if complete && checkpoint.exists() {
-        let _ = fs::remove_file(checkpoint);
+    let mut screen = Screen { lines: top, avatars: Vec::new() };
+    for _ in 0..2 {
+        if group_expanded(&screen.lines, hy) {
+            break;
+        }
+        screen = screen_of(&capture.call("contacts_click_list", json!({"x": 180.0, "y": hy})).await?);
+    }
+    if screen.avatars.is_empty() {
+        // 已展开但还没有头像数据（例如展开前就是展开状态）：重新取一次本屏
+        screen = screen_of(&capture.call("contacts_headers", json!({})).await?);
     }
 
-    info!(
-        "sync finished: complete={}, yielded={}, unreadable={}, needs_review={}",
-        complete, yielded, state.unreadable_rows, state.needs_review
-    );
+    // 2. 逐屏处理。done_until：本屏上已处理到的位置（这个 y 及以上的行都处理过）
+    let mut done_until = 0.0f64;
+    for _page in 0..200 {
+        let (rows, next_visible) = group_rows(&screen, category);
+        info!(
+            category,
+            rows = rows.len(),
+            named = rows.iter().filter(|(_, n)| n.is_some()).count(),
+            next_group_visible = next_visible,
+            "contacts_sync_screen"
+        );
+        let limit = done_until + 10.0;
+        for (y, name) in rows.iter().filter(|(y, _)| *y > limit) {
+            if should_yield() {
+                r.stopped = true;
+                return Ok(r);
+            }
+            done_until = *y;
 
-    Ok(report)
+            if mode == SyncMode::Incremental {
+                if let Some(name) = name {
+                    if let Some(cid) = existing
+                        .iter()
+                        .find(|p| {
+                            p.get("nickname").and_then(|v| v.as_str()).map_or(false, |n| names_match(name, n))
+                                || p.get("remark").and_then(|v| v.as_str()).map_or(false, |n| names_match(name, n))
+                        })
+                        .and_then(|p| p.get("contact_id").and_then(|v| v.as_str()))
+                    {
+                        if !r.ids.iter().any(|x| x == cid) {
+                            r.ids.push(cid.to_string());
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            let resp = capture.call("contacts_open_row", json!({"y": y})).await.unwrap_or_default();
+            let prof = lines_of(&resp);
+            // 资料卡画面没变：只有本行名字和资料卡对得上才算（点的正好是已显示的那个人），否则不记
+            let changed = resp.get("changed").and_then(|v| v.as_bool()).unwrap_or(true);
+            if prof.is_empty() {
+                info!(category, row_y = *y, "contacts_sync_profile_empty");
+                r.unreadable += 1;
+                continue;
+            }
+            let f = parse_profile(&prof, category).fields;
+            let matched = match name {
+                Some(name) => {
+                    names_match(name, &f.nickname) || f.remark.as_deref().map_or(false, |rmk| names_match(name, rmk))
+                }
+                None => changed && !f.nickname.trim().is_empty(),
+            };
+            if !matched {
+                info!(
+                    category,
+                    row_y = *y,
+                    changed,
+                    profile_lines = prof.len(),
+                    row_len = name.as_deref().map_or(0, |n| name_key_for_match(n).chars().count()),
+                    nickname_len = name_key_for_match(&f.nickname).chars().count(),
+                    has_wechat_id = f.wechat_id.is_some(),
+                    "contacts_sync_profile_name_mismatch"
+                );
+                r.unreadable += 1;
+                continue;
+            }
+            info!(category, row_y = *y, row_named = name.is_some(), has_wechat_id = f.wechat_id.is_some(), "contacts_sync_row_ok");
+            let input = ProfileInput {
+                category: category.to_string(),
+                wechat_id: f.wechat_id,
+                nickname: f.nickname,
+                remark: f.remark,
+                region: f.region,
+                source: f.source,
+                added_on: f.added_on,
+                common_groups: f.common_groups,
+                enterprise: f.enterprise,
+                real_name: f.real_name,
+                tags: f.tags,
+                friend_permission: f.friend_permission,
+            };
+            match store.upsert_profile(account_id, &input, now_ms) {
+                Ok(UpsertOutcome::Created(cid)) | Ok(UpsertOutcome::Updated(cid)) => {
+                    if !r.ids.contains(&cid) {
+                        r.ids.push(cid);
+                    }
+                }
+                Ok(UpsertOutcome::NeedsReview { .. }) => r.needs_review += 1,
+                Err(_) => r.unreadable += 1,
+            }
+        }
+
+        // 3. 本屏已到下一个分组：本分组结束
+        if next_visible {
+            break;
+        }
+        // 4. 滚一屏，量出实际滚动距离（到底时滚不满）
+        let next = screen_of(&capture.call("contacts_scroll_list", json!({"direction": "down", "ticks": SCREEN_TICKS})).await?);
+        let shift = measure_shift(&rows, &screen, &next, SCREEN_TICKS as f64 * 90.0);
+        info!(category, shift, "contacts_sync_scrolled");
+        if shift < 1.0 {
+            break; // 滚不动：到底
+        }
+        done_until -= shift;
+        screen = next;
+    }
+    Ok(r)
 }
 
 #[cfg(test)]
@@ -783,6 +636,10 @@ mod tests {
         pub fail_op: Option<String>,
         /// 真机：分组展开后标题旁的人数仍然显示（不能用人数判断是否展开）
         pub counts_always: bool,
+        /// 真机：字母行常识别不出来
+        pub letters_unread: bool,
+        /// 当前资料卡显示的是谁（点同一个人资料卡不变化）
+        pub shown_profile: Option<String>,
     }
 
     impl VirtualContactsUi {
@@ -803,11 +660,14 @@ mod tests {
                 header_open_clicks: 0,
                 fail_op: None,
                 counts_always: false,
+                letters_unread: false,
+                shown_profile: None,
             }
         }
 
-        fn render_list(&self) -> Vec<OcrLine> {
+        fn render_list(&self) -> (Vec<OcrLine>, Vec<f64>) {
             let mut lines = Vec::new();
+            let mut avatars: Vec<f64> = Vec::new();
 
             // 搜索框：center_y = 20.0
             let search_y = 20.0 - self.scroll_offset;
@@ -864,9 +724,9 @@ mod tests {
 
                 if g.expanded {
                     for (letter, items) in &g.letter_sections {
-                        // 字母索引行高 45
-                        let letter_center_y = cur_y + 22.5 - self.scroll_offset;
-                        if letter_center_y >= 40.0 && letter_center_y <= 640.0 {
+                        // 字母索引行高 36（实测）
+                        let letter_center_y = cur_y + 18.0 - self.scroll_offset;
+                        if letter_center_y >= 40.0 && letter_center_y <= 640.0 && !self.letters_unread {
                             lines.push(OcrLine {
                                 text: letter.clone(),
                                 x: 95.0,
@@ -875,11 +735,14 @@ mod tests {
                                 h: 20.0,
                             });
                         }
-                        cur_y += 45.0;
+                        cur_y += 36.0;
 
                         for item in items {
-                            // 联系人行高 50
-                            let item_center_y = cur_y + 25.0 - self.scroll_offset;
+                            // 联系人行高 54（实测），左侧头像 28 高、与名字同高
+                            let item_center_y = cur_y + 27.0 - self.scroll_offset;
+                            if item_center_y - 14.0 >= 0.0 && item_center_y + 14.0 <= 640.0 {
+                                avatars.push(item_center_y);
+                            }
                             if item_center_y >= 40.0 && item_center_y <= 640.0 {
                                 if !item.unreadable {
                                     let display_name = item.remark.as_deref().unwrap_or(&item.name);
@@ -892,13 +755,17 @@ mod tests {
                                     });
                                 }
                             }
-                            cur_y += 50.0;
+                            cur_y += 54.0;
                         }
                     }
                 }
             }
 
-            lines
+            // 真机识别结果的 y 是文字框上沿
+            for l in &mut lines {
+                l.y -= l.h / 2.0;
+            }
+            (lines, avatars)
         }
 
         /// 列表内容总高度（虚拟坐标，从 0 起）
@@ -908,7 +775,7 @@ mod tests {
                 cur_y += 40.0;
                 if g.expanded {
                     for (_l, items) in &g.letter_sections {
-                        cur_y += 45.0 + 50.0 * items.len() as f64;
+                        cur_y += 36.0 + 54.0 * items.len() as f64;
                     }
                 }
             }
@@ -926,16 +793,16 @@ mod tests {
 
                 if g.expanded {
                     for (_letter, items) in &g.letter_sections {
-                        if vy >= cur_y && vy < cur_y + 45.0 {
+                        if vy >= cur_y && vy < cur_y + 36.0 {
                             return Some((g, None, false, true));
                         }
-                        cur_y += 45.0;
+                        cur_y += 36.0;
 
                         for item in items {
-                            if vy >= cur_y && vy < cur_y + 50.0 {
+                            if vy >= cur_y && vy < cur_y + 54.0 {
                                 return Some((g, Some(item), false, false));
                             }
-                            cur_y += 50.0;
+                            cur_y += 54.0;
                         }
                     }
                 }
@@ -972,8 +839,8 @@ mod tests {
                 return Box::pin(async { Ok(json!({"ok": true})) });
             }
             if op == "contacts_headers" {
-                let lines = self.render_list();
-                return Box::pin(async move { Ok(json!({"lines": lines})) });
+                let (lines, avatars) = self.render_list();
+                return Box::pin(async move { Ok(json!({"lines": lines, "avatars": avatars})) });
             }
             if op == "contacts_scroll_list" {
                 let dir = params.get("direction").and_then(|v| v.as_str()).unwrap_or("down");
@@ -985,8 +852,8 @@ mod tests {
                 } else {
                     self.scroll_offset = (self.scroll_offset - ticks * 90.0).max(0.0);
                 }
-                let lines = self.render_list();
-                return Box::pin(async move { Ok(json!({"lines": lines})) });
+                let (lines, avatars) = self.render_list();
+                return Box::pin(async move { Ok(json!({"lines": lines, "avatars": avatars})) });
             }
             if op == "contacts_click_list" {
                 let x = params.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -999,8 +866,8 @@ mod tests {
                 if (vy - 59.0).abs() <= 15.0 {
                     self.manager_open = true;
                     self.calls.lock().unwrap().push(("contacts_manager_opened_by_click".to_string(), json!({"y": y})));
-                    let lines = self.render_list();
-                    return Box::pin(async move { Ok(json!({"lines": lines})) });
+                    let (lines, avatars) = self.render_list();
+                    return Box::pin(async move { Ok(json!({"lines": lines, "avatars": avatars})) });
                 }
                 let mut cur_y = 90.0;
                 for g in &mut self.groups {
@@ -1011,13 +878,13 @@ mod tests {
                     cur_y += 40.0;
                     if g.expanded {
                         for (_letter, items) in &g.letter_sections {
-                            cur_y += 45.0;
-                            cur_y += 50.0 * items.len() as f64;
+                            cur_y += 36.0;
+                            cur_y += 54.0 * items.len() as f64;
                         }
                     }
                 }
-                let lines = self.render_list();
-                return Box::pin(async move { Ok(json!({"lines": lines})) });
+                let (lines, avatars) = self.render_list();
+                return Box::pin(async move { Ok(json!({"lines": lines, "avatars": avatars})) });
             }
             if op == "contacts_open_row" {
                 let y = params.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -1034,10 +901,12 @@ mod tests {
                 }
                 let found = self.find_item_at_virtual_y(vy);
                 if let Some((_group, Some(item), false, false)) = found {
+                    let changed = self.shown_profile.as_deref() != Some(item.name.as_str());
                     if let Some(ref mis) = item.misaligned_profile {
                         let lines = mis.clone();
-                        return Box::pin(async move { Ok(json!({"lines": lines})) });
+                        return Box::pin(async move { Ok(json!({"lines": lines, "changed": true})) });
                     }
+                    let item_name = item.name.clone();
                     let mut lines = Vec::new();
                     lines.push(line(&item.name, 520.0, 60.0));
                     if let Some(ref wid) = item.wechat_id {
@@ -1053,7 +922,8 @@ mod tests {
                     if let Some(ref rn) = item.real_name {
                         lines.push(line(&format!("实名{}", rn), 520.0, 210.0));
                     }
-                    return Box::pin(async move { Ok(json!({"lines": lines})) });
+                    self.shown_profile = Some(item_name);
+                    return Box::pin(async move { Ok(json!({"lines": lines, "changed": changed})) });
                 }
                 // 点到分组标题：真机上会切换展开/收起（危险点击）
                 if let Some((_g, None, true, false)) = found {
@@ -1067,7 +937,7 @@ mod tests {
                         cur_y += 40.0;
                         if g.expanded {
                             for (_letter, items) in &g.letter_sections {
-                                cur_y += 45.0 + 50.0 * items.len() as f64;
+                                cur_y += 36.0 + 54.0 * items.len() as f64;
                             }
                         }
                     }
@@ -1233,41 +1103,10 @@ mod tests {
         assert!(!report.yielded);
         assert_eq!(report.unreadable_rows, 0);
         let profiles = store.list_profiles("test_acct", None).unwrap();
-        assert_eq!(profiles.len(), 6);
-    }
-
-    #[tokio::test]
-    async fn test_sync_yields_between_contacts_and_resumes_from_checkpoint() {
-        let temp = TestTempDir::new();
-        let state_dir = temp.path().join("state");
-        let store = HistoryStore::open(&state_dir).unwrap();
-        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
-
-        let p_items = vec![
-            VirtualContactItem { name: "张三".to_string(), remark: None, wechat_id: Some("wxid_p1".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
-            VirtualContactItem { name: "李四".to_string(), remark: None, wechat_id: Some("wxid_p2".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
-            VirtualContactItem { name: "王五".to_string(), remark: None, wechat_id: Some("wxid_p3".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
-        ];
-        let g_personal = VirtualGroup { category: "personal".to_string(), title: "联系人".to_string(), letter_sections: vec![("P".to_string(), p_items)], expanded: false };
-
-        let mut ui = VirtualContactsUi::new(vec![g_personal]);
-        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let c_clone = counter.clone();
-        let should_yield = move || {
-            c_clone.fetch_add(1, Ordering::SeqCst) >= 2
-        };
-
-        let report1 = run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &should_yield, 1000).await.unwrap();
-        assert!(report1.yielded);
-        assert!(!report1.complete);
-        assert!(checkpoint.exists());
-
-        let no_yield = || false;
-        let report2 = run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 2000).await.unwrap();
-        assert!(report2.complete);
-        assert!(!report2.yielded);
-        let profiles = store.list_profiles("test_acct", None).unwrap();
-        assert_eq!(profiles.len(), 3);
+        // 公众号不采集（用户 2026-11-08）：只有 3 个联系人 + 1 个企业微信联系人
+        assert_eq!(profiles.len(), 4);
+        assert!(profiles.iter().all(|p| p["category"] != "official"), "{profiles:?}");
+        assert!(report.per_category.iter().all(|(c, _, _)| c != "official"));
     }
 
     #[tokio::test]
@@ -1279,7 +1118,8 @@ mod tests {
 
         let p_items = vec![
             VirtualContactItem { name: "张三".to_string(), remark: None, wechat_id: Some("wxid_p1".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
-            VirtualContactItem { name: "李四".to_string(), remark: None, wechat_id: Some("wxid_p2".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: true, misaligned_profile: None },
+            // 资料卡读不出任何文字
+            VirtualContactItem { name: "李四".to_string(), remark: None, wechat_id: Some("wxid_p2".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: Some(vec![]) },
         ];
         let g_personal = VirtualGroup { category: "personal".to_string(), title: "联系人".to_string(), letter_sections: vec![("P".to_string(), p_items)], expanded: false };
 
@@ -1612,7 +1452,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_unreadable_name_marks_incomplete_without_misattribution() {
+    async fn test_row_without_readable_name_is_opened_by_avatar_without_misattribution() {
         let temp = TestTempDir::new();
         let state_dir = temp.path().join("state");
         let store = HistoryStore::open(&state_dir).unwrap();
@@ -1665,65 +1505,16 @@ mod tests {
         let no_yield = || false;
         let report = run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
 
-        assert!(!report.complete);
-        assert!(report.unreadable_rows >= 1);
+        // 列表上认不出名字的行仍按头像点开，资料卡换成了新的人就记下；三个人的微信号各归各位
+        assert!(report.complete, "{report:?}");
         let profiles = store.list_profiles("test_acct", None).unwrap();
-        // 用户A和用户C应该正确写入，且微信号没有串行错位
-        assert_eq!(profiles.len(), 2);
-        let nicks: Vec<String> = profiles.iter().map(|p| p.get("nickname").unwrap().as_str().unwrap().to_string()).collect();
-        assert!(nicks.contains(&"用户A".to_string()));
-        assert!(nicks.contains(&"用户C".to_string()));
-        assert!(!nicks.contains(&"用户B".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_yield_after_time_budget_and_resume_completes_without_duplicates() {
-        let temp = TestTempDir::new();
-        let state_dir = temp.path().join("state");
-        let store = HistoryStore::open(&state_dir).unwrap();
-        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
-
-        let items: Vec<VirtualContactItem> = (1..=6).map(|i| VirtualContactItem {
-            name: format!("用户{i}"),
-            remark: None,
-            wechat_id: Some(format!("wxid_{i}")),
-            enterprise: None,
-            real_name: None,
-            tags: vec![],
-            friend_permission: None,
-            unreadable: false,
-            misaligned_profile: None,
-        }).collect();
-
-        let g = VirtualGroup {
-            category: "personal".to_string(),
-            title: "联系人".to_string(),
-            letter_sections: vec![("U".to_string(), items)],
-            expanded: false,
-        };
-
-        let mut ui = VirtualContactsUi::new(vec![g]);
-
-        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let c_clone = counter.clone();
-        // 处理完 2 个后让出
-        let yield_after_2 = move || {
-            c_clone.fetch_add(1, Ordering::SeqCst) >= 2
-        };
-
-        let report1 = run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &yield_after_2, 1000).await.unwrap();
-        assert!(report1.yielded);
-        assert!(!report1.complete);
-        assert!(checkpoint.exists());
-
-        // 再次恢复
-        let no_yield = || false;
-        let report2 = run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 2000).await.unwrap();
-        assert!(report2.complete);
-        assert!(!report2.yielded);
-
-        let profiles = store.list_profiles("test_acct", None).unwrap();
-        assert_eq!(profiles.len(), 6, "Total profiles must be exactly 6 without duplicates");
+        assert_eq!(profiles.len(), 3);
+        for (nick, wid) in [("用户A", "wxid_a"), ("用户B", "wxid_b"), ("用户C", "wxid_c")] {
+            assert!(
+                profiles.iter().any(|p| p["nickname"] == nick && p["wechat_id"] == wid),
+                "{nick} 应对应 {wid}: {profiles:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1799,38 +1590,6 @@ mod tests {
         VirtualGroup { category: category.to_string(), title: title.to_string(), letter_sections, expanded: false }
     }
 
-    /// 真机每打开一张资料卡约 1.5 秒，15 秒预算只够约 10 个人。恢复时若从头把已处理的人重开一遍，
-    /// 进度永远停在前几个人。要求：反复让出/恢复能在有限轮内完成，且每个人的资料卡最多打开一次。
-    #[tokio::test]
-    async fn test_resume_progresses_without_reopening_processed_rows() {
-        let temp = TestTempDir::new();
-        let state_dir = temp.path().join("state");
-        let store = HistoryStore::open(&state_dir).unwrap();
-        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
-        let group = letter_group("personal", "联系人", "客", &[("A", 4), ("B", 5), ("C", 4), ("D", 5), ("E", 4)]);
-        let mut ui = VirtualContactsUi::new(vec![group]);
-
-        let mut done = false;
-        for run in 0..20 {
-            let opens_at_start = ui.row_open_clicks.len();
-            let budget = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let b = budget.clone();
-            // 每轮大约处理 3 个人后让出（模拟 15 秒时间预算）
-            let should_yield = move || b.fetch_add(1, Ordering::SeqCst) >= 6;
-            let report = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &should_yield, 1000 + run).await.unwrap();
-            assert!(ui.row_open_clicks.len() >= opens_at_start);
-            if report.complete {
-                assert_eq!(report.per_category, vec![("personal".to_string(), 22, 22)]);
-                done = true;
-                break;
-            }
-            assert!(report.yielded, "未完成时必须是让出: {report:?}");
-        }
-        assert!(done, "20 轮内必须完成（恢复后要从断点继续，不能每次从头重开）");
-        assert!(ui.row_open_clicks.len() <= 22, "每个人的资料卡最多打开一次，实际打开 {} 次", ui.row_open_clicks.len());
-        assert_eq!(store.list_profiles("acct", Some("personal")).unwrap().len(), 22);
-    }
-
     /// 真机识别出的分组标题带箭头（"> 公众号、服务号"、展开后 "∨ 联系人"），不能被当成联系人去"打开资料卡"
     /// ——真机上那一下会把分组收起。按位置区分：联系人名字 x≈133，分组标题与字母索引 x≈77–95。
     #[tokio::test]
@@ -1849,7 +1608,7 @@ mod tests {
 
         assert_eq!(ui.header_open_clicks, 0, "不得用打开资料卡点分组标题");
         assert!(report.complete, "{report:?}");
-        assert_eq!(report.per_category, vec![("official".to_string(), 3, 3), ("personal".to_string(), 7, 7)]);
+        assert_eq!(report.per_category, vec![("personal".to_string(), 7, 7)]);
     }
 
     /// 真机首次同步：进入通讯录后下一步失败，原实现直接返回、没有切回聊天页，微信停在通讯录页，机器人停摆。
@@ -1904,12 +1663,7 @@ mod tests {
         let personal = letter_group("personal", "联系人", "人", &[("A", 4), ("B", 4)]);
         let mut ui = VirtualContactsUi::new(vec![personal]);
 
-        let budget = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let b = budget.clone();
-        let yield_soon = move || b.fetch_add(1, Ordering::SeqCst) >= 3;
-        let first = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &yield_soon, 1000).await.unwrap();
-        assert!(first.yielded && checkpoint.exists(), "先让出留下断点: {first:?}");
-
+        fs::write(&checkpoint, "{}").unwrap(); // 旧版本留下的断点
         ui.fail_op = Some("contacts_scroll_list".to_string());
         let no_yield = || false;
         assert!(run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &no_yield, 2000).await.is_err());
@@ -1918,6 +1672,56 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(state_dir.join("contacts-sync-result.json")).unwrap()).unwrap();
         assert_eq!(result["complete"], false);
         assert!(result["error"].as_str().unwrap_or("").contains("layout_mismatch"), "{result}");
+    }
+
+    /// 中途停下不做断点续做：下次从头按固定流程再走一遍，按微信号更新，不重复记录
+    #[tokio::test]
+    async fn test_stopped_run_restarts_from_top_without_duplicates() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        let store = HistoryStore::open(&state_dir).unwrap();
+        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
+        let personal = letter_group("personal", "联系人", "人", &[("A", 5), ("B", 5)]);
+        let mut ui = VirtualContactsUi::new(vec![personal]);
+        let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let n2 = n.clone();
+        let stop_soon = move || n2.fetch_add(1, Ordering::SeqCst) >= 4;
+        let first = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &stop_soon, 1000).await.unwrap();
+        assert!(first.yielded && !first.complete, "{first:?}");
+        assert!(!checkpoint.exists());
+        let no_yield = || false;
+        let second = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &no_yield, 2000).await.unwrap();
+        assert!(second.complete, "{second:?}");
+        assert_eq!(store.list_profiles("acct", None).unwrap().len(), 10);
+    }
+
+    /// 实测（2026-11-08 截图）：每个字母单独占一行（36 点高），联系人行 54 点高，字母常识别不出。
+    /// 按头像逐个点开、点完一屏滚一屏：每个人只点一次、全部记对。
+    #[tokio::test]
+    async fn test_unread_letter_rows_and_scrolling_open_each_contact_once() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        let store = HistoryStore::open(&state_dir).unwrap();
+        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
+        let work = letter_group("work", "企业微信联系人", "企", &[("A", 3), ("C", 1), ("D", 2), ("L", 4), ("Z", 4)]);
+        let personal = letter_group("personal", "联系人", "人", &[("K", 1), ("L", 1), ("M", 2), ("N", 1), ("W", 6), ("X", 11)]);
+        let mut ui = VirtualContactsUi::new(vec![work, personal]);
+        ui.letters_unread = true;
+        ui.counts_always = true;
+        ui.header_arrows = true;
+        let no_yield = || false;
+        let report = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+        assert!(report.complete, "{report:?}");
+        assert_eq!(report.per_category, vec![("work".to_string(), 14, 14), ("personal".to_string(), 22, 22)]);
+        let profiles = store.list_profiles("acct", None).unwrap();
+        assert_eq!(profiles.len(), 36);
+        for p in &profiles {
+            let nick = p["nickname"].as_str().unwrap();
+            let want = if p["category"] == "work" { "企" } else { "人" };
+            assert!(nick.starts_with(want), "分类记错: {p:?}");
+        }
+        let opens = ui.calls.lock().unwrap().iter().filter(|(op, _)| op == "contacts_open_row").count();
+        assert_eq!(opens, 36, "每个人只点一次");
     }
 
     /// 实机：联系人分组每一行都"资料卡名字与列表名字不一致"、一个也没写入。列表名字会被截断（…），
@@ -1982,7 +1786,7 @@ mod tests {
         let report = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
         assert_eq!(
             report.per_category,
-            vec![("official".to_string(), 12, 12), ("work".to_string(), 10, 10), ("personal".to_string(), 8, 8)],
+            vec![("work".to_string(), 10, 10), ("personal".to_string(), 8, 8)],
             "{report:?}"
         );
         assert!(report.complete, "{report:?}");
@@ -2008,7 +1812,7 @@ mod tests {
         let report = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
         assert_eq!(
             report.per_category,
-            vec![("official".to_string(), 12, 12), ("work".to_string(), 5, 5), ("personal".to_string(), 8, 8)],
+            vec![("work".to_string(), 5, 5), ("personal".to_string(), 8, 8)],
             "{report:?}"
         );
         assert!(report.complete, "{report:?}");
