@@ -1552,6 +1552,16 @@ impl HistoryStore {
                 let owners = _owners_conn(&conn, account_id, &name_key(name), &["config", "alias", "observed", "addressbook"], true)?;
                 candidate_cids.extend(owners);
             }
+            // 没有微信号时按名字只能认"还没有通讯录资料"的联系人（如聊天里出现过的人）。已有资料的同名者
+            // 上面按"同名同企业"没对上，就是另一个人（实机：两个同名不同企业的企业微信联系人被并成一条）。
+            candidate_cids.retain(|cid| {
+                !conn
+                    .query_row("SELECT 1 FROM contact_profiles WHERE contact_id=?", params![cid], |_| Ok(true))
+                    .optional()
+                    .ok()
+                    .flatten()
+                    .unwrap_or(false)
+            });
 
             if candidate_cids.len() > 1 {
                 let mut candidates: Vec<String> = candidate_cids.into_iter().collect();
@@ -2715,6 +2725,45 @@ store.conn.close()
             assert!(matches!(r, UpsertOutcome::NeedsReview { .. }), "{r:?}");
         }
         assert_eq!(f.store.pending_reviews("acct").unwrap().len(), 1);
+    }
+
+    /// 实机 2026-11-08（资料卡指纹）：企业微信里两个同名、不同企业的人，第二个按名字被并进第一个人的记录，
+    /// 企业被覆盖（14 人只存下 12 个）。没有微信号时，按名字只能认"还没有通讯录资料"的联系人（如聊天里出现过的人）。
+    #[test]
+    fn test_weak_same_name_different_enterprise_are_two_people() {
+        let f = setup_fixture();
+        let mk = |ent: &str| ProfileInput {
+            category: "work".to_string(), wechat_id: None, nickname: "同名员工".to_string(), remark: None,
+            region: None, source: None, added_on: None, common_groups: None,
+            enterprise: Some(ent.to_string()), real_name: None, tags: vec![], friend_permission: None,
+        };
+        let a = match f.store.upsert_profile("acct", &mk("甲企业"), 1000).unwrap() {
+            UpsertOutcome::Created(c) => c,
+            o => panic!("{o:?}"),
+        };
+        let b = match f.store.upsert_profile("acct", &mk("乙企业"), 1000).unwrap() {
+            UpsertOutcome::Created(c) => c,
+            o => panic!("同名不同企业必须新建，实际 {o:?}"),
+        };
+        assert_ne!(a, b);
+        // 再同步一遍：各自更新，不互相覆盖
+        assert!(matches!(f.store.upsert_profile("acct", &mk("甲企业"), 2000).unwrap(), UpsertOutcome::Updated(ref c) if *c == a));
+        assert!(matches!(f.store.upsert_profile("acct", &mk("乙企业"), 2000).unwrap(), UpsertOutcome::Updated(ref c) if *c == b));
+        let profiles = f.store.list_profiles("acct", Some("work")).unwrap();
+        assert_eq!(profiles.len(), 2);
+    }
+
+    /// 聊天里出现过的人（还没有通讯录资料）仍按名字接上通讯录资料
+    #[test]
+    fn test_weak_profile_attaches_to_chat_contact_without_profile() {
+        let f = setup_fixture();
+        let chat = f.store.ensure_contact("acct", &json!({"recipient": "聊过的员工", "kind": "private"}), false).unwrap();
+        let p = ProfileInput {
+            category: "work".to_string(), wechat_id: None, nickname: "聊过的员工".to_string(), remark: None,
+            region: None, source: None, added_on: None, common_groups: None,
+            enterprise: Some("甲企业".to_string()), real_name: None, tags: vec![], friend_permission: None,
+        };
+        assert!(matches!(f.store.upsert_profile("acct", &p, 1000).unwrap(), UpsertOutcome::Updated(ref c) if *c == chat));
     }
 
     #[test]
