@@ -432,19 +432,19 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         let colName = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("NameCol"))
         colName.title = "名字 / 备注"
         colName.width = 160
-        colName.minWidth = 110
+        colName.minWidth = 150  // 详情面板打开时名字列最窄也要放下约 10 个字，再长显示"…"，悬停看全名
         contactsTable.addTableColumn(colName)
 
         let colWx = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("WxCol"))
         colWx.title = "微信号"
         colWx.width = 110
-        colWx.minWidth = 74
+        colWx.minWidth = 40
         contactsTable.addTableColumn(colWx)
 
         let colMsgs = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("MsgsCol"))
         colMsgs.title = "消息数"
         colMsgs.width = 60
-        colMsgs.minWidth = 40
+        colMsgs.minWidth = 32
         contactsTable.addTableColumn(colMsgs)
 
         let colHandling = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("HandlingCol"))
@@ -759,12 +759,17 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
 
         switch colId {
         case "NameCol":
+            // 名字放不下时末尾显示"…"并可悬停看全名（不能直接裁掉：用户会以为名字只有这么长）
             let cell = NSTextField(labelWithString: item.displayName)
             cell.font = NSFont.systemFont(ofSize: 12)
+            cell.lineBreakMode = .byTruncatingTail
+            cell.toolTip = item.displayName
             return cell
         case "WxCol":
             let wx = ContactsPageLogic.listWechatText(item)
             let cell = NSTextField(labelWithString: wx)
+            cell.lineBreakMode = .byTruncatingTail
+            cell.toolTip = wx
             cell.font = NSFont.systemFont(ofSize: 11)
             cell.textColor = .secondaryLabelColor
             return cell

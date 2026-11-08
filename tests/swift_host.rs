@@ -2523,6 +2523,9 @@ fn test_contacts_page_list_fills_height_and_detail_on_select() {
     let clear = &src[src.find("private func clearDetail()").unwrap()..];
     assert!(clear[..200].contains("detailBox.isHidden = true"), "取消选择收起详情");
     assert!(!src.contains("企微无微信号"));
+    // 用户 2026-11-08 截图：名字被直接裁掉，看起来不完整。放不下要显示"…"并可悬停看全名
+    let name_cell = &src[src.find("case \"NameCol\":").unwrap()..];
+    assert!(name_cell[..500].contains(".byTruncatingTail") && name_cell[..500].contains("toolTip"));
 }
 
 #[test]
