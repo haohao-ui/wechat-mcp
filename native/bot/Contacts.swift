@@ -85,6 +85,28 @@ public func managerFilterPoint(kind: String, y: Double?, windowHeight: Double, s
     }
 }
 
+/// 资料卡区域的画面指纹：缩成 16×12 灰度。用于判断点击后资料卡是否已经换成新联系人。
+public func profileSignature(_ image: CGImage) -> [UInt8] {
+    let w = 16, h = 12
+    var gray = [UInt8](repeating: 0, count: w * h)
+    gray.withUnsafeMutableBytes { buf in
+        if let ctx = CGContext(data: buf.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
+                               space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) {
+            ctx.interpolationQuality = .medium
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        }
+    }
+    return gray
+}
+
+/// 两个指纹的平均灰度差超过阈值即视为画面已变化
+public func profileChanged(_ a: [UInt8], _ b: [UInt8]) -> Bool {
+    guard a.count == b.count, !a.isEmpty else { return true }
+    var total = 0
+    for i in 0..<a.count { total += abs(Int(a[i]) - Int(b[i])) }
+    return Double(total) / Double(a.count) > 3.0
+}
+
 /// Formats OCR lines ensuring none intersect the forbidden profile region.
 public func filterProfileForbiddenLines(lines: [[String: Any]], forbiddenRect: WindowRect) -> [[String: Any]] {
     return lines.filter { line in
@@ -293,11 +315,23 @@ func executeContactsOperation(operation: String, params: [String: Any], manage: 
         let (window, _) = try readyWindow(manage: manage)
         try screenGate(window)
         let wx = window["x"] as! Double, wy = window["y"] as! Double
-        try act { try botActions.click(CGRect(x: wx + 180.0 - 10, y: wy + y - 5, width: 20, height: 10)) }
-        pauseUI(0.3)
-        let normImage = try checkedScreen(window, regions: ["session_list"])  // 通讯录页无输入框/标题锚点
         let profileCrop = CGRect(x: spec.profile.x, y: spec.profile.y, width: spec.profile.w, height: spec.profile.h)
-        guard let cropped = normImage.cropping(to: profileCrop) else { throw Failure.invalid("bitmap_failed") }
+        func profileImage() throws -> CGImage {
+            let normImage = try checkedScreen(window, regions: ["session_list"])  // 通讯录页无输入框/标题锚点
+            guard let cropped = normImage.cropping(to: profileCrop) else { throw Failure.invalid("bitmap_failed") }
+            return cropped
+        }
+        // 点击前记下资料卡画面；点击后等它真的换成新联系人再识别（实机：立刻截图读到的是上一个人）
+        let before = profileSignature(try profileImage())
+        try act { try botActions.click(CGRect(x: wx + 180.0 - 10, y: wy + y - 5, width: 20, height: 10)) }
+        var cropped = try profileImage()
+        let deadline = Date().addingTimeInterval(2.0)
+        while !profileChanged(before, profileSignature(cropped)) && Date() < deadline {
+            pauseUI(0.15)
+            cropped = try profileImage()
+        }
+        pauseUI(0.25)  // 资料卡切换有过渡，稍等稳定后再识别
+        cropped = try profileImage()
         let rawLines = try recognizeContactLines(image: cropped, offsetX: spec.profile.x, offsetY: spec.profile.y)
         let safeLines = filterProfileForbiddenLines(lines: rawLines, forbiddenRect: spec.profileForbidden)
         return ["lines": safeLines]
