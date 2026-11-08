@@ -107,17 +107,6 @@ pub fn model_view_file(file: &AttachmentFile) -> Value {
     Value::Object(map)
 }
 
-static SESSION_BRAIN_FACTORY: std::sync::RwLock<Option<Arc<dyn Fn() -> BrainFn + Send + Sync>>> =
-    std::sync::RwLock::new(None);
-
-pub fn register_default_brain_factory(factory: Option<Arc<dyn Fn() -> BrainFn + Send + Sync>>) {
-    *SESSION_BRAIN_FACTORY.write().unwrap() = factory;
-}
-
-pub fn get_default_brain() -> Option<BrainFn> {
-    SESSION_BRAIN_FACTORY.read().unwrap().as_ref().map(|f| f())
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FailedAttachmentItem {
     pub label: String,
@@ -352,7 +341,7 @@ impl BotService {
             }),
             sleep: Arc::new(|d| Box::pin(tokio::time::sleep(d))),
             ownership: ownership_str,
-            brain: get_default_brain(),
+            brain: None,
             routing_check,
             understand_fn: None,
             max_model_image_bytes: None,
@@ -1446,8 +1435,7 @@ impl BotService {
             max_attachment_mb: self.config.max_attachment_mb,
         };
 
-        let active_brain = self.brain.clone().or_else(get_default_brain);
-        let brain_reply = if let Some(brain) = &active_brain {
+        let brain_reply = if let Some(brain) = &self.brain {
             brain(&brain_turn).await?
         } else {
             let builtin = crate::brain::builtin::BuiltinBrain::new(
@@ -5571,15 +5559,10 @@ mod tests {
             })
         });
 
-        // 注册全局 brain factory（模拟 serve.rs 在 External 模式下的行为）
-        register_default_brain_factory(Some(Arc::new(move || external_brain.clone())));
-
-        // 模拟热加联系人：在 sweep 中动态创建新 child
+        // 热加会话由协调器注入 default_brain（见 scheduler 测试 test_hot_added_session_inherits_coordinator_default_brain）
         let mut new_child = BotService::new(cfg, None, None, None, None, None).unwrap();
         new_child.sleep = Arc::new(|_| Box::pin(async {}));
-
-        // 验证创建出来的 child.brain 立即就是 Some 而非 None
-        assert!(new_child.brain.is_some(), "热加会话在创建时必须已经注入 BrainFn");
+        new_child.brain = Some(external_brain);
 
         // 模拟该会话从磁盘恢复了 pending turn，在首个 sweep 立即触发回复
         let old = test_frame(vec![test_bubble("old", "inbound_visual")], "午夜咖啡");
@@ -5593,9 +5576,6 @@ mod tests {
 
         let res = new_child.cycle(&client, &mut cap).await;
         assert!(res.is_ok());
-
-        // 清理注册的 factory
-        register_default_brain_factory(None);
 
         assert!(external_called.load(Ordering::SeqCst), "首个 sweep 中热加会话必须调用外部大脑，绝不能越过外部大脑退化到 builtin");
     }

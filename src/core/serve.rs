@@ -115,7 +115,9 @@ pub async fn run_serve_core(
     let mut coordinator = BotCoordinator::new(config_path)?;
     coordinator.reconcile_journals()?;
 
-    let stop_ptr = &*coordinator.stop as *const AtomicBool as *mut AtomicBool;
+    // 有意泄漏一个 Arc 引用：信号处理器随时可能触发，指针必须在进程余生内有效，
+    // 即使 run_serve_core 因错误提前返回也不能悬空。
+    let stop_ptr = std::sync::Arc::into_raw(coordinator.stop.clone()) as *mut AtomicBool;
     SHARED_STOP.store(stop_ptr, Ordering::SeqCst);
 
     let home = std::env::var("HOME")
@@ -148,11 +150,8 @@ pub async fn run_serve_core(
     coordinator.capture = Some(Box::new(worker_client));
 
     if config.brain.mode == BrainMode::External {
-        let eb = external_brain.clone();
-        crate::core::turns::register_default_brain_factory(Some(std::sync::Arc::new(move || {
-            eb.brain_fn()
-        })));
         let brain_fn = external_brain.brain_fn();
+        coordinator.default_brain = Some(brain_fn.clone());
         let targets = coordinator.config.allowlist.clone();
         for target in &targets {
             if let Ok(child) = coordinator.session(target) {
@@ -326,7 +325,6 @@ pub async fn run_serve_core(
     }
 
     SHARED_STOP.store(std::ptr::null_mut(), Ordering::SeqCst);
-    crate::core::turns::register_default_brain_factory(None);
 
     Ok(0)
 }
