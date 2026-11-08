@@ -15,6 +15,9 @@
         <key>SuccessfulExit</key>
         <false/>
     </dict>
+    <!-- 宿主退出时要先停止核心（核心可能正在完成一轮回复，宿主最多等 240 秒） -->
+    <key>ExitTimeOut</key>
+    <integer>300</integer>
     <key>ThrottleInterval</key>
     <integer>30</integer>
     <key>ProcessType</key>

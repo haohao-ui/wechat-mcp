@@ -1899,3 +1899,16 @@ fn test_panel_shows_folder_permission_needed() {
     let item = ok.as_array().unwrap().iter().find(|i| i["key"] == "permissions").unwrap();
     assert_eq!(item["level"], "green");
 }
+
+/// launchd 停止/重启宿主时发 SIGTERM：AppKit 默认直接退出、不走 applicationWillTerminate，
+/// 核心子进程会变成无人管理的孤儿（2026-11-08 实机）。宿主必须把 SIGTERM 转成正常退出。
+#[test]
+fn test_host_turns_sigterm_into_orderly_terminate() {
+    let src = fs::read_to_string("native/bootstrap/main.swift").unwrap();
+    assert!(src.contains("signal(SIGTERM, SIG_IGN)"), "必须先忽略默认 SIGTERM 处理");
+    let at = src.find("makeSignalSource(signal: SIGTERM").expect("必须为 SIGTERM 建立 DispatchSource");
+    let handler = &src[at..(at + 400).min(src.len())];
+    assert!(handler.contains("terminate("), "SIGTERM 处理必须调用 NSApplication terminate，以执行 applicationWillTerminate");
+    let plist = fs::read_to_string("native/bootstrap/local.wechat-mcp.host.plist").unwrap();
+    assert!(plist.contains("<key>ExitTimeOut</key>"), "LaunchAgent 要给宿主足够时间停止核心");
+}
