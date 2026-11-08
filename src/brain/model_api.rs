@@ -13,6 +13,9 @@ use crate::core::config::ModelConfig;
 const O_NONBLOCK: i32 = 0x0004;
 const O_NOFOLLOW: i32 = 0x0100;
 
+#[cfg(test)]
+pub(crate) static CODEX_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[derive(Debug)]
 pub struct ModelOutputError(pub String);
 
@@ -372,6 +375,154 @@ where
         Box::pin(async move { request_completion(&cfg, &payload).await })
     })
     .await
+}
+
+pub async fn generate_codex_exec(
+    prompt: &str,
+    images: &[PathBuf],
+    metadata: Option<&mut HashMap<String, Value>>,
+) -> Result<String> {
+    struct TempDirGuard(PathBuf);
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let root = std::env::temp_dir().join(format!("wechat-bot-reply-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root)?;
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
+    let _guard = TempDirGuard(root.clone());
+
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "reply": { "type": "string" }
+        },
+        "required": ["reply"],
+        "additionalProperties": false
+    });
+    let schema_path = root.join("schema.json");
+    crate::core::state::write_private(&schema_path, &schema)?;
+    let output = root.join("reply.json");
+
+    let mut arguments: Vec<String> = vec![
+        "exec".into(),
+        "--ignore-user-config".into(),
+        "--ephemeral".into(),
+        "--skip-git-repo-check".into(),
+        "--sandbox".into(),
+        "read-only".into(),
+        "--disable".into(),
+        "shell_tool".into(),
+        "--disable".into(),
+        "apps".into(),
+        "--disable".into(),
+        "unified_exec".into(),
+        "-c".into(),
+        "web_search=\"disabled\"".into(),
+        "-c".into(),
+        "model_reasoning_effort=\"low\"".into(),
+        "-c".into(),
+        "project_doc_max_bytes=0".into(),
+        "--cd".into(),
+        root.to_string_lossy().to_string(),
+        "--output-schema".into(),
+        schema_path.to_string_lossy().to_string(),
+        "--output-last-message".into(),
+        output.to_string_lossy().to_string(),
+    ];
+
+    for image in images {
+        let path = image
+            .canonicalize()
+            .map_err(|_| anyhow::anyhow!("image attachment must be a file under 10MiB"))?;
+        if !path.is_file() {
+            bail!("image attachment must be a file under 10MiB");
+        }
+        let meta = std::fs::metadata(&path)?;
+        if meta.len() > 10 * 1024 * 1024 {
+            bail!("image attachment must be a file under 10MiB");
+        }
+        arguments.push("--image".into());
+        arguments.push(path.to_string_lossy().to_string());
+    }
+    arguments.push("-".into());
+
+    let codex_bin = std::env::var("WECHAT_CODEX_BIN").unwrap_or_else(|_| "codex".to_string());
+    let began = Instant::now();
+
+    let mut cmd = tokio::process::Command::new(&codex_bin);
+    cmd.args(&arguments)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|_| anyhow::anyhow!("reply generation failed; not automatically retried"))?;
+    let mut stdin = child.stdin.take().context("missing child stdin")?;
+    let prompt_bytes = prompt.as_bytes().to_vec();
+
+    let communicate = async move {
+        use tokio::io::AsyncWriteExt;
+        stdin
+            .write_all(&prompt_bytes)
+            .await
+            .map_err(|e| anyhow::anyhow!("stdin write error: {}", e))?;
+        drop(stdin);
+        child
+            .wait_with_output()
+            .await
+            .map_err(|e| anyhow::anyhow!("wait error: {}", e))
+    };
+
+    let wait_res = tokio::time::timeout(Duration::from_secs(180), communicate).await;
+    let child_output = match wait_res {
+        Ok(Ok(out)) => out,
+        _ => {
+            bail!("reply generation failed; not automatically retried");
+        }
+    };
+
+    if !child_output.status.success() || !output.is_file() {
+        bail!("reply generation failed; not automatically retried");
+    }
+
+    if let Some(meta) = metadata {
+        let elapsed = began.elapsed().as_secs_f64();
+        let header = String::from_utf8_lossy(&child_output.stderr);
+        meta.insert("backend".to_string(), json!("codex-exec"));
+        meta.insert("reasoning_effort".to_string(), json!("low"));
+        meta.insert("seconds".to_string(), json!(elapsed));
+        for key in &["model", "provider"] {
+            let prefix = format!("{}:", key);
+            let found = header.lines().find_map(|line| {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with(&prefix) {
+                    Some(trimmed[prefix.len()..].trim().to_string())
+                } else {
+                    None
+                }
+            });
+            if let Some(val) = found {
+                meta.insert(key.to_string(), json!(val));
+            } else {
+                meta.insert(key.to_string(), Value::Null);
+            }
+        }
+    }
+
+    let raw_out = std::fs::read_to_string(&output)?;
+    let parsed: Value = serde_json::from_str(&raw_out)
+        .map_err(|_| anyhow::anyhow!("reply generation failed; not automatically retried"))?;
+    let reply_str = parsed
+        .get("reply")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("reply generation failed; not automatically retried"))?;
+
+    validate_reply(reply_str)
 }
 
 pub async fn generate_api_with_requester<F, R>(
@@ -1339,5 +1490,117 @@ mod tests {
         );
 
         server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn test_generate_codex_exec_success_and_metadata() {
+        let _env_guard = CODEX_ENV_LOCK.lock().unwrap();
+        let temp_dir = std::env::temp_dir().join(format!("test-fake-codex-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let script_path = temp_dir.join("fake_codex.sh");
+        let script_content = r#"#!/bin/bash
+has_sandbox=0
+has_output=0
+output_file=""
+
+while [ $# -gt 0 ]; do
+    if [ "$1" = "--sandbox" ] && [ "$2" = "read-only" ]; then
+        has_sandbox=1
+        shift 2
+    elif [ "$1" = "--output-last-message" ]; then
+        has_output=1
+        output_file="$2"
+        shift 2
+    else
+        shift 1
+    fi
+done
+
+if [ "$has_sandbox" -ne 1 ] || [ "$has_output" -ne 1 ] || [ -z "$output_file" ]; then
+    exit 2
+fi
+
+echo '{"reply": "你好，我是AI客服助手。"}' > "$output_file"
+>&2 echo "model: gpt-4o-mini"
+>&2 echo "provider: openai"
+exit 0
+"#;
+        std::fs::write(&script_path, script_content).unwrap();
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let old_bin = std::env::var("WECHAT_CODEX_BIN").ok();
+        unsafe {
+            std::env::set_var("WECHAT_CODEX_BIN", &script_path);
+        }
+
+        let mut metadata = HashMap::new();
+        let reply = generate_codex_exec("测试输入", &[], Some(&mut metadata)).await.unwrap();
+
+        unsafe {
+            if let Some(old) = old_bin {
+                std::env::set_var("WECHAT_CODEX_BIN", old);
+            } else {
+                std::env::remove_var("WECHAT_CODEX_BIN");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        assert_eq!(reply, "你好，我是AI客服助手。");
+        assert_eq!(metadata["backend"], "codex-exec");
+        assert_eq!(metadata["reasoning_effort"], "low");
+        assert_eq!(metadata["model"], "gpt-4o-mini");
+        assert_eq!(metadata["provider"], "openai");
+        assert!(metadata["seconds"].as_f64().unwrap() >= 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_generate_codex_exec_failure_or_missing_output() {
+        let _env_guard = CODEX_ENV_LOCK.lock().unwrap();
+        let temp_dir = std::env::temp_dir().join(format!("test-fake-codex-fail-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let script_path = temp_dir.join("fake_codex_fail.sh");
+        let script_content = "#!/bin/bash\nexit 1\n";
+        std::fs::write(&script_path, script_content).unwrap();
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let old_bin = std::env::var("WECHAT_CODEX_BIN").ok();
+        unsafe {
+            std::env::set_var("WECHAT_CODEX_BIN", &script_path);
+        }
+
+        let err = generate_codex_exec("测试失败", &[], None).await.unwrap_err();
+
+        unsafe {
+            if let Some(old) = old_bin {
+                std::env::set_var("WECHAT_CODEX_BIN", old);
+            } else {
+                std::env::remove_var("WECHAT_CODEX_BIN");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        assert!(
+            err.to_string().contains("reply generation failed; not automatically retried"),
+            "got err: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_codex_exec_rejects_oversized_image() {
+        let temp_dir = std::env::temp_dir().join(format!("test-fake-codex-img-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let oversized_img = temp_dir.join("big.png");
+        let file = std::fs::File::create(&oversized_img).unwrap();
+        file.set_len(10 * 1024 * 1024 + 1).unwrap();
+
+        let err = generate_codex_exec("测试大图", &[oversized_img], None).await.unwrap_err();
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        assert!(
+            err.to_string().contains("image attachment must be a file under 10MiB"),
+            "got err: {}",
+            err
+        );
     }
 }
