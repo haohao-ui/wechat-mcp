@@ -293,6 +293,25 @@ pub trait CoordinatorCapture: Send + Sync {
     fn prepare_target(&mut self, _recipient: &str, _directory: &Path, _names: &[String], _group: bool) {}
     fn sessions<'a>(&'a mut self, names: &'a [String]) -> Pin<Box<dyn Future<Output = Result<Vec<SessionRow>>> + Send + 'a>>;
     fn download<'a>(&'a mut self, media_id: &'a str, kind: &'a str) -> Pin<Box<dyn Future<Output = Result<PathBuf>> + Send + 'a>>;
+    fn attachments<'a>(
+        &'a mut self,
+        items: &'a [Bubble],
+        frame: &'a Frame,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<(
+                        Vec<AttachmentImage>,
+                        Vec<AttachmentFile>,
+                        Vec<FailedAttachmentItem>,
+                    )>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        let _ = (items, frame);
+        Box::pin(async move { bail!("attachments not supported") })
+    }
     fn last_switch(&self) -> Option<Value>;
     fn ocr_status(&self) -> Option<OcrStatus>;
     fn is_connected(&self) -> bool;
@@ -300,6 +319,18 @@ pub trait CoordinatorCapture: Send + Sync {
 
 pub struct CaptureAdapter<'a> {
     pub inner: &'a mut (dyn CoordinatorCapture + 'a),
+}
+
+impl<'a> CaptureAdapter<'a> {
+    pub fn download(
+        &mut self,
+        media_id: &str,
+        kind: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<PathBuf>> + Send + '_>> {
+        let mid = media_id.to_string();
+        let k = kind.to_string();
+        Box::pin(async move { self.inner.download(&mid, &k).await })
+    }
 }
 
 #[allow(refining_impl_trait)]
@@ -321,14 +352,21 @@ impl<'a> Capture for CaptureAdapter<'a> {
         &mut self,
         media_id: &str,
     ) -> Pin<Box<dyn Future<Output = Result<PathBuf>> + Send + '_>> {
-        let mid = media_id.to_string();
-        Box::pin(async move { self.inner.download(&mid, "image").await })
+        self.download_kind(media_id, "image")
+    }
+
+    fn download_kind(
+        &mut self,
+        media_id: &str,
+        kind: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<PathBuf>> + Send + '_>> {
+        CaptureAdapter::download(self, media_id, kind)
     }
 
     fn attachments(
         &mut self,
-        _items: &[Bubble],
-        _frame: &Frame,
+        items: &[Bubble],
+        frame: &Frame,
     ) -> Pin<
         Box<
             dyn Future<
@@ -341,7 +379,9 @@ impl<'a> Capture for CaptureAdapter<'a> {
                 + '_,
         >,
     > {
-        Box::pin(async move { Ok((Vec::new(), Vec::new(), Vec::new())) })
+        let items = items.to_vec();
+        let frame = frame.clone();
+        Box::pin(async move { self.inner.attachments(&items, &frame).await })
     }
 }
 
@@ -3570,8 +3610,32 @@ mod tests {
         }
     }
 
+    fn b64_encode(data: &[u8]) -> String {
+        const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
+        for chunk in data.chunks(3) {
+            let b0 = chunk[0];
+            let b1 = if chunk.len() > 1 { chunk[1] } else { 0 };
+            let b2 = if chunk.len() > 2 { chunk[2] } else { 0 };
+            result.push(B64[(b0 >> 2) as usize] as char);
+            result.push(B64[(((b0 & 3) << 4) | (b1 >> 4)) as usize] as char);
+            if chunk.len() > 1 {
+                result.push(B64[(((b1 & 0xf) << 2) | (b2 >> 6)) as usize] as char);
+            } else {
+                result.push('=');
+            }
+            if chunk.len() > 2 {
+                result.push(B64[(b2 & 0x3f) as usize] as char);
+            } else {
+                result.push('=');
+            }
+        }
+        result
+    }
+
     struct E2eFakeBotWorker {
         pub sock_path: PathBuf,
+        pub calls: Arc<Mutex<Vec<Value>>>,
     }
 
     impl E2eFakeBotWorker {
@@ -3584,12 +3648,15 @@ mod tests {
             let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
             let frames_arc = Arc::new(Mutex::new(frames));
             let frames_clone = frames_arc.clone();
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let calls_clone = calls.clone();
 
             tokio::spawn(async move {
                 while let Ok((stream, _)) = listener.accept().await {
                     let (read_half, mut write_half) = stream.into_split();
                     let mut reader = BufReader::new(read_half);
                     let frames_inner = frames_clone.clone();
+                    let calls_inner = calls_clone.clone();
 
                     tokio::spawn(async move {
                         let mut line = String::new();
@@ -3600,6 +3667,45 @@ mod tests {
                             if let Ok(req) = serde_json::from_str::<Value>(&line) {
                                 let op = req.get("operation").and_then(|o| o.as_str()).unwrap_or("");
                                 let id = req.get("id").and_then(|v| v.as_u64()).unwrap_or(1);
+                                calls_inner.lock().unwrap().push(req.clone());
+                                let params = req.get("params").cloned().unwrap_or(json!({}));
+
+                                if op == "prepare_image" {
+                                    let mid = params.get("media_id").and_then(|v| v.as_str()).unwrap_or("");
+                                    if mid.starts_with("fa") {
+                                        let resp = json!({
+                                            "protocol_version": 1,
+                                            "id": id,
+                                            "ok": false,
+                                            "error": "save_as_failed: invalid(\"menu_not_found\")",
+                                        });
+                                        let mut out = serde_json::to_vec(&resp).unwrap();
+                                        out.push(b'\n');
+                                        let _ = write_half.write_all(&out).await;
+                                        let _ = write_half.flush().await;
+                                        line.clear();
+                                        continue;
+                                    }
+                                }
+
+                                if op == "prepare_file" {
+                                    let mid = params.get("media_id").and_then(|v| v.as_str()).unwrap_or("");
+                                    if mid.starts_with("fe") {
+                                        let resp = json!({
+                                            "protocol_version": 1,
+                                            "id": id,
+                                            "ok": false,
+                                            "error": "file_size_limit",
+                                        });
+                                        let mut out = serde_json::to_vec(&resp).unwrap();
+                                        out.push(b'\n');
+                                        let _ = write_half.write_all(&out).await;
+                                        let _ = write_half.flush().await;
+                                        line.clear();
+                                        continue;
+                                    }
+                                }
+
                                 let result = if op == "sessions" {
                                     json!({
                                         "profile": "wechat-4",
@@ -3629,6 +3735,43 @@ mod tests {
                                         e2e_test_frame(vec![], "Alice")
                                     };
                                     serde_json::to_value(&f).unwrap()
+                                } else if op == "prepare_image" {
+                                    let mid = params.get("media_id").and_then(|v| v.as_str()).unwrap_or("");
+                                    json!({
+                                        "media_id": mid,
+                                        "extension": "png",
+                                    })
+                                } else if op == "prepare_file" {
+                                    let mid = params.get("media_id").and_then(|v| v.as_str()).unwrap_or("");
+                                    let ext = if mid.starts_with("00") { "pdf" } else { "txt" };
+                                    let filename = if mid.starts_with("00") { "doc.pdf" } else { "readme.txt" };
+                                    json!({
+                                        "filename": filename,
+                                        "extension": ext,
+                                        "size": 100,
+                                        "extraction": if ext == "pdf" {
+                                            json!({ "text": "真实PDF文件正文内容", "page_count": 1 })
+                                        } else {
+                                            json!({})
+                                        }
+                                    })
+                                } else if op == "read_media" {
+                                    let mid = params.get("media_id").and_then(|v| v.as_str()).unwrap_or("");
+                                    let (bytes, ext) = if mid.starts_with("00") {
+                                        (b"%PDF-1.7\npdf content bytes".to_vec(), "pdf")
+                                    } else if mid.starts_with("1") || mid.starts_with("fa") {
+                                        (b"\x89PNG\r\n\x1a\nfakeimagebytes".to_vec(), "png")
+                                    } else {
+                                        ("真实TXT文本正文内容".as_bytes().to_vec(), "txt")
+                                    };
+                                    json!({
+                                        "offset": 0,
+                                        "size": bytes.len(),
+                                        "bytes": b64_encode(&bytes),
+                                        "eof": true,
+                                        "sha256": crate::core::worker_client::sha256(&bytes),
+                                        "extension": ext,
+                                    })
                                 } else {
                                     json!({})
                                 };
@@ -3650,7 +3793,7 @@ mod tests {
                 }
             });
 
-            Self { sock_path }
+            Self { sock_path, calls }
         }
     }
 
@@ -3915,5 +4058,298 @@ mod tests {
             }
         }
         assert!(not_sent_found, "Expected not_sent recognition in send record or delivery");
+    }
+
+    #[tokio::test]
+    async fn test_e2e_assembly_attachments_image_and_document() {
+        let td = TestDir::new();
+        let recipient = "Alice";
+        let allow = vec![AllowlistEntry {
+            recipient: recipient.to_string(),
+            kind: "private".to_string(),
+            aliases: None,
+        }];
+        let cfg_path = create_test_config(td.path(), allow.clone());
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+
+        let fake_mcp = E2eFakeMcp::start(&coord.config.account_id, false).await;
+        let mcp_client = Arc::new(crate::core::mcp_client::McpSocketClient::new(
+            fake_mcp.sock_path.clone(),
+            coord.config.account_id.clone(),
+        ));
+
+        let img_id = "1".repeat(64);
+        let file_id = "2".repeat(64);
+
+        let mut b_old = e2e_test_bubble("历史文本消息", "inbound_visual");
+        b_old.digest = "msg_old".to_string();
+
+        let mut b_img = e2e_test_bubble("[图片]", "inbound_visual");
+        b_img.kind = Some("image".to_string());
+        b_img.media_id = Some(img_id.clone());
+        b_img.digest = "msg_img_1".to_string();
+
+        let mut b_file = e2e_test_bubble("[文件] readme.txt", "inbound_visual");
+        b_file.kind = Some("file".to_string());
+        b_file.media_id = Some(file_id.clone());
+        b_file.filename = Some("readme.txt".to_string());
+        b_file.digest = "msg_file_1".to_string();
+
+        let mut b_reply = e2e_test_bubble("已查阅附件", "outbound_visual");
+        b_reply.digest = "msg_reply_1".to_string();
+
+        let f_retarget = e2e_test_frame(vec![b_old.clone()], recipient);
+        let f_base = e2e_test_frame(vec![b_old.clone()], recipient);
+        let f_incoming = e2e_test_frame(vec![b_old.clone(), b_img.clone(), b_file.clone()], recipient);
+        let f_echo = e2e_test_frame(vec![b_old, b_img, b_file, b_reply], recipient);
+
+        let fake_bot = E2eFakeBotWorker::start(vec![
+            f_retarget,
+            f_base,
+            f_incoming.clone(),
+            f_incoming.clone(),
+            f_incoming,
+            f_echo,
+        ]).await;
+
+        let base_dir = td.path().join(".wechat-rpa");
+        fs::create_dir_all(&base_dir).unwrap();
+        let mut base_perms = fs::metadata(&base_dir).unwrap().permissions();
+        base_perms.set_mode(0o700);
+        fs::set_permissions(&base_dir, base_perms).unwrap();
+
+        let bin_dir = base_dir.join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let worker_bin = bin_dir.join("wechat_bot_worker");
+        fs::write(&worker_bin, b"#!/bin/sh\nexit 0\n").unwrap();
+        let mut bin_perms = fs::metadata(&worker_bin).unwrap().permissions();
+        bin_perms.set_mode(0o755);
+        fs::set_permissions(&worker_bin, bin_perms).unwrap();
+
+        let flag_file = base_dir.join("bot-worker.enabled");
+        fs::write(&flag_file, &coord.ownership).unwrap();
+        let mut flag_perms = fs::metadata(&flag_file).unwrap().permissions();
+        flag_perms.set_mode(0o600);
+        fs::set_permissions(&flag_file, flag_perms).unwrap();
+
+        let worker_client = crate::core::worker_client::WorkerClient::new(
+            base_dir.clone(),
+            fake_bot.sock_path.clone(),
+            coord.ownership.clone(),
+            recipient.to_string(),
+            base_dir.clone(),
+            None,
+            true,
+            false,
+            50 * 1024 * 1024,
+            Some(mcp_client.clone()),
+        );
+
+        coord.tool_client = Some(mcp_client.clone());
+        coord.capture = Some(Box::new(worker_client));
+
+        let received_turn = Arc::new(Mutex::new(None::<crate::brain::Turn>));
+        let rt_clone = received_turn.clone();
+
+        coord.config.turn_quiet_seconds = 0;
+        let brain_fn: crate::core::turns::BrainFn = Arc::new(move |turn| {
+            let mut guard = rt_clone.lock().unwrap();
+            *guard = Some(turn.clone());
+            Box::pin(async {
+                Ok(crate::brain::BrainReply {
+                    reply: "已查阅附件".to_string(),
+                    metadata: HashMap::new(),
+                })
+            })
+        });
+        {
+            let child = coord.session(&allow[0]).unwrap();
+            child.config.turn_quiet_seconds = 0;
+            child.brain = Some(brain_fn);
+        }
+
+        // 周期 1: 建立 baseline
+        coord.visit(&allow[0]).await.unwrap();
+        // 周期 2: 探测到新消息（包含图片和文件）并建立 turn
+        coord.visit(&allow[0]).await.unwrap();
+        // 周期 3: turn 到期，触发附件获取、注入大脑并回复
+        coord.visit(&allow[0]).await.unwrap();
+
+        // 验证 worker 收到的 RPC 调用与顺序
+        let calls = fake_bot.calls.lock().unwrap().clone();
+        let prep_img = calls.iter().find(|c| c["operation"] == "prepare_image");
+        let prep_file = calls.iter().find(|c| c["operation"] == "prepare_file");
+        let read_media_calls: Vec<_> = calls.iter().filter(|c| c["operation"] == "read_media").collect();
+
+        assert!(prep_img.is_some(), "worker 应收到 prepare_image 调用");
+        assert_eq!(prep_img.unwrap()["params"]["media_id"], img_id);
+        assert_eq!(prep_img.unwrap()["params"]["max_bytes"], 50 * 1024 * 1024);
+
+        assert!(prep_file.is_some(), "worker 应收到 prepare_file 调用");
+        assert_eq!(prep_file.unwrap()["params"]["media_id"], file_id);
+        assert_eq!(prep_file.unwrap()["params"]["max_bytes"], 50 * 1024 * 1024);
+
+        assert!(!read_media_calls.is_empty(), "worker 应收到 read_media 调用");
+
+        // 验证调用的相对顺序：prepare_image -> prepare_file -> read_media
+        let idx_prep_img = calls.iter().position(|c| c["operation"] == "prepare_image").unwrap();
+        let idx_prep_file = calls.iter().position(|c| c["operation"] == "prepare_file").unwrap();
+        assert!(idx_prep_img < idx_prep_file, "prepare_image 应在 prepare_file 之前");
+
+        // 验证进入大脑的 BrainTurn
+        let turn = received_turn.lock().unwrap().clone();
+        assert!(turn.is_some(), "大脑应收到 BrainTurn 调用");
+        let turn = turn.unwrap();
+
+        assert_eq!(turn.image_count, Some(1));
+        assert_eq!(turn.images.len(), 1, "图片应成功注入 BrainTurn.images");
+        assert!(turn.images[0].exists(), "图片本地文件应存在");
+
+        assert_eq!(turn.files.len(), 1, "文件应成功注入 BrainTurn.files");
+        assert_eq!(turn.files[0]["filename"], "readme.txt");
+        assert_eq!(turn.files[0]["text"], "真实TXT文本正文内容");
+
+        assert!(turn.failed.is_empty(), "没有失败附件");
+    }
+
+    #[tokio::test]
+    async fn test_e2e_assembly_attachments_fallback_and_failed_items() {
+        let td = TestDir::new();
+        let recipient = "Alice";
+        let allow = vec![AllowlistEntry {
+            recipient: recipient.to_string(),
+            kind: "private".to_string(),
+            aliases: None,
+        }];
+        let cfg_path = create_test_config(td.path(), allow.clone());
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+
+        let fake_mcp = E2eFakeMcp::start(&coord.config.account_id, false).await;
+        let mcp_client = Arc::new(crate::core::mcp_client::McpSocketClient::new(
+            fake_mcp.sock_path.clone(),
+            coord.config.account_id.clone(),
+        ));
+
+        let fail_img_id = "fa".repeat(32);
+        let fail_file_id = "fe".repeat(32);
+        let good_pdf_id = "00".repeat(32);
+
+        let mut b_old = e2e_test_bubble("历史消息", "inbound_visual");
+        b_old.digest = "msg_old".to_string();
+
+        let mut b_fail_img = e2e_test_bubble("[图片]", "inbound_visual");
+        b_fail_img.kind = Some("image".to_string());
+        b_fail_img.media_id = Some(fail_img_id.clone());
+        b_fail_img.digest = "msg_fail_img".to_string();
+
+        let mut b_fail_file = e2e_test_bubble("[文件] big.bin", "inbound_visual");
+        b_fail_file.kind = Some("file".to_string());
+        b_fail_file.media_id = Some(fail_file_id.clone());
+        b_fail_file.filename = Some("big.bin".to_string());
+        b_fail_file.digest = "msg_fail_file".to_string();
+
+        let mut b_good_pdf = e2e_test_bubble("[文件] doc.pdf", "inbound_visual");
+        b_good_pdf.kind = Some("file".to_string());
+        b_good_pdf.media_id = Some(good_pdf_id.clone());
+        b_good_pdf.filename = Some("doc.pdf".to_string());
+        b_good_pdf.digest = "msg_good_pdf".to_string();
+
+        let mut b_reply = e2e_test_bubble("收到部分附件", "outbound_visual");
+        b_reply.digest = "msg_reply_2".to_string();
+
+        let f_retarget = e2e_test_frame(vec![b_old.clone()], recipient);
+        let f_base = e2e_test_frame(vec![b_old.clone()], recipient);
+        let f_incoming = e2e_test_frame(vec![b_old.clone(), b_fail_img.clone(), b_fail_file.clone(), b_good_pdf.clone()], recipient);
+        let f_echo = e2e_test_frame(vec![b_old, b_fail_img, b_fail_file, b_good_pdf, b_reply], recipient);
+
+        let fake_bot = E2eFakeBotWorker::start(vec![
+            f_retarget,
+            f_base,
+            f_incoming.clone(),
+            f_incoming.clone(),
+            f_incoming,
+            f_echo,
+        ]).await;
+
+        let base_dir = td.path().join(".wechat-rpa");
+        fs::create_dir_all(&base_dir).unwrap();
+        let mut base_perms = fs::metadata(&base_dir).unwrap().permissions();
+        base_perms.set_mode(0o700);
+        fs::set_permissions(&base_dir, base_perms).unwrap();
+
+        let bin_dir = base_dir.join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let worker_bin = bin_dir.join("wechat_bot_worker");
+        fs::write(&worker_bin, b"#!/bin/sh\nexit 0\n").unwrap();
+        let mut bin_perms = fs::metadata(&worker_bin).unwrap().permissions();
+        bin_perms.set_mode(0o755);
+        fs::set_permissions(&worker_bin, bin_perms).unwrap();
+
+        let flag_file = base_dir.join("bot-worker.enabled");
+        fs::write(&flag_file, &coord.ownership).unwrap();
+        let mut flag_perms = fs::metadata(&flag_file).unwrap().permissions();
+        flag_perms.set_mode(0o600);
+        fs::set_permissions(&flag_file, flag_perms).unwrap();
+
+        let worker_client = crate::core::worker_client::WorkerClient::new(
+            base_dir.clone(),
+            fake_bot.sock_path.clone(),
+            coord.ownership.clone(),
+            recipient.to_string(),
+            base_dir.clone(),
+            None,
+            true,
+            false,
+            50 * 1024 * 1024,
+            Some(mcp_client.clone()),
+        );
+
+        let logged_events_ref = worker_client.logged_events.clone();
+
+        coord.tool_client = Some(mcp_client.clone());
+        coord.capture = Some(Box::new(worker_client));
+
+        let received_turn = Arc::new(Mutex::new(None::<crate::brain::Turn>));
+        let rt_clone = received_turn.clone();
+
+        coord.config.turn_quiet_seconds = 0;
+        let brain_fn: crate::core::turns::BrainFn = Arc::new(move |turn| {
+            let mut guard = rt_clone.lock().unwrap();
+            *guard = Some(turn.clone());
+            Box::pin(async {
+                Ok(crate::brain::BrainReply {
+                    reply: "收到部分附件".to_string(),
+                    metadata: HashMap::new(),
+                })
+            })
+        });
+        {
+            let child = coord.session(&allow[0]).unwrap();
+            child.config.turn_quiet_seconds = 0;
+            child.brain = Some(brain_fn);
+        }
+
+        coord.visit(&allow[0]).await.unwrap();
+        coord.visit(&allow[0]).await.unwrap();
+        coord.visit(&allow[0]).await.unwrap();
+
+        // 1. 验证原图失败回退为缩略图并记录 image_original_unavailable 事件
+        let events = logged_events_ref.lock().unwrap().clone();
+        let unavail = events.iter().find(|e| e["event"] == "image_original_unavailable");
+        assert!(unavail.is_some(), "原图失败时应记录 image_original_unavailable 事件");
+
+        let turn = received_turn.lock().unwrap().clone().unwrap();
+        // 缩略图仍然进入了 images
+        assert_eq!(turn.images.len(), 1, "回退缩略图后图片仍然进入大脑");
+
+        // 2. 验证坏文件进入 failed 列表
+        assert_eq!(turn.failed.len(), 1, "坏文件应进入 failed 列表");
+        assert_eq!(turn.failed[0].label, "big.bin");
+        assert_eq!(turn.failed[0].reason.as_deref(), Some("too_large"));
+
+        // 3. 验证单个附件失败不影响其他正常附件
+        assert_eq!(turn.files.len(), 1, "好的 pdf 文件仍然成功进入 files");
+        assert_eq!(turn.files[0]["filename"], "doc.pdf");
+        assert_eq!(turn.files[0]["text"], "真实PDF文件正文内容");
     }
 }

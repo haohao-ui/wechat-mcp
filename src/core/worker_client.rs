@@ -2,7 +2,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
@@ -13,7 +13,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
+use crate::core::model::{Bubble, Frame};
 use crate::core::scheduler::{CoordinatorCapture, SessionRow};
+use crate::core::turns::{AttachmentFile, AttachmentImage, FailedAttachmentItem};
 
 #[repr(C)]
 struct Tm {
@@ -212,6 +214,7 @@ pub struct WorkerClient {
     pub reader: Option<BufReader<tokio::net::unix::OwnedReadHalf>>,
     pub writer: Option<tokio::net::unix::OwnedWriteHalf>,
     pub rpc_lock: Mutex<()>,
+    pub logged_events: Arc<StdMutex<Vec<Value>>>,
 }
 
 impl WorkerClient {
@@ -246,6 +249,7 @@ impl WorkerClient {
             reader: None,
             writer: None,
             rpc_lock: Mutex::new(()),
+            logged_events: Arc::new(StdMutex::new(Vec::new())),
         }
     }
 
@@ -637,7 +641,11 @@ impl WorkerClient {
                 .get("bytes")
                 .and_then(|v| v.as_str())
                 .context("missing bytes")?;
-            let chunk = crate::wechat::files::decode_base64(b64_str)?;
+            let chunk = if b64_str.is_empty() {
+                Vec::new()
+            } else {
+                crate::wechat::files::decode_base64(b64_str)?
+            };
             let eof = res.get("eof").and_then(|v| v.as_bool()).unwrap_or(false);
 
             if chunk.is_empty() && !eof {
@@ -775,6 +783,258 @@ impl WorkerClient {
         }
         Ok(())
     }
+
+    pub fn log_event(&self, event: &str, fields: Value) {
+        let mut item = match fields {
+            Value::Object(map) => map,
+            _ => serde_json::Map::new(),
+        };
+        item.insert("event".to_string(), json!(event));
+        tracing::info!(event = %event, fields = %serde_json::to_string(&item).unwrap_or_default());
+        self.logged_events.lock().unwrap().push(Value::Object(item));
+    }
+
+    pub async fn attachments(
+        &mut self,
+        items: &[Bubble],
+        frame: &Frame,
+    ) -> Result<(
+        Vec<AttachmentImage>,
+        Vec<AttachmentFile>,
+        Vec<FailedAttachmentItem>,
+    )> {
+        let mut images = Vec::new();
+        let mut files = Vec::new();
+        let mut failed = Vec::new();
+        let mut used = 0usize;
+        let mut number = 0usize;
+        let mut items = items.to_vec();
+        let mut current_frame = frame.clone();
+
+        for index in 0..items.len() {
+            let item = items[index].clone();
+            let kind = item.kind.as_deref().unwrap_or("text");
+            if kind == "image" {
+                number += 1;
+                let label = format!("第{}张图片", number);
+                let mut source = "original".to_string();
+                let media_id = item.media_id.clone().unwrap_or_default();
+
+                let prep_res = self
+                    .call(
+                        "prepare_image",
+                        json!({
+                            "media_id": media_id,
+                            "snapshot_id": current_frame.snapshot_id,
+                            "max_bytes": self.max_bytes,
+                        }),
+                    )
+                    .await;
+
+                match prep_res {
+                    Ok(_) => {
+                        let f = self.frame().await?;
+                        current_frame = f;
+                        if index + 1 < items.len() {
+                            let relocated = crate::core::policy::relocate(&items[index + 1..], &current_frame.bubbles);
+                            items.splice(index + 1.., relocated);
+                        }
+                    }
+                    Err(err) => {
+                        let err_str = err.to_string();
+                        if action_interrupted(&err_str) {
+                            return Err(err);
+                        }
+                        source = "chat_thumbnail".to_string();
+                        self.log_event(
+                            "image_original_unavailable",
+                            json!({
+                                "reason": media_reason(&err_str),
+                                "detail": worker_code(&err_str),
+                            }),
+                        );
+                    }
+                }
+
+                match self.download(&media_id, "image").await {
+                    Ok(path) => {
+                        images.push(AttachmentImage {
+                            path,
+                            label,
+                            source,
+                            bubble: item.clone(),
+                            media_id: Some(media_id),
+                        });
+                    }
+                    Err(_) => {
+                        failed.push(FailedAttachmentItem {
+                            label,
+                            kind: "image".to_string(),
+                            reason: "download_failed".to_string(),
+                            detail: None,
+                        });
+                        continue;
+                    }
+                }
+            } else if kind == "file" {
+                let mut label = item.filename.clone().unwrap_or_else(|| "文件".to_string());
+                let media_id = item.media_id.clone().unwrap_or_default();
+
+                let prep_step = async {
+                    let info = self
+                        .call(
+                            "prepare_file",
+                            json!({
+                                "media_id": media_id,
+                                "snapshot_id": current_frame.snapshot_id,
+                                "max_bytes": self.max_bytes,
+                            }),
+                        )
+                        .await?;
+                    let path = self.download(&media_id, "file").await?;
+                    let f = self.frame().await?;
+                    Ok::<_, anyhow::Error>((info, path, f))
+                }
+                .await;
+
+                let (info, path, new_frame) = match prep_step {
+                    Ok(res) => res,
+                    Err(err) => {
+                        let err_str = err.to_string();
+                        if action_interrupted(&err_str) {
+                            return Err(err);
+                        }
+                        failed.push(FailedAttachmentItem {
+                            label,
+                            kind: "file".to_string(),
+                            reason: media_reason(&err_str),
+                            detail: Some(worker_code(&err_str)),
+                        });
+                        continue;
+                    }
+                };
+
+                current_frame = new_frame;
+                if index + 1 < items.len() {
+                    let relocated = crate::core::policy::relocate(&items[index + 1..], &current_frame.bubbles);
+                    items.splice(index + 1.., relocated);
+                }
+
+                if let Some(fn_str) = info.get("filename").and_then(|v| v.as_str()) {
+                    label = fn_str.to_string();
+                }
+
+                let ext = info.get("extension").and_then(|v| v.as_str()).unwrap_or("");
+                if ext == "png" || ext == "jpg" || ext == "jpeg" {
+                    images.push(AttachmentImage {
+                        path,
+                        label,
+                        source: "original".to_string(),
+                        bubble: item.clone(),
+                        media_id: Some(media_id),
+                    });
+                    continue;
+                }
+
+                let extraction_val = info.get("extraction");
+                let content = match crate::brain::documents::extract(
+                    &path,
+                    ext,
+                    extraction_val,
+                    Some(self.max_bytes as u64),
+                ) {
+                    Ok(val) => val,
+                    Err(_) => {
+                        failed.push(FailedAttachmentItem {
+                            label,
+                            kind: "file".to_string(),
+                            reason: "extract_failed".to_string(),
+                            detail: None,
+                        });
+                        continue;
+                    }
+                };
+
+                let previews = extraction_val
+                    .and_then(|e| e.get("previews"))
+                    .and_then(|p| p.as_array());
+
+                let has_text = content
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false);
+                let has_rows = content
+                    .get("rows")
+                    .and_then(|v| v.as_array())
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false);
+                let has_sheets = content
+                    .get("sheets")
+                    .and_then(|v| v.as_array())
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false);
+                let has_previews = previews.map(|p| !p.is_empty()).unwrap_or(false);
+
+                if !has_text && !has_rows && !has_sheets && !has_previews {
+                    failed.push(FailedAttachmentItem {
+                        label,
+                        kind: "file".to_string(),
+                        reason: "empty".to_string(),
+                        detail: None,
+                    });
+                    continue;
+                }
+
+                let size = serde_json::to_string(&content)?.chars().count();
+                if used + size > MAX_EXTRACTED {
+                    failed.push(FailedAttachmentItem {
+                        label,
+                        kind: "file".to_string(),
+                        reason: "too_large".to_string(),
+                        detail: None,
+                    });
+                    continue;
+                }
+                used += size;
+
+                if let Some(prevs) = previews {
+                    for (page_idx, prev) in prevs.iter().enumerate() {
+                        if let Some(prev_id) = prev.as_str() {
+                            let prev_path = self.download(prev_id, "image").await?;
+                            images.push(AttachmentImage {
+                                path: prev_path,
+                                label: format!("{}第{}页", label, page_idx + 1),
+                                source: "preview".to_string(),
+                                bubble: item.clone(),
+                                media_id: Some(prev_id.to_string()),
+                            });
+                        }
+                    }
+                }
+
+                let content_map = match content {
+                    Value::Object(m) => m,
+                    _ => serde_json::Map::new(),
+                };
+
+                files.push(AttachmentFile {
+                    filename: info
+                        .get("filename")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&label)
+                        .to_string(),
+                    label,
+                    original_bytes: true,
+                    path,
+                    bubble: item.clone(),
+                    content: content_map,
+                });
+            }
+        }
+
+        Ok((images, files, failed))
+    }
 }
 
 impl CoordinatorCapture for WorkerClient {
@@ -830,6 +1090,25 @@ impl CoordinatorCapture for WorkerClient {
 
     fn download<'a>(&'a mut self, media_id: &'a str, kind: &'a str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<PathBuf>> + Send + 'a>> {
         Box::pin(async move { self.download(media_id, kind).await })
+    }
+
+    fn attachments<'a>(
+        &'a mut self,
+        items: &'a [Bubble],
+        frame: &'a Frame,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<(
+                        Vec<AttachmentImage>,
+                        Vec<AttachmentFile>,
+                        Vec<FailedAttachmentItem>,
+                    )>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move { self.attachments(items, frame).await })
     }
 
     fn last_switch(&self) -> Option<Value> {
@@ -2165,5 +2444,471 @@ mod tests {
 
         let content = fs::read_to_string(today_file).unwrap();
         assert_eq!(content.lines().count(), 1, "达到大小上限后不再追加写入");
+    }
+
+    fn test_bubble_helper(kind: &str, media_id: &str, filename: Option<&str>) -> Bubble {
+        serde_json::from_value(json!({
+            "kind": kind,
+            "media_id": media_id,
+            "filename": filename,
+            "direction": "inbound_visual",
+            "digest": format!("{}_{}", kind, media_id),
+            "text": if kind == "image" { "[图片]" } else { "[文件]" }
+        })).unwrap()
+    }
+
+    fn test_empty_frame() -> Frame {
+        serde_json::from_value(json!({
+            "snapshot_id": "snap_1",
+            "bubbles": [],
+            "title_lines": ["测试"]
+        })).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_attachments_full_flow_image_and_document() {
+        let temp = TestDir::new();
+        let sock = temp.path().join("bot-worker.sock");
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let calls_clone = calls.clone();
+
+        let img_id = "1".repeat(64);
+        let file_id = "2".repeat(64);
+
+        let img_bytes = b"\x89PNG\r\n\x1a\nfakeimagebytes";
+        let file_bytes = "口令：竹叶-47".as_bytes();
+
+        let _server = MockWorkerServer::spawn(sock.clone(), move |req| {
+            let op = req["operation"].as_str().unwrap_or("");
+            let id = req["id"].as_u64().unwrap_or(1);
+            let params = &req["params"];
+            calls_clone.lock().unwrap().push(req.clone());
+
+            let result = if op == "prepare_image" {
+                json!({"media_id": params["media_id"], "extension": "png"})
+            } else if op == "prepare_file" {
+                json!({
+                    "filename": "sample.txt",
+                    "extension": "txt",
+                    "size": file_bytes.len(),
+                })
+            } else if op == "capture" {
+                serde_json::to_value(test_sample_frame()).unwrap()
+            } else if op == "read_media" {
+                let mid = params["media_id"].as_str().unwrap_or("");
+                let (bytes, ext) = if mid == "1".repeat(64) {
+                    (img_bytes.to_vec(), "png")
+                } else {
+                    (file_bytes.to_vec(), "txt")
+                };
+                json!({
+                    "offset": 0,
+                    "size": bytes.len(),
+                    "bytes": test_b64_encode(&bytes),
+                    "eof": true,
+                    "sha256": sha256(&bytes),
+                    "extension": ext,
+                })
+            } else {
+                json!({})
+            };
+
+            json!({
+                "protocol_version": 1,
+                "id": id,
+                "ok": true,
+                "result": result,
+            })
+        }).await;
+
+        let mut client = setup_test_client(&temp, sock, None);
+        client.connect(5).await.unwrap();
+        calls.lock().unwrap().clear();
+
+        let bubble_img = test_bubble_helper("image", &img_id, None);
+        let bubble_file = test_bubble_helper("file", &file_id, Some("sample.txt"));
+
+        let frame = test_empty_frame();
+        let (images, files, failed) = client.attachments(&[bubble_img, bubble_file], &frame).await.unwrap();
+
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].label, "第1张图片");
+        assert_eq!(images[0].source, "original");
+        assert_eq!(images[0].media_id.as_deref(), Some(img_id.as_str()));
+        assert!(images[0].path.exists());
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].filename, "sample.txt");
+        assert_eq!(files[0].label, "sample.txt");
+        assert!(files[0].original_bytes);
+        assert_eq!(files[0].content.get("text").and_then(|v| v.as_str()), Some("口令：竹叶-47"));
+        assert!(files[0].path.exists());
+
+        assert!(failed.is_empty());
+
+        let recorded: Vec<String> = calls.lock().unwrap().iter()
+            .map(|c| c["operation"].as_str().unwrap_or("").to_string())
+            .collect();
+        assert_eq!(recorded, vec!["prepare_image", "capture", "read_media", "prepare_file", "read_media", "capture"]);
+    }
+
+    #[tokio::test]
+    async fn test_attachments_image_original_unavailable_fallback_thumbnail() {
+        let temp = TestDir::new();
+        let sock = temp.path().join("bot-worker.sock");
+        let img_id = "1".repeat(64);
+        let img_bytes = b"thumbnailbytes";
+
+        let _server = MockWorkerServer::spawn(sock.clone(), move |req| {
+            let op = req["operation"].as_str().unwrap_or("");
+            let id = req["id"].as_u64().unwrap_or(1);
+            if op == "prepare_image" {
+                json!({
+                    "protocol_version": 1,
+                    "id": id,
+                    "ok": false,
+                    "error": "save_as_failed: invalid(\"menu_not_found\")",
+                })
+            } else if op == "read_media" {
+                json!({
+                    "protocol_version": 1,
+                    "id": id,
+                    "ok": true,
+                    "result": {
+                        "offset": 0,
+                        "size": img_bytes.len(),
+                        "bytes": test_b64_encode(img_bytes),
+                        "eof": true,
+                        "sha256": sha256(img_bytes),
+                        "extension": "png",
+                    }
+                })
+            } else {
+                json!({"protocol_version": 1, "id": id, "ok": true, "result": {}})
+            }
+        }).await;
+
+        let mut client = setup_test_client(&temp, sock, None);
+        client.connect(5).await.unwrap();
+
+        let bubble_img = test_bubble_helper("image", &img_id, None);
+        let frame = test_empty_frame();
+        let (images, files, failed) = client.attachments(&[bubble_img], &frame).await.unwrap();
+
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].label, "第1张图片");
+        assert_eq!(images[0].source, "chat_thumbnail");
+        assert!(files.is_empty());
+        assert!(failed.is_empty());
+
+        let events = client.logged_events.lock().unwrap().clone();
+        let unavail_event = events.iter().find(|e| e["event"] == "image_original_unavailable");
+        assert!(unavail_event.is_some(), "原图不可用时应记录 image_original_unavailable 事件");
+        let ev = unavail_event.unwrap();
+        assert_eq!(ev["reason"], "download_failed");
+        assert_eq!(ev["detail"], "menu_not_found");
+    }
+
+    #[tokio::test]
+    async fn test_attachments_action_interrupted_bubble_propagates() {
+        let temp = TestDir::new();
+        let sock = temp.path().join("bot-worker.sock");
+
+        let _server = MockWorkerServer::spawn(sock.clone(), move |req| {
+            let op = req["operation"].as_str().unwrap_or("");
+            let id = req["id"].as_u64().unwrap_or(1);
+            if op == "prepare_image" {
+                json!({
+                    "protocol_version": 1,
+                    "id": id,
+                    "ok": false,
+                    "error": "private visual operation failed: invalid(\"user_input_detected\")",
+                })
+            } else {
+                json!({
+                    "protocol_version": 1,
+                    "id": id,
+                    "ok": true,
+                    "result": {}
+                })
+            }
+        }).await;
+
+        let mut client = setup_test_client(&temp, sock, None);
+        client.connect(5).await.unwrap();
+
+        let bubble_img = test_bubble_helper("image", &"1".repeat(64), None);
+        let frame = test_empty_frame();
+        let err = client.attachments(&[bubble_img], &frame).await.unwrap_err();
+        assert!(action_interrupted(&err.to_string()), "action_interrupted 必须向上抛出");
+    }
+
+    #[tokio::test]
+    async fn test_attachments_failed_items_recorded_and_others_continue() {
+        let temp = TestDir::new();
+        let sock = temp.path().join("bot-worker.sock");
+        let bad_img_id = "1".repeat(64);
+        let good_img_id = "2".repeat(64);
+        let empty_file_id = "3".repeat(64);
+        let good_file_id = "4".repeat(64);
+
+        let good_txt = b"valid file content";
+
+        let _server = MockWorkerServer::spawn(sock.clone(), move |req| {
+            let op = req["operation"].as_str().unwrap_or("");
+            let id = req["id"].as_u64().unwrap_or(1);
+            let params = &req["params"];
+            let mid = params["media_id"].as_str().unwrap_or("");
+
+            if op == "read_media" && mid == "1".repeat(64) {
+                return json!({
+                    "protocol_version": 1,
+                    "id": id,
+                    "ok": false,
+                    "error": "media missing",
+                });
+            }
+
+            let result = if op == "prepare_image" {
+                json!({})
+            } else if op == "prepare_file" {
+                if mid == "3".repeat(64) {
+                    json!({ "filename": "empty.txt", "extension": "txt" })
+                } else {
+                    json!({ "filename": "good.txt", "extension": "txt" })
+                }
+            } else if op == "capture" {
+                serde_json::to_value(test_sample_frame()).unwrap()
+            } else if op == "read_media" {
+                if mid == "3".repeat(64) {
+                    json!({
+                        "offset": 0,
+                        "size": 0,
+                        "bytes": "",
+                        "eof": true,
+                        "sha256": sha256(b""),
+                        "extension": "txt",
+                    })
+                } else {
+                    json!({
+                        "offset": 0,
+                        "size": good_txt.len(),
+                        "bytes": test_b64_encode(good_txt),
+                        "eof": true,
+                        "sha256": sha256(good_txt),
+                        "extension": "txt",
+                    })
+                }
+            } else {
+                json!({})
+            };
+
+            json!({
+                "protocol_version": 1,
+                "id": id,
+                "ok": true,
+                "result": result,
+            })
+        }).await;
+
+        let mut client = setup_test_client(&temp, sock, None);
+        client.connect(5).await.unwrap();
+
+        let b_bad_img = test_bubble_helper("image", &bad_img_id, None);
+        let b_empty_file = test_bubble_helper("file", &empty_file_id, Some("empty.txt"));
+        let b_good_file = test_bubble_helper("file", &good_file_id, Some("good.txt"));
+        let b_good_img = test_bubble_helper("image", &good_img_id, None);
+
+        let frame = test_empty_frame();
+        let (images, files, failed) = client.attachments(&[b_bad_img, b_empty_file, b_good_file, b_good_img], &frame).await.unwrap();
+
+        assert_eq!(images.len(), 1, "好的图片应该成功");
+        assert_eq!(images[0].label, "第2张图片");
+
+        assert_eq!(files.len(), 1, "好的文件应该成功");
+        assert_eq!(files[0].filename, "good.txt");
+
+        assert_eq!(failed.len(), 2, "坏图片和空文件应记录在 failed 列表");
+        assert_eq!(failed[0].label, "第1张图片");
+        assert_eq!(failed[0].reason, "download_failed");
+        assert_eq!(failed[1].label, "empty.txt");
+        assert_eq!(failed[1].reason, "empty");
+    }
+
+    #[tokio::test]
+    async fn test_attachments_png_jpg_file_treated_as_image() {
+        let temp = TestDir::new();
+        let sock = temp.path().join("bot-worker.sock");
+        let png_bytes = b"\x89PNG\r\n\x1a\nfakeimagebytes";
+
+        let _server = MockWorkerServer::spawn(sock.clone(), move |req| {
+            let op = req["operation"].as_str().unwrap_or("");
+            let id = req["id"].as_u64().unwrap_or(1);
+            let result = if op == "prepare_file" {
+                json!({ "filename": "photo.png", "extension": "png" })
+            } else if op == "capture" {
+                serde_json::to_value(test_sample_frame()).unwrap()
+            } else if op == "read_media" {
+                json!({
+                    "offset": 0,
+                    "size": png_bytes.len(),
+                    "bytes": test_b64_encode(png_bytes),
+                    "eof": true,
+                    "sha256": sha256(png_bytes),
+                    "extension": "png",
+                })
+            } else {
+                json!({})
+            };
+
+            json!({
+                "protocol_version": 1,
+                "id": id,
+                "ok": true,
+                "result": result,
+            })
+        }).await;
+
+        let mut client = setup_test_client(&temp, sock, None);
+        client.connect(5).await.unwrap();
+
+        let b_file = test_bubble_helper("file", &"1".repeat(64), Some("photo.png"));
+        let frame = test_empty_frame();
+        let (images, files, failed) = client.attachments(&[b_file], &frame).await.unwrap();
+
+        assert_eq!(images.len(), 1, "png 扩展名的文件应作为图片处理进入 images");
+        assert_eq!(images[0].label, "photo.png");
+        assert_eq!(images[0].source, "original");
+        assert!(files.is_empty(), "png 文件不应进入 files");
+        assert!(failed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_attachments_max_extracted_limit() {
+        let temp = TestDir::new();
+        let sock = temp.path().join("bot-worker.sock");
+        let big_str_1 = "a".repeat(20000);
+        let big_str_2 = "b".repeat(10000);
+
+        let _server = MockWorkerServer::spawn(sock.clone(), move |req| {
+            let op = req["operation"].as_str().unwrap_or("");
+            let id = req["id"].as_u64().unwrap_or(1);
+            let params = &req["params"];
+            let mid = params["media_id"].as_str().unwrap_or("");
+
+            let result = if op == "prepare_file" {
+                let name = if mid == "1".repeat(64) { "f1.txt" } else { "f2.txt" };
+                json!({ "filename": name, "extension": "txt" })
+            } else if op == "capture" {
+                serde_json::to_value(test_sample_frame()).unwrap()
+            } else if op == "read_media" {
+                let content = if mid == "1".repeat(64) { big_str_1.as_bytes() } else { big_str_2.as_bytes() };
+                json!({
+                    "offset": 0,
+                    "size": content.len(),
+                    "bytes": test_b64_encode(content),
+                    "eof": true,
+                    "sha256": sha256(content),
+                    "extension": "txt",
+                })
+            } else {
+                json!({})
+            };
+
+            json!({
+                "protocol_version": 1,
+                "id": id,
+                "ok": true,
+                "result": result,
+            })
+        }).await;
+
+        let mut client = setup_test_client(&temp, sock, None);
+        client.connect(5).await.unwrap();
+
+        let b1 = test_bubble_helper("file", &"1".repeat(64), Some("f1.txt"));
+        let b2 = test_bubble_helper("file", &"2".repeat(64), Some("f2.txt"));
+
+        let frame = test_empty_frame();
+        let (images, files, failed) = client.attachments(&[b1, b2], &frame).await.unwrap();
+
+        assert!(images.is_empty());
+        assert_eq!(files.len(), 1, "第 1 个文件未超限成功提取");
+        assert_eq!(files[0].filename, "f1.txt");
+
+        assert_eq!(failed.len(), 1, "第 2 个文件因总字数超 24000 标记 too_large");
+        assert_eq!(failed[0].label, "f2.txt");
+        assert_eq!(failed[0].reason, "too_large");
+    }
+
+    #[tokio::test]
+    async fn test_attachments_pdf_with_previews() {
+        let temp = TestDir::new();
+        let sock = temp.path().join("bot-worker.sock");
+        let pdf_bytes = b"%PDF-1.7\nfake pdf content";
+        let prev_bytes = b"\x89PNG\r\n\x1a\npreviewimage";
+
+        let _server = MockWorkerServer::spawn(sock.clone(), move |req| {
+            let op = req["operation"].as_str().unwrap_or("");
+            let id = req["id"].as_u64().unwrap_or(1);
+            let params = &req["params"];
+            let mid = params["media_id"].as_str().unwrap_or("");
+
+            let result = if op == "prepare_file" {
+                json!({
+                    "filename": "doc.pdf",
+                    "extension": "pdf",
+                    "extraction": {
+                        "text": "PDF测试提取文字",
+                        "page_count": 2,
+                        "previews": ["a".repeat(64), "b".repeat(64)],
+                    }
+                })
+            } else if op == "capture" {
+                serde_json::to_value(test_sample_frame()).unwrap()
+            } else if op == "read_media" {
+                let (bytes, ext) = if mid == "a".repeat(64) || mid == "b".repeat(64) {
+                    (prev_bytes.to_vec(), "png")
+                } else {
+                    (pdf_bytes.to_vec(), "pdf")
+                };
+                json!({
+                    "offset": 0,
+                    "size": bytes.len(),
+                    "bytes": test_b64_encode(&bytes),
+                    "eof": true,
+                    "sha256": sha256(&bytes),
+                    "extension": ext,
+                })
+            } else {
+                json!({})
+            };
+
+            json!({
+                "protocol_version": 1,
+                "id": id,
+                "ok": true,
+                "result": result,
+            })
+        }).await;
+
+        let mut client = setup_test_client(&temp, sock, None);
+        client.connect(5).await.unwrap();
+
+        let b_pdf = test_bubble_helper("file", &"1".repeat(64), Some("doc.pdf"));
+        let frame = test_empty_frame();
+        let (images, files, failed) = client.attachments(&[b_pdf], &frame).await.unwrap();
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].filename, "doc.pdf");
+        assert_eq!(files[0].content.get("text").and_then(|v| v.as_str()), Some("PDF测试提取文字"));
+
+        assert_eq!(images.len(), 2, "PDF 的两页预览应加入 images");
+        assert_eq!(images[0].label, "doc.pdf第1页");
+        assert_eq!(images[0].source, "preview");
+        assert_eq!(images[1].label, "doc.pdf第2页");
+        assert_eq!(images[1].source, "preview");
+
+        assert!(failed.is_empty());
     }
 }
