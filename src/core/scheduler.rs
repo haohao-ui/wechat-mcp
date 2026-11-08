@@ -1617,15 +1617,24 @@ impl BotCoordinator {
     /// 续做前必须先连上，否则第一步就 transport closed、被当成失败（2026-11-08 实机）。
     async fn ensure_capture_connected(&mut self) -> bool {
         match self.capture.as_mut() {
-            Some(cap) if cap.is_connected() => true,
+            Some(cap) if cap.is_connected() => return true,
             Some(cap) => match cap.start().await {
-                Ok(()) => true,
-                Err(e) => {
-                    tracing::warn!("contacts sync deferred: worker reconnect failed: {e:#}");
-                    false
-                }
+                Ok(()) => return true,
+                Err(e) => tracing::warn!("contacts sync: worker reconnect without target failed: {e:#}"),
             },
-            None => false,
+            None => return false,
+        }
+        // 暂停期间从没连接过会话：桌面服务连接需要一个目标会话。按平时的连接流程连到允许名单第一个会话
+        // （只建立连接，不读消息、不回复），然后再进通讯录（2026-11-08 实机：重试 562 次都连不上）
+        let Some(target) = self.config.allowlist.first().map(|e| e.recipient.clone()) else {
+            return false;
+        };
+        match self.connect(&target).await {
+            Ok(()) => self.capture.as_ref().map_or(false, |c| c.is_connected()),
+            Err(e) => {
+                tracing::warn!("contacts sync deferred: connect to {} failed: {e:#}", "allowlist[0]");
+                false
+            }
         }
     }
 
@@ -1968,6 +1977,9 @@ mod tests {
         ocr: Option<OcrStatus>,
         last_switch: Option<Value>,
         target_name: Option<String>,
+        /// 与真实 WorkerClient 一致：没有目标会话时 start() 失败
+        require_target: bool,
+        prepared: Option<String>,
         download_error: Option<String>,
         probe_batches: Arc<Mutex<Vec<Vec<String>>>>,
     }
@@ -1983,6 +1995,8 @@ mod tests {
                 ocr: None,
                 last_switch: None,
                 target_name: None,
+                require_target: false,
+                prepared: None,
                 download_error: None,
                 probe_batches: Arc::new(Mutex::new(Vec::new())),
             }
@@ -2001,9 +2015,15 @@ mod tests {
     impl CoordinatorCapture for MockCoordinatorCapture {
         fn start<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
             Box::pin(async move {
+                if self.require_target && self.prepared.is_none() && self.target_name.is_none() {
+                    anyhow::bail!("worker start requires a target chat (prepare_target before start)");
+                }
                 self.connected = true;
                 Ok(())
             })
+        }
+        fn prepare_target(&mut self, recipient: &str, _directory: &Path, _names: &[String], _group: bool) {
+            self.prepared = Some(recipient.to_string());
         }
         fn close<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
             Box::pin(async move {
@@ -2465,7 +2485,10 @@ mod tests {
         let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
         let cfg_path = create_test_config(td.path(), allow);
         let mut coord = BotCoordinator::new(&cfg_path).unwrap();
-        coord.capture = Some(Box::new(MockCoordinatorCapture::new()));
+        let mut cap = MockCoordinatorCapture::new();
+        cap.connected = false; // 暂停期间从未连接过会话
+        cap.require_target = true;
+        coord.capture = Some(Box::new(cap));
         write_private(&coord.root.join("admin-pause.json"), &json!({"paused": true, "at": (coord.clock)()})).unwrap();
         write_private(
             &coord.root.join("contacts-sync-request.json"),
@@ -2477,6 +2500,8 @@ mod tests {
         assert!(!coord.root.join("contacts-sync-request.json").exists(), "暂停时手动同步请求也要处理");
         assert!(coord.root.join("contacts-sync-result.json").exists());
         assert!(coord.root.join("admin-pause.json").exists(), "用户的暂停标记必须保留");
+        let result: Value = read_json(&coord.root.join("contacts-sync-result.json")).unwrap();
+        assert!(!result.to_string().contains("error"), "暂停期间也要能连上并同步: {result}");
     }
 
     #[test]
