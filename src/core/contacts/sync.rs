@@ -1,11 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use tracing::{info, warn};
+use serde_json::{json, Value};
+use tracing::info;
 
 use crate::core::contacts::parse::{
     parse_group_headers, parse_manager_page, parse_profile, ManagerColumns, ManagerRow, OcrLine,
@@ -30,17 +30,281 @@ pub struct SyncReport {
     pub complete: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ManagerTableResult {
+    pub rows: Vec<ManagerRow>,
+    pub pages_count: usize,
+    pub tag_members: HashMap<String, Vec<String>>,
+}
+
+pub async fn read_manager_table(capture: &mut dyn CoordinatorCapture) -> Result<ManagerTableResult> {
+    // 1. 打开管理窗口
+    let mut opened = false;
+    for _ in 0..2 {
+        if capture.call("contacts_manager_open", json!({})).await.is_ok() {
+            opened = true;
+            break;
+        }
+    }
+    if !opened {
+        bail!("contacts_manager_missing");
+    }
+
+    let cols = ManagerColumns {
+        name_x: 300.0,
+        remark_x: 385.0,
+        tags_x: 500.0,
+        permission_x: 620.0,
+    };
+
+    async fn fetch_page(capture: &mut dyn CoordinatorCapture) -> Result<Vec<OcrLine>> {
+        match capture.call("contacts_manager_page", json!({})).await {
+            Ok(v) => {
+                let lines: Vec<OcrLine> = v.get("lines")
+                    .and_then(|l| serde_json::from_value(l.clone()).ok())
+                    .unwrap_or_default();
+                Ok(lines)
+            }
+            Err(e) => {
+                if e.to_string().contains("contacts_manager_missing") {
+                    capture.call("contacts_manager_open", json!({})).await?;
+                    let v = capture.call("contacts_manager_page", json!({})).await?;
+                    let lines: Vec<OcrLine> = v.get("lines")
+                        .and_then(|l| serde_json::from_value(l.clone()).ok())
+                        .unwrap_or_default();
+                    Ok(lines)
+                } else {
+                    bail!(e);
+                }
+            }
+        }
+    }
+
+    async fn scroll_down(capture: &mut dyn CoordinatorCapture, ticks: usize) -> Result<Vec<OcrLine>> {
+        match capture.call("contacts_manager_scroll", json!({"direction": "down", "ticks": ticks})).await {
+            Ok(v) => {
+                let lines: Vec<OcrLine> = v.get("lines")
+                    .and_then(|l| serde_json::from_value(l.clone()).ok())
+                    .unwrap_or_default();
+                Ok(lines)
+            }
+            Err(e) => {
+                if e.to_string().contains("contacts_manager_missing") {
+                    capture.call("contacts_manager_open", json!({})).await?;
+                    let v = capture.call("contacts_manager_page", json!({})).await?;
+                    let lines: Vec<OcrLine> = v.get("lines")
+                        .and_then(|l| serde_json::from_value(l.clone()).ok())
+                        .unwrap_or_default();
+                    Ok(lines)
+                } else {
+                    bail!(e);
+                }
+            }
+        }
+    }
+
+    // 读取第一页
+    let first_lines = fetch_page(capture).await?;
+
+    // 识别左侧标签项
+    let mut tags = Vec::new();
+    for l in &first_lines {
+        if l.x <= 150.0 && l.y >= 180.0 && l.text != "全部" && l.text != "标签" && l.text != "朋友权限" {
+            tags.push((l.text.clone(), l.y));
+        }
+    }
+
+    let mut collected_rows: Vec<ManagerRow> = Vec::new();
+    let mut pages_count = 0;
+    let mut current_lines = first_lines;
+
+    fn rows_equal(a: &[ManagerRow], b: &[ManagerRow]) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+        for (r1, r2) in a.iter().zip(b.iter()) {
+            if r1.name != r2.name || r1.remark != r2.remark || r1.tags != r2.tags || r1.permission != r2.permission {
+                return false;
+            }
+        }
+        true
+    }
+
+    let mut prev_page_rows: Vec<ManagerRow> = Vec::new();
+
+    loop {
+        pages_count += 1;
+        let page_rows = parse_manager_page(&current_lines, 96.0, 48.0, 10, &cols);
+        let valid_page_rows: Vec<ManagerRow> = page_rows.into_iter().filter(|r| r.name.is_some()).collect();
+
+        if valid_page_rows.is_empty() {
+            break;
+        }
+
+        if !prev_page_rows.is_empty() && rows_equal(&valid_page_rows, &prev_page_rows) {
+            break;
+        }
+
+        if collected_rows.is_empty() {
+            collected_rows.extend(valid_page_rows.clone());
+        } else {
+            let max_overlap = valid_page_rows.len().min(collected_rows.len());
+            let mut match_k = 0;
+            for k in (1..=max_overlap).rev() {
+                let tail = &collected_rows[collected_rows.len() - k..];
+                let head = &valid_page_rows[..k];
+                if rows_equal(tail, head) {
+                    match_k = k;
+                    break;
+                }
+            }
+
+            if match_k == 0 && !collected_rows.is_empty() {
+                let appears_inside = collected_rows.windows(valid_page_rows.len())
+                    .any(|w| rows_equal(w, &valid_page_rows));
+                if appears_inside {
+                    prev_page_rows = valid_page_rows;
+                    current_lines = scroll_down(capture, 6).await?;
+                    continue;
+                }
+            }
+
+            for r in valid_page_rows.iter().skip(match_k) {
+                collected_rows.push(r.clone());
+            }
+        }
+
+        prev_page_rows = valid_page_rows;
+
+        if pages_count >= 200 {
+            break;
+        }
+
+        current_lines = scroll_down(capture, 6).await?;
+    }
+
+    // 收集各标签成员
+    let mut tag_members: HashMap<String, Vec<String>> = HashMap::new();
+    for (tag_name, tag_y) in &tags {
+        let filter_res = capture.call("contacts_manager_filter", json!({"kind": "tag", "y": tag_y})).await;
+        let mut cur_filter_lines: Vec<OcrLine> = match filter_res {
+            Ok(v) => v.get("lines").and_then(|l| serde_json::from_value::<Vec<OcrLine>>(l.clone()).ok()).unwrap_or_default(),
+            Err(_) => {
+                let _ = capture.call("contacts_manager_open", json!({})).await;
+                capture.call("contacts_manager_filter", json!({"kind": "tag", "y": tag_y})).await
+                    .ok().and_then(|v| v.get("lines").cloned()).and_then(|l| serde_json::from_value::<Vec<OcrLine>>(l).ok()).unwrap_or_default()
+            }
+        };
+
+        let mut members = Vec::new();
+        let mut f_pages = 0;
+        let mut prev_f_rows: Vec<ManagerRow> = Vec::new();
+
+        loop {
+            f_pages += 1;
+            let p_rows: Vec<ManagerRow> = parse_manager_page(&cur_filter_lines, 96.0, 48.0, 10, &cols)
+                .into_iter().filter(|r| r.name.is_some()).collect();
+
+            if p_rows.is_empty() || (!prev_f_rows.is_empty() && rows_equal(&p_rows, &prev_f_rows)) {
+                break;
+            }
+
+            for r in &p_rows {
+                if let Some(ref nm) = r.name {
+                    if !members.contains(nm) {
+                        members.push(nm.clone());
+                    }
+                }
+            }
+
+            prev_f_rows = p_rows;
+            if f_pages >= 200 {
+                break;
+            }
+
+            cur_filter_lines = scroll_down(capture, 6).await?;
+        }
+
+        tag_members.insert(tag_name.clone(), members);
+    }
+
+    if !tags.is_empty() {
+        let _ = capture.call("contacts_manager_filter", json!({"kind": "all", "y": 0.0})).await;
+    }
+
+    let _ = capture.call("contacts_manager_close", json!({})).await;
+
+    Ok(ManagerTableResult {
+        rows: collected_rows,
+        pages_count,
+        tag_members,
+    })
+}
+
+pub fn should_attempt_daily_sync(state_dir: &Path, is_idle: bool, now_sec: f64) -> bool {
+    if !is_idle {
+        return false;
+    }
+    let attempt_file = state_dir.join("contacts-sync-daily-attempt.json");
+    if attempt_file.exists() {
+        if let Ok(content) = fs::read_to_string(&attempt_file) {
+            if let Ok(v) = serde_json::from_str::<Value>(&content) {
+                if let Some(last_sec) = v.get("last_attempt_sec").and_then(|t| t.as_f64()) {
+                    if now_sec - last_sec < 20.0 * 3600.0 {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    let res_file = state_dir.join("contacts-sync-result.json");
+    if res_file.exists() {
+        if let Ok(content) = fs::read_to_string(&res_file) {
+            if let Ok(v) = serde_json::from_str::<Value>(&content) {
+                if let Some(fin_ms) = v.get("finished_at_ms").and_then(|t| t.as_f64()) {
+                    let fin_sec = fin_ms / 1000.0;
+                    if now_sec - fin_sec < 20.0 * 3600.0 {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    true
+}
+
+pub fn record_daily_sync_attempt(state_dir: &Path, now_sec: f64) -> Result<()> {
+    let attempt_file = state_dir.join("contacts-sync-daily-attempt.json");
+    write_private(&attempt_file, &json!({"last_attempt_sec": now_sec}))
+}
+
+pub fn clean_stale_contacts_sync_pause(state_dir: &Path) {
+    let pause_file = state_dir.join("admin-pause.json");
+    if pause_file.exists() {
+        if let Ok(content) = fs::read_to_string(&pause_file) {
+            if let Ok(v) = serde_json::from_str::<Value>(&content) {
+                if v.get("reason").and_then(|r| r.as_str()) == Some("contacts_sync") {
+                    let _ = fs::remove_file(&pause_file);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct CheckpointState {
     mode: Option<SyncMode>,
     category_index: usize,
     categories: Vec<(String, u32, f64)>, // (category, expected, header_y)
     seen_ids_by_cat: HashMap<String, Vec<String>>,
-    cat_progress: HashMap<String, usize>, // category -> processed count
+    cat_progress: HashMap<String, Vec<String>>, // category -> list of processed contact names in order
     unreadable_rows: u32,
     needs_review: u32,
     manager_done: bool,
-    manager_names: Vec<String>,
+    manager_rows: Vec<ManagerRow>,
+    tag_members: HashMap<String, Vec<String>>,
 }
 
 pub async fn run_sync(
@@ -113,205 +377,277 @@ pub async fn run_sync(
             .join(", ")
     );
 
-    // 3. 打开管理窗口读取表格（收集已有名字/信息，以便增量对比）
-    let mut manager_contacts: Vec<ManagerRow> = Vec::new();
+    // 3. 读取管理窗口表格与标签
     if !state.manager_done {
-        let mut open_res = capture.call("contacts_manager_open", json!({})).await;
-        if open_res.is_err() {
-            // 如果出错尝试再次打开
-            open_res = capture.call("contacts_manager_open", json!({})).await;
-        }
-
-        if open_res.is_ok() {
-            let cols = ManagerColumns {
-                name_x: 300.0,
-                remark_x: 385.0,
-                tags_x: 500.0,
-                permission_x: 620.0,
-            };
-
-            let mut page_count = 0;
-            loop {
-                page_count += 1;
-                let page_res = capture.call("contacts_manager_page", json!({})).await;
-                let page_val = match page_res {
-                    Ok(val) => val,
-                    Err(e) => {
-                        let err_str = e.to_string();
-                        if err_str.contains("contacts_manager_missing") {
-                            // 重新打开
-                            let _ = capture.call("contacts_manager_open", json!({})).await;
-                            capture
-                                .call("contacts_manager_page", json!({}))
-                                .await
-                                .unwrap_or_else(|_| json!({"lines": []}))
-                        } else {
-                            json!({"lines": []})
-                        }
-                    }
-                };
-
-                let lines: Vec<OcrLine> = page_val
-                    .get("lines")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    .unwrap_or_default();
-
-                if lines.is_empty() {
-                    break;
-                }
-
-                let rows = parse_manager_page(&lines, 96.0, 48.0, 10, &cols);
-                let had_names = rows.iter().any(|r| r.name.is_some());
-                if !had_names {
-                    break;
-                }
-
-                for r in rows {
-                    if let Some(ref name) = r.name {
-                        if !state.manager_names.contains(name) {
-                            state.manager_names.push(name.clone());
-                        }
-                    }
-                    manager_contacts.push(r);
-                }
-
-                if page_count >= 5 {
-                    break;
-                }
-
-                let scroll_res = capture
-                    .call(
-                        "contacts_manager_scroll",
-                        json!({"direction": "down", "ticks": 10}),
-                    )
-                    .await;
-                if let Err(e) = scroll_res {
-                    if e.to_string().contains("contacts_manager_missing") {
-                        let _ = capture.call("contacts_manager_open", json!({})).await;
-                    }
-                }
-            }
-
-            let _ = capture.call("contacts_manager_close", json!({})).await;
+        if let Ok(mgr_res) = read_manager_table(capture).await {
+            state.manager_rows = mgr_res.rows;
+            state.tag_members = mgr_res.tag_members;
             state.manager_done = true;
         }
     }
 
-    // 4. 逐分组、逐行点开资料卡
+    // 4. 逐分组展开、逐屏识别联系人行
     let existing_profiles = store.list_profiles(account_id, None).unwrap_or_default();
-    let existing_names: HashSet<String> = existing_profiles
-        .iter()
-        .filter_map(|p| {
-            p.get("nickname")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
-        .collect();
-
-    let row_height = 50.0;
     let mut yielded = false;
 
     'outer: while state.category_index < state.categories.len() {
-        let (cat_name, expected, header_y) = state.categories[state.category_index].clone();
+        let (cat_name, expected, _) = state.categories[state.category_index].clone();
         let seen_list = state
             .seen_ids_by_cat
             .entry(cat_name.clone())
-            .or_insert_with(Vec::new);
-        let mut processed = *state.cat_progress.entry(cat_name.clone()).or_insert(0);
+            .or_default();
+        let processed_names = state
+            .cat_progress
+            .entry(cat_name.clone())
+            .or_default();
 
-        while processed < expected as usize {
-            // 每处理完一个联系人前/后检查 should_yield
-            if should_yield() {
-                yielded = true;
-                break 'outer;
+        // a. 滚到顶
+        let _ = capture
+            .call("contacts_scroll_list", json!({"direction": "up", "ticks": 20}))
+            .await;
+
+        // b. 找到当前分组标题行位置
+        let top_headers_res = capture.call("contacts_headers", json!({})).await?;
+        let top_lines: Vec<OcrLine> = top_headers_res
+            .get("lines")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        let header_line = top_lines.iter().find(|l| {
+            let t = l.text.trim();
+            match cat_name.as_str() {
+                "official" => t.contains("公众号"),
+                "work" => t.contains("企业微信"),
+                "personal" => t == "联系人" || (t.contains("联系人") && !t.contains("企业微信")),
+                _ => false,
             }
+        });
 
-            let row_idx = processed;
-            let row_y = header_y + row_height * (row_idx as f64 + 1.0);
+        if let Some(hl) = header_line {
+            let hy = hl.y;
+            // 检查标题右侧是否有数量（收起状态）
+            let has_count = top_lines.iter().any(|l| {
+                (l.y - hy).abs() < 15.0 && l.x > 250.0 && l.text.trim().chars().all(|c| c.is_ascii_digit())
+            });
 
-            // 增量模式优化：如果在管理表格里已经有记录，并且数据库里已有且无变化，跳过 open_row
-            let mut skip_open = false;
-            if mode == SyncMode::Incremental && !existing_profiles.is_empty() {
-                // 如果管理表格第 row_idx 项已在 existing_names 中
-                if let Some(m_name) = state.manager_names.get(row_idx) {
-                    if existing_names.contains(m_name) {
-                        skip_open = true;
-                        // 找到该联系人的 contact_id 加入 seen
-                        if let Some(p) = existing_profiles.iter().find(|p| {
-                            p.get("nickname").and_then(|v| v.as_str()) == Some(m_name.as_str())
-                        }) {
-                            if let Some(cid) = p.get("contact_id").and_then(|v| v.as_str()) {
-                                if !seen_list.contains(&cid.to_string()) {
-                                    seen_list.push(cid.to_string());
-                                }
-                            }
-                        }
+            let mut cur_screen_lines = if has_count {
+                // c. 点击分组标题展开并确认
+                let click_res = capture.call("contacts_click_list", json!({"x": 180.0, "y": hy})).await?;
+                click_res
+                    .get("lines")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default()
+            } else {
+                top_lines
+            };
+
+            let mut no_new_rows_count = 0;
+
+            'screen_loop: loop {
+                if should_yield() {
+                    yielded = true;
+                    break 'outer;
+                }
+
+                // 识别当前屏幕属于联系人的行
+                let mut contact_rows_on_screen: Vec<(String, f64)> = Vec::new();
+                let mut lines_sorted = cur_screen_lines.clone();
+                lines_sorted.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
+
+                for l in &lines_sorted {
+                    if l.y < 40.0 || l.y > 640.0 {
+                        continue;
+                    }
+                    let txt = l.text.trim();
+                    if txt == "搜索" || txt == "通讯录管理" {
+                        continue;
+                    }
+                    let is_group_title = ["公众号、服务号", "企业微信联系人", "联系人", "群聊"]
+                        .iter()
+                        .any(|gt| txt == *gt);
+                    if is_group_title {
+                        continue;
+                    }
+                    if txt.len() == 1 && txt.chars().all(|c| c.is_ascii_uppercase()) {
+                        continue;
+                    }
+                    if l.x > 250.0 && txt.chars().all(|c| c.is_ascii_digit()) {
+                        continue;
+                    }
+                    contact_rows_on_screen.push((txt.to_string(), l.y));
+                }
+
+                let screen_names: Vec<String> = contact_rows_on_screen.iter().map(|(n, _)| n.clone()).collect();
+                let max_overlap = screen_names.len().min(processed_names.len());
+                let mut match_k = 0;
+                for k in (1..=max_overlap).rev() {
+                    let tail = &processed_names[processed_names.len() - k..];
+                    let head = &screen_names[..k];
+                    if tail == head {
+                        match_k = k;
+                        break;
                     }
                 }
-            }
 
-            if !skip_open {
-                let open_res = capture
-                    .call("contacts_open_row", json!({"y": row_y}))
-                    .await;
-                let prof_lines: Vec<OcrLine> = open_res
-                    .ok()
-                    .and_then(|v| v.get("lines").cloned())
-                    .and_then(|v| serde_json::from_value(v).ok())
-                    .unwrap_or_default();
-
-                if prof_lines.is_empty() {
-                    state.unreadable_rows += 1;
+                let new_rows = if processed_names.is_empty() {
+                    &contact_rows_on_screen[..]
                 } else {
-                    let parse_result = parse_profile(&prof_lines, &cat_name);
-                    let f = parse_result.fields;
-                    if f.nickname.trim().is_empty() && f.wechat_id.is_none() {
-                        state.unreadable_rows += 1;
-                    } else {
-                        let input = ProfileInput {
-                            category: cat_name.clone(),
-                            wechat_id: f.wechat_id,
-                            nickname: f.nickname,
-                            remark: f.remark,
-                            region: f.region,
-                            source: f.source,
-                            added_on: f.added_on,
-                            common_groups: f.common_groups,
-                            enterprise: f.enterprise,
-                            real_name: f.real_name,
-                            tags: f.tags,
-                            friend_permission: f.friend_permission,
-                        };
-                        match store.upsert_profile(account_id, &input, now_ms) {
-                            Ok(UpsertOutcome::Created(cid)) | Ok(UpsertOutcome::Updated(cid)) => {
-                                if !seen_list.contains(&cid) {
-                                    seen_list.push(cid);
+                    &contact_rows_on_screen[match_k..]
+                };
+
+                if new_rows.is_empty() {
+                    no_new_rows_count += 1;
+                    if no_new_rows_count >= 2 {
+                        break 'screen_loop;
+                    }
+                } else {
+                    no_new_rows_count = 0;
+                    for (row_name, row_y) in new_rows {
+                        if should_yield() {
+                            yielded = true;
+                            break 'outer;
+                        }
+
+                        let mut skip_open = false;
+                        if mode == SyncMode::Incremental {
+                            if let Some(p) = existing_profiles.iter().find(|p| {
+                                p.get("nickname").and_then(|v| v.as_str()) == Some(row_name) ||
+                                p.get("remark").and_then(|v| v.as_str()) == Some(row_name)
+                            }) {
+                                let mgr_match = state.manager_rows.iter().find(|r| {
+                                    r.name.as_deref() == Some(row_name) || r.remark.as_deref() == Some(row_name)
+                                });
+                                let remark_changed = if let Some(mr) = mgr_match {
+                                    let db_remark = p.get("remark").and_then(|v| v.as_str());
+                                    mr.remark.as_deref() != db_remark
+                                } else {
+                                    false
+                                };
+                                if !remark_changed {
+                                    skip_open = true;
+                                    if let Some(cid) = p.get("contact_id").and_then(|v| v.as_str()) {
+                                        if !seen_list.contains(&cid.to_string()) {
+                                            seen_list.push(cid.to_string());
+                                        }
+                                    }
                                 }
                             }
-                            Ok(UpsertOutcome::NeedsReview { .. }) => {
-                                state.needs_review += 1;
-                            }
-                            Err(e) => {
-                                warn!("upsert profile error: {e:#}");
+                        }
+
+                        if !skip_open {
+                            let open_res = capture.call("contacts_open_row", json!({"y": row_y})).await;
+                            let prof_lines: Vec<OcrLine> = open_res.ok()
+                                .and_then(|v| v.get("lines").cloned())
+                                .and_then(|v| serde_json::from_value(v).ok())
+                                .unwrap_or_default();
+
+                            if prof_lines.is_empty() {
                                 state.unreadable_rows += 1;
+                            } else {
+                                let parse_res = parse_profile(&prof_lines, &cat_name);
+                                let f = parse_res.fields;
+
+                                // 错位保护：资料卡昵称或备注必须与该行名字一致
+                                let name_matched = (row_name == &f.nickname)
+                                    || f.remark.as_deref().map(|rmk| rmk == row_name).unwrap_or(false);
+
+                                if !name_matched {
+                                    state.unreadable_rows += 1;
+                                } else {
+                                    let mut combined_tags = f.tags.clone();
+                                    for (t_name, members) in &state.tag_members {
+                                        if members.contains(row_name) || members.contains(&f.nickname) {
+                                            if !combined_tags.contains(t_name) {
+                                                combined_tags.push(t_name.clone());
+                                            }
+                                        }
+                                    }
+
+                                    let input = ProfileInput {
+                                        category: cat_name.clone(),
+                                        wechat_id: f.wechat_id,
+                                        nickname: f.nickname,
+                                        remark: f.remark,
+                                        region: f.region,
+                                        source: f.source,
+                                        added_on: f.added_on,
+                                        common_groups: f.common_groups,
+                                        enterprise: f.enterprise,
+                                        real_name: f.real_name,
+                                        tags: combined_tags,
+                                        friend_permission: f.friend_permission,
+                                    };
+
+                                    match store.upsert_profile(account_id, &input, now_ms) {
+                                        Ok(UpsertOutcome::Created(cid)) | Ok(UpsertOutcome::Updated(cid)) => {
+                                            if !seen_list.contains(&cid) {
+                                                seen_list.push(cid);
+                                            }
+                                        }
+                                        Ok(UpsertOutcome::NeedsReview { .. }) => {
+                                            state.needs_review += 1;
+                                        }
+                                        Err(_) => {
+                                            state.unreadable_rows += 1;
+                                        }
+                                    }
+                                }
                             }
                         }
+
+                        processed_names.push(row_name.clone());
                     }
+                }
+
+                // 滚一格继续
+                let scroll_res = capture
+                    .call("contacts_scroll_list", json!({"direction": "down", "ticks": 1}))
+                    .await?;
+                cur_screen_lines = scroll_res
+                    .get("lines")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+            }
+
+            // 核对人数差额：如果已同步数 < 期望数，记录差额为 unreadable
+            let synced_count = seen_list.len() as u32;
+            if synced_count < expected {
+                let missing = expected - synced_count;
+                if missing > state.unreadable_rows {
+                    state.unreadable_rows = missing;
                 }
             }
 
-            processed += 1;
-            state.cat_progress.insert(cat_name.clone(), processed);
-
-            if should_yield() {
-                yielded = true;
-                break 'outer;
+            // 收起分组
+            let _ = capture
+                .call("contacts_scroll_list", json!({"direction": "up", "ticks": 20}))
+                .await;
+            if let Ok(th_res) = capture.call("contacts_headers", json!({})).await {
+                let th_lines: Vec<OcrLine> = th_res
+                    .get("lines")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+                if let Some(target_hl) = th_lines.iter().find(|l| {
+                    let t = l.text.trim();
+                    match cat_name.as_str() {
+                        "official" => t.contains("公众号"),
+                        "work" => t.contains("企业微信"),
+                        "personal" => t == "联系人" || (t.contains("联系人") && !t.contains("企业微信")),
+                        _ => false,
+                    }
+                }) {
+                    let is_expanded = !th_lines.iter().any(|l| {
+                        (l.y - target_hl.y).abs() < 15.0 && l.x > 250.0 && l.text.trim().chars().all(|c| c.is_ascii_digit())
+                    });
+                    if is_expanded {
+                        let _ = capture.call("contacts_click_list", json!({"x": 180.0, "y": target_hl.y})).await;
+                    }
+                }
             }
         }
 
         // 标记缺失
         let _ = store.mark_missing(account_id, &cat_name, seen_list, now_ms);
-
         state.category_index += 1;
     }
 
@@ -403,27 +739,186 @@ mod tests {
         }
     }
 
-    struct TestCapture {
-        calls: Arc<Mutex<Vec<(String, Value)>>>,
-        headers_lines: Vec<OcrLine>,
-        manager_pages: Arc<Mutex<Vec<Result<Vec<OcrLine>, String>>>>,
-        manager_page_index: Arc<Mutex<usize>>,
-        profile_responses: HashMap<i64, Vec<OcrLine>>,
+    #[derive(Debug, Clone)]
+    #[allow(dead_code)]
+    pub struct VirtualContactItem {
+        pub name: String,
+        pub remark: Option<String>,
+        pub wechat_id: Option<String>,
+        pub enterprise: Option<String>,
+        pub real_name: Option<String>,
+        pub tags: Vec<String>,
+        pub friend_permission: Option<String>,
+        pub unreadable: bool,
+        pub misaligned_profile: Option<Vec<OcrLine>>,
     }
 
-    impl TestCapture {
-        fn new() -> Self {
-            Self {
-                calls: Arc::new(Mutex::new(Vec::new())),
-                headers_lines: Vec::new(),
-                manager_pages: Arc::new(Mutex::new(Vec::new())),
-                manager_page_index: Arc::new(Mutex::new(0)),
-                profile_responses: HashMap::new(),
-            }
+    #[derive(Debug, Clone)]
+    #[allow(dead_code)]
+    pub struct VirtualGroup {
+        pub category: String,
+        pub title: String,
+        pub letter_sections: Vec<(String, Vec<VirtualContactItem>)>,
+        pub expanded: bool,
+    }
+
+    impl VirtualGroup {
+        pub fn total_contacts(&self) -> u32 {
+            self.letter_sections.iter().map(|(_, items)| items.len() as u32).sum()
         }
     }
 
-    impl CoordinatorCapture for TestCapture {
+    pub struct VirtualContactsUi {
+        pub groups: Vec<VirtualGroup>,
+        pub scroll_offset: f64,
+        pub calls: Arc<Mutex<Vec<(String, Value)>>>,
+        pub manager_open: bool,
+        pub manager_rows: Vec<ManagerRow>,
+        pub manager_scroll_row: usize,
+        pub manager_tags: Vec<(String, f64)>, // (tag_name, y)
+        pub current_filter_tag: Option<String>,
+        pub manager_close_countdown: Option<usize>,
+        pub list_clicks: Vec<(f64, f64)>,
+        pub row_open_clicks: Vec<f64>,
+    }
+
+    impl VirtualContactsUi {
+        pub fn new(groups: Vec<VirtualGroup>) -> Self {
+            Self {
+                groups,
+                scroll_offset: 0.0,
+                calls: Arc::new(Mutex::new(Vec::new())),
+                manager_open: false,
+                manager_rows: Vec::new(),
+                manager_scroll_row: 0,
+                manager_tags: Vec::new(),
+                current_filter_tag: None,
+                manager_close_countdown: None,
+                list_clicks: Vec::new(),
+                row_open_clicks: Vec::new(),
+            }
+        }
+
+        fn render_list(&self) -> Vec<OcrLine> {
+            let mut lines = Vec::new();
+
+            // 搜索框：center_y = 20.0
+            let search_y = 20.0 - self.scroll_offset;
+            if search_y >= 40.0 && search_y <= 640.0 {
+                lines.push(OcrLine {
+                    text: "搜索".to_string(),
+                    x: 100.0,
+                    y: search_y,
+                    w: 60.0,
+                    h: 20.0,
+                });
+            }
+
+            // 通讯录管理按钮：center_y = 59.0
+            let mgr_y = 59.0 - self.scroll_offset;
+            if mgr_y >= 40.0 && mgr_y <= 640.0 {
+                lines.push(OcrLine {
+                    text: "通讯录管理".to_string(),
+                    x: 100.0,
+                    y: mgr_y,
+                    w: 80.0,
+                    h: 20.0,
+                });
+            }
+
+            let mut cur_y = 90.0;
+            for g in &self.groups {
+                // 分组标题行高 40
+                let header_center_y = cur_y + 20.0 - self.scroll_offset;
+                if header_center_y >= 40.0 && header_center_y <= 640.0 {
+                    lines.push(OcrLine {
+                        text: g.title.clone(),
+                        x: 80.0,
+                        y: header_center_y,
+                        w: 120.0,
+                        h: 24.0,
+                    });
+                    if !g.expanded {
+                        lines.push(OcrLine {
+                            text: g.total_contacts().to_string(),
+                            x: 272.0,
+                            y: header_center_y,
+                            w: 30.0,
+                            h: 20.0,
+                        });
+                    }
+                }
+                cur_y += 40.0;
+
+                if g.expanded {
+                    for (letter, items) in &g.letter_sections {
+                        // 字母索引行高 45
+                        let letter_center_y = cur_y + 22.5 - self.scroll_offset;
+                        if letter_center_y >= 40.0 && letter_center_y <= 640.0 {
+                            lines.push(OcrLine {
+                                text: letter.clone(),
+                                x: 95.0,
+                                y: letter_center_y,
+                                w: 20.0,
+                                h: 20.0,
+                            });
+                        }
+                        cur_y += 45.0;
+
+                        for item in items {
+                            // 联系人行高 50
+                            let item_center_y = cur_y + 25.0 - self.scroll_offset;
+                            if item_center_y >= 40.0 && item_center_y <= 640.0 {
+                                if !item.unreadable {
+                                    let display_name = item.remark.as_deref().unwrap_or(&item.name);
+                                    lines.push(OcrLine {
+                                        text: display_name.to_string(),
+                                        x: 133.0,
+                                        y: item_center_y,
+                                        w: 100.0,
+                                        h: 20.0,
+                                    });
+                                }
+                            }
+                            cur_y += 50.0;
+                        }
+                    }
+                }
+            }
+
+            lines
+        }
+
+        fn find_item_at_virtual_y(&self, vy: f64) -> Option<(&VirtualGroup, Option<&VirtualContactItem>, bool, bool)> {
+            // 返回 (group, Option<item>, is_header, is_letter)
+            let mut cur_y = 90.0;
+            for g in &self.groups {
+                if vy >= cur_y && vy < cur_y + 40.0 {
+                    return Some((g, None, true, false));
+                }
+                cur_y += 40.0;
+
+                if g.expanded {
+                    for (_letter, items) in &g.letter_sections {
+                        if vy >= cur_y && vy < cur_y + 45.0 {
+                            return Some((g, None, false, true));
+                        }
+                        cur_y += 45.0;
+
+                        for item in items {
+                            if vy >= cur_y && vy < cur_y + 50.0 {
+                                return Some((g, Some(item), false, false));
+                            }
+                            cur_y += 50.0;
+                        }
+                    }
+                }
+            }
+            None
+        }
+    }
+
+    impl CoordinatorCapture for VirtualContactsUi {
         fn start<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
             Box::pin(async { Ok(()) })
         }
@@ -438,56 +933,188 @@ mod tests {
         }
         fn call<'a>(&'a mut self, op: &'a str, params: Value) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>> {
             let calls = self.calls.clone();
-            let op_str = op.to_string();
-            let p = params.clone();
-            calls.lock().unwrap().push((op_str.clone(), p));
+            calls.lock().unwrap().push((op.to_string(), params.clone()));
 
-            if op == "contacts_enter" || op == "contacts_leave" {
+            if op == "contacts_enter" {
+                self.scroll_offset = 0.0;
+                return Box::pin(async { Ok(json!({"ok": true})) });
+            }
+            if op == "contacts_leave" {
                 return Box::pin(async { Ok(json!({"ok": true})) });
             }
             if op == "contacts_headers" {
-                let lines = self.headers_lines.clone();
+                let lines = self.render_list();
                 return Box::pin(async move { Ok(json!({"lines": lines})) });
             }
+            if op == "contacts_scroll_list" {
+                let dir = params.get("direction").and_then(|v| v.as_str()).unwrap_or("down");
+                let ticks = params.get("ticks").and_then(|v| v.as_u64()).unwrap_or(1) as f64;
+                if dir == "down" {
+                    self.scroll_offset += ticks * 90.0;
+                } else {
+                    self.scroll_offset = (self.scroll_offset - ticks * 90.0).max(0.0);
+                }
+                let lines = self.render_list();
+                return Box::pin(async move { Ok(json!({"lines": lines})) });
+            }
+            if op == "contacts_click_list" {
+                let x = params.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let y = params.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                if x < 60.0 || x > 300.0 || y < 40.0 || y > 640.0 {
+                    return Box::pin(async { bail!("contacts_click_outside_list") });
+                }
+                self.list_clicks.push((x, y));
+                let vy = y + self.scroll_offset;
+                let mut cur_y = 90.0;
+                for g in &mut self.groups {
+                    if vy >= cur_y && vy < cur_y + 40.0 {
+                        g.expanded = !g.expanded;
+                        break;
+                    }
+                    cur_y += 40.0;
+                    if g.expanded {
+                        for (_letter, items) in &g.letter_sections {
+                            cur_y += 45.0;
+                            cur_y += 50.0 * items.len() as f64;
+                        }
+                    }
+                }
+                let lines = self.render_list();
+                return Box::pin(async move { Ok(json!({"lines": lines})) });
+            }
+            if op == "contacts_open_row" {
+                let y = params.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                if y < 40.0 || y > 640.0 {
+                    return Box::pin(async { bail!("contacts_click_outside_list") });
+                }
+                self.row_open_clicks.push(y);
+                let vy = y + self.scroll_offset;
+                let found = self.find_item_at_virtual_y(vy);
+                if let Some((_group, Some(item), false, false)) = found {
+                    if let Some(ref mis) = item.misaligned_profile {
+                        let lines = mis.clone();
+                        return Box::pin(async move { Ok(json!({"lines": lines})) });
+                    }
+                    let mut lines = Vec::new();
+                    lines.push(line(&item.name, 520.0, 60.0));
+                    if let Some(ref wid) = item.wechat_id {
+                        lines.push(line(&format!("微信号：{}", wid), 520.0, 90.0));
+                    }
+                    if let Some(ref rmk) = item.remark {
+                        lines.push(line(&format!("备注：{}", rmk), 520.0, 120.0));
+                    }
+                    lines.push(line("地区中国 测试省", 520.0, 150.0));
+                    if let Some(ref ent) = item.enterprise {
+                        lines.push(line(&format!("企业{}", ent), 520.0, 180.0));
+                    }
+                    if let Some(ref rn) = item.real_name {
+                        lines.push(line(&format!("实名{}", rn), 520.0, 210.0));
+                    }
+                    return Box::pin(async move { Ok(json!({"lines": lines})) });
+                }
+                // 分组标题、字母行、或者空白区：无资料卡
+                return Box::pin(async { Ok(json!({"lines": []})) });
+            }
             if op == "contacts_manager_open" {
+                self.manager_open = true;
+                self.manager_scroll_row = 0;
                 return Box::pin(async {
+                    Ok(json!({"window": {"x": 200, "y": 100, "w": 720, "h": 560}}))
+                });
+            }
+            if op == "contacts_manager_close" {
+                if !self.manager_open {
+                    return Box::pin(async { bail!("contacts_manager_missing") });
+                }
+                self.manager_open = false;
+                return Box::pin(async { Ok(json!({"closed": true})) });
+            }
+            if op == "contacts_manager_page" || op == "contacts_manager_scroll" || op == "contacts_manager_filter" {
+                if !self.manager_open {
+                    return Box::pin(async { bail!("contacts_manager_missing") });
+                }
+                if let Some(ref mut cnt) = self.manager_close_countdown {
+                    if *cnt == 0 {
+                        self.manager_open = false;
+                        self.manager_close_countdown = None;
+                        return Box::pin(async { bail!("contacts_manager_missing") });
+                    } else {
+                        *cnt -= 1;
+                    }
+                }
+
+                if op == "contacts_manager_filter" {
+                    let kind = params.get("kind").and_then(|v| v.as_str()).unwrap_or("all");
+                    if kind == "tag" {
+                        let y = params.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        if let Some((tag, _)) = self.manager_tags.iter().find(|(_, ty)| (ty - y).abs() < 10.0) {
+                            self.current_filter_tag = Some(tag.clone());
+                        } else {
+                            return Box::pin(async { bail!("contacts_filter_position_invalid") });
+                        }
+                    } else {
+                        self.current_filter_tag = None;
+                    }
+                    self.manager_scroll_row = 0;
+                } else if op == "contacts_manager_scroll" {
+                    let dir = params.get("direction").and_then(|v| v.as_str()).unwrap_or("down");
+                    let ticks = params.get("ticks").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+                    let filtered_rows: Vec<_> = self.manager_rows.iter().filter(|r| {
+                        if let Some(ref tag) = self.current_filter_tag {
+                            r.tags.contains(tag)
+                        } else {
+                            true
+                        }
+                    }).collect();
+                    let max_start = filtered_rows.len().saturating_sub(10);
+                    if dir == "down" {
+                        self.manager_scroll_row = (self.manager_scroll_row + ticks).min(max_start);
+                    } else {
+                        self.manager_scroll_row = self.manager_scroll_row.saturating_sub(ticks);
+                    }
+                }
+
+                let filtered_rows: Vec<_> = self.manager_rows.iter().filter(|r| {
+                    if let Some(ref tag) = self.current_filter_tag {
+                        r.tags.contains(tag)
+                    } else {
+                        true
+                    }
+                }).collect();
+
+                let mut lines = Vec::new();
+                lines.push(line("全部", 40.0, 52.0));
+                lines.push(line("标签", 40.0, 167.0));
+                for (tag_name, tag_y) in &self.manager_tags {
+                    lines.push(line(tag_name, 40.0, *tag_y));
+                }
+
+                let page_rows = filtered_rows.iter().skip(self.manager_scroll_row).take(10);
+                for (idx, r) in page_rows.enumerate() {
+                    let y = 96.0 + 48.0 * idx as f64;
+                    if let Some(ref nm) = r.name {
+                        lines.push(line(nm, 300.0, y));
+                    }
+                    if let Some(ref rmk) = r.remark {
+                        lines.push(line(rmk, 385.0, y));
+                    }
+                    if !r.tags.is_empty() {
+                        lines.push(line(&r.tags.join(","), 500.0, y));
+                    }
+                    if let Some(ref p) = r.permission {
+                        lines.push(line(p, 620.0, y));
+                    }
+                }
+
+                return Box::pin(async move {
                     Ok(json!({
+                        "lines": lines,
                         "window": {"x": 200, "y": 100, "w": 720, "h": 560}
                     }))
                 });
             }
-            if op == "contacts_manager_close" {
-                return Box::pin(async { Ok(json!({"closed": true})) });
-            }
-            if op == "contacts_manager_page" || op == "contacts_manager_scroll" || op == "contacts_manager_filter" {
-                let idx_arc = self.manager_page_index.clone();
-                let pages_arc = self.manager_pages.clone();
-                return Box::pin(async move {
-                    let mut idx = idx_arc.lock().unwrap();
-                    let pages = pages_arc.lock().unwrap();
-                    if *idx >= pages.len() {
-                        return Ok(json!({"lines": [], "window": {"x": 200, "y": 100, "w": 720, "h": 560}}));
-                    }
-                    let res = pages[*idx].clone();
-                    *idx += 1;
-                    match res {
-                        Ok(lines) => Ok(json!({
-                            "lines": lines,
-                            "window": {"x": 200, "y": 100, "w": 720, "h": 560}
-                        })),
-                        Err(e) => bail!(e),
-                    }
-                });
-            }
-            if op == "contacts_open_row" {
-                let y = params.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0).round() as i64;
-                let prof = self.profile_responses.get(&y).cloned().unwrap_or_default();
-                return Box::pin(async move {
-                    Ok(json!({"lines": prof}))
-                });
-            }
 
-            Box::pin(async move { Ok(json!({})) })
+            Box::pin(async { Ok(json!({})) })
         }
         fn retarget<'a>(&'a mut self, _recipient: &'a str, _directory: &'a Path, _names: &'a [String], _group: bool) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
             Box::pin(async { Ok(()) })
@@ -520,50 +1147,28 @@ mod tests {
         let store = HistoryStore::open(&state_dir).unwrap();
         let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
 
-        let mut cap = TestCapture::new();
-        // Mock headers: personal 3, work 1, official 2
-        cap.headers_lines = vec![
-            line("联系人", 80.0, 100.0),
-            line("3", 260.0, 100.0),
-            line("企业微信联系人", 80.0, 300.0),
-            line("1", 260.0, 300.0),
-            line("公众号、服务号", 80.0, 400.0),
-            line("2", 260.0, 400.0),
+        let p_items = vec![
+            VirtualContactItem { name: "张三".to_string(), remark: None, wechat_id: Some("wxid_p1".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
+            VirtualContactItem { name: "李四".to_string(), remark: None, wechat_id: Some("wxid_p2".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
+            VirtualContactItem { name: "王五".to_string(), remark: None, wechat_id: Some("wxid_p3".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
         ];
-        // Profiles for each row y
-        // Personal rows at y=150, 200, 250
-        cap.profile_responses.insert(150, vec![
-            line("张三", 520.0, 60.0),
-            line("微信号：wxid_p1", 520.0, 90.0),
-        ]);
-        cap.profile_responses.insert(200, vec![
-            line("李四", 520.0, 60.0),
-            line("微信号：wxid_p2", 520.0, 90.0),
-        ]);
-        cap.profile_responses.insert(250, vec![
-            line("王五", 520.0, 60.0),
-            line("微信号：wxid_p3", 520.0, 90.0),
-        ]);
-        // Work row at y=350
-        cap.profile_responses.insert(350, vec![
-            line("企微员工赵", 520.0, 60.0),
-            line("企业某某公司", 520.0, 90.0),
-            line("实名赵六", 520.0, 120.0),
-        ]);
-        // Official rows at y=450, 500
-        cap.profile_responses.insert(450, vec![
-            line("公众号一", 520.0, 60.0),
-            line("微信号gh_off1", 520.0, 90.0),
-        ]);
-        cap.profile_responses.insert(500, vec![
-            line("公众号二", 520.0, 60.0),
-            line("微信号gh_off2", 520.0, 90.0),
-        ]);
+        let w_items = vec![
+            VirtualContactItem { name: "企微员工赵".to_string(), remark: None, wechat_id: None, enterprise: Some("某某公司".to_string()), real_name: Some("赵六".to_string()), tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
+        ];
+        let o_items = vec![
+            VirtualContactItem { name: "公众号一".to_string(), remark: None, wechat_id: Some("gh_off1".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
+            VirtualContactItem { name: "公众号二".to_string(), remark: None, wechat_id: Some("gh_off2".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
+        ];
 
+        let g_personal = VirtualGroup { category: "personal".to_string(), title: "联系人".to_string(), letter_sections: vec![("P".to_string(), p_items)], expanded: false };
+        let g_work = VirtualGroup { category: "work".to_string(), title: "企业微信联系人".to_string(), letter_sections: vec![("W".to_string(), w_items)], expanded: false };
+        let g_official = VirtualGroup { category: "official".to_string(), title: "公众号、服务号".to_string(), letter_sections: vec![("O".to_string(), o_items)], expanded: false };
+
+        let mut ui = VirtualContactsUi::new(vec![g_personal, g_work, g_official]);
         let no_yield = || false;
-        let report = run_sync(&mut cap, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+        let report = run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
 
-        assert!(report.complete);
+        assert!(report.complete, "report: {report:?}");
         assert!(!report.yielded);
         assert_eq!(report.unreadable_rows, 0);
         let profiles = store.list_profiles("test_acct", None).unwrap();
@@ -577,38 +1182,27 @@ mod tests {
         let store = HistoryStore::open(&state_dir).unwrap();
         let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
 
-        let mut cap = TestCapture::new();
-        cap.headers_lines = vec![
-            line("联系人", 80.0, 100.0),
-            line("3", 260.0, 100.0),
+        let p_items = vec![
+            VirtualContactItem { name: "张三".to_string(), remark: None, wechat_id: Some("wxid_p1".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
+            VirtualContactItem { name: "李四".to_string(), remark: None, wechat_id: Some("wxid_p2".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
+            VirtualContactItem { name: "王五".to_string(), remark: None, wechat_id: Some("wxid_p3".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
         ];
-        cap.profile_responses.insert(150, vec![
-            line("张三", 520.0, 60.0),
-            line("微信号：wxid_p1", 520.0, 90.0),
-        ]);
-        cap.profile_responses.insert(200, vec![
-            line("李四", 520.0, 60.0),
-            line("微信号：wxid_p2", 520.0, 90.0),
-        ]);
-        cap.profile_responses.insert(250, vec![
-            line("王五", 520.0, 60.0),
-            line("微信号：wxid_p3", 520.0, 90.0),
-        ]);
+        let g_personal = VirtualGroup { category: "personal".to_string(), title: "联系人".to_string(), letter_sections: vec![("P".to_string(), p_items)], expanded: false };
 
+        let mut ui = VirtualContactsUi::new(vec![g_personal]);
         let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let c_clone = counter.clone();
-        // yield after 2 contacts
         let should_yield = move || {
             c_clone.fetch_add(1, Ordering::SeqCst) >= 2
         };
 
-        let report1 = run_sync(&mut cap, &store, "test_acct", SyncMode::Full, &checkpoint, &should_yield, 1000).await.unwrap();
+        let report1 = run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &should_yield, 1000).await.unwrap();
         assert!(report1.yielded);
         assert!(!report1.complete);
         assert!(checkpoint.exists());
 
         let no_yield = || false;
-        let report2 = run_sync(&mut cap, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 2000).await.unwrap();
+        let report2 = run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 2000).await.unwrap();
         assert!(report2.complete);
         assert!(!report2.yielded);
         let profiles = store.list_profiles("test_acct", None).unwrap();
@@ -622,20 +1216,15 @@ mod tests {
         let store = HistoryStore::open(&state_dir).unwrap();
         let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
 
-        let mut cap = TestCapture::new();
-        cap.headers_lines = vec![
-            line("联系人", 80.0, 100.0),
-            line("2", 260.0, 100.0),
+        let p_items = vec![
+            VirtualContactItem { name: "张三".to_string(), remark: None, wechat_id: Some("wxid_p1".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
+            VirtualContactItem { name: "李四".to_string(), remark: None, wechat_id: Some("wxid_p2".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: true, misaligned_profile: None },
         ];
-        cap.profile_responses.insert(150, vec![
-            line("张三", 520.0, 60.0),
-            line("微信号：wxid_p1", 520.0, 90.0),
-        ]);
-        // Row 2 is unreadable (empty OCR lines or no nickname found)
-        cap.profile_responses.insert(200, vec![]);
+        let g_personal = VirtualGroup { category: "personal".to_string(), title: "联系人".to_string(), letter_sections: vec![("P".to_string(), p_items)], expanded: false };
 
+        let mut ui = VirtualContactsUi::new(vec![g_personal]);
         let no_yield = || false;
-        let report = run_sync(&mut cap, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+        let report = run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
         assert!(!report.complete);
         assert_eq!(report.unreadable_rows, 1);
         let res_file = state_dir.join("contacts-sync-result.json");
@@ -651,27 +1240,21 @@ mod tests {
         let store = HistoryStore::open(&state_dir).unwrap();
         let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
 
-        let mut cap = TestCapture::new();
-        cap.headers_lines = vec![
-            line("联系人", 80.0, 100.0),
-            line("1", 260.0, 100.0),
+        let p_items = vec![
+            VirtualContactItem { name: "张三".to_string(), remark: None, wechat_id: Some("wxid_p1".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
         ];
-        // First manager page call succeeds, second fails with contacts_manager_missing, third succeeds
-        *cap.manager_pages.lock().unwrap() = vec![
-            Ok(vec![line("张三", 300.0, 96.0)]),
-            Err("invalid(\"contacts_manager_missing\")".to_string()),
-            Ok(vec![]),
+        let g_personal = VirtualGroup { category: "personal".to_string(), title: "联系人".to_string(), letter_sections: vec![("P".to_string(), p_items)], expanded: false };
+
+        let mut ui = VirtualContactsUi::new(vec![g_personal]);
+        ui.manager_rows = vec![
+            ManagerRow { row_y: 96.0, name: Some("张三".to_string()), remark: None, tags: vec![], permission: None }
         ];
-        cap.profile_responses.insert(150, vec![
-            line("张三", 520.0, 60.0),
-            line("微信号：wxid_p1", 520.0, 90.0),
-        ]);
+        ui.manager_close_countdown = Some(1); // 模拟中途关闭
 
         let no_yield = || false;
-        let report = run_sync(&mut cap, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+        let report = run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
         assert!(report.complete);
-        // Verify contacts_manager_open was called more than once
-        let open_calls = cap.calls.lock().unwrap().iter().filter(|(op, _)| op == "contacts_manager_open").count();
+        let open_calls = ui.calls.lock().unwrap().iter().filter(|(op, _)| op == "contacts_manager_open").count();
         assert!(open_calls >= 2);
     }
 
@@ -682,7 +1265,6 @@ mod tests {
         let store = HistoryStore::open(&state_dir).unwrap();
         let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
 
-        // Seed store with 3 contacts
         for i in 1..=3 {
             let p = ProfileInput {
                 category: "personal".to_string(),
@@ -701,31 +1283,33 @@ mod tests {
             store.upsert_profile("test_acct", &p, 500).unwrap();
         }
 
-        let mut cap = TestCapture::new();
-        cap.headers_lines = vec![
-            line("联系人", 80.0, 100.0),
-            line("4", 260.0, 100.0),
-        ];
-        // Manager table has 4 users: 用户1, 用户2, 用户3, 用户4
-        *cap.manager_pages.lock().unwrap() = vec![
-            Ok(vec![
-                line("用户1", 300.0, 96.0),
-                line("用户2", 300.0, 144.0),
-                line("用户3", 300.0, 192.0),
-                line("用户4", 300.0, 240.0),
-            ]),
-        ];
-        // Profile for only the new user (row 4 -> y = 100 + 50 * 4 = 300)
-        cap.profile_responses.insert(300, vec![
-            line("用户4", 520.0, 60.0),
-            line("微信号：wxid_p4", 520.0, 90.0),
-        ]);
+        let p_items = (1..=4).map(|i| VirtualContactItem {
+            name: format!("用户{i}"),
+            remark: None,
+            wechat_id: Some(format!("wxid_p{i}")),
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+            unreadable: false,
+            misaligned_profile: None,
+        }).collect();
+        let g_personal = VirtualGroup { category: "personal".to_string(), title: "联系人".to_string(), letter_sections: vec![("U".to_string(), p_items)], expanded: false };
+
+        let mut ui = VirtualContactsUi::new(vec![g_personal]);
+        ui.manager_rows = (1..=4).map(|i| ManagerRow {
+            row_y: 96.0 + 48.0 * ((i - 1) as f64),
+            name: Some(format!("用户{i}")),
+            remark: None,
+            tags: vec![],
+            permission: None,
+        }).collect();
 
         let no_yield = || false;
-        let report = run_sync(&mut cap, &store, "test_acct", SyncMode::Incremental, &checkpoint, &no_yield, 1000).await.unwrap();
+        let report = run_sync(&mut ui, &store, "test_acct", SyncMode::Incremental, &checkpoint, &no_yield, 1000).await.unwrap();
         assert!(report.complete);
-        let open_row_calls = cap.calls.lock().unwrap().iter().filter(|(op, _)| op == "contacts_open_row").count();
-        assert_eq!(open_row_calls, 1);
+        let open_row_calls = ui.calls.lock().unwrap().iter().filter(|(op, _)| op == "contacts_open_row").count();
+        assert_eq!(open_row_calls, 1, "Only the 4th new user should trigger contacts_open_row");
     }
 
     #[tokio::test]
@@ -735,25 +1319,20 @@ mod tests {
         let store = HistoryStore::open(&state_dir).unwrap();
         let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
 
-        let mut cap = TestCapture::new();
-        cap.headers_lines = vec![
-            line("联系人", 80.0, 100.0),
-            line("1", 260.0, 100.0),
+        let p_items = vec![
+            VirtualContactItem { name: "张三".to_string(), remark: None, wechat_id: Some("wxid_p1".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
         ];
-        cap.profile_responses.insert(150, vec![
-            line("张三", 520.0, 60.0),
-            line("微信号：wxid_p1", 520.0, 90.0),
-        ]);
+        let g = VirtualGroup { category: "personal".to_string(), title: "联系人".to_string(), letter_sections: vec![("Z".to_string(), p_items)], expanded: false };
 
+        let mut ui = VirtualContactsUi::new(vec![g]);
         let no_yield = || false;
-        run_sync(&mut cap, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+        run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
 
-        let calls = cap.calls.lock().unwrap();
+        let calls = ui.calls.lock().unwrap();
         for (op, params) in calls.iter() {
             if op == "contacts_click_list" {
                 let x = params["x"].as_f64().unwrap_or(0.0);
                 let y = params["y"].as_f64().unwrap_or(0.0);
-                // forbidden area: x in 420..840 and y >= 440
                 assert!(!(x >= 420.0 && x <= 840.0 && y >= 440.0));
             }
         }
@@ -768,47 +1347,40 @@ mod tests {
         let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
         let pause_file = state_dir.join("admin-pause.json");
 
-        let mut cap = TestCapture::new();
-        cap.headers_lines = vec![
-            line("联系人", 80.0, 100.0),
-            line("1", 260.0, 100.0),
+        let p_items = vec![
+            VirtualContactItem { name: "张三".to_string(), remark: None, wechat_id: Some("wxid_p1".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
         ];
-        cap.profile_responses.insert(150, vec![
-            line("张三", 520.0, 60.0),
-            line("微信号：wxid_p1", 520.0, 90.0),
-        ]);
+        let g = VirtualGroup { category: "personal".to_string(), title: "联系人".to_string(), letter_sections: vec![("Z".to_string(), p_items)], expanded: false };
+
+        let mut ui = VirtualContactsUi::new(vec![g]);
 
         // Case A: pause_file did not exist initially -> removed after sync
         assert!(!pause_file.exists());
         let no_yield = || false;
-        run_sync(&mut cap, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+        run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
         assert!(!pause_file.exists());
 
         // Case B: pause_file existed initially -> remains after sync
         fs::write(&pause_file, b"{\"paused\":true}").unwrap();
-        run_sync(&mut cap, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 2000).await.unwrap();
+        run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 2000).await.unwrap();
         assert!(pause_file.exists());
     }
 
     #[tokio::test]
     async fn test_sync_logs_counts_only() {
-        // Collect tracing logs during sync and assert no synthetic name or wechat_id leaked
         let temp = TestTempDir::new();
         let state_dir = temp.path().join("state");
         let store = HistoryStore::open(&state_dir).unwrap();
         let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
 
-        let mut cap = TestCapture::new();
-        cap.headers_lines = vec![
-            line("联系人", 80.0, 100.0),
-            line("1", 260.0, 100.0),
-        ];
         let secret_name = "秘密联系人甲";
         let secret_wxid = "wxid_secret_999";
-        cap.profile_responses.insert(150, vec![
-            line(secret_name, 520.0, 60.0),
-            line(&format!("微信号：{secret_wxid}"), 520.0, 90.0),
-        ]);
+        let p_items = vec![
+            VirtualContactItem { name: secret_name.to_string(), remark: None, wechat_id: Some(secret_wxid.to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
+        ];
+        let g = VirtualGroup { category: "personal".to_string(), title: "联系人".to_string(), letter_sections: vec![("M".to_string(), p_items)], expanded: false };
+
+        let mut ui = VirtualContactsUi::new(vec![g]);
 
         let log_buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
         let writer = log_buffer.clone();
@@ -830,11 +1402,444 @@ mod tests {
 
         let no_yield = || false;
         let _guard = tracing::subscriber::set_default(subscriber);
-        run_sync(&mut cap, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+        run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
         drop(_guard);
 
         let logs = String::from_utf8(log_buffer.lock().unwrap().clone()).unwrap();
         assert!(!logs.contains(secret_name), "Logs leaked secret name: {}", logs);
         assert!(!logs.contains(secret_wxid), "Logs leaked secret wxid: {}", logs);
+    }
+
+    #[tokio::test]
+    async fn test_full_sync_with_letter_rows_and_scrolling_attaches_profiles_to_right_names() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        let store = HistoryStore::open(&state_dir).unwrap();
+        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
+
+        // 22 人带字母行，需滚动
+        let letters = vec![
+            ("A", vec!["安安", "傲天", "艾伦", "阿强"]),
+            ("B", vec!["白白", "包包", "贝贝", "冰冰", "彬彬"]),
+            ("C", vec!["陈陈", "程程", "楚楚", "春春"]),
+            ("D", vec!["大大", "丹丹", "点点", "东东", "冬冬"]),
+            ("E", vec!["鄂鄂", "恩恩", "二郎", "尔康"]),
+        ];
+
+        let mut contact_idx = 0;
+        let mut sections = Vec::new();
+        for (let_str, names) in letters {
+            let mut items = Vec::new();
+            for n in names {
+                contact_idx += 1;
+                items.push(VirtualContactItem {
+                    name: n.to_string(),
+                    remark: None,
+                    wechat_id: Some(format!("wxid_user_{contact_idx:02}")),
+                    enterprise: None,
+                    real_name: None,
+                    tags: vec![],
+                    friend_permission: None,
+                    unreadable: false,
+                    misaligned_profile: None,
+                });
+            }
+            sections.push((let_str.to_string(), items));
+        }
+
+        let group = VirtualGroup {
+            category: "personal".to_string(),
+            title: "联系人".to_string(),
+            letter_sections: sections,
+            expanded: false,
+        };
+
+        let mut ui = VirtualContactsUi::new(vec![group]);
+        let no_yield = || false;
+        let report = run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+
+        assert!(report.complete, "report should be complete: {report:?}");
+        assert_eq!(report.per_category, vec![("personal".to_string(), 22, 22)]);
+
+        let profiles = store.list_profiles("test_acct", Some("personal")).unwrap();
+        assert_eq!(profiles.len(), 22);
+
+        // 验证每个微信号对应名字正确
+        for (i, p) in profiles.iter().enumerate() {
+            let wid = p.get("wechat_id").and_then(|v| v.as_str()).unwrap();
+            let _nick = p.get("nickname").and_then(|v| v.as_str()).unwrap();
+            let expected_idx: usize = wid.strip_prefix("wxid_user_").unwrap().parse().unwrap();
+            assert_eq!(expected_idx, i + 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sync_never_clicks_group_header_as_contact() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        let store = HistoryStore::open(&state_dir).unwrap();
+        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
+
+        let g1 = VirtualGroup {
+            category: "official".to_string(),
+            title: "公众号、服务号".to_string(),
+            letter_sections: vec![
+                ("G".to_string(), vec![VirtualContactItem {
+                    name: "公众号甲".to_string(),
+                    remark: None,
+                    wechat_id: Some("gh_111".to_string()),
+                    enterprise: None,
+                    real_name: None,
+                    tags: vec![],
+                    friend_permission: None,
+                    unreadable: false,
+                    misaligned_profile: None,
+                }]),
+            ],
+            expanded: false,
+        };
+        let g2 = VirtualGroup {
+            category: "personal".to_string(),
+            title: "联系人".to_string(),
+            letter_sections: vec![
+                ("Z".to_string(), vec![VirtualContactItem {
+                    name: "张三".to_string(),
+                    remark: None,
+                    wechat_id: Some("wxid_zs".to_string()),
+                    enterprise: None,
+                    real_name: None,
+                    tags: vec![],
+                    friend_permission: None,
+                    unreadable: false,
+                    misaligned_profile: None,
+                }]),
+            ],
+            expanded: false,
+        };
+
+        let mut ui = VirtualContactsUi::new(vec![g1, g2]);
+        let no_yield = || false;
+        run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+
+        // 检查所有 open_row 点击的 y，不得落在 header 或字母行
+        for &y in &ui.row_open_clicks {
+            let vy = y + ui.scroll_offset;
+            let found = ui.find_item_at_virtual_y(vy);
+            if let Some((_, _, is_header, is_letter)) = found {
+                assert!(!is_header, "contacts_open_row clicked on group header at y={y}");
+                assert!(!is_letter, "contacts_open_row clicked on letter row at y={y}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_misaligned_profile_is_not_written() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        let store = HistoryStore::open(&state_dir).unwrap();
+        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
+
+        // 张三行的资料卡返回了李四的资料（名字错位）
+        let misaligned_lines = vec![
+            line("李四", 520.0, 60.0),
+            line("微信号：wxid_lisi", 520.0, 90.0),
+        ];
+
+        let g = VirtualGroup {
+            category: "personal".to_string(),
+            title: "联系人".to_string(),
+            letter_sections: vec![
+                ("Z".to_string(), vec![VirtualContactItem {
+                    name: "张三".to_string(),
+                    remark: None,
+                    wechat_id: Some("wxid_zhangsan".to_string()),
+                    enterprise: None,
+                    real_name: None,
+                    tags: vec![],
+                    friend_permission: None,
+                    unreadable: false,
+                    misaligned_profile: Some(misaligned_lines),
+                }]),
+            ],
+            expanded: false,
+        };
+
+        let mut ui = VirtualContactsUi::new(vec![g]);
+        let no_yield = || false;
+        let report = run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+
+        assert!(!report.complete);
+        assert_eq!(report.unreadable_rows, 1);
+        assert!(ui.row_open_clicks.len() >= 1, "Must have opened the row to detect misalignment");
+        let profiles = store.list_profiles("test_acct", None).unwrap();
+        assert_eq!(profiles.len(), 0, "Misaligned profile must not be written to db");
+    }
+
+    #[tokio::test]
+    async fn test_unreadable_name_marks_incomplete_without_misattribution() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        let store = HistoryStore::open(&state_dir).unwrap();
+        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
+
+        let g = VirtualGroup {
+            category: "personal".to_string(),
+            title: "联系人".to_string(),
+            letter_sections: vec![
+                ("A".to_string(), vec![
+                    VirtualContactItem {
+                        name: "用户A".to_string(),
+                        remark: None,
+                        wechat_id: Some("wxid_a".to_string()),
+                        enterprise: None,
+                        real_name: None,
+                        tags: vec![],
+                        friend_permission: None,
+                        unreadable: false,
+                        misaligned_profile: None,
+                    },
+                    VirtualContactItem {
+                        name: "用户B".to_string(),
+                        remark: None,
+                        wechat_id: Some("wxid_b".to_string()),
+                        enterprise: None,
+                        real_name: None,
+                        tags: vec![],
+                        friend_permission: None,
+                        unreadable: true, // 认不出名字
+                        misaligned_profile: None,
+                    },
+                    VirtualContactItem {
+                        name: "用户C".to_string(),
+                        remark: None,
+                        wechat_id: Some("wxid_c".to_string()),
+                        enterprise: None,
+                        real_name: None,
+                        tags: vec![],
+                        friend_permission: None,
+                        unreadable: false,
+                        misaligned_profile: None,
+                    },
+                ]),
+            ],
+            expanded: false,
+        };
+
+        let mut ui = VirtualContactsUi::new(vec![g]);
+        let no_yield = || false;
+        let report = run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+
+        assert!(!report.complete);
+        assert!(report.unreadable_rows >= 1);
+        let profiles = store.list_profiles("test_acct", None).unwrap();
+        // 用户A和用户C应该正确写入，且微信号没有串行错位
+        assert_eq!(profiles.len(), 2);
+        let nicks: Vec<String> = profiles.iter().map(|p| p.get("nickname").unwrap().as_str().unwrap().to_string()).collect();
+        assert!(nicks.contains(&"用户A".to_string()));
+        assert!(nicks.contains(&"用户C".to_string()));
+        assert!(!nicks.contains(&"用户B".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_yield_after_time_budget_and_resume_completes_without_duplicates() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        let store = HistoryStore::open(&state_dir).unwrap();
+        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
+
+        let items: Vec<VirtualContactItem> = (1..=6).map(|i| VirtualContactItem {
+            name: format!("用户{i}"),
+            remark: None,
+            wechat_id: Some(format!("wxid_{i}")),
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+            unreadable: false,
+            misaligned_profile: None,
+        }).collect();
+
+        let g = VirtualGroup {
+            category: "personal".to_string(),
+            title: "联系人".to_string(),
+            letter_sections: vec![("U".to_string(), items)],
+            expanded: false,
+        };
+
+        let mut ui = VirtualContactsUi::new(vec![g]);
+
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c_clone = counter.clone();
+        // 处理完 2 个后让出
+        let yield_after_2 = move || {
+            c_clone.fetch_add(1, Ordering::SeqCst) >= 2
+        };
+
+        let report1 = run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &yield_after_2, 1000).await.unwrap();
+        assert!(report1.yielded);
+        assert!(!report1.complete);
+        assert!(checkpoint.exists());
+
+        // 再次恢复
+        let no_yield = || false;
+        let report2 = run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 2000).await.unwrap();
+        assert!(report2.complete);
+        assert!(!report2.yielded);
+
+        let profiles = store.list_profiles("test_acct", None).unwrap();
+        assert_eq!(profiles.len(), 6, "Total profiles must be exactly 6 without duplicates");
+    }
+
+    #[tokio::test]
+    async fn test_manager_pages_overlap_and_stop_at_bottom() {
+        // 35 行，包含同名不同行
+        let mut rows = Vec::new();
+        for i in 1..=35 {
+            let nm = if i == 5 || i == 6 {
+                "同名张三".to_string()
+            } else {
+                format!("联系人{i:02}")
+            };
+            rows.push(ManagerRow {
+                row_y: 96.0 + 48.0 * ((i - 1) % 10) as f64,
+                name: Some(nm),
+                remark: Some(format!("备注{i:02}")),
+                tags: vec![],
+                permission: None,
+            });
+        }
+
+        let mut ui = VirtualContactsUi::new(vec![]);
+        ui.manager_rows = rows;
+
+        let result = read_manager_table(&mut ui).await.unwrap();
+        assert_eq!(result.rows.len(), 35, "Must collect all 35 rows");
+        let same_names: Vec<_> = result.rows.iter().filter(|r| r.name.as_deref() == Some("同名张三")).collect();
+        assert_eq!(same_names.len(), 2, "Same name different rows must not be merged");
+        assert!(result.pages_count <= 200, "Must stop at bottom within 200 pages");
+    }
+
+    #[tokio::test]
+    async fn test_manager_closed_midway_reopens_without_loss() {
+        let rows: Vec<ManagerRow> = (1..=25).map(|i| ManagerRow {
+            row_y: 96.0 + 48.0 * ((i - 1) % 10) as f64,
+            name: Some(format!("联系人{i:02}")),
+            remark: None,
+            tags: vec![],
+            permission: None,
+        }).collect();
+
+        let mut ui = VirtualContactsUi::new(vec![]);
+        ui.manager_rows = rows;
+        ui.manager_close_countdown = Some(2); // 在第2次交互时关闭
+
+        let result = read_manager_table(&mut ui).await.unwrap();
+        assert_eq!(result.rows.len(), 25);
+        let open_count = ui.calls.lock().unwrap().iter().filter(|(op, _)| op == "contacts_manager_open").count();
+        assert!(open_count >= 2, "Manager should reopen after closing midway");
+    }
+
+    #[tokio::test]
+    async fn test_tags_collected_by_observed_y() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        let store = HistoryStore::open(&state_dir).unwrap();
+        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
+
+        let mut ui = VirtualContactsUi::new(vec![
+            VirtualGroup {
+                category: "personal".to_string(),
+                title: "联系人".to_string(),
+                letter_sections: vec![
+                    ("T".to_string(), vec![
+                        VirtualContactItem {
+                            name: "标签好友甲".to_string(),
+                            remark: None,
+                            wechat_id: Some("wxid_tag1".to_string()),
+                            enterprise: None,
+                            real_name: None,
+                            tags: vec!["重要客户".to_string()],
+                            friend_permission: None,
+                            unreadable: false,
+                            misaligned_profile: None,
+                        },
+                    ]),
+                ],
+                expanded: false,
+            }
+        ]);
+
+        ui.manager_tags = vec![
+            ("重要客户".to_string(), 195.0),
+            ("合作伙伴".to_string(), 235.0),
+        ];
+        ui.manager_rows = vec![
+            ManagerRow {
+                row_y: 96.0,
+                name: Some("标签好友甲".to_string()),
+                remark: None,
+                tags: vec!["重要客户".to_string()],
+                permission: None,
+            }
+        ];
+
+        let no_yield = || false;
+        run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+
+        // 检查 calls 是否通过 observed y 调用了 filter
+        let filter_calls: Vec<Value> = ui.calls.lock().unwrap().iter()
+            .filter(|(op, _)| op == "contacts_manager_filter")
+            .map(|(_, p)| p.clone())
+            .collect();
+
+        assert!(filter_calls.iter().any(|p| p["kind"] == "tag" && (p["y"].as_f64().unwrap_or(0.0) - 195.0).abs() < 1.0));
+        assert!(filter_calls.iter().any(|p| p["kind"] == "all"), "Must reset filter to all at end");
+    }
+
+    #[tokio::test]
+    async fn test_daily_sync_attempted_at_most_once_per_day_even_if_incomplete() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let res_path = state_dir.join("contacts-sync-result.json");
+        let _attempt_path = state_dir.join("contacts-sync-daily-attempt.json");
+
+        // 写入一次不完整同步结果
+        fs::write(&res_path, serde_json::to_string(&json!({
+            "finished_at_ms": 1000000000000_i64,
+            "complete": false,
+        })).unwrap()).unwrap();
+
+        // 检查在同一天（未跨天且未满20小时）是否会再次触发
+        let now_sec = 1000000000.0 + 3600.0; // 1小时后
+        assert!(!should_attempt_daily_sync(&state_dir, true, now_sec));
+
+        // 记录当天 attempt
+        record_daily_sync_attempt(&state_dir, now_sec).unwrap();
+        assert!(!should_attempt_daily_sync(&state_dir, true, now_sec + 3600.0));
+    }
+
+    #[test]
+    fn test_stale_contacts_sync_pause_cleared_on_startup() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let pause_file = state_dir.join("admin-pause.json");
+
+        // Case 1: reason == contacts_sync -> 清理
+        fs::write(&pause_file, serde_json::to_string(&json!({
+            "paused": true,
+            "reason": "contacts_sync"
+        })).unwrap()).unwrap();
+        clean_stale_contacts_sync_pause(&state_dir);
+        assert!(!pause_file.exists(), "Stale contacts_sync pause must be removed");
+
+        // Case 2: reason == manual -> 不清理
+        fs::write(&pause_file, serde_json::to_string(&json!({
+            "paused": true,
+            "reason": "manual_admin"
+        })).unwrap()).unwrap();
+        clean_stale_contacts_sync_pause(&state_dir);
+        assert!(pause_file.exists(), "User manual pause must NOT be removed");
     }
 }
