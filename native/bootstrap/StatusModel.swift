@@ -25,15 +25,19 @@ public struct StatusItem: Codable, Equatable {
 public struct PermissionsInput: Codable {
     public var screenRecordingAuthorized: Bool
     public var accessibilityTrusted: Bool
+    /// 核心写入 ~/.wechat-rpa/folder-permission-needed.json 时的 detail（如 folder_access_blocked:Desktop）
+    public var folderPermissionBlocked: String?
 
-    public init(screenRecordingAuthorized: Bool, accessibilityTrusted: Bool) {
+    public init(screenRecordingAuthorized: Bool, accessibilityTrusted: Bool, folderPermissionBlocked: String? = nil) {
         self.screenRecordingAuthorized = screenRecordingAuthorized
         self.accessibilityTrusted = accessibilityTrusted
+        self.folderPermissionBlocked = folderPermissionBlocked
     }
 
     enum CodingKeys: String, CodingKey {
         case screenRecordingAuthorized = "screen_recording_authorized"
         case accessibilityTrusted = "accessibility_trusted"
+        case folderPermissionBlocked = "folder_permission_blocked"
     }
 }
 
@@ -327,7 +331,15 @@ public func evaluate(_ s: StatusInput) -> [StatusItem] {
     } else {
         permItem = StatusItem(key: "permissions", level: .red, reason: "辅助功能未授权", fix: "请在「系统设置 → 隐私与安全性」中授予辅助功能权限")
     }
-    items.append(permItem)
+    if permItem.level == .green, let blocked = s.permissions.folderPermissionBlocked {
+        // 附件保存在受保护文件夹而未授权：图片只能用缩略图，文件读不到
+        items.append(StatusItem(
+            key: "permissions", level: .red,
+            reason: "附件保存所在文件夹未授权（\(blocked)），图片和文件无法保存",
+            fix: "请在「系统设置 → 隐私与安全性 → 文件和文件夹」中为 微信客服助手 打开 桌面、文稿、下载 文件夹的访问"))
+    } else {
+        items.append(permItem)
+    }
 
     // 2. desktop_service
     let svcItem: StatusItem

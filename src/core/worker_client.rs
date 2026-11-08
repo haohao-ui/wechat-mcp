@@ -160,11 +160,21 @@ pub fn worker_code(error: &str) -> String {
             return code.chars().take(120).collect();
         }
     }
+    if let Some(start) = error.find("folder_access_blocked:") {
+        return error[start..]
+            .chars()
+            .take_while(|c| !c.is_whitespace() && *c != '"')
+            .take(120)
+            .collect();
+    }
     "error".to_string()
 }
 
 pub fn media_reason(error: &str) -> String {
-    if error.contains("unsupported_file_type") {
+    // 附件落在受保护文件夹（桌面/文稿/下载）而本机未授权：要人去系统设置里允许，不是下载偶发失败
+    if error.contains("folder_access_blocked:") || error.contains(":denied=") {
+        "folder_permission".to_string()
+    } else if error.contains("unsupported_file_type") {
         "unsupported_type".to_string()
     } else if error.contains("file_size_limit") || error.contains("media_too_large") {
         "too_large".to_string()
@@ -215,6 +225,8 @@ pub struct WorkerClient {
     pub writer: Option<tokio::net::unix::OwnedWriteHalf>,
     pub rpc_lock: Mutex<()>,
     pub logged_events: Arc<StdMutex<Vec<Value>>>,
+    /// 协调器的停止标志：等待 worker 的长时间循环要随时响应停止（control stop / 宿主关闭）
+    pub stop: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl WorkerClient {
@@ -250,6 +262,7 @@ impl WorkerClient {
             writer: None,
             rpc_lock: Mutex::new(()),
             logged_events: Arc::new(StdMutex::new(Vec::new())),
+            stop: None,
         }
     }
 
@@ -332,8 +345,14 @@ impl WorkerClient {
 
         if let Some(nav) = &self.navigator {
             // Python logs this failure (quiet_relaunch_failed); swallowing it hid why the worker never started.
-            if let Err(error) = nav.get_messages(None).await {
-                tracing::warn!("quiet_relaunch_get_messages_failed: {:#}", error);
+            let relaunch = tokio::select! {
+                res = nav.get_messages(None) => Some(res),
+                _ = Self::until_stop_requested(self.stop.clone()) => None,
+            };
+            match relaunch {
+                None => bail!("stop_requested: quiet relaunch abandoned"),
+                Some(Err(error)) => tracing::warn!("quiet_relaunch_get_messages_failed: {:#}", error),
+                Some(Ok(_)) => {}
             }
             match self.connect(60).await {
                 Ok(()) => {
@@ -372,9 +391,31 @@ impl WorkerClient {
         Ok(())
     }
 
+    fn stop_requested(&self) -> bool {
+        self.stop
+            .as_ref()
+            .map_or(false, |s| s.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    /// 停止请求到来时结束（每 200ms 检查一次）；没有停止标志则永不结束。
+    async fn until_stop_requested(stop: Option<Arc<std::sync::atomic::AtomicBool>>) {
+        match stop {
+            Some(flag) => {
+                while !flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }
+            None => std::future::pending::<()>().await,
+        }
+    }
+
     pub async fn connect(&mut self, timeout_seconds: u64) -> Result<()> {
         let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
         loop {
+            if self.stop_requested() {
+                self.close_transport().await;
+                bail!("stop_requested: worker connect abandoned");
+            }
             match UnixStream::connect(&self.socket_path).await {
                 Ok(stream) => {
                     let (read_half, write_half) = stream.into_split();
@@ -784,6 +825,30 @@ impl WorkerClient {
         Ok(())
     }
 
+    fn folder_permission_marker(&self) -> PathBuf {
+        self.base_dir.join("folder-permission-needed.json")
+    }
+
+    /// 附件因文件夹权限失败：记警告并写标记文件，宿主状态面板据此提示去「文件和文件夹」里允许。
+    fn note_folder_permission(&self, err_str: &str) {
+        if media_reason(err_str) != "folder_permission" {
+            return;
+        }
+        let detail = worker_code(err_str);
+        tracing::warn!(detail = %detail, "attachment_folder_permission: 附件保存所在文件夹未授权，请在系统设置 > 隐私与安全性 > 文件和文件夹中允许");
+        self.log_event("attachment_folder_permission", json!({"detail": detail}));
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        let _ = crate::core::state::write_private(&self.folder_permission_marker(), &json!({"detail": detail, "at": at}));
+    }
+
+    /// 附件原件保存成功即说明权限已恢复，清掉提示。
+    fn clear_folder_permission(&self) {
+        let _ = fs::remove_file(self.folder_permission_marker());
+    }
+
     pub fn log_event(&self, event: &str, fields: Value) {
         let mut item = match fields {
             Value::Object(map) => map,
@@ -838,6 +903,7 @@ impl WorkerClient {
 
                 match prep_res {
                     Ok(_) => {
+                        self.clear_folder_permission();
                         let f = self.frame().await?;
                         current_frame = f;
                         if index + 1 < items.len() {
@@ -851,6 +917,7 @@ impl WorkerClient {
                             return Err(err);
                         }
                         source = "chat_thumbnail".to_string();
+                        self.note_folder_permission(&err_str);
                         self.log_event(
                             "image_original_unavailable",
                             json!({
@@ -903,12 +970,16 @@ impl WorkerClient {
                 .await;
 
                 let (info, path, new_frame) = match prep_step {
-                    Ok(res) => res,
+                    Ok(res) => {
+                        self.clear_folder_permission();
+                        res
+                    }
                     Err(err) => {
                         let err_str = err.to_string();
                         if action_interrupted(&err_str) {
                             return Err(err);
                         }
+                        self.note_folder_permission(&err_str);
                         failed.push(FailedAttachmentItem {
                             label,
                             kind: "file".to_string(),
@@ -2681,6 +2752,146 @@ mod tests {
         let frame = test_empty_frame();
         let err = client.attachments(&[bubble_img], &frame).await.unwrap_err();
         assert!(action_interrupted(&err.to_string()), "action_interrupted 必须向上抛出");
+    }
+
+    /// 停止请求必须打断等待 worker 的 connect（原来最长 60 秒不看停止标志）
+    #[tokio::test]
+    async fn test_connect_returns_promptly_when_stop_requested() {
+        let temp = TestDir::new();
+        let sock = temp.path().join("absent.sock");
+        let mut client = setup_test_client(&temp, sock, None);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        client.stop = Some(stop.clone());
+        let s2 = stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            s2.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let began = Instant::now();
+        let err = client.connect(60).await.unwrap_err();
+        assert!(began.elapsed() < Duration::from_secs(3), "{:?}", began.elapsed());
+        assert!(err.to_string().contains("stop_requested"), "{err}");
+    }
+
+    struct HangingNavigator;
+    impl Navigator for HangingNavigator {
+        fn get_messages<'a>(
+            &'a self,
+            _recipient: Option<&'a str>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Ok(json!({}))
+            })
+        }
+    }
+
+    /// 静默重启里 get_messages 可能等桌面锁 30 秒：停止请求同样要能打断
+    #[tokio::test]
+    async fn test_quiet_relaunch_aborts_promptly_when_stop_requested() {
+        let temp = TestDir::new();
+        let sock = temp.path().join("absent.sock");
+        let mut client = setup_test_client(&temp, sock, Some(Arc::new(HangingNavigator)));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        client.stop = Some(stop.clone());
+        let s2 = stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            s2.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let began = Instant::now();
+        let res = client.start().await;
+        assert!(res.is_err());
+        assert!(began.elapsed() < Duration::from_secs(5), "start 没有响应停止: {:?}", began.elapsed());
+    }
+
+    #[test]
+    fn test_folder_permission_errors_are_classified_with_folder() {
+        assert_eq!(media_reason("MCP tool failed: folder_access_blocked:Desktop"), "folder_permission");
+        assert_eq!(media_reason("invalid(\"download_completion_unknown:denied=Desktop,Documents\")"), "folder_permission");
+        assert_eq!(worker_code("folder_access_blocked:Desktop"), "folder_access_blocked:Desktop");
+        assert_eq!(
+            worker_code("invalid(\"download_completion_unknown:denied=Desktop\")"),
+            "download_completion_unknown:denied=Desktop"
+        );
+    }
+
+    async fn folder_blocked_server(sock: PathBuf, op_fails: &'static str) -> MockWorkerServer {
+        let ok_txt = b"ok";
+        MockWorkerServer::spawn(sock, move |req| {
+            let op = req["operation"].as_str().unwrap_or("");
+            let id = req["id"].as_u64().unwrap_or(1);
+            if op == op_fails {
+                return json!({"protocol_version": 1, "id": id, "ok": false, "error": "folder_access_blocked:Desktop"});
+            }
+            let result = match op {
+                "capture" => serde_json::to_value(test_sample_frame()).unwrap(),
+                "prepare_file" => json!({"filename": "a.txt", "extension": "txt"}),
+                "read_media" => json!({"offset": 0, "size": ok_txt.len(), "bytes": test_b64_encode(ok_txt),
+                                       "eof": true, "sha256": sha256(ok_txt), "extension": "png"}),
+                _ => json!({}),
+            };
+            json!({"protocol_version": 1, "id": id, "ok": true, "result": result})
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_file_folder_permission_recorded_logged_and_marked() {
+        let temp = TestDir::new();
+        let sock = temp.path().join("bot-worker.sock");
+        let _server = folder_blocked_server(sock.clone(), "prepare_file").await;
+        let mut client = setup_test_client(&temp, sock, None);
+        client.connect(5).await.unwrap();
+
+        let b = test_bubble_helper("file", &"5".repeat(64), Some("a.txt"));
+        let (_, files, failed) = client.attachments(&[b], &test_empty_frame()).await.unwrap();
+
+        assert!(files.is_empty());
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].reason, "folder_permission");
+        assert_eq!(failed[0].detail.as_deref(), Some("folder_access_blocked:Desktop"));
+        let events = client.logged_events.lock().unwrap().clone();
+        assert!(events.iter().any(|e| e["event"] == "attachment_folder_permission"
+            && e["detail"] == "folder_access_blocked:Desktop"), "{events:?}");
+        let marker: Value = serde_json::from_str(
+            &fs::read_to_string(client.base_dir.join("folder-permission-needed.json")).unwrap()).unwrap();
+        assert_eq!(marker["detail"], "folder_access_blocked:Desktop");
+    }
+
+    #[tokio::test]
+    async fn test_image_original_folder_permission_logged_and_marked() {
+        let temp = TestDir::new();
+        let sock = temp.path().join("bot-worker.sock");
+        let _server = folder_blocked_server(sock.clone(), "prepare_image").await;
+        let mut client = setup_test_client(&temp, sock, None);
+        client.connect(5).await.unwrap();
+
+        let b = test_bubble_helper("image", &"6".repeat(64), None);
+        let (images, _, _) = client.attachments(&[b], &test_empty_frame()).await.unwrap();
+
+        assert_eq!(images.len(), 1, "原图拿不到时仍用聊天缩略图");
+        assert_eq!(images[0].source, "chat_thumbnail");
+        let events = client.logged_events.lock().unwrap().clone();
+        assert!(events.iter().any(|e| e["event"] == "attachment_folder_permission"), "{events:?}");
+        assert!(client.base_dir.join("folder-permission-needed.json").exists());
+    }
+
+    #[tokio::test]
+    async fn test_successful_original_clears_folder_permission_marker() {
+        let temp = TestDir::new();
+        let sock = temp.path().join("bot-worker.sock");
+        let _server = folder_blocked_server(sock.clone(), "none").await;
+        let mut client = setup_test_client(&temp, sock, None);
+        client.connect(5).await.unwrap();
+        let marker = client.base_dir.join("folder-permission-needed.json");
+        fs::write(&marker, "{}").unwrap();
+
+        let b = test_bubble_helper("image", &"7".repeat(64), None);
+        let (images, _, _) = client.attachments(&[b], &test_empty_frame()).await.unwrap();
+
+        assert_eq!(images[0].source, "original");
+        assert!(!marker.exists(), "权限恢复后提示要自动消失");
     }
 
     #[tokio::test]

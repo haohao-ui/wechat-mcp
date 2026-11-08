@@ -397,9 +397,18 @@ public final class StatusPanelController: NSViewController {
         let probe = readDesktopProbe()
 
         // 1. Permissions
+        // 核心在附件因文件夹权限失败时写这个标记，权限恢复后自动删除
+        let folderMarker = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".wechat-rpa/folder-permission-needed.json")
+        var folderBlocked: String? = nil
+        if let data = try? Data(contentsOf: folderMarker),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            folderBlocked = (obj["detail"] as? String) ?? "unknown"
+        }
         let perm = PermissionsInput(
             screenRecordingAuthorized: probe.screen_recording_authorized,
-            accessibilityTrusted: probe.accessibility_trusted
+            accessibilityTrusted: probe.accessibility_trusted,
+            folderPermissionBlocked: folderBlocked
         )
 
         // 2. Desktop Service

@@ -1878,3 +1878,24 @@ fn test_supervisor_async_stopping_non_blocking_and_recovers() {
     assert_eq!(res["final_status"], "not_running");
     assert_eq!(res["can_restart_decision"], "start");
 }
+
+/// 附件保存的文件夹未授权（核心写了 folder-permission-needed.json）：权限项必须变红并告诉人去哪里允许。
+#[test]
+fn test_panel_shows_folder_permission_needed() {
+    if !has_swiftc() {
+        eprintln!("swiftc not available, skipping test");
+        return;
+    }
+    let mut inp = default_status_input();
+    inp["permissions"]["folder_permission_blocked"] = serde_json::json!("folder_access_blocked:Desktop");
+    let items = run_host_cmd("status", &inp).unwrap();
+    let item = items.as_array().unwrap().iter().find(|i| i["key"] == "permissions").unwrap();
+    assert_eq!(item["level"], "red");
+    assert!(item["reason"].as_str().unwrap().contains("Desktop"), "{item}");
+    assert!(item["fix"].as_str().unwrap().contains("文件和文件夹"), "{item}");
+
+    // 没有标记时保持原样（绿色）
+    let ok = run_host_cmd("status", &default_status_input()).unwrap();
+    let item = ok.as_array().unwrap().iter().find(|i| i["key"] == "permissions").unwrap();
+    assert_eq!(item["level"], "green");
+}
