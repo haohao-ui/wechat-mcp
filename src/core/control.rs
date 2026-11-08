@@ -435,20 +435,15 @@ pub fn locations() -> (PathBuf, PathBuf, PathBuf) {
     (base, config, plist)
 }
 
-pub fn resolve_state_dir(config_path: &Path, base: &Path) -> PathBuf {
+/// Same rule as control.py: an existing config must load (errors are reported, never replaced by a default
+/// directory, so a broken config cannot act on the real state); only a missing config means `base/state`.
+pub fn resolve_state_dir(config_path: &Path, base: &Path) -> Result<PathBuf> {
     if config_path.exists() {
-        if let Ok(cfg) = BotConfig::load(config_path) {
-            return cfg.state_dir;
-        }
-        if let Ok(content) = fs::read_to_string(config_path) {
-            if let Ok(v) = serde_json::from_str::<Value>(&content) {
-                if let Some(s) = v.get("state_dir").and_then(Value::as_str) {
-                    return PathBuf::from(s);
-                }
-            }
-        }
+        return BotConfig::load(config_path)
+            .map(|cfg| cfg.state_dir)
+            .with_context(|| format!("invalid config {}", config_path.display()));
     }
-    base.join("state")
+    Ok(base.join("state"))
 }
 
 pub fn loaded() -> bool {
@@ -748,7 +743,13 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 }
             }
             let config_path = config_file.unwrap_or(default_config_path);
-            let state_dir = resolve_state_dir(&config_path, &base);
+            let state_dir = match resolve_state_dir(&config_path, &base) {
+                Ok(dir) => dir,
+                Err(error) => {
+                    let _ = writeln!(stderr, "control: {error:#}");
+                    return 2;
+                }
+            };
 
             if let Err(e) = fs::create_dir_all(&state_dir) {
                 let _ = writeln!(stderr, "failed to create state dir: {}", e);
@@ -786,7 +787,13 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 }
             }
             let config_path = config_file.unwrap_or(default_config_path);
-            let state_dir = resolve_state_dir(&config_path, &base);
+            let state_dir = match resolve_state_dir(&config_path, &base) {
+                Ok(dir) => dir,
+                Err(error) => {
+                    let _ = writeln!(stderr, "control: {error:#}");
+                    return 2;
+                }
+            };
 
             let pause_file = state_dir.join("admin-pause.json");
             if pause_file.exists() {
@@ -862,7 +869,13 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 }
             }
             let config_path = config_file.unwrap_or(default_config_path);
-            let state_dir = resolve_state_dir(&config_path, &base);
+            let state_dir = match resolve_state_dir(&config_path, &base) {
+                Ok(dir) => dir,
+                Err(error) => {
+                    let _ = writeln!(stderr, "control: {error:#}");
+                    return 2;
+                }
+            };
 
             let health_path = state_dir.join("health.json");
             let health = if health_path.exists() {
@@ -933,7 +946,13 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             }
 
             let config_path = config_file.unwrap_or(default_config_path);
-            let state_dir = resolve_state_dir(&config_path, &base);
+            let state_dir = match resolve_state_dir(&config_path, &base) {
+                Ok(dir) => dir,
+                Err(error) => {
+                    let _ = writeln!(stderr, "control: {error:#}");
+                    return 2;
+                }
+            };
 
             if let Err(e) = fs::create_dir_all(&state_dir) {
                 let _ = writeln!(stderr, "failed to create state dir: {}", e);
@@ -1594,6 +1613,7 @@ mod tests {
             &cfg_path,
             json!({
                 "schema_version": 1,
+            "allowlist": [{"recipient": "示例群", "kind": "group"}],
                 "account_id": "test",
                 "state_dir": state_dir.to_str().unwrap()
             })
@@ -1916,6 +1936,7 @@ mod tests {
         let cfg_path = env.path().join("config.json");
         let cfg = json!({
             "schema_version": 1,
+            "allowlist": [{"recipient": "示例群", "kind": "group"}],
             "host": "local",
             "account_id": "test",
             "state_dir": state_dir.to_str().unwrap()
@@ -1983,6 +2004,7 @@ mod tests {
         let cfg_path = env.path().join("config.json");
         let cfg = json!({
             "schema_version": 1,
+            "allowlist": [{"recipient": "示例群", "kind": "group"}],
             "host": "local",
             "account_id": "test",
             "state_dir": state_dir.to_str().unwrap()
@@ -2249,7 +2271,8 @@ mod tests {
         let cfg_path = env.path().join("config.json");
         let cfg = json!({
             "schema_version": 1,
-            "host": "wechat-mac",
+            "allowlist": [{"recipient": "示例群", "kind": "group"}],
+            "host": "local",
             "account_id": "fixture",
             "state_dir": state_dir.to_str().unwrap()
         });
@@ -2312,6 +2335,7 @@ mod tests {
         let cfg_path = env.path().join("config.json");
         let cfg = json!({
             "schema_version": 1,
+            "allowlist": [{"recipient": "示例群", "kind": "group"}],
             "host": "wechat-mac",
             "account_id": "fixture",
             "state_dir": state_dir.to_str().unwrap()
@@ -2401,6 +2425,7 @@ mod tests {
         let config_path = base.join("config.json");
         let cfg = json!({
             "schema_version": 1,
+            "allowlist": [{"recipient": "示例群", "kind": "group"}],
             "host": "local",
             "account_id": "test",
             "state_dir": custom_state.to_str().unwrap()
