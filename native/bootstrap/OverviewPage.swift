@@ -71,7 +71,7 @@ public final class OverviewPageController: NSViewController {
         topStack.addArrangedSubview(recheckButton)
         topStack.addArrangedSubview(pauseResumeButton)
 
-        topCard.contentView = topStack
+        topCard.setContent(topStack)
         mainStack.addArrangedSubview(topCard)
 
         // 2. Health check items list
@@ -84,7 +84,7 @@ public final class OverviewPageController: NSViewController {
         itemsStack.spacing = 10
         itemsStack.translatesAutoresizingMaskIntoConstraints = false
 
-        itemsBox.contentView = itemsStack
+        itemsBox.setContent(itemsStack)
         mainStack.addArrangedSubview(itemsBox)
 
         let document = FlippedView()

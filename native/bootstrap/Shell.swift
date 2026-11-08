@@ -125,3 +125,23 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
         }
     }
 }
+
+extension NSBox {
+    /// 把内容放进分组框自带的 contentView 并四边约束，分组框才会随内容撑高。
+    /// 不要直接 `box.contentView = stack`：那样框的高度不随内容变化，内容溢出、互相重叠（2026-11-08 设备上所有页面"挤在一起"）。
+    public func setContent(_ content: NSView, inset: CGFloat = 8) {
+        guard let host = self.contentView else {
+            self.contentView = content
+            return
+        }
+        host.subviews.forEach { $0.removeFromSuperview() }
+        content.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: inset),
+            content.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -inset),
+            content.topAnchor.constraint(equalTo: host.topAnchor, constant: inset),
+            content.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -inset),
+        ])
+    }
+}

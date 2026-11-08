@@ -1935,6 +1935,7 @@ fn host_task5_selftest_bin() -> Option<&'static PathBuf> {
             root.join("native").join("bootstrap").join("StatusPanel.swift"),
             root.join("native").join("bootstrap").join("LogTail.swift"),
             root.join("native").join("bootstrap").join("Permissions.swift"),
+            root.join("native").join("bootstrap").join("Shell.swift"),
             root.join("native").join("bootstrap").join("SettingsPage.swift"),
             root.join("native").join("eyes").join("Screens.swift"),
             root.join("tests").join("host_task5_selftest").join("main.swift"),
@@ -2191,6 +2192,7 @@ fn host_task6_selftest_bin() -> Option<&'static PathBuf> {
             root.join("native").join("bootstrap").join("StatusPanel.swift"),
             root.join("native").join("bootstrap").join("LogTail.swift"),
             root.join("native").join("bootstrap").join("Permissions.swift"),
+            root.join("native").join("bootstrap").join("Shell.swift"),
             root.join("native").join("bootstrap").join("SettingsPage.swift"),
             root.join("native").join("bootstrap").join("ContactsPage.swift"),
             root.join("native").join("bootstrap").join("McpPage.swift"),
@@ -2598,4 +2600,28 @@ fn test_native_sources_avoid_syntax_newer_than_swift_5_7() {
         }
     }
     assert!(offenders.is_empty(), "设备上的 Swift 5.7 不支持这些写法:\n{}", offenders.join("\n"));
+}
+
+/// NSBox 直接替换 contentView 时，框的高度不会随内容撑开：内容溢出、互相重叠（2026-11-08 设备上
+/// 所有页面右侧"挤在一起"）。页面里的分组框必须用 setContent(_:)（内容加进框自带的 contentView 并四边约束）。
+#[test]
+fn test_pages_never_replace_nsbox_content_view() {
+    let mut offenders = Vec::new();
+    for entry in fs::read_dir(repo_root().join("native/bootstrap")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().map_or(true, |e| e != "swift") {
+            continue;
+        }
+        let src = fs::read_to_string(&path).unwrap();
+        for (i, line) in src.lines().enumerate() {
+            let t = line.trim();
+            if t.starts_with("//") || t.contains("scrollView") || t.contains("window.") || t.contains("guard let host") || t.contains("self.contentView = content") {
+                continue;
+            }
+            if t.contains(".contentView = ") {
+                offenders.push(format!("{}:{}: {}", path.file_name().unwrap().to_string_lossy(), i + 1, t));
+            }
+        }
+    }
+    assert!(offenders.is_empty(), "分组框内容必须用 setContent(_:)：\n{}", offenders.join("\n"));
 }

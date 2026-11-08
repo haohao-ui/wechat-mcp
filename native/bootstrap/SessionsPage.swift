@@ -50,7 +50,7 @@ public final class SessionsPageController: NSViewController {
         emptyLabel.textColor = .secondaryLabelColor
         sessionsStack.addArrangedSubview(emptyLabel)
 
-        box.contentView = sessionsStack
+        box.setContent(sessionsStack)
         mainStack.addArrangedSubview(box)
 
         let document = FlippedView()
