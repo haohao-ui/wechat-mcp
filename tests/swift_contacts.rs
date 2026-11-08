@@ -23,6 +23,20 @@ fn build_contacts_test_bin(test_case: &str) -> Option<PathBuf> {
     let main = dir.join("main.swift");
 
     let main_code = match test_case {
+        "signature" => r#"
+import Foundation
+import CoreGraphics
+func solid(_ v: UInt8, _ w: Int = 40, _ h: Int = 30) -> CGImage {
+    var px = [UInt8](repeating: v, count: w * h * 4)
+    let ctx = CGContext(data: &px, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                        space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    return ctx.makeImage()!
+}
+let a = profileSignature(solid(200)), a2 = profileSignature(solid(200)), b = profileSignature(solid(40))
+guard !profileChanged(a, a2) else { print("FAIL: identical images reported changed"); exit(1) }
+guard profileChanged(a, b) else { print("FAIL: different images not detected"); exit(1) }
+print("PASS: profile_signature_verified")
+"#,
         "filter" => r#"
 import Foundation
 let spec = ContactsManagerFilterSpec(x: 40, tagY: 167, allY: 52)
@@ -322,4 +336,21 @@ fn contacts_leave_closes_manager_window_first() {
     let close = body.find("closeManagerWindow(").expect("contacts_leave 必须先关闭通讯录管理窗口");
     let gate = body.find("screenGate(").expect("gate");
     assert!(close < gate, "必须在界面检查之前关闭管理窗口（否则被它挡住、检查失败）");
+}
+
+/// 实机：点完联系人立刻截图，资料卡还没刷新，读到的是上一个人的（名字核对全部不通过）。
+/// 打开资料卡必须先记下点击前的画面指纹，点击后等到画面变化再识别。
+#[test]
+fn open_row_waits_for_profile_to_change() {
+    let Some(bin) = build_contacts_test_bin("signature") else { panic!("build failed") };
+    let out = Command::new(&bin).output().expect("run");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("PASS: profile_signature_verified"), "{stdout}");
+    let src = std::fs::read_to_string("native/bot/Contacts.swift").unwrap();
+    let start = src.find("operation == \"contacts_open_row\"").expect("open_row");
+    let body = &src[start..(start + 2600).min(src.len())];
+    let before = body.find("profileSignature(").expect("点击前要记下资料卡画面指纹");
+    let click = body.find("botActions.click").expect("click");
+    let wait = body.find("profileChanged(").expect("点击后要等资料卡画面变化");
+    assert!(before < click && click < wait, "顺序：先记指纹、再点击、再等变化");
 }

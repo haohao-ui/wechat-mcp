@@ -390,6 +390,14 @@ impl<'a> Capture for CaptureAdapter<'a> {
 /// 只在异常卡住时才让出。
 pub const CONTACTS_SYNC_MAX_RUN: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 
+/// 同步的让出判断：收到停止信号立即让出（写断点、核心可正常退出）；否则只在超过安全上限时让出
+pub fn contacts_sync_yield_check(
+    stop: Arc<AtomicBool>,
+    started: std::time::Instant,
+) -> impl Fn() -> bool + Send + Sync {
+    move || stop.load(Ordering::SeqCst) || started.elapsed() >= CONTACTS_SYNC_MAX_RUN
+}
+
 // ---------------------------------------------------------------------------
 // BotCoordinator: 对齐 coordinator.py
 // ---------------------------------------------------------------------------
@@ -1682,10 +1690,7 @@ impl BotCoordinator {
             let account_id = &self.config.account_id;
             let now_ms = (now * 1000.0) as i64;
 
-            let start_instant = std::time::Instant::now();
-            let should_yield = move || {
-                start_instant.elapsed() >= CONTACTS_SYNC_MAX_RUN
-            };
+            let should_yield = contacts_sync_yield_check(self.stop.clone(), std::time::Instant::now());
 
             match crate::core::contacts::sync::run_sync(
                 capture,
@@ -1762,10 +1767,7 @@ impl BotCoordinator {
             let store = &self.history;
             let account_id = &self.config.account_id;
             let now_ms = (now * 1000.0) as i64;
-            let start_instant = std::time::Instant::now();
-            let should_yield = move || {
-                start_instant.elapsed() >= CONTACTS_SYNC_MAX_RUN
-            };
+            let should_yield = contacts_sync_yield_check(self.stop.clone(), std::time::Instant::now());
             let _ = crate::core::contacts::sync::run_sync(
                 capture,
                 store,
@@ -2436,6 +2438,16 @@ mod tests {
         assert!(CONTACTS_SYNC_MAX_RUN >= std::time::Duration::from_secs(600));
         let src = include_str!("scheduler.rs");
         assert!(!src.contains(&format!("from_secs({})", 15)), "不得再有 15 秒让出");
+    }
+
+    /// 实机：同步不响应停止信号，只能强制结束核心。收到停止（control stop / 宿主退出）要立即让出。
+    #[test]
+    fn test_contacts_sync_yields_on_stop_signal() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let should_yield = contacts_sync_yield_check(stop.clone(), std::time::Instant::now());
+        assert!(!should_yield());
+        stop.store(true, Ordering::SeqCst);
+        assert!(should_yield(), "收到停止必须立即让出");
     }
 
     #[test]
