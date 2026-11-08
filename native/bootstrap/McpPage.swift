@@ -80,7 +80,7 @@ public struct McpPageLogic {
         timeoutSeconds: Int,
         timeoutAction: String,
         queueMinutes: Int
-    ) -> Result<[String: Any], String> {
+    ) -> Result<[String: Any], PageError> {
         let formInputs: [String: Any] = [
             "brain_mode": "external",
             "brain_timeout_seconds": timeoutSeconds,
@@ -92,17 +92,17 @@ public struct McpPageLogic {
             let updated = try ConfigFormLogic.buildUpdatedConfig(original: config, formInputs: formInputs)
             return .success(updated)
         } catch {
-            return .failure(error.localizedDescription)
+            return .failure(PageError(error.localizedDescription))
         }
     }
 
-    public static func updateBrainModeBuiltin(config: [String: Any]) -> Result<[String: Any], String> {
+    public static func updateBrainModeBuiltin(config: [String: Any]) -> Result<[String: Any], PageError> {
         let formInputs: [String: Any] = ["brain_mode": "builtin"]
         do {
             let updated = try ConfigFormLogic.buildUpdatedConfig(original: config, formInputs: formInputs)
             return .success(updated)
         } catch {
-            return .failure(error.localizedDescription)
+            return .failure(PageError(error.localizedDescription))
         }
     }
 
@@ -345,7 +345,7 @@ public final class McpPageController: NSViewController {
 
     @objc private func handleSaveBrain() {
         let isExternal = (modeExternalRadio.state == .on)
-        let res: Result<[String: Any], String>
+        let res: Result<[String: Any], PageError>
 
         if isExternal {
             guard let timeout = Int(timeoutField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) else {
@@ -380,7 +380,7 @@ public final class McpPageController: NSViewController {
                 brainStatusMessageLabel.textColor = .systemRed
             }
         case .failure(let err):
-            brainStatusMessageLabel.stringValue = "校验错误: \(err)"
+            brainStatusMessageLabel.stringValue = "校验错误: \(err.message)"
             brainStatusMessageLabel.textColor = .systemRed
         }
     }

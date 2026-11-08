@@ -2568,3 +2568,34 @@ fn test_run_control_command_reads_large_output_without_deadlock() {
     assert_eq!(hung["timed_out"], true, "{hung}");
     assert!(hung["seconds"].as_f64().unwrap() < 5.0, "{hung}");
 }
+
+/// 专用 Mac 上是 Swift 5.7（开发机更新）：部署时在设备上编译，较新的语法在开发机能过、到设备就失败
+/// （2026-11-08：`extension String: @retroactive Error` 让宿主应用在设备上编译失败）。
+/// 禁止已知的 5.7 不支持的写法，并禁止把 String 当 Error 用。
+#[test]
+fn test_native_sources_avoid_syntax_newer_than_swift_5_7() {
+    let mut offenders = Vec::new();
+    let mut stack = vec![repo_root().join("native")];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().map_or(false, |e| e == "swift") {
+                let src = fs::read_to_string(&path).unwrap();
+                for (i, line) in src.lines().enumerate() {
+                    let t = line.trim_start();
+                    if t.starts_with("//") {
+                        continue;
+                    }
+                    for bad in ["@retroactive", "extension String: Error", "throws(", "#Preview", "package func ", "consuming ", "borrowing "] {
+                        if line.contains(bad) {
+                            offenders.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(offenders.is_empty(), "设备上的 Swift 5.7 不支持这些写法:\n{}", offenders.join("\n"));
+}
