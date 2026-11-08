@@ -213,9 +213,10 @@ async fn run_core_for_account(
     let worker_sock = base_dir.join("worker.sock");
     let bot_worker_sock = base_dir.join("bot-worker.sock");
 
+    // 网关里登记的是配置里的账号名（设备绑定），不是数据归属的微信账号；用 wxid 会"未注册账号"连不上（2026-11-08 实机）
     let mcp_client = std::sync::Arc::new(McpSocketClient::new(
         worker_sock,
-        coordinator.config.account_id.clone(),
+        coordinator.configured_account_id.clone(),
     ));
 
     let max_bytes = (coordinator.config.max_attachment_mb * 1024 * 1024) as usize;
@@ -436,6 +437,17 @@ async fn run_core_for_account(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// 实机 2026-11-08：连网关时用了当前微信账号（wxid），网关报"未注册账号"，机器人连不上。
+    /// 网关客户端必须用配置里的账号名。
+    #[test]
+    fn test_gateway_client_uses_configured_account_not_wechat_account() {
+        let src = include_str!("serve.rs");
+        let start = src.find("McpSocketClient::new(").expect("mcp client");
+        let call = &src[start..start + 200];
+        assert!(call.contains("configured_account_id"), "{call}");
+        assert!(!call.contains("config.account_id"), "{call}");
+    }
 
 
     struct TempDir(PathBuf);
