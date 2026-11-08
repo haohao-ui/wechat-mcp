@@ -1493,39 +1493,60 @@ impl BotCoordinator {
             }
         };
 
+        let config_val = serde_json::to_value(&self.config).ok();
         if action == "accept" {
-            let mut accepted_res = json!({
-                "accepted": true,
-            });
-            if let Some(obj) = worker_res.as_object() {
-                for (k, v) in obj {
-                    accepted_res[k] = v.clone();
+            match crate::core::control::calibrate_accept(config_val.as_ref(), None, None, Some(&worker_res), None) {
+                Ok(accepted_res) => {
+                    write_private(
+                        &res_path,
+                        &json!({
+                            "id": req_id,
+                            "ok": true,
+                            "result": accepted_res,
+                        }),
+                    )?;
+                }
+                Err(err) => {
+                    write_private(
+                        &res_path,
+                        &json!({
+                            "id": req_id,
+                            "ok": false,
+                            "error": err.to_string(),
+                        }),
+                    )?;
                 }
             }
-            write_private(
-                &res_path,
-                &json!({
-                    "id": req_id,
-                    "ok": true,
-                    "result": accepted_res,
-                }),
-            )?;
         } else {
-            let version = worker_res.get("wechat_version").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let out = json!({
-                "candidate_json": format!("native/layout/candidate-wechat-{version}.json"),
-                "candidate_png": format!("native/layout/candidate-wechat-{version}.png"),
-                "differences": json!([]),
-                "missing": json!([]),
-            });
-            write_private(
-                &res_path,
-                &json!({
-                    "id": req_id,
-                    "ok": true,
-                    "result": out,
-                }),
-            )?;
+            match crate::core::control::run_calibrate(config_val.as_ref(), Some(&worker_res), None, None, None) {
+                Ok((diffs, missing, candidate)) => {
+                    let version = candidate.get("wechat_version").and_then(Value::as_str).unwrap_or("");
+                    let out = json!({
+                        "candidate_json": format!("{}/candidate-wechat-{}.json", crate::core::control::REMOTE_LAYOUT_DIR, version),
+                        "candidate_png": format!("{}/candidate-wechat-{}.png", crate::core::control::REMOTE_LAYOUT_DIR, version),
+                        "differences": diffs,
+                        "missing": missing,
+                    });
+                    write_private(
+                        &res_path,
+                        &json!({
+                            "id": req_id,
+                            "ok": true,
+                            "result": out,
+                        }),
+                    )?;
+                }
+                Err(err) => {
+                    write_private(
+                        &res_path,
+                        &json!({
+                            "id": req_id,
+                            "ok": false,
+                            "error": err.to_string(),
+                        }),
+                    )?;
+                }
+            }
         }
 
         Ok(())
@@ -3187,6 +3208,89 @@ mod tests {
     }
 
     #[test]
+    fn test_serve_calibration_real_candidate_writing_and_accept_flow() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+
+        // 构造带差异的 calibrate 测量结果
+        let mut base_layout: Value = serde_json::from_str(include_str!("../../native/layout/wechat-4.1.15.json")).unwrap();
+        base_layout["wechat_version"] = json!("4.1.99");
+        let measured = json!({
+            "input_divider": 510.0
+        });
+
+        let mut cap = MockCoordinatorCapture::new();
+        cap.call_responses.insert("calibrate".to_string(), json!({
+            "wechat_version": "4.1.99",
+            "layout": base_layout,
+            "measured": measured,
+        }));
+        coord.capture = Some(Box::new(cap));
+
+        let req_file = coord.root.join("calibrate-request.json");
+        let res_file = coord.root.join("calibrate-result.json");
+        write_private(&req_file, &json!({
+            "id": "req_cal_diff",
+            "action": "calibrate",
+            "created_at": (coord.clock)()
+        })).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.serve_calibration().await.unwrap();
+        });
+
+        assert!(!req_file.exists());
+        assert!(res_file.exists());
+        let res: Value = read_json(&res_file).unwrap();
+        assert_eq!(res["id"], "req_cal_diff");
+        assert_eq!(res["ok"], true);
+
+        // 必须计算出差异，不能是空数组！
+        let diffs = res["result"]["differences"].as_array().expect("differences must be an array");
+        assert!(!diffs.is_empty(), "Differences must not be empty when measured fields differ");
+
+        // 必须真实写出 candidate json 文件
+        let cand_path_str = res["result"]["candidate_json"].as_str().expect("candidate_json path must be returned");
+        let resolved_cand = crate::core::control::resolve_local_path(cand_path_str);
+        assert!(resolved_cand.exists(), "candidate_json file must physically exist at {}", resolved_cand.display());
+
+        let cand_content: Value = serde_json::from_str(&fs::read_to_string(&resolved_cand).unwrap()).unwrap();
+        assert_eq!(cand_content["regions"]["input"]["y"], 510.0, "Candidate JSON must reflect measured coordinate");
+
+        // 下一步：测试 accept 流程真实生效
+        write_private(&req_file, &json!({
+            "id": "req_acc_real",
+            "action": "accept",
+            "created_at": (coord.clock)()
+        })).unwrap();
+
+        rt.block_on(async {
+            coord.serve_calibration().await.unwrap();
+        });
+
+        assert!(!req_file.exists());
+        let acc_res: Value = read_json(&res_file).unwrap();
+        assert_eq!(acc_res["id"], "req_acc_real");
+        assert_eq!(acc_res["ok"], true);
+        assert_eq!(acc_res["result"]["accepted"], true);
+
+        let active_path_str = acc_res["result"]["active_layout"].as_str().unwrap();
+        let resolved_active = crate::core::control::resolve_local_path(active_path_str);
+        assert!(resolved_active.exists(), "Active layout file must exist after accept");
+
+        let active_content: Value = serde_json::from_str(&fs::read_to_string(&resolved_active).unwrap()).unwrap();
+        assert_eq!(active_content["regions"]["input"]["y"], 510.0, "Active layout must be updated with candidate contents");
+
+        // candidate 文件在原子 mv 之后应当不再存在
+        assert!(!resolved_cand.exists(), "Candidate file should be moved to active layout");
+        let _ = fs::remove_file(&resolved_active);
+        let _ = fs::remove_file(&resolved_cand);
+    }
+
+    #[test]
     fn test_serve_calibration_writes_candidate_via_live_capture() {
         let td = TestDir::new();
         let allow = vec![AllowlistEntry { recipient: "a".to_string(), kind: "private".to_string(), aliases: None }];
@@ -3196,7 +3300,17 @@ mod tests {
         let mut cap = MockCoordinatorCapture::new();
         cap.call_responses.insert("calibrate".to_string(), json!({
             "wechat_version": "4.1.15",
-            "layout": {}
+            "layout": {
+                "schema": 1,
+                "wechat_version": "4.1.15",
+                "window": {"width": 880.0, "height": 640.0},
+                "regions": {
+                    "session_list": {"x": 60.0, "y": 60.0, "w": 240.0, "h": 580.0},
+                    "title": {"x": 250.0, "y": 0.0, "w": 620.0, "h": 50.0},
+                    "chat": {"x": 315.0, "y": 60.0, "w": 565.0, "h": 436.0},
+                    "input": {"x": 315.0, "y": 496.0, "w": 565.0, "h": 144.0}
+                }
+            }
         }));
         coord.capture = Some(Box::new(cap));
 
@@ -3227,22 +3341,36 @@ mod tests {
         let cfg_path = create_test_config(td.path(), allow);
         let mut coord = BotCoordinator::new(&cfg_path).unwrap();
 
+        let layout_obj: Value = serde_json::from_str(include_str!("../../native/layout/wechat-4.1.15.json")).unwrap();
         let mut cap = MockCoordinatorCapture::new();
         cap.call_responses.insert("calibrate".to_string(), json!({
             "wechat_version": "4.1.15",
-            "layout": {}
+            "layout": layout_obj.clone()
         }));
         coord.capture = Some(Box::new(cap));
 
         let req_file = coord.root.join("calibrate-request.json");
         let res_file = coord.root.join("calibrate-result.json");
+
+        // 先发起 calibrate 写 candidate
+        write_private(&req_file, &json!({
+            "id": "req_cal_prior",
+            "action": "calibrate",
+            "created_at": (coord.clock)()
+        })).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            coord.serve_calibration().await.unwrap();
+        });
+
+        // 再发起 accept
         write_private(&req_file, &json!({
             "id": "req_accept_1",
             "action": "accept",
             "created_at": (coord.clock)()
         })).unwrap();
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             coord.serve_calibration().await.unwrap();
         });

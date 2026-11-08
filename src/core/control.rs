@@ -14,6 +14,16 @@ pub const HISTORY_LABEL: &str = "local.wechat-rpa.history";
 pub const REMOTE_LAYOUT_DIR: &str = ".wechat-rpa/layout";
 pub const CALIBRATE_PROBE: &str = "calibrate-probe";
 
+pub fn core_enabled_file() -> PathBuf {
+    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"));
+    home.join(".wechat-rpa/core.enabled")
+}
+
+pub fn core_socket_file() -> PathBuf {
+    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"));
+    home.join(".wechat-rpa/core.sock")
+}
+
 #[repr(C)]
 struct Tm {
     tm_sec: i32,
@@ -586,7 +596,7 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
     if action == "-h" || action == "--help" {
         let _ = writeln!(
             stdout,
-            "Usage: wechat-mcp control <status|start|stop|pause|resume|resume-session|config-check|calibrate> [--config <path>]"
+            "Usage: wechat-mcp control <status|start|stop|pause|resume|resume-session|config-check|calibrate|migrate-history|history-status|merge-contact|unmerge-contact|history-backup> [--config <path>]"
         );
         return 0;
     }
@@ -611,6 +621,15 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 }
             }
             let config_path = config_file.unwrap_or(default_config_path);
+
+            let core_enabled_path = core_enabled_file();
+            if let Some(parent) = core_enabled_path.parent() {
+                let _ = fs::create_dir_all(parent);
+                let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+            }
+            let _ = fs::write(&core_enabled_path, b"");
+            let _ = fs::set_permissions(&core_enabled_path, fs::Permissions::from_mode(0o600));
+
             let uid = unsafe { getuid() };
             let domain = format!("gui/{uid}");
             let label = format!("{domain}/{BOT_LABEL}");
@@ -645,10 +664,23 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 }
             }
 
-            let _ = writeln!(stdout, "{}", json!({"status": "started", "label": BOT_LABEL}));
+            let _ = writeln!(
+                stdout,
+                "{}",
+                json!({
+                    "status": "started",
+                    "label": BOT_LABEL,
+                    "core_enabled": true
+                })
+            );
             0
         }
         "stop" => {
+            let core_enabled_path = core_enabled_file();
+            if core_enabled_path.exists() {
+                let _ = fs::remove_file(&core_enabled_path);
+            }
+
             let uid = unsafe { getuid() };
             let domain = format!("gui/{uid}");
             let label = format!("{domain}/{BOT_LABEL}");
@@ -700,7 +732,15 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 return 1;
             }
 
-            let _ = writeln!(stdout, "{}", json!({"status": "stopped", "label": BOT_LABEL}));
+            let _ = writeln!(
+                stdout,
+                "{}",
+                json!({
+                    "status": "stopped",
+                    "label": BOT_LABEL,
+                    "core_enabled": false
+                })
+            );
             0
         }
         "config-check" => {
@@ -899,8 +939,20 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 let _ = writeln!(stderr, "界面核对连续失败，请运行 control calibrate 重新定位");
             }
 
+            let core_enabled_path = core_enabled_file();
+            let core_enabled = core_enabled_path.exists();
+            let core_sock_path = core_socket_file();
+            let core_running = std::os::unix::net::UnixStream::connect(&core_sock_path).is_ok();
+
+            if is_loaded && core_enabled {
+                let _ = writeln!(stderr, "警告：检测到旧 Python 服务 (local.wechat-rpa.bot) 与 core.enabled 同时存在冲突");
+            }
+
             let out = json!({
                 "launchd_loaded": is_loaded,
+                "python_launchd_loaded": is_loaded,
+                "core_enabled": core_enabled,
+                "core_running": core_running,
                 "health": health,
                 "stats": stats,
                 "config": config_path.to_string_lossy().to_string(),
@@ -910,7 +962,10 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             0
         }
         "calibrate" => {
-            if !is_loaded {
+            let core_enabled = core_enabled_file().exists();
+            let core_running = std::os::unix::net::UnixStream::connect(&core_socket_file()).is_ok();
+            let bot_running = is_loaded || core_running || core_enabled;
+            if !bot_running {
                 let _ = writeln!(stderr, "机器人未运行：请先 control start");
                 return 1;
             }
@@ -1051,6 +1106,274 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
 
             let _ = writeln!(stdout, "{}", res);
             0
+        }
+        "migrate-history" => {
+            let mut config_file: Option<PathBuf> = None;
+            let mut idx = 1;
+            while idx < args.len() {
+                if args[idx] == "--config" && idx + 1 < args.len() {
+                    config_file = Some(PathBuf::from(&args[idx + 1]));
+                    idx += 2;
+                } else {
+                    idx += 1;
+                }
+            }
+            let config_path = config_file.unwrap_or(default_config_path);
+            let config_val = match BotConfig::load(&config_path) {
+                Ok(c) => serde_json::to_value(&c).unwrap_or(Value::Null),
+                Err(e) => {
+                    let _ = writeln!(stderr, "failed to load config: {}", e);
+                    return 1;
+                }
+            };
+            match crate::core::history::migrate::migrate(&config_val) {
+                Ok(res) => {
+                    let _ = writeln!(stdout, "{}", serde_json::to_string(&res).unwrap_or_default());
+                    0
+                }
+                Err(e) => {
+                    let _ = writeln!(stderr, "migrate error: {}", e);
+                    1
+                }
+            }
+        }
+        "history-status" => {
+            let mut config_file: Option<PathBuf> = None;
+            let mut idx = 1;
+            while idx < args.len() {
+                if args[idx] == "--config" && idx + 1 < args.len() {
+                    config_file = Some(PathBuf::from(&args[idx + 1]));
+                    idx += 2;
+                } else {
+                    idx += 1;
+                }
+            }
+            let config_path = config_file.unwrap_or(default_config_path);
+            let cfg = match BotConfig::load(&config_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = writeln!(stderr, "failed to load config: {}", e);
+                    return 1;
+                }
+            };
+            let store = match crate::core::history::store::HistoryStore::open(&cfg.state_dir) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = writeln!(stderr, "failed to open history store: {}", e);
+                    return 1;
+                }
+            };
+            match crate::core::history::migrate::history_status(&store) {
+                Ok(val) => {
+                    let _ = writeln!(stdout, "{}", val);
+                    0
+                }
+                Err(e) => {
+                    let _ = writeln!(stderr, "history status error: {}", e);
+                    1
+                }
+            }
+        }
+        "merge-contact" => {
+            let mut config_file: Option<PathBuf> = None;
+            let mut source: Option<String> = None;
+            let mut into: Option<String> = None;
+            let mut note = String::new();
+            let mut idx = 1;
+            let mut positional = Vec::new();
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--config" if idx + 1 < args.len() => {
+                        config_file = Some(PathBuf::from(&args[idx + 1]));
+                        idx += 2;
+                    }
+                    "--source" if idx + 1 < args.len() => {
+                        source = Some(args[idx + 1].clone());
+                        idx += 2;
+                    }
+                    "--into" if idx + 1 < args.len() => {
+                        into = Some(args[idx + 1].clone());
+                        idx += 2;
+                    }
+                    "--note" if idx + 1 < args.len() => {
+                        note = args[idx + 1].clone();
+                        idx += 2;
+                    }
+                    pos if !pos.starts_with('-') => {
+                        positional.push(pos.to_string());
+                        idx += 1;
+                    }
+                    _ => {
+                        idx += 1;
+                    }
+                }
+            }
+            if source.is_none() && !positional.is_empty() {
+                source = Some(positional.remove(0));
+            }
+            if into.is_none() && !positional.is_empty() {
+                into = Some(positional.remove(0));
+            }
+            if note.is_empty() && !positional.is_empty() {
+                note = positional.remove(0);
+            }
+            let (Some(src), Some(dst)) = (source, into) else {
+                let _ = writeln!(stderr, "merge-contact requires --source and --into");
+                return 2;
+            };
+            let config_path = config_file.unwrap_or(default_config_path);
+            let cfg = match BotConfig::load(&config_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = writeln!(stderr, "failed to load config: {}", e);
+                    return 1;
+                }
+            };
+            let store = match crate::core::history::store::HistoryStore::open(&cfg.state_dir) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = writeln!(stderr, "failed to open history store: {}", e);
+                    return 1;
+                }
+            };
+            let src_cid = match crate::core::history::migrate::resolve_contact(&store, &cfg.account_id, &src) {
+                Ok(id) => id,
+                Err(_) => {
+                    let _ = writeln!(stderr, "unknown contact: {}", src);
+                    return 1;
+                }
+            };
+            let dst_cid = match crate::core::history::migrate::resolve_contact(&store, &cfg.account_id, &dst) {
+                Ok(id) => id,
+                Err(_) => {
+                    let _ = writeln!(stderr, "unknown contact: {}", dst);
+                    return 1;
+                }
+            };
+            match store.merge(&src_cid, &dst_cid, &note) {
+                Ok(merge_id) => {
+                    let _ = writeln!(stdout, "{}", json!({"merge_id": merge_id}));
+                    0
+                }
+                Err(e) => {
+                    let _ = writeln!(stderr, "merge error: {}", e);
+                    1
+                }
+            }
+        }
+        "unmerge-contact" => {
+            let mut config_file: Option<PathBuf> = None;
+            let mut merge_id: Option<String> = None;
+            let mut idx = 1;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--config" if idx + 1 < args.len() => {
+                        config_file = Some(PathBuf::from(&args[idx + 1]));
+                        idx += 2;
+                    }
+                    "--merge-id" if idx + 1 < args.len() => {
+                        merge_id = Some(args[idx + 1].clone());
+                        idx += 2;
+                    }
+                    id if !id.starts_with('-') => {
+                        merge_id = Some(id.to_string());
+                        idx += 1;
+                    }
+                    _ => {
+                        idx += 1;
+                    }
+                }
+            }
+            let Some(mid) = merge_id else {
+                let _ = writeln!(stderr, "unmerge-contact requires merge_id");
+                return 2;
+            };
+            let Ok(mid_i64) = mid.parse::<i64>() else {
+                let _ = writeln!(stderr, "invalid merge_id: {}", mid);
+                return 2;
+            };
+            let config_path = config_file.unwrap_or(default_config_path);
+            let cfg = match BotConfig::load(&config_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = writeln!(stderr, "failed to load config: {}", e);
+                    return 1;
+                }
+            };
+            let store = match crate::core::history::store::HistoryStore::open(&cfg.state_dir) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = writeln!(stderr, "failed to open history store: {}", e);
+                    return 1;
+                }
+            };
+            match store.unmerge(mid_i64) {
+                Ok(_) => {
+                    let _ = writeln!(stdout, "{}", json!({"unmerged": mid_i64}));
+                    0
+                }
+                Err(e) => {
+                    let _ = writeln!(stderr, "unmerge error: {}", e);
+                    1
+                }
+            }
+        }
+        "history-backup" => {
+            let mut config_file: Option<PathBuf> = None;
+            let mut to_path: Option<PathBuf> = None;
+            let mut idx = 1;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--config" if idx + 1 < args.len() => {
+                        config_file = Some(PathBuf::from(&args[idx + 1]));
+                        idx += 2;
+                    }
+                    "--to" if idx + 1 < args.len() => {
+                        to_path = Some(PathBuf::from(&args[idx + 1]));
+                        idx += 2;
+                    }
+                    p if !p.starts_with('-') => {
+                        to_path = Some(PathBuf::from(p));
+                        idx += 1;
+                    }
+                    _ => {
+                        idx += 1;
+                    }
+                }
+            }
+            let Some(target) = to_path else {
+                let _ = writeln!(stderr, "history-backup requires --to <path>");
+                return 2;
+            };
+            if target.exists() {
+                let _ = writeln!(stderr, "backup target already exists: {}", target.display());
+                return 1;
+            }
+            let config_path = config_file.unwrap_or(default_config_path);
+            let cfg = match BotConfig::load(&config_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = writeln!(stderr, "failed to load config: {}", e);
+                    return 1;
+                }
+            };
+            let store = match crate::core::history::store::HistoryStore::open(&cfg.state_dir) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = writeln!(stderr, "failed to open history store: {}", e);
+                    return 1;
+                }
+            };
+            match crate::core::history::migrate::history_backup(&store, &target) {
+                Ok(bytes) => {
+                    let _ = writeln!(stdout, "{}", json!({"backup": target.to_string_lossy(), "bytes": bytes}));
+                    0
+                }
+                Err(e) => {
+                    let _ = writeln!(stderr, "history-backup error: {}", e);
+                    1
+                }
+            }
         }
         other => {
             let _ = writeln!(stderr, "unknown control action: {}", other);
@@ -2329,7 +2652,11 @@ mod tests {
     /// 机器人未运行时退出码 1 且 stderr 提示 "机器人未运行：请先 control start"
     #[test]
     fn test_control_calibrate_requires_running_bot() {
+        let _lock = ENV_LOCK.lock().unwrap();
         let env = TempDir::new();
+        let orig_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", env.path()) };
+
         let state_dir = env.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
         let cfg_path = env.path().join("config.json");
@@ -2350,6 +2677,10 @@ mod tests {
             &mut stderr,
             Some(false),
         );
+
+        if let Some(h) = orig_home {
+            unsafe { std::env::set_var("HOME", h) };
+        }
 
         assert_eq!(code, 1);
         let err_str = String::from_utf8(stderr).unwrap();
@@ -2542,5 +2873,270 @@ mod tests {
         let out: Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(out["status"], "started");
         assert_eq!(out["label"], BOT_LABEL);
+    }
+
+    #[test]
+    fn test_control_history_maintenance_commands_cli() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let env = TempDir::new();
+        let state_dir = env.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+
+        let cfg = json!({
+            "schema_version": 1,
+            "account_id": "test_account",
+            "host": "local",
+            "state_dir": state_dir.to_str().unwrap(),
+            "allowlist": [{"recipient": "测试联系人A", "kind": "private"}]
+        });
+        let cfg_path = env.path().join("config.json");
+        fs::write(&cfg_path, serde_json::to_string(&cfg).unwrap()).unwrap();
+
+        // 1. 测试 migrate-history
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control(
+            &["migrate-history".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &mut stdout,
+            &mut stderr,
+            None,
+        );
+        assert_eq!(code, 0, "migrate-history should succeed: {}", String::from_utf8_lossy(&stderr));
+        let out: Value = serde_json::from_slice(&stdout).unwrap();
+        assert!(out.is_object(), "migrate-history output should be json map");
+
+        // 在 history 库中插入两个联系人以供 merge/unmerge 测试
+        {
+            let store = crate::core::history::store::HistoryStore::open(&state_dir).unwrap();
+            let conn_guard = store.connection();
+            let conn = conn_guard.lock().unwrap();
+            conn.execute(
+                "INSERT INTO contacts (contact_id, account_id, kind, display_name, created_at, updated_at) VALUES ('c_user1', 'test_account', 'private', 'User 1', 1, 1), ('c_user2', 'test_account', 'private', 'User 2', 1, 1)",
+                [],
+            ).unwrap();
+        }
+
+        // 2. 测试 history-status
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control(
+            &["history-status".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &mut stdout,
+            &mut stderr,
+            None,
+        );
+        assert_eq!(code, 0, "history-status should succeed: {}", String::from_utf8_lossy(&stderr));
+        let status_out: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(status_out["contacts"].as_array().unwrap().len(), 2);
+
+        // 3. 测试 merge-contact
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control(
+            &[
+                "merge-contact".into(),
+                "--config".into(), cfg_path.to_str().unwrap().into(),
+                "--source".into(), "c_user1".into(),
+                "--into".into(), "c_user2".into(),
+                "--note".into(), "test merge".into(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+        );
+        assert_eq!(code, 0, "merge-contact should succeed: {}", String::from_utf8_lossy(&stderr));
+        let merge_out: Value = serde_json::from_slice(&stdout).unwrap();
+        let merge_id = merge_out["merge_id"].as_i64().expect("merge_id should be integer");
+
+        // 4. 测试 unmerge-contact
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control(
+            &[
+                "unmerge-contact".into(),
+                "--config".into(), cfg_path.to_str().unwrap().into(),
+                merge_id.to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+        );
+        assert_eq!(code, 0, "unmerge-contact should succeed: {}", String::from_utf8_lossy(&stderr));
+        let unmerge_out: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(unmerge_out["unmerged"], merge_id);
+
+        // 5. 测试 history-backup
+        let backup_target = env.path().join("backup_hist.sqlite3");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control(
+            &[
+                "history-backup".into(),
+                "--config".into(), cfg_path.to_str().unwrap().into(),
+                "--to".into(), backup_target.to_str().unwrap().into(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+        );
+        assert_eq!(code, 0, "history-backup should succeed: {}", String::from_utf8_lossy(&stderr));
+        assert!(backup_target.exists(), "backup destination must exist");
+        let backup_out: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(backup_out["backup"], backup_target.to_str().unwrap());
+    }
+
+    #[test]
+    fn test_control_start_and_stop_manage_core_enabled() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let env = TempDir::new();
+        let orig_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", env.path()) };
+
+        let core_enabled_path = env.path().join(".wechat-rpa/core.enabled");
+        assert!(!core_enabled_path.exists());
+
+        // 1. control start 必须创建 core.enabled
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut loaded_fn = || false;
+        let mut cmd_runner = |_cmd: &str, _args: &[&str]| true;
+        let code = execute_control_full(
+            &["start".into()],
+            &mut stdout,
+            &mut stderr,
+            Some(&mut loaded_fn),
+            Some(&mut cmd_runner),
+        );
+        assert_eq!(code, 0);
+        assert!(core_enabled_path.exists(), "control start must create core.enabled for CoreSupervisor");
+        let start_out: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(start_out["core_enabled"], true);
+
+        // 2. control stop 必须删除 core.enabled
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut loaded_fn = || false;
+        let code = execute_control_full(
+            &["stop".into()],
+            &mut stdout,
+            &mut stderr,
+            Some(&mut loaded_fn),
+            Some(&mut cmd_runner),
+        );
+        assert_eq!(code, 0);
+        assert!(!core_enabled_path.exists(), "control stop must remove core.enabled");
+        let stop_out: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(stop_out["core_enabled"], false);
+
+        if let Some(h) = orig_home {
+            unsafe { std::env::set_var("HOME", h) };
+        }
+    }
+
+    #[test]
+    fn test_control_status_distinguishes_python_and_core() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let env = TempDir::new();
+        let orig_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", env.path()) };
+
+        let core_enabled_path = env.path().join(".wechat-rpa/core.enabled");
+        fs::create_dir_all(core_enabled_path.parent().unwrap()).unwrap();
+        fs::write(&core_enabled_path, b"").unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut loaded_fn = || false; // Python launchd 未 loaded
+        let code = execute_control_full(
+            &["status".into()],
+            &mut stdout,
+            &mut stderr,
+            Some(&mut loaded_fn),
+            None,
+        );
+        assert_eq!(code, 0);
+        let out: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(out["python_launchd_loaded"], false);
+        assert_eq!(out["core_enabled"], true);
+
+        if let Some(h) = orig_home {
+            unsafe { std::env::set_var("HOME", h) };
+        }
+    }
+
+    #[test]
+    fn test_control_calibrate_allows_running_core_when_python_not_loaded() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let env = TempDir::new();
+        let orig_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", env.path()) };
+
+        // 模拟 core.enabled 存在（或正在运行），但 python loaded 为 false
+        let core_enabled_path = env.path().join(".wechat-rpa/core.enabled");
+        fs::create_dir_all(core_enabled_path.parent().unwrap()).unwrap();
+        fs::write(&core_enabled_path, b"").unwrap();
+
+        let state_dir = env.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let cfg = json!({
+            "schema_version": 1,
+            "account_id": "test_account",
+            "host": "local",
+            "state_dir": state_dir.to_str().unwrap(),
+            "allowlist": [{"recipient": "测试群", "kind": "group"}]
+        });
+        let cfg_path = env.path().join("config.json");
+        fs::write(&cfg_path, serde_json::to_string(&cfg).unwrap()).unwrap();
+
+        // 后台模拟响应 calibrate-request.json
+        let state_dir_clone = state_dir.clone();
+        let handle = std::thread::spawn(move || {
+            let req_path = state_dir_clone.join("calibrate-request.json");
+            let res_path = state_dir_clone.join("calibrate-result.json");
+            for _ in 0..50 {
+                if req_path.exists() {
+                    if let Ok(content) = fs::read_to_string(&req_path) {
+                        if let Ok(req) = serde_json::from_str::<Value>(&content) {
+                            let id = req["id"].as_str().unwrap();
+                            let _ = fs::remove_file(&req_path);
+                            let _ = fs::write(
+                                &res_path,
+                                json!({
+                                    "id": id,
+                                    "ok": true,
+                                    "result": {
+                                        "candidate_json": "cand.json",
+                                        "candidate_png": "cand.png",
+                                        "differences": [],
+                                        "missing": []
+                                    }
+                                }).to_string(),
+                            );
+                            return;
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut loaded_fn = || false; // Python 未运行
+        let code = execute_control_full(
+            &["calibrate".into(), "--config".into(), cfg_path.to_str().unwrap().into(), "--timeout".into(), "3".into()],
+            &mut stdout,
+            &mut stderr,
+            Some(&mut loaded_fn),
+            None,
+        );
+        let _ = handle.join();
+
+        if let Some(h) = orig_home {
+            unsafe { std::env::set_var("HOME", h) };
+        }
+
+        // 不应报错 "机器人未运行：请先 control start"
+        assert_eq!(code, 0, "Calibrate should succeed when core.enabled is present even if python is not loaded");
     }
 }

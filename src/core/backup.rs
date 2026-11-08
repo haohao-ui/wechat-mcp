@@ -141,6 +141,23 @@ pub fn backup_sqlite_db(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn is_valid_backup_dir(path: &Path) -> bool {
+    if !path.is_dir() {
+        return false;
+    }
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        if name.starts_with('.') {
+            return false;
+        }
+    }
+    // 必须是非空目录：空目录（例如备份失败残留）不能算有效备份
+    if let Ok(mut entries) = fs::read_dir(path) {
+        entries.next().is_some()
+    } else {
+        false
+    }
+}
+
 /// Prunes old backup directories in `backups_dir`, keeping only the newest `keep` backups.
 pub fn prune_old_backups(backups_dir: &Path, keep: usize) -> Result<usize> {
     if !backups_dir.exists() {
@@ -177,7 +194,9 @@ pub fn prune_old_backups(backups_dir: &Path, keep: usize) -> Result<usize> {
 /// Resolves the message gateway database path.
 /// Priority:
 /// 1. $MESSAGE_GATEWAY_DB environment variable
-/// 2. ~/.wechat-rpa/test.sqlite3
+/// 2. ~/.wechat-rpa/test.sqlite3 (if exists)
+/// 3. ~/Library/Application Support/message-gateway/service.sqlite3 (if exists)
+/// 4. ~/.wechat-rpa/test.sqlite3
 pub fn resolve_gateway_db_path() -> Option<PathBuf> {
     if let Ok(env_path) = std::env::var("MESSAGE_GATEWAY_DB") {
         let p = PathBuf::from(env_path);
@@ -185,66 +204,115 @@ pub fn resolve_gateway_db_path() -> Option<PathBuf> {
     }
 
     if let Ok(home) = std::env::var("HOME") {
-        let p = PathBuf::from(home).join(".wechat-rpa").join("test.sqlite3");
-        return Some(p);
+        let home_path = PathBuf::from(home);
+        let test_db = home_path.join(".wechat-rpa").join("test.sqlite3");
+        if test_db.exists() {
+            return Some(test_db);
+        }
+        let service_db = home_path
+            .join("Library/Application Support/message-gateway")
+            .join("service.sqlite3");
+        if service_db.exists() {
+            return Some(service_db);
+        }
+        return Some(test_db);
     }
 
     None
 }
 
-/// Runs a backup for both history.sqlite3 and test.sqlite3 according to config.
+/// Runs a backup for both history.sqlite3 and test/service.sqlite3 according to config.
+/// Uses a temporary directory and atomic rename so that interrupted/failed backups never
+/// leave incomplete directories behind or get treated as successful backups.
 /// Destination:
 /// - If `custom_out` is provided, backs up directly into that directory.
 /// - Otherwise backs up into `<config.state_dir>/backups/YYYYMMDD-HHMMSS/` and prunes old backups to 7.
 pub fn run_backup(config: &BotConfig, custom_out: Option<&Path>) -> Result<PathBuf> {
-    let out_dir = match custom_out {
-        Some(dir) => dir.to_path_buf(),
+    let (out_dir, is_custom) = match custom_out {
+        Some(dir) => (dir.to_path_buf(), true),
         None => {
             let timestamp = format_timestamp(SystemTime::now());
-            config.state_dir.join("backups").join(timestamp)
+            (config.state_dir.join("backups").join(timestamp), false)
         }
     };
 
-    if !out_dir.exists() {
-        fs::create_dir_all(&out_dir)
-            .with_context(|| format!("failed to create backup dir {}", out_dir.display()))?;
-        fs::set_permissions(&out_dir, fs::Permissions::from_mode(0o700))?;
-    } else {
-        fs::set_permissions(&out_dir, fs::Permissions::from_mode(0o700))?;
+    let parent_dir = out_dir.parent().context("destination has no parent dir")?;
+    if !parent_dir.exists() {
+        fs::create_dir_all(parent_dir)
+            .with_context(|| format!("failed to create parent dir {}", parent_dir.display()))?;
+        fs::set_permissions(parent_dir, fs::Permissions::from_mode(0o700))?;
     }
 
-    let history_db = config.state_dir.join("history").join("history.sqlite3");
-    let gateway_db = resolve_gateway_db_path();
+    let temp_name = format!(".tmp-backup-{}", uuid::Uuid::new_v4().simple());
+    let temp_dir = parent_dir.join(temp_name);
+    fs::create_dir_all(&temp_dir)
+        .with_context(|| format!("failed to create temp backup dir {}", temp_dir.display()))?;
+    fs::set_permissions(&temp_dir, fs::Permissions::from_mode(0o700))?;
 
-    let mut backed_up_count = 0;
+    let run_backup_internal = || -> Result<PathBuf> {
+        let history_db = config.state_dir.join("history").join("history.sqlite3");
+        let gateway_db = resolve_gateway_db_path();
 
-    if history_db.exists() {
-        let target = out_dir.join("history.sqlite3");
-        backup_sqlite_db(&history_db, &target)
-            .with_context(|| format!("failed to backup history db from {}", history_db.display()))?;
-        backed_up_count += 1;
-    }
+        let mut backed_up_count = 0;
+        let mut manifest_files = Vec::new();
 
-    if let Some(gw_path) = gateway_db {
-        if gw_path.exists() {
-            let target = out_dir.join("test.sqlite3");
-            backup_sqlite_db(&gw_path, &target)
-                .with_context(|| format!("failed to backup gateway db from {}", gw_path.display()))?;
+        if history_db.exists() {
+            let target = temp_dir.join("history.sqlite3");
+            backup_sqlite_db(&history_db, &target)
+                .with_context(|| format!("failed to backup history db from {}", history_db.display()))?;
             backed_up_count += 1;
+            manifest_files.push("history.sqlite3".to_string());
+        }
+
+        if let Some(gw_path) = &gateway_db {
+            if gw_path.exists() {
+                let gw_file_name = gw_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("test.sqlite3");
+                let target = temp_dir.join(gw_file_name);
+                backup_sqlite_db(gw_path, &target)
+                    .with_context(|| format!("failed to backup gateway db from {}", gw_path.display()))?;
+                backed_up_count += 1;
+                manifest_files.push(gw_file_name.to_string());
+            }
+        }
+
+        if backed_up_count == 0 {
+            bail!("No source databases found to backup (checked history at {} and gateway database)", history_db.display());
+        }
+
+        let manifest = serde_json::json!({
+            "version": 1,
+            "created_at": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+            "databases": manifest_files,
+        });
+        let manifest_path = temp_dir.join("manifest.json");
+        fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
+        fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o600))?;
+
+        if out_dir.exists() {
+            fs::remove_dir_all(&out_dir)?;
+        }
+        fs::rename(&temp_dir, &out_dir)
+            .with_context(|| format!("failed to rename temp backup to {}", out_dir.display()))?;
+        fs::set_permissions(&out_dir, fs::Permissions::from_mode(0o700))?;
+
+        if !is_custom {
+            let backups_root = config.state_dir.join("backups");
+            let _ = prune_old_backups(&backups_root, DEFAULT_BACKUP_RETENTION);
+        }
+
+        Ok(out_dir)
+    };
+
+    match run_backup_internal() {
+        Ok(dir) => Ok(dir),
+        Err(err) => {
+            let _ = fs::remove_dir_all(&temp_dir);
+            Err(err)
         }
     }
-
-    if backed_up_count == 0 {
-        bail!("No source databases found to backup (checked history at {} and gateway database)", history_db.display());
-    }
-
-    // If using the standard backups directory, prune older backups
-    if custom_out.is_none() {
-        let backups_root = config.state_dir.join("backups");
-        let _ = prune_old_backups(&backups_root, DEFAULT_BACKUP_RETENTION);
-    }
-
-    Ok(out_dir)
 }
 
 /// Returns the timestamp in seconds of the newest backup in `backups_dir`, or 0.0 if none exist.
@@ -256,7 +324,7 @@ pub fn latest_backup_timestamp(backups_dir: &Path) -> f64 {
     if let Ok(entries) = fs::read_dir(backups_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            if is_valid_backup_dir(&path) {
                 if let Ok(meta) = fs::metadata(&path) {
                     if let Ok(modified) = meta.modified() {
                         if let Ok(dur) = modified.duration_since(UNIX_EPOCH) {
@@ -520,6 +588,65 @@ mod tests {
         let res = run_backup(&config, Some(&custom_dir)).unwrap();
         assert_eq!(res, custom_dir);
         assert!(custom_dir.join("history.sqlite3").exists());
+    }
+
+    #[test]
+    fn test_backup_failure_does_not_leave_empty_dir_as_latest_backup() {
+        let temp = TempDir::new("failure_empty_dir");
+        let state_dir = temp.0.join("state");
+        let backups_dir = state_dir.join("backups");
+        fs::create_dir_all(&backups_dir).unwrap();
+
+        // 模拟一个失败遗留的空备份目录
+        let fake_failed_dir = backups_dir.join("20261108-100000");
+        fs::create_dir_all(&fake_failed_dir).unwrap();
+
+        // latest_backup_timestamp 应当忽略空目录或无效备份目录，返回 0.0
+        let ts = latest_backup_timestamp(&backups_dir);
+        assert_eq!(ts, 0.0, "Empty or corrupted backup directory must not count as latest backup");
+
+        // 同样，如果 run_backup 失败，不能留下未完成的空目标目录
+        let history_dir = state_dir.join("history");
+        fs::create_dir_all(&history_dir).unwrap();
+        let history_db = history_dir.join("history.sqlite3");
+        // 写入一个非 SQLite 的损坏文件，导致备份或 integrity_check 失败
+        fs::write(&history_db, b"not a sqlite db").unwrap();
+
+        let config = sample_config(&state_dir);
+        let res = run_backup(&config, None);
+        assert!(res.is_err(), "Corrupted database backup must fail");
+
+        // 验证失败后不会留下新的空目录
+        let ts_after = latest_backup_timestamp(&backups_dir);
+        assert_eq!(ts_after, 0.0, "Failed backup attempt must not update latest_backup_timestamp");
+    }
+
+    #[test]
+    fn test_resolve_gateway_db_path_fallback_service_sqlite3() {
+        let temp = TempDir::new("service_sqlite3_test");
+        let orig_home = std::env::var("HOME").ok();
+        let orig_gw = std::env::var("MESSAGE_GATEWAY_DB").ok();
+
+        unsafe {
+            std::env::remove_var("MESSAGE_GATEWAY_DB");
+            std::env::set_var("HOME", temp.0.to_str().unwrap());
+        }
+
+        let app_support = temp.0.join("Library/Application Support/message-gateway");
+        fs::create_dir_all(&app_support).unwrap();
+        let service_db = app_support.join("service.sqlite3");
+        fs::write(&service_db, b"dummy").unwrap();
+
+        let resolved = resolve_gateway_db_path();
+
+        if let Some(h) = orig_home {
+            unsafe { std::env::set_var("HOME", h) };
+        }
+        if let Some(g) = orig_gw {
+            unsafe { std::env::set_var("MESSAGE_GATEWAY_DB", g) };
+        }
+
+        assert_eq!(resolved, Some(service_db), "Should fallback to Library/Application Support/message-gateway/service.sqlite3 when test.sqlite3 is absent");
     }
 
     #[test]
