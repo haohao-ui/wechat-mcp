@@ -146,7 +146,17 @@ if [ $APP -eq 1 ]; then
     [ -f "$PLIST" ] && cp -p "$PLIST" "$PLIST.before-$TS"
     sed "s|__HOME__|$HOME|g" "$HOME/.wechat-rpa/src/native/bootstrap/local.wechat-mcp.host.plist" > "$PLIST"; chmod 0600 "$PLIST"
     plutil -lint "$PLIST"
+    # 先让宿主正常退出（applicationWillTerminate 会停掉核心与桌面服务），再卸载，避免留下孤儿核心
+    if pgrep -f "微信客服助手.app/Contents/MacOS/wechat-cs-host" >/dev/null; then
+      osascript -e "tell application id \"local.wechat-mcp.host\" to quit" || true
+      for i in $(seq 1 120); do pgrep -f "微信客服助手.app/Contents/MacOS/wechat-cs-host" >/dev/null || break; sleep 1; done
+    fi
     launchctl bootout "gui/$UID/local.wechat-mcp.host" 2>/dev/null || true
+    if pgrep -f "wechat-rpa/bin/wechat-mcp serve-core" >/dev/null; then
+      echo "serve-core still running after host quit; stopping it" >&2
+      pkill -TERM -f "wechat-rpa/bin/wechat-mcp serve-core" || true
+      for i in $(seq 1 60); do pgrep -f "wechat-rpa/bin/wechat-mcp serve-core" >/dev/null || break; sleep 1; done
+    fi
     launchctl bootstrap "gui/$UID" "$PLIST"
     echo "now grant Screen Recording and Accessibility to 微信客服助手 in System Settings, then press 刷新检查"'
 fi
