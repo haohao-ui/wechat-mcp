@@ -139,23 +139,28 @@ pub async fn generate(
         Ok(Value::String(validated))
     };
 
-    let reply_val = model_api::generate_api(
-        &prompt,
-        &turn.images,
-        model_config,
-        Some(&mut metadata),
-        "reply",
-        check,
-    )
-    .await?;
+    let reply = if model_config.backend == "codex-exec" {
+        model_api::generate_codex_exec(&prompt, &turn.images, Some(&mut metadata)).await?
+    } else {
+        let reply_val = model_api::generate_api(
+            &prompt,
+            &turn.images,
+            model_config,
+            Some(&mut metadata),
+            "reply",
+            check,
+        )
+        .await?;
+        reply_val.as_str().unwrap_or("").to_string()
+    };
 
-    let reply = reply_val.as_str().unwrap_or("").to_string();
     Ok(BrainReply { reply, metadata })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn prompt_for(failed_items: Vec<Value>, max_attachment_mb: u64) -> Value {
         let failed = failed_items
@@ -271,5 +276,79 @@ mod tests {
         );
         let hint120 = data120["unreadable"][0]["hint"].as_str().unwrap();
         assert!(hint120.contains("120MB"));
+    }
+
+    #[tokio::test]
+    async fn test_builtin_brain_reply_with_codex_exec_backend() {
+        let _env_guard = crate::brain::model_api::CODEX_ENV_LOCK.lock().unwrap();
+        let temp_dir = std::env::temp_dir().join(format!("test-fake-builtin-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let script_path = temp_dir.join("fake_codex.sh");
+        let script_content = r#"#!/bin/bash
+while [ $# -gt 0 ]; do
+    if [ "$1" = "--output-last-message" ]; then
+        output_file="$2"
+        shift 2
+    else
+        shift 1
+    fi
+done
+
+echo '{"reply": "你好，我是BuiltinBrain。"}' > "$output_file"
+>&2 echo "model: gpt-4o-mini"
+>&2 echo "provider: openai"
+exit 0
+"#;
+        std::fs::write(&script_path, script_content).unwrap();
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let old_bin = std::env::var("WECHAT_CODEX_BIN").ok();
+        unsafe {
+            std::env::set_var("WECHAT_CODEX_BIN", &script_path);
+        }
+
+        let brain = BuiltinBrain::new(ModelConfig {
+            backend: "codex-exec".to_string(),
+            base_url: None,
+            model: None,
+            api_key_file: None,
+            api_key_env: None,
+            supports_images: None,
+            timeout_seconds: None,
+            json_output: None,
+        });
+
+        let turn = Turn {
+            turn_id: "t_test".to_string(),
+            account_id: "acc_test".to_string(),
+            contact: Default::default(),
+            text: "你好".to_string(),
+            mode: "service".to_string(),
+            chat_kind: "private".to_string(),
+            context: vec![],
+            images: vec![],
+            files: vec![],
+            notes: vec![],
+            failed: vec![],
+            image_count: None,
+            earlier_images: 0,
+            max_attachment_mb: 50,
+        };
+
+        let res = brain.reply(&turn).await.unwrap();
+
+        unsafe {
+            if let Some(old) = old_bin {
+                std::env::set_var("WECHAT_CODEX_BIN", old);
+            } else {
+                std::env::remove_var("WECHAT_CODEX_BIN");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        assert_eq!(res.reply, "你好，我是BuiltinBrain。");
+        assert_eq!(res.metadata["backend"], "codex-exec");
+        assert_eq!(res.metadata["model"], "gpt-4o-mini");
+        assert_eq!(res.metadata["provider"], "openai");
     }
 }
