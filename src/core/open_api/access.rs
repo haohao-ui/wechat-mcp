@@ -55,7 +55,7 @@ impl BrainAccess {
             }
         }
         let mut unresolved = Vec::new();
-        let mut resolve = |entries: &[crate::core::config::AllowlistEntry]| {
+        let mut resolve = |entries: &[crate::core::config::AllowlistEntry], ignore_all: bool| {
             let mut resolved = HashSet::new();
             for entry in entries {
                 let mut candidates = HashSet::new();
@@ -68,16 +68,18 @@ impl BrainAccess {
                         }
                     }
                 }
-                if candidates.len() == 1 {
-                    resolved.extend(candidates);
-                } else {
+                if candidates.len() != 1 {
                     unresolved.push(entry.recipient.clone());
+                }
+                // Ambiguous deny entries must still override uniquely resolved grants.
+                if ignore_all || candidates.len() == 1 {
+                    resolved.extend(candidates);
                 }
             }
             resolved
         };
-        let allow = resolve(&config.allowlist);
-        let ignore = resolve(config.ignorelist.as_deref().unwrap_or(&[]));
+        let allow = resolve(&config.allowlist, false);
+        let ignore = resolve(config.ignorelist.as_deref().unwrap_or(&[]), true);
         let allowed = roots
             .into_iter()
             .filter_map(|(id, root)| {
@@ -146,6 +148,25 @@ mod tests {
         let access = BrainAccess::load(&f.config(entry.clone(), entry), &f.conn).unwrap();
         assert!(!access.permit("a"));
     }
+    #[test]
+    fn ambiguous_ignore_name_ignores_all_candidates() {
+        let f = Fixture::new();
+        f.contact("a", "A", "小美", "private", None);
+        f.contact("b", "A", "小美", "private", None);
+        f.conn.execute(
+            "INSERT INTO contact_names(contact_id,account_id,raw_name,name_key,source,first_seen_at,last_seen_at) VALUES('a','A','美美',?,'alias',1,1)",
+            [crate::core::history::names::name_key("美美")],
+        ).unwrap();
+        let config = f.config(
+            json!([{"recipient":"美美","kind":"private"}]),
+            json!([{"recipient":"小美","kind":"private"}]),
+        );
+        let access = BrainAccess::load(&config, &f.conn).unwrap();
+        assert!(!access.permit("a"));
+        assert!(!access.permit("b"));
+        assert_eq!(access.unresolved(), &["小美"]);
+    }
+
     #[test]
     fn ambiguous_name_is_unresolved() {
         let f = Fixture::new();
