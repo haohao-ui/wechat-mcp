@@ -90,47 +90,24 @@ pub fn identity(account: &str, name: &str, message: &str, source: &str) -> Strin
         .map(|b| format!("{b:02x}"))
         .collect()
 }
-/// Classifies sources using stable anchors even when OCR misreads surrounding text.
-pub fn source_category(source: &str) -> Option<&'static str> {
-    let source: String = source.chars().filter(|c| !c.is_whitespace()).collect();
-    if ["手机号", "微信号", "QQ号"]
-        .iter()
-        .any(|s| source.contains(s))
-    {
-        Some("搜索")
-    } else if source.contains('扫') {
-        Some("扫一扫")
-    } else if source.contains('群') {
-        Some("群聊")
-    } else if source.contains("名片") {
-        Some("名片分享")
-    } else if source.contains("附近") {
-        Some("附近的人")
-    } else if source.contains('摇') {
-        Some("摇一摇")
-    } else {
-        None
-    }
-}
+const MATCH_ALGORITHM_VERSION: &str = "closed_vocabulary_dual_scale_v2";
 
 fn rule_hash(c: &Config) -> Result<String> {
     Ok(identity(
         "rules",
         &serde_json::to_string(c)?,
-        "source_category_v1",
+        MATCH_ALGORITHM_VERSION,
         "",
     ))
 }
 
+/// `source` is the canonical vocabulary entry returned by native dual-scale OCR.
 pub fn matches_rules(c: &Config, source: &str, message: &str) -> (bool, Vec<String>) {
-    let category = source_category(source);
     let source_hits: Vec<_> = c
         .accept_sources
         .iter()
         .enumerate()
-        .filter(|(_, s)| {
-            source.contains(s.as_str()) || category.is_some_and(|v| v.contains(s.as_str()))
-        })
+        .filter(|(_, s)| source.contains(s.as_str()))
         .map(|(i, _)| format!("source:{i}"))
         .collect();
     let keyword_hits: Vec<_> = c
@@ -254,6 +231,8 @@ struct Row {
     name: String,
     status: String,
     message: String,
+    #[serde(default)]
+    error: Option<String>,
 }
 #[derive(Debug, Default)]
 pub struct ScanReport {
@@ -295,17 +274,45 @@ async fn scan_inner(
     let value = capture.call("friend_request_scan", json!({})).await?;
     let rows: Vec<Row> =
         serde_json::from_value(value.get("rows").cloned().context("missing request rows")?)?;
-    report.pending = rows.iter().any(|r| r.status == "等待验证");
+    report.pending = rows
+        .iter()
+        .any(|r| matches!(r.status.as_str(), "等待验证" | "unknown"));
     state.pending = report.pending;
     state.last_scan = Some(now);
     state.save(root)?;
     let mut processed = 0;
-    for row in rows.into_iter().filter(|r| r.status == "等待验证") {
+    for row in rows
+        .into_iter()
+        .filter(|r| matches!(r.status.as_str(), "等待验证" | "unknown"))
+    {
         if processed >= 5 {
             break;
         }
         if stop() {
             break;
+        }
+        let review_id = identity(account, &row.name, &row.message, "");
+        if state
+            .records
+            .iter()
+            .any(|r| r.identity == review_id && r.decision == Decision::NeedsReview)
+        {
+            continue;
+        }
+        if row.status == "unknown" {
+            state.record(
+                &review_id,
+                row.name.chars().count(),
+                &day,
+                now,
+                c.mode,
+                Decision::NeedsReview,
+                vec![],
+            );
+            state.save(root)?;
+            report.events.push(json!({"event":"friend_request_decision","decision":Decision::NeedsReview,"name_length":row.name.chars().count(),"source":"","error":row.error.as_deref().unwrap_or("unknown_status best=0.000,second=0.000")}));
+            processed += 1;
+            continue;
         }
         let detail = match capture
             .call(
@@ -325,6 +332,30 @@ async fn scan_inner(
         let source = detail["source"].as_str().unwrap_or("");
         let message = detail["message"].as_str().unwrap_or(&row.message);
         let id = identity(account, &row.name, message, source);
+        let unknown = detail["error"].as_str().map(str::to_owned).or_else(|| {
+            if source.is_empty() {
+                Some("unknown_source best=0.000,second=0.000".into())
+            } else if detail["verify_button"].is_null() {
+                Some("unknown_button best=0.000,second=0.000".into())
+            } else {
+                None
+            }
+        });
+        if let Some(error) = unknown {
+            state.record(
+                &review_id,
+                row.name.chars().count(),
+                &day,
+                now,
+                c.mode,
+                Decision::NeedsReview,
+                vec![],
+            );
+            state.save(root)?;
+            report.events.push(json!({"event":"friend_request_decision","decision":Decision::NeedsReview,"name_length":row.name.chars().count(),"source":source,"error":error}));
+            processed += 1;
+            continue;
+        }
         if state.records.iter().any(|r| {
             r.identity == id
                 && (matches!(r.decision, Decision::Accepted | Decision::NeedsReview)
@@ -335,6 +366,7 @@ async fn scan_inner(
         }
         processed += 1;
         let (_, hits) = matches_rules(c, source, message);
+        let mut decision_error = None;
         let mut decision = state
             .decide(c, &id, &day, source, message)
             .unwrap_or(Decision::NeedsReview);
@@ -353,6 +385,7 @@ async fn scan_inner(
             if !stop() && !source.is_empty() && !detail["verify_button"].is_null() {
                 let v=capture.call("friend_request_verify",json!({"mode":c.mode,"row_y":row.row_y,"name":row.name,"diagnostics_dir":root.join("diagnostics/friend-requests").join(format!("{now:.0}-{}",uuid::Uuid::new_v4()))})).await;
                 if let Err(error) = &v {
+                    decision_error = Some(format!("{error:#}"));
                     report.events.push(json!({"event":"friend_request_scan","reason":"verify_failed","error":format!("{error:#}")}));
                 }
                 if let Ok(v) = v {
@@ -380,7 +413,7 @@ async fn scan_inner(
             hits,
         );
         state.save(root)?;
-        report.events.push(json!({"event":"friend_request_decision","decision":decision,"name_length":row.name.chars().count(),"message_length":message.chars().count(),"source":source,"source_category":source_category(source)}));
+        report.events.push(json!({"event":"friend_request_decision","decision":decision,"name_length":row.name.chars().count(),"message_length":message.chars().count(),"source":source,"error":decision_error}));
     }
     Ok(report)
 }
@@ -426,27 +459,6 @@ pub fn promote_contacts_sync(root: &Path, account: &str, now: f64) -> Result<boo
 mod tests {
     use super::*;
     #[test]
-    fn source_categories() {
-        for (source, expected) in [
-            ("通过搜索微信号添加", Some("搜索")),
-            ("通过扫一扫添加", Some("扫一扫")),
-            ("通过群聊添加", Some("群聊")),
-            ("通过名片分享添加", Some("名片分享")),
-            ("通过附近添加", Some("附近的人")),
-            ("通过摇一摇添加", Some("摇一摇")),
-            ("通过 QQ 号添加", Some("搜索")),
-            ("手 机\n号 扫群名片附近摇", Some("搜索")),
-            ("扫群名片附近摇", Some("扫一扫")),
-            ("群名片附近摇", Some("群聊")),
-            ("名片附近摇", Some("名片分享")),
-            ("附近摇", Some("附近的人")),
-            ("乱码", None),
-        ] {
-            assert_eq!(source_category(source), expected, "{source}");
-        }
-    }
-
-    #[test]
     fn rule_hash_changes_with_algorithm_version() {
         let c = Config::default();
         let old_hash = identity("rules", &serde_json::to_string(&c).unwrap(), "", "");
@@ -456,7 +468,7 @@ mod tests {
             rule_hash: old_hash,
             ..State::default()
         };
-        let source = "通过搜察手机号添加";
+        let source = "通过搜索手机号添加";
         let id = identity("account", "name", "", source);
         state.record(
             &id,
@@ -483,8 +495,11 @@ mod tests {
     }
 
     #[test]
-    fn ocr_misread_search_source_matches() {
-        assert!(matches_rules(&Config::default(), "通过搜察手机号添加", "").0);
+    fn rules_use_normalized_source_without_ocr_aliases() {
+        let c = Config::default();
+        assert!(matches_rules(&c, "通过搜索手机号添加", "").0);
+        assert!(!matches_rules(&c, "通过甲乙手机号添加", "").0);
+        assert!(!matches_rules(&c, "通过甲乙微信号添加", "").0);
     }
 
     #[test]

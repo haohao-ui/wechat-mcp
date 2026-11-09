@@ -6645,6 +6645,66 @@ mod tests {
         (td, coord, calls)
     }
     #[tokio::test]
+    async fn friend_unknown_fields_need_review_without_verify_or_retry() {
+        use crate::core::friend_requests::{self, Config, Decision, Mode, State};
+        for field in ["source", "status", "button"] {
+            let td = TestDir::new();
+            let mut cap = MockCoordinatorCapture::new();
+            let error = format!("unknown_{field} best=0.700,second=0.600");
+            cap.call_responses.insert("friend_request_scan".into(), json!({"rows":[{"row_y":160.0,"name":"甲","status":if field=="status" {"unknown"} else {"等待验证"},"message":"hello","error":if field=="status" {Some(&error)} else {None}}]}));
+            cap.call_responses.insert("friend_request_detail".into(), json!({"source":if field=="source" {""} else {"通过搜索手机号添加"},"message":"hello","verify_button":{"x":500,"y":300},"error":error}));
+            let c = Config {
+                mode: Mode::Live,
+                ..Config::default()
+            };
+            let report =
+                friend_requests::scan(&mut cap, &c, &td.0, "account", 1_794_201_600., &|| false)
+                    .await
+                    .unwrap();
+            assert_eq!(report.events[0]["decision"], "needs_review");
+            assert_eq!(report.events[0]["error"], error);
+            assert!(
+                !cap.calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(op, _)| op == "friend_request_verify")
+            );
+            assert_eq!(
+                State::load(&td.0).unwrap().records[0].decision,
+                Decision::NeedsReview
+            );
+            let count = cap
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(op, _)| op == "friend_request_detail")
+                .count();
+            // A later clean read must not retry a request already marked needs_review.
+            cap.call_responses.insert(
+                "friend_request_scan".into(),
+                json!({"rows":[{"row_y":160.0,"name":"甲","status":"等待验证","message":"hello"}]}),
+            );
+            cap.call_responses.insert("friend_request_detail".into(), json!({"source":"通过搜索手机号添加","message":"hello","verify_button":{"x":500,"y":300}}));
+            let report =
+                friend_requests::scan(&mut cap, &c, &td.0, "account", 1_794_201_800., &|| false)
+                    .await
+                    .unwrap();
+            assert!(report.events.is_empty());
+            assert_eq!(
+                cap.calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(op, _)| op == "friend_request_detail")
+                    .count(),
+                count
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn first_enable_scans_without_badge() {
         // A request whose badge was already cleared (opened once by a person) must still be handled.
         let (_td, mut coord, calls) =
