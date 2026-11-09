@@ -349,6 +349,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_builtin_brain_reply_with_codex_exec_backend() {
         let _env_guard = crate::brain::model_api::CODEX_ENV_LOCK.lock().unwrap();
         let temp_dir =

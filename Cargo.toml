@@ -18,3 +18,12 @@ scraper = "0.27"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 unicode-normalization = "0.1.26"
 sha2 = "0.11.1"
+
+[lints.clippy]
+correctness = "deny"
+suspicious = "deny"
+style = "warn"
+complexity = "warn"
+perf = "warn"
+pedantic = "warn"
+

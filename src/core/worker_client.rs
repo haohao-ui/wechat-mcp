@@ -120,7 +120,6 @@ pub fn dump_frame_impl(
     // macOS O_NOFOLLOW = 0x0100
     const O_NOFOLLOW: i32 = 0x0100;
     let mut file = OpenOptions::new()
-        .write(true)
         .create(true)
         .append(true)
         .mode(0o600)

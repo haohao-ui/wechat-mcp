@@ -1548,6 +1548,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_generate_codex_exec_success_and_metadata() {
         let _env_guard = CODEX_ENV_LOCK.lock().unwrap();
         let temp_dir =
@@ -1612,6 +1613,7 @@ exit 0
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_generate_codex_exec_failure_or_missing_output() {
         let _env_guard = CODEX_ENV_LOCK.lock().unwrap();
         let temp_dir =

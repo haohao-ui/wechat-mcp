@@ -202,6 +202,7 @@ pub fn backup_sqlite_db(source: &Path, destination: &Path) -> Result<()> {
         let _ = OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(true)
             .mode(0o600)
             .open(&temp_path)
             .with_context(|| format!("failed to create temp file at {}", temp_path.display()))?;

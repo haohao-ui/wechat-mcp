@@ -436,6 +436,7 @@ impl HistoryStore {
             let file = OpenOptions::new()
                 .create(true)
                 .write(true)
+                .truncate(true)
                 .mode(0o600)
                 .open(&db_path)?;
             drop(file);
@@ -1197,14 +1198,7 @@ impl HistoryStore {
         let plan: Vec<(Bubble, &'static str, Value)>;
         let mut current_reconciled = current_bubbles.clone();
 
-        if stored_fps.is_none() {
-            let meta = baseline_meta.cloned().unwrap_or(json!({}));
-            plan = current_bubbles
-                .into_iter()
-                .map(|b| (b, "baseline", meta.clone()))
-                .collect();
-        } else {
-            let stored = stored_fps.unwrap();
+        if let Some(stored) = stored_fps {
             let mut previous: Vec<Bubble> = Vec::new();
             for item in &stored {
                 if let Some(arr) = item.as_array() {
@@ -1292,6 +1286,12 @@ impl HistoryStore {
                         .collect();
                 }
             }
+        } else {
+            let meta = baseline_meta.cloned().unwrap_or(json!({}));
+            plan = current_bubbles
+                .into_iter()
+                .map(|b| (b, "baseline", meta.clone()))
+                .collect();
         }
 
         let mut rows = Vec::new();

@@ -546,16 +546,14 @@ impl BotService {
 
         for item in context {
             if let Some(media) = &item.media {
-                if media.kind.as_deref() == Some("image")
-                    && media.understanding.is_none()
-                    && media.path.is_some()
-                {
-                    let p = media.path.as_ref().unwrap();
-                    if model_images.len() < batch && p.is_file() {
-                        let size = fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-                        if total + size <= max_image_bytes {
-                            model_images.push(p.clone());
-                            total += size;
+                if media.kind.as_deref() == Some("image") && media.understanding.is_none() {
+                    if let Some(p) = &media.path {
+                        if model_images.len() < batch && p.is_file() {
+                            let size = fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+                            if total + size <= max_image_bytes {
+                                model_images.push(p.clone());
+                                total += size;
+                            }
                         }
                     }
                 }
@@ -953,16 +951,18 @@ impl BotService {
                 .and_then(|b| b.get("media_id"))
                 .and_then(|v| v.as_str());
             let message_id = row.get("message_id").and_then(|v| v.as_str());
-            if kind == Some("image") && mid.is_some() && message_id.is_some() {
-                if let Ok(path) = capture.download_kind(mid.unwrap(), "image").await {
-                    let _ = history.attach_media(
-                        message_id.unwrap(),
-                        &path,
-                        "image",
-                        None,
-                        "chat_thumbnail",
-                        None,
-                    );
+            if kind == Some("image") {
+                if let (Some(mid_str), Some(msg_id)) = (mid, message_id) {
+                    if let Ok(path) = capture.download_kind(mid_str, "image").await {
+                        let _ = history.attach_media(
+                            msg_id,
+                            &path,
+                            "image",
+                            None,
+                            "chat_thumbnail",
+                            None,
+                        );
+                    }
                 }
             }
         }
@@ -1042,7 +1042,7 @@ impl BotService {
             }
         };
 
-        if ambiguous.is_some() && changes.is_empty() {
+        if let Some(ambig) = ambiguous.filter(|_| changes.is_empty()) {
             let confirmed = capture.frame().await?;
             self.policy
                 .check_frame(&confirmed)
@@ -1051,14 +1051,11 @@ impl BotService {
             let fp2: Vec<_> = confirmed.bubbles.iter().map(fingerprint).collect();
             if fp1 != fp2 {
                 let mut d = Map::new();
-                d.insert("reason".to_string(), json!(ambiguous.unwrap()));
+                d.insert("reason".to_string(), json!(ambig));
                 self.health("waiting_for_stable_frame", d)?;
                 return Ok(());
             }
-            let reason_text = format!(
-                "{}: visible history rebaselined without reply",
-                ambiguous.unwrap()
-            );
+            let reason_text = format!("{ambig}: visible history rebaselined without reply");
             // 这里会把画面上的消息当历史、不回复：必须留在 core.log 里，否则事后无法判断消息为什么没回
             tracing::warn!(
                 recipient = %self.recipient,
@@ -1574,10 +1571,9 @@ impl BotService {
 
         let mut text_lines = Vec::new();
         for b in incoming {
-            let prefix = if self.group && b.sender.is_some() {
-                format!("{}：", b.sender.as_ref().unwrap())
-            } else {
-                String::new()
+            let prefix = match (&b.sender, self.group) {
+                (Some(sender), true) => format!("{sender}："),
+                _ => String::new(),
             };
             text_lines.push(format!("{}{}", prefix, b.text));
         }

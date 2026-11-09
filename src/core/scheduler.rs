@@ -1215,26 +1215,28 @@ impl BotCoordinator {
             } else if self.sessions.get(name).map_or(false, |s| s.turn.is_some()) {
                 reason = Some("turn_open");
             } else if let Some(r) = row {
-                if prior_opt.is_none() || prior_opt.as_ref().unwrap().digest.is_none() {
-                    reason = Some("initial");
-                } else {
-                    let p = prior_opt.as_ref().unwrap();
-                    if p.left {
-                        let bubbles = self
-                            .sessions
-                            .get(name)
-                            .and_then(|s| s.cursor.as_ref())
-                            .map(|c| c.bubbles.as_slice())
-                            .unwrap_or(&[]);
-                        if preview_changed(p, r)
-                            && !shows_last_seen(r.preview_key.as_deref().unwrap_or(""), bubbles)
-                        {
+                match prior_opt.as_ref() {
+                    Some(p) if p.digest.is_some() => {
+                        if p.left {
+                            let bubbles = self
+                                .sessions
+                                .get(name)
+                                .and_then(|s| s.cursor.as_ref())
+                                .map(|c| c.bubbles.as_slice())
+                                .unwrap_or(&[]);
+                            if preview_changed(p, r)
+                                && !shows_last_seen(r.preview_key.as_deref().unwrap_or(""), bubbles)
+                            {
+                                reason = Some("preview_changed");
+                            }
+                        } else if preview_changed(p, r) {
                             reason = Some("preview_changed");
+                        } else if r.red_pixels >= p.min_red + BADGE_PIXELS {
+                            reason = Some("unread_badge");
                         }
-                    } else if preview_changed(p, r) {
-                        reason = Some("preview_changed");
-                    } else if r.red_pixels >= p.min_red + BADGE_PIXELS {
-                        reason = Some("unread_badge");
+                    }
+                    _ => {
+                        reason = Some("initial");
                     }
                 }
             }
@@ -1273,15 +1275,17 @@ impl BotCoordinator {
                 reason = Some("pending");
             }
 
-            if row.is_none() && self.active_name.as_deref() != Some(name) && reason.is_some() {
-                if !self.hidden_rows.contains(name) {
-                    self.hidden_rows.insert(name.clone());
-                    self.log_event(
-                        "session_row_not_visible",
-                        json!({"recipient": name, "reason": reason.unwrap()}),
-                    );
+            if row.is_none() && self.active_name.as_deref() != Some(name) {
+                if let Some(r) = reason {
+                    if !self.hidden_rows.contains(name) {
+                        self.hidden_rows.insert(name.clone());
+                        self.log_event(
+                            "session_row_not_visible",
+                            json!({"recipient": name, "reason": r}),
+                        );
+                    }
+                    continue;
                 }
-                continue;
             }
             self.hidden_rows.remove(name);
 
@@ -1330,16 +1334,16 @@ impl BotCoordinator {
         };
         let mid = job["message_id"].as_str().unwrap_or("").to_string();
 
-        let conn_arc = self.history.connection();
-        let conn = conn_arc.lock().unwrap();
-        let digest_row: Option<String> = conn
-            .query_row(
+        let digest_row: Option<String> = {
+            let conn_arc = self.history.connection();
+            let conn = conn_arc.lock().unwrap();
+            conn.query_row(
                 "SELECT bubble_digest FROM messages WHERE message_id=?",
                 [&mid],
                 |r| r.get(0),
             )
-            .ok();
-        drop(conn);
+            .ok()
+        };
 
         let digest = match digest_row {
             Some(d) => d,
