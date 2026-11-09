@@ -181,3 +181,51 @@ assert(blocked["error"] as? String == "unknown_button best=0.500,second=0.400")
 "#,
     );
 }
+
+/// Layout observed on 2026-11-09 (360x640 「通过朋友验证」 window), with the OCR variance seen there.
+const OBSERVED_DIALOG: &str = r#"
+func dialog(_ extra:[[String:Any]]=[],tag:String="搜奈或创建标签.",toggle:String="不让他（她）看",drop:String="")->[[String:Any]] {
+ ([l("通过朋友验证",137,17),l("备注",34,66),l("甲乙丙丁戊",35,103),l("标签",35,152),l(tag,32,190),l("朋友权限",36,248),
+  l("聊天、朋友圈、微信运动等",57,286),l("仅聊天",60,331),l("朋友圈和状态",35,378),l(toggle,34,416),l("不看他（她）",32,460),
+  l("确定",233,593),l("取消",97,594)]+extra).filter{($0["text"] as? String) != drop}
+}
+"#;
+
+#[test]
+fn verification_dialog_observed_layout_is_accepted() {
+    swift_fixture(
+        "dialog_ok",
+        &format!(
+            r#"{OBSERVED_DIALOG}
+let ok=classifyFriendDialog(dialog())
+assert(ok["error"] == nil,"\(ok)")
+assert((ok["cancel"] as? [String:Any])?["x"] as? Double == 97)
+assert((ok["confirm"] as? [String:Any])?["x"] as? Double == 233)
+// Half-width parentheses are the same text after compatibility normalization.
+assert(classifyFriendDialog(dialog(toggle:"不让他(她)看"))["error"] == nil)
+// Field contents are exempt by position, whatever OCR reads there.
+assert(classifyFriendDialog(dialog(tag:"任意内容"))["error"] == nil)
+"#
+        ),
+    );
+}
+
+#[test]
+fn verification_dialog_unexpected_content_needs_review() {
+    swift_fixture(
+        "dialog_unknown",
+        &format!(
+            r#"{OBSERVED_DIALOG}
+// An unobserved line outside the input fields blocks any click.
+let extra=classifyFriendDialog(dialog([l("请输入验证码",40,520)]))
+assert((extra["error"] as? String)?.hasPrefix("unknown_dialog") == true && extra["confirm"] == nil)
+// A misread label is unknown, never corrected.
+assert(classifyFriendDialog(dialog(toggle:"不甲他乙她丙看"))["error"] != nil)
+assert(classifyFriendDialog(dialog(drop:"通过朋友验证"))["error"] != nil)
+assert(classifyFriendDialog(dialog(drop:"朋友权限"))["error"] != nil)
+assert(classifyFriendDialog(dialog(drop:"取消"))["error"] != nil)
+assert(classifyFriendDialog(dialog([l("确定",233,560)]))["error"] != nil)
+"#
+        ),
+    );
+}
