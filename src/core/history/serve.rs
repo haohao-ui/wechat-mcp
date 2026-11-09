@@ -44,7 +44,7 @@ fn encode_base64(data: &[u8]) -> String {
 }
 
 /// Constant-time comparison between two byte slices.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }

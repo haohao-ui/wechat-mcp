@@ -2040,6 +2040,7 @@ mod tests {
             context_messages: 5,
             manage_window: true,
             capture_backend: "native".to_string(),
+            open_api: Default::default(),
             history_http: crate::core::config::HistoryHttpConfig {
                 bind: "127.0.0.1".to_string(),
                 port: 8765,

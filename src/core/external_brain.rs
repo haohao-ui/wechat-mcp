@@ -698,6 +698,11 @@ impl ExternalBrain {
         }))
     }
 
+    pub async fn resume_contact(&self, display_name: &str) -> anyhow::Result<()> {
+        self.handle_resume_session(&json!({"recipient": display_name})).await?;
+        Ok(())
+    }
+
     async fn handle_resume_session(&self, req: &Value) -> Result<Value> {
         let recipient = req
             .get("recipient")

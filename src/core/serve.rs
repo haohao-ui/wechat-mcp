@@ -192,6 +192,12 @@ async fn run_core_for_account(
         Some(server_stop_rx),
     );
 
+    let open_api_server = if config.open_api.enabled {
+        Some(crate::core::open_api::http::OpenApiServer::start(
+            &config.open_api, external_brain.clone(), std::sync::Arc::new(config.clone()),
+        ).await?)
+    } else { None };
+
     // 4. 运行调度器
     let mut coordinator = BotCoordinator::new_with_account(config_path, account.clone())?;
     if source == AccountSource::WeChat {
@@ -421,6 +427,7 @@ async fn run_core_for_account(
     // 停止并清理 core.sock
     let _ = server_stop_tx.send(true);
     socket_server_handle.abort();
+    if let Some(server) = open_api_server { server.shutdown(); }
     let _ = fs::remove_file(&sock_path);
 
     // 停止历史 HTTP 服务

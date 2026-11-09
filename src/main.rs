@@ -271,7 +271,7 @@ fn is_valid_date(s: &str) -> bool {
     (1..=12).contains(&month) && (1..=31).contains(&day)
 }
 
-fn negotiate_protocol_version(client_version: Option<&str>) -> (&'static str, bool) {
+pub(crate) fn negotiate_protocol_version(client_version: Option<&str>) -> (&'static str, bool) {
     match client_version {
         Some(v) if is_valid_date(v) && v >= SUPPORTED_PROTOCOL_VERSION => {
             (SUPPORTED_PROTOCOL_VERSION, true)

@@ -1,3 +1,4 @@
+pub use crate::core::open_api::http::OpenApiConfig;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -111,6 +112,8 @@ pub struct BotConfig {
     pub manage_window: bool,
     pub capture_backend: String,
     pub history_http: HistoryHttpConfig,
+    #[serde(default)]
+    pub open_api: OpenApiConfig,
     pub model_config: ModelConfig,
     pub brain: BrainConfig,
 }
@@ -549,6 +552,7 @@ impl BotConfig {
             "idle_check_seconds",
             "context_messages",
             "history_http",
+            "open_api",
             "manage_window",
             "turn_quiet_seconds",
             "turn_max_seconds",
@@ -645,6 +649,11 @@ impl BotConfig {
             None => true,
         };
 
+        let open_api = match map.get("open_api") {
+            Some(value) => serde_json::from_value(value.clone()).context("invalid open_api")?,
+            None => OpenApiConfig::default(),
+        };
+
         let history_http = match map.get("history_http") {
             Some(v) => {
                 let hmap = v.as_object().context("invalid history_http")?;
@@ -712,6 +721,7 @@ impl BotConfig {
             manage_window,
             capture_backend,
             history_http,
+            open_api,
             model_config,
             brain,
         })
