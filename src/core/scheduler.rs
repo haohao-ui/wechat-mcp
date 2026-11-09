@@ -1139,6 +1139,22 @@ impl BotCoordinator {
         Ok(())
     }
 
+    /// Whether this chat already has a reply baseline (persisted cursor with bubbles).
+    fn has_baseline(
+        &mut self,
+        name: &str,
+        entries: &HashMap<String, AllowlistEntry>,
+    ) -> Result<bool> {
+        let Some(entry) = entries.get(name) else {
+            return Ok(true);
+        };
+        Ok(self
+            .session(entry)?
+            .cursor
+            .as_ref()
+            .is_some_and(|c| !c.bubbles.is_empty()))
+    }
+
     pub async fn due_sessions(&mut self, names: &[String]) -> Result<HashSet<String>> {
         if names.is_empty() || self.capture.is_none() {
             return Ok(names.iter().cloned().collect());
@@ -1206,14 +1222,15 @@ impl BotCoordinator {
             let prior_opt = self.list_state.get(name).cloned();
             let mut reason: Option<&'static str> = None;
 
+            // Visits are event driven: an unread badge or a changed preview. No periodic
+            // sweep, so hundreds of allowlisted chats cost one list probe, not hundreds of clicks.
             if self.active_name.as_deref() == Some(name) {
                 reason = Some("active");
-            } else if !self.last_visit.contains_key(name) {
-                reason = Some("initial");
-            } else if now - self.last_visit[name] >= self.config.idle_check_seconds as f64 {
-                reason = Some("idle_check");
             } else if self.sessions.get(name).map_or(false, |s| s.turn.is_some()) {
                 reason = Some("turn_open");
+            } else if !self.has_baseline(name, &entries)? {
+                // Once per chat ever: the persisted cursor survives restarts.
+                reason = Some("initial");
             } else if let Some(r) = row {
                 match prior_opt.as_ref() {
                     Some(p) if p.digest.is_some() => {
@@ -1235,8 +1252,12 @@ impl BotCoordinator {
                             reason = Some("unread_badge");
                         }
                     }
+                    // First list sighting in this process (e.g. after a restart): only a
+                    // visible unread badge means messages arrived while we were not looking.
                     _ => {
-                        reason = Some("initial");
+                        if r.red_pixels >= BADGE_PIXELS {
+                            reason = Some("unread_badge");
+                        }
                     }
                 }
             }
@@ -1295,8 +1316,7 @@ impl BotCoordinator {
                     let y_coord = row.map(|r| r.y).unwrap_or(0);
                     self.pending.entry(name.clone()).or_insert((now, -y_coord));
                 }
-                if res != "active" && res != "idle_check" && res != "pending" && res != "turn_open"
-                {
+                if res != "active" && res != "pending" && res != "turn_open" {
                     self.log_event(
                         "session_switch_due",
                         json!({
@@ -1822,11 +1842,9 @@ impl BotCoordinator {
             .unwrap()
             .call("friend_request_badge", json!({}))
             .await?;
-        // Never scanned: a request whose badge was cleared by a person viewing it must still be found.
-        let never_scanned = state.last_scan.is_none();
-        let revisit =
-            never_scanned || (state.pending && state.last_scan.is_some_and(|t| now - t >= 1800.0));
-        if badge["red_pixels"].as_u64().unwrap_or(0) < BADGE_PIXELS && !revisit {
+        // Only a new request (the 通讯录 badge) opens the list. That scan also handles every older
+        // row still showing 「等待验证」; rows already decided under the same rules are skipped.
+        if badge["red_pixels"].as_u64().unwrap_or(0) < BADGE_PIXELS {
             return Ok(());
         }
         let stop = self.stop.clone();
@@ -2233,6 +2251,35 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// Gives a chat a persisted-style reply baseline so list events alone decide visits.
+    fn seed_baseline(coord: &mut BotCoordinator, name: &str) {
+        let child = coord
+            .session(&AllowlistEntry {
+                recipient: name.to_string(),
+                kind: "private".to_string(),
+                aliases: None,
+            })
+            .unwrap();
+        let bubble = Bubble {
+            text: "seen".to_string(),
+            digest: "dig_seen".to_string(),
+            direction: "inbound".to_string(),
+            kind: None,
+            media_id: None,
+            phash: None,
+            filename: None,
+            sender: None,
+            transfer_pending: None,
+            image_source: None,
+            x: None,
+            y: None,
+            width: None,
+            height: None,
+            extra: Map::new(),
+        };
+        child.cursor = Some(test_frame(vec![bubble], "snap"));
     }
 
     fn test_frame(bubbles: Vec<Bubble>, snapshot_id: &str) -> Frame {
@@ -3387,6 +3434,7 @@ mod tests {
             y: 100,
         }];
         coord.capture = Some(Box::new(cap));
+        seed_baseline(&mut coord, "c");
         let now = (coord.clock)();
         coord.last_visit.insert("c".to_string(), now);
         coord.list_state.insert(
@@ -3403,6 +3451,58 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let due = rt.block_on(async { coord.due_sessions(&["c".to_string()]).await.unwrap() });
         assert!(!due.contains("c"));
+    }
+
+    fn due_after_restart(red_pixels: u64, preview_age: f64, baseline: bool) -> bool {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry {
+            recipient: "c".to_string(),
+            kind: "private".to_string(),
+            aliases: None,
+        }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let mut cap = MockCoordinatorCapture::new();
+        cap.rows = vec![SessionRow {
+            name: "c".to_string(),
+            preview_digest: "d1".to_string(),
+            preview_key: Some("k1".to_string()),
+            preview_time: Some("12:00".to_string()),
+            red_pixels,
+            y: 100,
+        }];
+        coord.capture = Some(Box::new(cap));
+        if baseline {
+            seed_baseline(&mut coord, "c");
+        }
+        // A visit long ago used to trigger the periodic idle check.
+        let now = (coord.clock)();
+        if preview_age > 0.0 {
+            coord.last_visit.insert("c".to_string(), now - preview_age);
+        }
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async { coord.due_sessions(&["c".to_string()]).await.unwrap() })
+            .contains("c")
+    }
+
+    #[test]
+    fn restart_with_baseline_and_no_badge_does_not_open_chat() {
+        assert!(!due_after_restart(0, 0.0, true));
+    }
+
+    #[test]
+    fn restart_with_unread_badge_opens_chat() {
+        assert!(due_after_restart(25, 0.0, true));
+    }
+
+    #[test]
+    fn chat_without_baseline_is_opened_once() {
+        assert!(due_after_restart(0, 0.0, false));
+    }
+
+    #[test]
+    fn no_periodic_idle_visit() {
+        assert!(!due_after_restart(0, 100_000.0, true));
     }
 
     #[test]
@@ -6705,8 +6805,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_enable_scans_without_badge() {
-        // A request whose badge was already cleared (opened once by a person) must still be handled.
+    async fn no_badge_never_opens_contacts() {
+        // Without the 通讯录 badge the bot must not leave the chat, even on first enable.
         let (_td, mut coord, calls) =
             friend_fixture(crate::core::friend_requests::Mode::DryRun, true);
         let mut cap = MockCoordinatorCapture::new();
@@ -6726,12 +6826,12 @@ mod tests {
         coord.capture = Some(Box::new(cap));
         coord.serve_friend_requests().await.unwrap();
         assert!(
-            calls
+            !calls
                 .lock()
                 .unwrap()
                 .iter()
                 .any(|(op, _)| op == "friend_request_scan"),
-            "first enable must scan even without a badge"
+            "no badge must not open the friend list"
         );
     }
     #[tokio::test]

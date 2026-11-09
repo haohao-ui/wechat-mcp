@@ -103,6 +103,7 @@ pub struct BotConfig {
     pub poll_seconds: u64,
     pub cooldown_seconds: u64,
     pub max_replies_per_hour: u64,
+    /// Accepted for config compatibility only; chats are no longer visited periodically.
     pub idle_check_seconds: u64,
     pub turn_quiet_seconds: u64,
     pub turn_max_seconds: u64,
