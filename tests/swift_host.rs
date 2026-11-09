@@ -3051,4 +3051,3 @@ fn test_main_window_largest_on_screen() {
     assert_eq!(res["x"], 10.0);
     assert_eq!(res["y"], 183.0);
 }
-
