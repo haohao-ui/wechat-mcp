@@ -716,6 +716,115 @@ impl HistoryQuery {
         }))
     }
 
+    /// Search an explicit contact set, filtering before limit and cursor selection.
+    #[allow(dead_code, clippy::too_many_arguments)]
+    pub fn search_messages_in(
+        &self,
+        q: &str,
+        contacts: &HashSet<String>,
+        since: Option<i64>,
+        until: Option<i64>,
+        cursor: Option<&str>,
+        limit: Option<i64>,
+    ) -> Result<Value, QueryError> {
+        let lim = check_limit(limit.unwrap_or(20), "search")?;
+        let trimmed_q = q.trim();
+        if trimmed_q.is_empty() {
+            return Err(QueryError::invalid_argument("q is required"));
+        }
+
+        if contacts.is_empty() {
+            return Ok(json!({"items": [], "next_cursor": null}));
+        }
+        let family: Vec<String> = contacts.iter().cloned().collect();
+
+        let (mut where_clause, mut params) = self._range(&family, since, until, cursor, "desc")?;
+        where_clause.push_str(" AND m.account_id = (SELECT account_id FROM contacts WHERE contact_id=m.contact_id)");
+        let escaped_like = format!(
+            "%{}%",
+            trimmed_q
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        let understood = " OR md.understanding LIKE ? ESCAPE '\\'";
+
+        if trimmed_q.chars().count() >= 3 {
+            where_clause.push_str(&format!(
+                " AND (m.rowid IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?){})",
+                understood
+            ));
+            let fts_phrase = format!("\"{}\"", trimmed_q.replace('"', "\"\""));
+            params.push(Box::new(fts_phrase));
+            params.push(Box::new(escaped_like));
+        } else {
+            where_clause.push_str(&format!(" AND (m.text LIKE ? ESCAPE '\\'{})", understood));
+            params.push(Box::new(escaped_like.clone()));
+            params.push(Box::new(escaped_like));
+        }
+
+        let sql = format!(
+            "{} WHERE {} ORDER BY m.rowid DESC LIMIT ?",
+            MESSAGE_SELECT, where_clause
+        );
+        params.push(Box::new(lim + 1));
+
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&sql).map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(params_refs)).map_err(|e| QueryError::new("db_error", e.to_string()))?;
+
+        let mut items = Vec::new();
+        let mut rids = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| QueryError::new("db_error", e.to_string()))? {
+            let rid: i64 = row.get("rid").map_err(|e| QueryError::new("db_error", e.to_string()))?;
+            rids.push(rid);
+            let mut item = self._message(row, false)?;
+
+            let cid: String = item["contact_id"].as_str().unwrap().to_string();
+            let seq: i64 = item["seq"].as_i64().unwrap();
+            let mut ctx_stmt = self.conn.prepare(
+                "SELECT message_id FROM messages WHERE contact_id=? AND account_id=(SELECT account_id FROM contacts WHERE contact_id=messages.contact_id) AND seq BETWEEN ? AND ? AND seq != ? ORDER BY seq",
+            ).map_err(|e| QueryError::new("db_error", e.to_string()))?;
+            let ctx_rows = ctx_stmt.query_map(params![cid, seq - 2, seq + 2, seq], |r| r.get::<_, String>(0)).map_err(|e| QueryError::new("db_error", e.to_string()))?;
+            let mut ctx_ids = Vec::new();
+            for id in ctx_rows {
+                ctx_ids.push(id.map_err(|e| QueryError::new("db_error", e.to_string()))?);
+            }
+            item["context_ids"] = json!(ctx_ids);
+
+            items.push(item);
+        }
+
+        let has_more = items.len() > lim as usize;
+        if has_more {
+            items.truncate(lim as usize);
+            rids.truncate(lim as usize);
+        }
+
+        let next_cursor = if has_more {
+            let last_rid = *rids.last().unwrap();
+            Some(encode_cursor(&vec![json!(last_rid), json!("desc")]))
+        } else {
+            None
+        };
+
+        Ok(json!({
+            "items": items,
+            "next_cursor": next_cursor,
+        }))
+    }
+
+    /// Media belongs to messages, rather than directly to a contact or account.
+    #[allow(dead_code)]
+    pub fn media_owners(&self, media_id: &str) -> Result<Vec<(String, String, String)>, QueryError> {
+        let mut stmt = self.conn.prepare("SELECT message_id, contact_id, account_id FROM messages WHERE media_id=?")
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        stmt.query_map([media_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| QueryError::new("db_error", e.to_string()))
+    }
+
     pub fn get_message(&self, message_id: &str) -> Result<Value, QueryError> {
         let sql = format!("{} WHERE m.message_id=?", MESSAGE_SELECT);
         let mut stmt = self.conn.prepare(&sql).map_err(|e| QueryError::new("db_error", e.to_string()))?;

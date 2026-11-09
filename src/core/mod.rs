@@ -1,3 +1,4 @@
+pub mod open_api;
 pub mod backup;
 pub mod contacts;
 pub mod brain_tools;
