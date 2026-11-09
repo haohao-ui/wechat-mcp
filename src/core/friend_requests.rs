@@ -280,10 +280,10 @@ async fn scan_inner(
             .await
         {
             Ok(v) => v,
-            Err(_) => {
+            Err(error) => {
                 report
                     .events
-                    .push(json!({"event":"friend_request_scan","reason":"detail_failed"}));
+                    .push(json!({"event":"friend_request_scan","reason":"detail_failed","error":format!("{error:#}")}));
                 break;
             }
         };
@@ -317,6 +317,9 @@ async fn scan_inner(
             state.save(root)?;
             if !stop() && !source.is_empty() && !detail["verify_button"].is_null() {
                 let v=capture.call("friend_request_verify",json!({"mode":c.mode,"row_y":row.row_y,"name":row.name,"diagnostics_dir":root.join("diagnostics/friend-requests").join(format!("{now:.0}-{}",uuid::Uuid::new_v4()))})).await;
+                if let Err(error) = &v {
+                    report.events.push(json!({"event":"friend_request_scan","reason":"verify_failed","error":format!("{error:#}")}));
+                }
                 if let Ok(v) = v {
                     if v["verified"] == true {
                         decision = if c.mode == Mode::Live {
