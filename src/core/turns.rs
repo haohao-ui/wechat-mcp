@@ -40,7 +40,7 @@ use crate::core::history::store::{HistoryStore, similar};
 use crate::core::model::{Bubble, Frame};
 use crate::core::policy::{
     ContinuityError, Policy, echo_matches, fingerprint, merge_pages, new_bubbles, reconcile,
-    relocate, strip_member_count, validate_reply,
+    relocate, separator_tail, strip_member_count, validate_reply,
 };
 use crate::core::state::{read_json, write_private};
 use crate::core::worker_client::action_interrupted;
@@ -969,6 +969,34 @@ impl BotService {
         Ok(true)
     }
 
+    /// Identical messages: a time separator never seen before marks the newest bubble as new.
+    /// A second capture must show the same bubbles and separators, otherwise nothing is new.
+    async fn separator_arrivals(
+        &mut self,
+        capture: &mut impl Capture,
+        cursor: &[Bubble],
+        frame: &Frame,
+    ) -> Result<Vec<Bubble>> {
+        let tail = separator_tail(cursor, &frame.bubbles);
+        if tail.is_empty() {
+            return Ok(tail);
+        }
+        let again = capture.frame().await?;
+        let key = |b: &Bubble| (fingerprint(b), b.extra.get("time_label").cloned());
+        let same = again.bubbles.len() == frame.bubbles.len()
+            && again
+                .bubbles
+                .iter()
+                .zip(&frame.bubbles)
+                .all(|(a, b)| key(a) == key(b));
+        tracing::info!(
+            recipient = %self.recipient,
+            confirmed = same,
+            "separator_disambiguated"
+        );
+        Ok(if same { tail } else { Vec::new() })
+    }
+
     pub async fn cycle(
         &mut self,
         client: &impl ToolClient,
@@ -1020,7 +1048,12 @@ impl BotService {
             Ok(ch) => ch,
             Err(ref err @ ContinuityError::AmbiguousAnchor { ref certain }) => {
                 ambiguous = Some(err.to_string());
-                certain.clone()
+                if certain.is_empty() {
+                    self.separator_arrivals(capture, &cursor_bubbles, &frame)
+                        .await?
+                } else {
+                    certain.clone()
+                }
             }
             Err(ContinuityError::ContinuityGap) => {
                 match self.recover_gap(capture, &frame, GAP_SCROLL_PAGES).await? {
@@ -4318,6 +4351,95 @@ mod tests {
             .cloned()
             .collect();
         assert_eq!(sends.len(), 1);
+    }
+
+    fn timed(text: &str, direction: &str, label: Option<&str>) -> Bubble {
+        let mut b = test_bubble(text, direction);
+        if let Some(label) = label {
+            b.extra.insert("time_label".into(), json!(label));
+        }
+        b
+    }
+
+    async fn identical_with_separators(
+        old: &[Option<&str>],
+        current: &[Option<&str>],
+        confirm: &[Option<&str>],
+    ) -> usize {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        svc.brain = Some(default_brain("你好，我是AI客服助手。"));
+        let frame = |labels: &[Option<&str>]| {
+            test_frame(
+                labels
+                    .iter()
+                    .map(|l| timed("开放接口验收测试", "inbound_visual", *l))
+                    .collect(),
+                "午夜咖啡",
+            )
+        };
+        svc.advance(frame(old)).unwrap();
+        let mut after = frame(current);
+        after
+            .bubbles
+            .push(test_bubble("你好，我是AI客服助手。", "outbound_visual"));
+        let client = MockToolClient::new_default();
+        let mut cap = MockCapture::new(vec![
+            frame(current),
+            frame(confirm),
+            frame(current),
+            frame(current),
+            frame(current),
+            after,
+        ]);
+        svc.cycle(&client, &mut cap).await.unwrap();
+        assert!(!svc.paused);
+        client
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(n, _)| n == "send_message")
+            .count()
+    }
+
+    #[tokio::test]
+    async fn test_identical_message_under_new_time_separator_gets_one_reply() {
+        let old = [Some("14:40"), Some("19:42"), Some("21:30")];
+        let now = [Some("14:40"), Some("19:42"), Some("21:30"), Some("21:41")];
+        assert_eq!(identical_with_separators(&old, &now, &now).await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_identical_message_without_new_separator_is_not_replied() {
+        // Same minute: WeChat draws no new separator, so the newest cannot be told apart.
+        let old = [Some("14:40"), Some("19:42"), Some("21:30")];
+        let now = [Some("14:40"), Some("19:42"), Some("21:30"), None];
+        assert_eq!(identical_with_separators(&old, &now, &now).await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_separator_must_agree_across_two_reads() {
+        let old = [Some("14:40"), Some("19:42"), Some("21:30")];
+        let now = [Some("14:40"), Some("19:42"), Some("21:30"), Some("21:41")];
+        let other = [Some("14:40"), Some("19:42"), Some("21:30"), Some("21:47")];
+        assert_eq!(identical_with_separators(&old, &now, &other).await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_earlier_or_unlabelled_cursor_is_not_replied() {
+        let now = [Some("14:40"), Some("19:42"), Some("21:30"), Some("21:20")];
+        let old = [Some("14:40"), Some("19:42"), Some("21:30")];
+        assert_eq!(identical_with_separators(&old, &now, &now).await, 0);
+        // A cursor saved before separators were recorded cannot be compared.
+        let legacy = [None, None, None];
+        let labelled = [Some("14:40"), Some("19:42"), Some("21:30"), Some("21:41")];
+        assert_eq!(
+            identical_with_separators(&legacy, &labelled, &labelled).await,
+            0
+        );
     }
 
     #[tokio::test]

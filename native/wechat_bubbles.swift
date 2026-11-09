@@ -106,6 +106,27 @@ func recognize(_ image: CGImage, timeout: Double = 12) throws -> [Text] {
     return result
 }
 
+/// Time separators: WeChat centers a time line ("21:30", "昨天 21:30") above a message when time
+/// has passed. Each bubble records the separator between it and the previous bubble, so identical
+/// texts sent at different times can be told apart. Format check only; no character corrections.
+func attachTimeLabels(_ bubbles: inout [[String:Any]], texts: [Text], width: Int) {
+    let pattern = #"^(\S{1,12}\s)?\d{1,2}:\d{2}$"#
+    let separators = texts.filter { t in
+        abs(t.x-Double(width)/2) < Double(width)*0.12 &&
+        t.body.trimmingCharacters(in:.whitespaces).range(of:pattern,options:.regularExpression) != nil
+    }
+    var previousBottom = -Double.infinity
+    for index in bubbles.indices {
+        guard let y = bubbles[index]["y"] as? Int, let h = bubbles[index]["height"] as? Int else { continue }
+        let between = separators.filter { $0.y > previousBottom && $0.y < Double(y) }
+        if let label = between.max(by:{ $0.y < $1.y }) {
+            bubbles[index]["time_label"] = label.body.trimmingCharacters(in:.whitespaces)
+        }
+        previousBottom = Double(y+h)
+    }
+}
+/// End time separators
+
 /// Loads the text model once (Vision cold start is ~30s on macOS 26+).
 func warmUpRecognizer() {
     guard let context = CGContext(data:nil,width:200,height:60,bitsPerComponent:8,bytesPerRow:0,
@@ -489,6 +510,7 @@ func analyzeFrame(_ captured: CGImage, window: [String:Any], mediaRoot: URL? = n
         bubbles.append(item)
     }
     bubbles.sort { ($0["y"] as! Int)<($1["y"] as! Int) }
+    attachTimeLabels(&bubbles,texts:texts,width:width)
     if group {
         // Group chats print the member's name just above each left bubble, left-aligned with it.
         let boxes=bubbles.compactMap { b -> CGRect? in
