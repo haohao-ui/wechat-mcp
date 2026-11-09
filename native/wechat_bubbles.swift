@@ -128,56 +128,67 @@ func attachTimeLabels(_ bubbles: inout [[String:Any]], texts: [Text], width: Int
 /// End time separators
 
 /// Voice messages (observed 2026-11-09, docs/observations §10): a single-line inbound bubble with a
-/// speaker icon at its left and the duration ("5\"", seconds) after it. After 转文字 WeChat adds a
-/// left bubble ~6pt below the voice, aligned with it, holding the transcript; it is folded into the
-/// voice bubble so continuity (digest of the voice pixels) is unchanged.
+/// speaker icon at its left and the duration ("5\"", seconds). Its width is 71 + 9 x seconds. An
+/// unconverted voice has a 「转文字」 button on its right; after conversion WeChat adds a left bubble
+/// ~4–6pt below it holding the transcript. The transcript stays a bubble of its own (continuity sees
+/// the same list at every scroll position), marked voice_transcript, and is copied onto the voice.
+/// OCR turns the icon, digit and mark into anything (`")3"`, `•))ぶ"`, `合"`, `•) 2M`): geometry decides.
 func markVoiceBubbles(_ bubbles: inout [[String:Any]], texts: [Text], ink: (Int,Int)->Bool) {
     func box(_ b: [String:Any]) -> (Int,Int,Int,Int)? {
         guard let x=b["x"] as? Int,let y=b["y"] as? Int,let w=b["width"] as? Int,let h=b["height"] as? Int else { return nil }
         return (x,y,w,h)
     }
-    func seconds(_ b: [String:Any]) -> Int?? {
+    func distance(_ a:[Character],_ b:[Character]) -> Int {
+        var previous=Array(0...b.count)
+        for (i,x) in a.enumerated() {
+            var row=[i+1]
+            for (j,y) in b.enumerated() { row.append(min(row[j]+1,previous[j+1]+1,previous[j]+(x==y ? 0:1))) }
+            previous=row
+        }
+        return previous[b.count]
+    }
+    func transcriptBelow(_ index: Int) -> Bool {
+        guard index+1 < bubbles.count, let (x,y,_,h)=box(bubbles[index]), let (nx,ny,_,_)=box(bubbles[index+1]),
+              bubbles[index+1]["direction"] as? String == "inbound_visual",
+              (bubbles[index+1]["kind"] as? String ?? "text") == "text" else { return false }
+        return abs(nx-x) <= 12 && (1...14).contains(ny-(y+h))
+    }
+    func seconds(_ index: Int) -> Int?? {
+        let b=bubbles[index]
         guard b["direction"] as? String == "inbound_visual", (b["kind"] as? String ?? "text") == "text",
               let (x,y,w,h)=box(b), h <= 48, w >= 40 else { return nil }
         let body=texts.filter { $0.x>=Double(x) && $0.x<Double(x+w) && $0.y>=Double(y) && $0.y<Double(y+h) }
             .sorted { $0.x < $1.x }.map(\.body).joined().filter { !$0.isWhitespace }
-        // Closing seconds mark after a short reading. OCR turns the icon and digit into anything
-        // (`")3"`, `•))ぶ"`, `合"`), so the reading's characters never decide.
-        guard let mark=body.last, ["\"","”","″","“"].contains(mark), (2...8).contains(body.count) else { return nil }
+        guard (1...8).contains(body.count) else { return nil }
         var inkCount=0
         for yy in (y+8)..<max(y+9,y+h-8) { for xx in (x+8)..<(x+30) where ink(xx,yy) { inkCount += 1 } }
         guard inkCount >= 12 else { return nil }
-        // Geometry decides: bubble width = 71 + 9 × seconds on the device (2s 89, 3s 98, 5s 116, 6s 125).
-        let fromWidth=(Double(w)-71)/9
-        let widthSeconds=Int(fromWidth.rounded())
+        let widthSeconds=Int(((Double(w)-71)/9).rounded())
         let fits=(1...60).contains(widthSeconds) && abs(Double(w)-71-9*Double(widthSeconds)) <= 1
-        let digits=Int(String(body.dropLast().reversed().prefix { $0.isASCII && $0.isNumber }.reversed()))
-        // Long voices may stop growing; then only a clean reading (icon noise + digits) qualifies.
-        let clean = !body.contains { c in c.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) || ($0.isASCII && CharacterSet.letters.contains($0)) } }
-        guard fits || (clean && digits != nil) else { return nil }
-        return .some(fits ? widthSeconds : digits)
-    }
-    var result: [[String:Any]] = []
-    var index=0
-    while index < bubbles.count {
-        var bubble=bubbles[index]
-        if let duration=seconds(bubble), let (x,y,_,h)=box(bubble) {
-            bubble["kind"]="voice"
-            bubble["media_id"]=bubble["digest"]
-            bubble["text"]=duration.map { "[语音\($0)秒]" } ?? "[语音]"
-            if let duration=duration { bubble["voice_seconds"]=duration }
-            if index+1 < bubbles.count, let (nx,ny,_,_)=box(bubbles[index+1]),
-               bubbles[index+1]["direction"] as? String == "inbound_visual",
-               (bubbles[index+1]["kind"] as? String ?? "text") == "text",
-               abs(nx-x) <= 12, (1...14).contains(ny-(y+h)) {
-                bubble["transcript"]=bubbles[index+1]["text"]
-                index += 1
-            }
+        let marked=["\"","”","″","“"].contains(body.last!)
+        let button=texts.contains { t in
+            t.x > Double(x+w) && t.x < Double(x+w+160) && abs(t.y-Double(y+h/2)) < Double(h)/2 &&
+            distance(Array(t.body.filter { !$0.isWhitespace && !"•·.。".contains($0) }),Array("转文字")) <= 1
         }
-        result.append(bubble)
-        index += 1
+        let digits=Int(String(body.dropLast(marked ? 1:0).reversed().prefix { $0.isASCII && $0.isNumber }.reversed()))
+        let clean = !body.contains { c in c.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) || ($0.isASCII && CharacterSet.letters.contains($0)) } }
+        // Width plus one independent voice signal; a long voice (width capped) needs a clean reading.
+        if fits && (marked || button || transcriptBelow(index)) { return .some(widthSeconds) }
+        if !fits && clean && marked && digits != nil && w > 71+9*20 { return .some(digits) }
+        return nil
     }
-    bubbles=result
+    for index in bubbles.indices {
+        guard let duration=seconds(index) else { continue }
+        bubbles[index]["kind"]="voice"
+        bubbles[index]["media_id"]=bubbles[index]["digest"]
+        bubbles[index]["text"]=duration.map { "[语音\($0)秒]" } ?? "[语音]"
+        if let duration=duration { bubbles[index]["voice_seconds"]=duration }
+        if transcriptBelow(index) {
+            bubbles[index]["transcript"]=bubbles[index+1]["text"]
+            bubbles[index+1]["kind"]="voice_transcript"
+            bubbles[index+1]["transcript_of"]=bubbles[index]["digest"]
+        }
+    }
 }
 /// End voice messages
 

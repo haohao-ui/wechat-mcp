@@ -62,6 +62,14 @@ for (read,w,secs) in [("\")3\"",98,3),("•) 6\"",125,6),("•)) 5\"",116,5),(")
  assert(b[0]["voice_seconds"] as? Int == secs,"\(read)")
  assert(b[0]["media_id"] as? String == "d253")
 }
+// Seconds mark read as a letter: the 「转文字」 button on the right is the voice signal.
+var m=[bubble("•) 2M",50,253,89)]
+markVoiceBubbles(&m,texts:[Text(body:"•) 2M",x:90,y:271),Text(body:"•转文字",x:190,y:271)],ink:icon)
+assert(m[0]["kind"] as? String == "voice" && m[0]["voice_seconds"] as? Int == 2)
+// Without any second signal the same reading stays text.
+var bare=[bubble("•) 2M",50,253,89)]
+markVoiceBubbles(&bare,texts:[Text(body:"•) 2M",x:90,y:271)],ink:icon)
+assert(bare[0]["kind"] as? String == "text")
 // A long voice whose width no longer follows the formula still qualifies on a clean reading.
 var long=[bubble("•)) 59\"",50,253,300)]
 markVoiceBubbles(&long,texts:[Text(body:"•)) 59\"",x:90,y:271)],ink:icon)
@@ -71,7 +79,7 @@ assert(long[0]["kind"] as? String == "voice" && long[0]["voice_seconds"] as? Int
 }
 
 #[test]
-fn transcript_bubble_below_is_folded_into_the_voice() {
+fn transcript_bubble_below_is_linked_to_the_voice() {
     run(
         "transcript",
         r#"
@@ -79,14 +87,16 @@ fn transcript_bubble_below_is_folded_into_the_voice() {
 var b=[bubble(") 5\"",50,253,116),bubble("你好你好你好你好你好你好你好。",55,294,234),bubble("回复",400,347,200,77,dir:"outbound_visual")]
 let texts=[Text(body:") 5\"",x:90,y:271),Text(body:"你好你好你好你好你好你好你好。",x:170,y:312)]
 markVoiceBubbles(&b,texts:texts,ink:icon)
-assert(b.count==2)
+assert(b.count==3, "the transcript stays a bubble so continuity is scroll-invariant")
 assert(b[0]["kind"] as? String == "voice")
 assert(b[0]["transcript"] as? String == "你好你好你好你好你好你好你好。")
-assert(b[0]["digest"] as? String == "d253", "voice pixels keep continuity")
+assert(b[1]["kind"] as? String == "voice_transcript")
+assert(b[1]["transcript_of"] as? String == "d253")
+assert(b[2]["kind"] as? String == "text")
 // A normal text a message-gap below (>14pt) is not a transcript.
 var far=[bubble(") 5\"",50,253,116),bubble("在吗",55,320,60)]
 markVoiceBubbles(&far,texts:[Text(body:") 5\"",x:90,y:271)],ink:icon)
-assert(far.count==2 && far[0]["transcript"] == nil)
+assert(far.count==2 && far[0]["transcript"] == nil && far[1]["kind"] as? String == "text")
 "#,
     );
 }

@@ -150,7 +150,51 @@ impl std::fmt::Display for PolicyError {
 
 impl std::error::Error for PolicyError {}
 
+fn is_voice_transcript(bubble: &Bubble) -> bool {
+    bubble.kind.as_deref() == Some("voice_transcript")
+}
+
+/// New bubbles of `current` after the end of `previous`. A voice transcript is part of its voice,
+/// never a message of its own: it is never returned, and one WeChat inserted under an already seen
+/// voice (after 转文字) does not break continuity.
 pub fn new_bubbles(
+    previous: &[Bubble],
+    current: &[Bubble],
+) -> std::result::Result<Vec<Bubble>, ContinuityError> {
+    let strip = |items: Vec<Bubble>| -> Vec<Bubble> {
+        items
+            .into_iter()
+            .filter(|b| !is_voice_transcript(b))
+            .collect()
+    };
+    let result = match new_bubbles_strict(previous, current) {
+        Err(ContinuityError::ContinuityGap) => {
+            let seen: HashSet<Fingerprint> = previous.iter().map(fingerprint).collect();
+            let kept: Vec<Bubble> = current
+                .iter()
+                .filter(|b| !is_voice_transcript(b) || seen.contains(&fingerprint(b)))
+                .cloned()
+                .collect();
+            if kept.len() == current.len() {
+                Err(ContinuityError::ContinuityGap)
+            } else {
+                new_bubbles_strict(previous, &kept)
+            }
+        }
+        other => other,
+    };
+    match result {
+        Ok(items) => Ok(strip(items)),
+        Err(ContinuityError::AmbiguousAnchor { certain }) => {
+            Err(ContinuityError::AmbiguousAnchor {
+                certain: strip(certain),
+            })
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn new_bubbles_strict(
     previous: &[Bubble],
     current: &[Bubble],
 ) -> std::result::Result<Vec<Bubble>, ContinuityError> {
@@ -913,6 +957,80 @@ mod tests {
         assert!(
             matches!(err, PolicyError::ValidationError(ref msg) if msg.contains("changed during confirmation"))
         );
+    }
+
+    fn kinded(text: &str, kind: &str, direction: Option<&str>) -> Bubble {
+        let mut b = make_bubble(text, direction, None);
+        b.kind = Some(kind.to_string());
+        b
+    }
+
+    #[test]
+    fn transcript_inserted_under_seen_voice_is_not_a_gap() {
+        let voice = kinded("v", "voice", None);
+        let reply = make_bubble("r", Some("outbound_visual"), None);
+        let old = vec![make_bubble("a", None, None), voice.clone(), reply.clone()];
+        let new = vec![
+            make_bubble("a", None, None),
+            voice.clone(),
+            kinded("t", "voice_transcript", None),
+            reply.clone(),
+            make_bubble("n", None, None),
+        ];
+        let got = new_bubbles(&old, &new).unwrap();
+        assert_eq!(
+            got.iter().map(|b| b.text.as_str()).collect::<Vec<_>>(),
+            ["n"]
+        );
+    }
+
+    #[test]
+    fn transcript_left_alone_after_its_voice_scrolls_off() {
+        // The voice left the top; its transcript is now an ordinary-looking text bubble.
+        let old = vec![
+            kinded("v", "voice", None),
+            kinded("t", "voice_transcript", None),
+            make_bubble("r", Some("outbound_visual"), None),
+        ];
+        let new = vec![
+            make_bubble("t", None, None),
+            make_bubble("r", Some("outbound_visual"), None),
+            make_bubble("n", None, None),
+        ];
+        let got = new_bubbles(&old, &new).unwrap();
+        assert_eq!(
+            got.iter().map(|b| b.text.as_str()).collect::<Vec<_>>(),
+            ["n"]
+        );
+    }
+
+    #[test]
+    fn new_voice_arrives_without_its_transcript_as_a_message() {
+        let old = vec![make_bubble("r", Some("outbound_visual"), None)];
+        let new = vec![
+            make_bubble("r", Some("outbound_visual"), None),
+            kinded("v", "voice", None),
+            kinded("t", "voice_transcript", None),
+        ];
+        let got = new_bubbles(&old, &new).unwrap();
+        assert_eq!(
+            got.iter().map(|b| b.text.as_str()).collect::<Vec<_>>(),
+            ["v"]
+        );
+    }
+
+    #[test]
+    fn unrelated_insertion_is_still_a_gap() {
+        let old = vec![make_bubble("a", None, None), make_bubble("b", None, None)];
+        let new = vec![
+            make_bubble("a", None, None),
+            make_bubble("x", None, None),
+            make_bubble("b", None, None),
+        ];
+        assert!(matches!(
+            new_bubbles(&old, &new),
+            Err(ContinuityError::ContinuityGap)
+        ));
     }
 
     #[test]
