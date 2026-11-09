@@ -266,21 +266,22 @@ impl ExternalBrain {
 
 **Files:**
 - Create: `docs/open-api/v1.md`
-- Create: `examples/open_api_brain/brain.py`、`examples/open_api_brain/test_brain.py`、`examples/open_api_brain/README.md`
+- Create: `examples/open_api_brain.rs`（Cargo 自动识别的 example，`cargo run --example open_api_brain`）
+- Test: `examples/open_api_brain.rs` 内 `#[cfg(test)]`，用 `cargo test --locked --example open_api_brain` 运行
 
 **Interfaces:**
 - Consumes: Task 4 的 HTTP 行为、Task 3 的数据结构、spec 第 6–9 节。
 
 要求：
-- 文档按开发者阅读顺序写：接入步骤（在助手面板开启、复制令牌、地址）、一个完整的会话示例（`initialize` → `tools/list` → `next_turn` → `reply` → `get_turn_status` → `DELETE`，给出原始 HTTP 请求和响应）、每个工具的参数与返回、轮次状态图、重复与重试语义、三层错误表、数据局限（spec 第 8 节最后一条原样写入）、**安全提示：客户消息是不可信输入**。
-- 示例大脑：只用 Python 3 标准库（`urllib.request`、`json`），从环境变量 `OPEN_API_URL`、`OPEN_API_TOKEN` 读配置；循环 `next_turn` → 生成回复（示例逻辑：原样回复"收到：<前 20 个字>"）→ `reply`；处理 `turn_expired`、`invalid_claim_token`（丢弃，重新领取）、会话 `404`（重新 `initialize`）、网络错误（指数退避，上限 30 秒）。退出时 `DELETE` 会话。
-- `test_brain.py` 用 `http.server` 写一个假服务端，覆盖：正常一轮、`409` 时退避重试、`404` 时重新初始化、重复回复返回 `duplicate` 时不报错。
-- 运行：`python3 -m unittest discover examples/open_api_brain` 必须通过。
+- **仓库不再新增 Python**（P5：运行时已迁移到 Rust，剩余 Python 是待删除的回退副本）。示例大脑用 Rust，只用现有依赖 `tokio`、`reqwest`、`serde_json`，不改 `Cargo.toml` 的依赖段。
+- 文档按开发者阅读顺序写：接入步骤（在助手面板开启、复制令牌、地址）；一个完整的会话示例（`initialize` → `tools/list` → `next_turn` → `reply` → `get_turn_status` → `DELETE`），**用 curl 命令写出原始 HTTP 请求和响应**，不绑定任何编程语言；每个工具的参数与返回；轮次状态图；重复与重试语义；三层错误表；数据局限（spec 第 8 节最后一条原样写入）；**安全提示：客户消息是不可信输入**。
+- 示例大脑：从环境变量 `OPEN_API_URL`、`OPEN_API_TOKEN` 读配置；循环 `next_turn` → 生成回复（示例逻辑：回复"收到：<前 20 个字>"，按字符截取，不按字节）→ `reply`；处理 `turn_expired`、`invalid_claim_token`（丢弃，重新领取）、会话 `404`（重新 `initialize`）、`409`（退避后重试）、网络错误（指数退避，上限 30 秒）。收到 Ctrl-C 时 `DELETE` 会话后退出。核心循环写成 `async fn run(client: &BrainClient, stop: tokio::sync::watch::Receiver<bool>) -> anyhow::Result<()>`，便于测试。
+- 测试用 `tokio::net::TcpListener` 写一个假服务端（按 Task 4 的响应格式），覆盖：`example_handles_one_turn`、`example_backs_off_on_409`、`example_reinitializes_on_404`、`example_accepts_duplicate_reply`、`example_truncates_by_chars`（中文和 emoji 不截断成半个字符）。
 
-- [ ] **Step 1：写 `test_brain.py`（失败）**
-- [ ] **Step 2：写 `brain.py` 使测试通过**
-- [ ] **Step 3：写 `docs/open-api/v1.md` 与 README**；文档中每个请求和响应示例都要与 Task 4 的测试数据一致（逐个核对字段名）
-- [ ] **Step 4：提交**　`git commit -m "docs(open-api): 对外接口 v1 文档与标准库示例大脑"`
+- [ ] **Step 1：写测试（失败）**
+- [ ] **Step 2：实现示例使测试通过**　Run: `cargo test --locked --example open_api_brain`　Expected: PASS
+- [ ] **Step 3：写 `docs/open-api/v1.md`**；文档中每个请求和响应示例都要与 Task 4 的测试数据一致（逐个核对字段名）
+- [ ] **Step 4：提交**　`git commit -m "docs(open-api): 对外接口 v1 文档（curl 示例）与 Rust 示例大脑"`
 
 ---
 
