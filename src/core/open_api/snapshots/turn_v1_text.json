@@ -1,0 +1,27 @@
+{
+  "account": {
+    "account_id": "wx_bot_main"
+  },
+  "api_version": "1",
+  "claim": {
+    "claim_token": "tok_claim_text",
+    "lease_expires_at": "2023-11-14T22:14:20Z"
+  },
+  "contact": {
+    "contact_id": "c_zhangsan_01",
+    "display_name": "张三",
+    "kind": "private"
+  },
+  "context": [],
+  "deadline_at": "2023-11-14T22:15:20Z",
+  "messages": [
+    {
+      "kind": "text",
+      "message_id": null,
+      "source": "desktop_ocr",
+      "text": "你好，请问客服在吗？"
+    }
+  ],
+  "turn_id": "t_1001",
+  "unavailable": []
+}

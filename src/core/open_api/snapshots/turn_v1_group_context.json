@@ -1,0 +1,47 @@
+{
+  "account": {
+    "account_id": "wx_bot_main"
+  },
+  "api_version": "1",
+  "claim": {
+    "claim_token": "tok_claim_grp",
+    "lease_expires_at": "2023-11-14T22:14:20Z"
+  },
+  "contact": {
+    "contact_id": "c_group_vip_03",
+    "display_name": "VIP客户群",
+    "kind": "group"
+  },
+  "context": [
+    {
+      "kind": "text",
+      "message_id": null,
+      "role": "customer",
+      "text": "你好，我想问个问题"
+    },
+    {
+      "kind": "text",
+      "message_id": null,
+      "role": "assistant",
+      "text": "您好，请发一下具体的报错信息或截图"
+    },
+    {
+      "kind": "image",
+      "media_id": "media_ctx_err_99",
+      "message_id": null,
+      "role": "customer",
+      "text": "[图片]"
+    }
+  ],
+  "deadline_at": "2023-11-14T22:15:20Z",
+  "messages": [
+    {
+      "kind": "text",
+      "message_id": null,
+      "source": "desktop_ocr",
+      "text": "请问这个报错怎么解决？"
+    }
+  ],
+  "turn_id": "t_1003",
+  "unavailable": []
+}

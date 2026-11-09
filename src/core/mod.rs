@@ -14,6 +14,7 @@ pub mod scheduler;
 pub mod serve;
 pub mod state;
 pub mod turns;
+pub mod open_api;
 pub mod wechat_account;
 pub mod worker_client;
 
