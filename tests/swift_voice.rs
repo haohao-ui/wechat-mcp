@@ -54,18 +54,18 @@ fn observed_voice_readings_are_voice_with_duration() {
     run(
         "readings",
         r#"
-// The four OCR readings recorded for real voice bubbles today.
-for (read,secs) in [("\")3\"",3),("•) 6\"",6),("•)) 5\"",5),(") 5\"",5)] {
- var b=[bubble(read,50,253,116)]
+// Every OCR reading recorded for real voice bubbles today, with the measured bubble width.
+for (read,w,secs) in [("\")3\"",98,3),("•) 6\"",125,6),("•)) 5\"",116,5),(") 5\"",116,5),("合\"",125,6),("•））ぶ\"",116,5),("•)) 2\"",89,2)] {
+ var b=[bubble(read,50,253,w)]
  markVoiceBubbles(&b,texts:[Text(body:read,x:90,y:271)],ink:icon)
  assert(b[0]["kind"] as? String == "voice","\(read)")
  assert(b[0]["voice_seconds"] as? Int == secs,"\(read)")
  assert(b[0]["media_id"] as? String == "d253")
 }
-// Duration misread as a kana: still a voice, duration unknown.
-var k=[bubble("•））ぶ\"",50,253,116)]
-markVoiceBubbles(&k,texts:[Text(body:"•））ぶ\"",x:90,y:271)],ink:icon)
-assert(k[0]["kind"] as? String == "voice" && k[0]["voice_seconds"] == nil && k[0]["text"] as? String == "[语音]")
+// A long voice whose width no longer follows the formula still qualifies on a clean reading.
+var long=[bubble("•)) 59\"",50,253,300)]
+markVoiceBubbles(&long,texts:[Text(body:"•)) 59\"",x:90,y:271)],ink:icon)
+assert(long[0]["kind"] as? String == "voice" && long[0]["voice_seconds"] as? Int == 59)
 "#,
     );
 }
@@ -96,8 +96,8 @@ fn ordinary_messages_are_not_voice() {
     run(
         "not_voice",
         r#"
-for read in ["在吗","5\"","ok\"","今天发货吗\"","123"] {
- var b=[bubble(read,50,253,116)]
+for (read,w) in [("在吗",60),("5\"",98),("ok\"",50),("今天发货吗\"",120),("123",98),("好的哈\"",300)] {
+ var b=[bubble(read,50,253,w)]
  markVoiceBubbles(&b,texts:[Text(body:read,x:90,y:271)],ink:read=="5\"" ? {_,_ in false} : icon)
  assert(b[0]["kind"] as? String == "text","\(read)")
 }

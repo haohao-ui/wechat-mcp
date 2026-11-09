@@ -141,18 +141,21 @@ func markVoiceBubbles(_ bubbles: inout [[String:Any]], texts: [Text], ink: (Int,
               let (x,y,w,h)=box(b), h <= 48, w >= 40 else { return nil }
         let body=texts.filter { $0.x>=Double(x) && $0.x<Double(x+w) && $0.y>=Double(y) && $0.y<Double(y+h) }
             .sorted { $0.x < $1.x }.map(\.body).joined().filter { !$0.isWhitespace }
-        // Only icon glyph noise, the duration, and a closing seconds mark: no Chinese characters or
-        // Latin letters (OCR has read the digit as a kana, so other scripts are icon/digit noise).
-        let wordLike: (Character) -> Bool = { c in
-            c.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) || ($0.isASCII && CharacterSet.letters.contains($0)) }
-        }
-        guard !body.isEmpty, body.count <= 8, !body.contains(where:wordLike),
-              let mark=body.last, ["\"","”","″","“"].contains(mark) else { return nil }
+        // Closing seconds mark after a short reading. OCR turns the icon and digit into anything
+        // (`")3"`, `•))ぶ"`, `合"`), so the reading's characters never decide.
+        guard let mark=body.last, ["\"","”","″","“"].contains(mark), (2...8).contains(body.count) else { return nil }
         var inkCount=0
         for yy in (y+8)..<max(y+9,y+h-8) { for xx in (x+8)..<(x+30) where ink(xx,yy) { inkCount += 1 } }
         guard inkCount >= 12 else { return nil }
-        let digits=body.dropLast().reversed().prefix { $0.isASCII && $0.isNumber }
-        return .some(Int(String(digits.reversed())))
+        // Geometry decides: bubble width = 71 + 9 × seconds on the device (2s 89, 3s 98, 5s 116, 6s 125).
+        let fromWidth=(Double(w)-71)/9
+        let widthSeconds=Int(fromWidth.rounded())
+        let fits=(1...60).contains(widthSeconds) && abs(Double(w)-71-9*Double(widthSeconds)) <= 1
+        let digits=Int(String(body.dropLast().reversed().prefix { $0.isASCII && $0.isNumber }.reversed()))
+        // Long voices may stop growing; then only a clean reading (icon noise + digits) qualifies.
+        let clean = !body.contains { c in c.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) || ($0.isASCII && CharacterSet.letters.contains($0)) } }
+        guard fits || (clean && digits != nil) else { return nil }
+        return .some(fits ? widthSeconds : digits)
     }
     var result: [[String:Any]] = []
     var index=0
