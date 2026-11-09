@@ -207,6 +207,7 @@ mod tests {
             image_count: None,
             earlier_images: 0,
             max_attachment_mb,
+            media_refs: Vec::new(),
         };
 
         let prompt = build_prompt(&turn).unwrap();
@@ -317,6 +318,7 @@ mod tests {
             image_count: None,
             earlier_images: 0,
             max_attachment_mb: 50,
+            media_refs: Vec::new(),
         };
 
         let prompt = build_prompt(&turn).unwrap();
@@ -381,6 +383,7 @@ exit 0
             image_count: None,
             earlier_images: 0,
             max_attachment_mb: 50,
+            media_refs: Vec::new(),
         };
 
         let res = brain.reply(&turn).await.unwrap();

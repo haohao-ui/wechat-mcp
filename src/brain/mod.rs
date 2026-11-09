@@ -48,6 +48,14 @@ pub struct FailedAttachment {
     pub hint: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct MediaRef {
+    pub kind: String,
+    pub media_id: Option<String>,
+    pub filename: Option<String>,
+    pub understanding: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Turn {
     #[serde(default)]
@@ -78,6 +86,8 @@ pub struct Turn {
     pub earlier_images: usize,
     #[serde(default = "default_max_attachment_mb")]
     pub max_attachment_mb: u64,
+    #[serde(skip)]
+    pub media_refs: Vec<MediaRef>,
 }
 
 fn default_mode() -> String {

@@ -1,0 +1,48 @@
+{
+  "account": {
+    "account_id": "wx_bot_main"
+  },
+  "api_version": "1",
+  "claim": {
+    "claim_token": "tok_claim_img",
+    "lease_expires_at": "2023-11-14T22:14:20Z"
+  },
+  "contact": {
+    "contact_id": "c_lisi_02",
+    "display_name": "李四",
+    "kind": "private"
+  },
+  "context": [],
+  "deadline_at": "2023-11-14T22:15:20Z",
+  "messages": [
+    {
+      "kind": "text",
+      "message_id": null,
+      "source": "desktop_ocr",
+      "text": "发了两张图片和一个文件，还有一张图没加载出来"
+    },
+    {
+      "kind": "image",
+      "media_id": "media_img_001",
+      "message_id": null
+    },
+    {
+      "kind": "image",
+      "media_id": "media_img_002",
+      "message_id": null
+    },
+    {
+      "filename": "价格表.xlsx",
+      "kind": "file",
+      "media_id": "media_file_price_01",
+      "message_id": null
+    }
+  ],
+  "turn_id": "t_1002",
+  "unavailable": [
+    {
+      "kind": "image",
+      "reason": "download_timeout"
+    }
+  ]
+}

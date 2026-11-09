@@ -897,6 +897,7 @@ mod tests {
             image_count: Some(1),
             earlier_images: 0,
             max_attachment_mb: 50,
+            media_refs: Vec::new(),
         };
 
         let prompt = crate::brain::builtin::build_prompt(&turn).unwrap();
