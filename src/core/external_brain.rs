@@ -273,21 +273,23 @@ impl ExternalBrain {
             return Err(OpenApiError::TurnExpired);
         }
         if access.account_id() != pending.turn.account_id || !access.permit(&claim.contact_id) {
-            ledger
-                .record(TerminalRecord {
-                    turn_id: req.turn_id.clone(),
-                    outcome: "revoked".into(),
-                    action: None,
-                    text: None,
-                    text_sha256: None,
-                    at: now,
-                })
-                .map_err(|e| OpenApiError::Internal(e.to_string()))?;
+            let record_result = ledger.record(TerminalRecord {
+                turn_id: req.turn_id.clone(),
+                outcome: "revoked".into(),
+                action: None,
+                text: None,
+                text_sha256: None,
+                at: now,
+            });
             deliver_reply(
                 &mut state,
                 &req.turn_id,
                 action_reply("skip", "", Some("revoked")),
             );
+            if let Err(error) = record_result {
+                tracing::error!(%error, turn_id = %req.turn_id, "failed to persist revoked turn; skipped and removed from queue");
+                return Err(OpenApiError::Internal(error.to_string()));
+            }
             return Err(OpenApiError::TurnRevoked);
         }
         if !["send", "skip", "handoff"].contains(&req.action.as_str()) {
@@ -458,14 +460,19 @@ impl ExternalBrain {
                     drop(state);
                     return rx.await.context("reply channel closed");
                 }
-                if let Ok(ledger) = ledger.as_mut() {
+                let record_result = if let Ok(ledger) = ledger.as_mut() {
                     ledger.record(TerminalRecord {
                         turn_id: turn_id.clone(), outcome: "expired".into(),
                         action: None, text: None, text_sha256: None, at: now_secs() as u64,
-                    })?;
-                }
+                    })
+                } else {
+                    Ok(())
+                };
                 state.pending.remove(&turn_id);
                 state.order.retain(|id| id != &turn_id);
+                if let Err(error) = record_result {
+                    tracing::error!(%error, %turn_id, "failed to persist expired turn; removed from queue and applying timeout action");
+                }
                 drop(ledger);
                 drop(state);
 
