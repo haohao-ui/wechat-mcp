@@ -6,11 +6,13 @@ private func frX(_ line:[String:Any])->Double { (line["x"] as? Double ?? 0) + (l
 
 // Closed UI vocabulary from docs/observations/2026-11-06-wechat-4.1.15-actions.md §9.
 // Observe new UI wording on the real client before adding entries; never add OCR typo aliases.
-enum FriendWordKind { case status, source, button }
+enum FriendWordKind { case status, source, button, dialog }
 private let friendVocabulary: [FriendWordKind:[String]] = [
  .status:["等待验证","已添加","已过期"],
  .source:["通过搜索手机号添加","通过搜索微信号添加","通过搜索QQ号添加","通过扫一扫添加","通过群聊添加","通过名片分享添加"],
- .button:["前往验证","取消","确定","完成","确认"]
+ .button:["前往验证","取消","确定","完成","确认"],
+ // 「通过朋友验证」 dialog, observed 2026-11-09 (§9). Field contents (remark, tag placeholder) are exempt by position.
+ .dialog:["通过朋友验证","备注","标签","朋友权限","聊天、朋友圈、微信运动等","仅聊天","朋友圈和状态","不让他（她）看","不看他（她）","取消","确定"]
 ]
 struct FriendWordMatch {
  let word:String?
@@ -27,10 +29,12 @@ private func friendDistance(_ a:[Character],_ b:[Character])->Int {
  }
  return previous[b.count]
 }
+/// Unicode compatibility form (full/half width) only; never per-character OCR corrections.
+private func friendNormalized(_ text:String)->[Character] {Array(text.precomposedStringWithCompatibilityMapping.filter{!$0.isWhitespace})}
 func friendWordMatch(_ text:String,_ kind:FriendWordKind)->FriendWordMatch {
- let text=Array(text.filter{!$0.isWhitespace})
+ let text=friendNormalized(text)
  let scores=(friendVocabulary[kind] ?? []).map { word -> (String,Double,Int) in
-  let chars=Array(word), distance=friendDistance(text,chars)
+  let chars=friendNormalized(word), distance=friendDistance(text,chars)
   return (word,1-Double(distance)/Double(max(1,max(chars.count,text.count))),distance)
  }.sorted{$0.1>$1.1}
  let best=scores[0], second=scores[1].1
@@ -119,6 +123,21 @@ public func parseFriendRequestDetail(_ lines:[[String:Any]])->[String:Any] {
  return result
 }
 
+/// Validates the 「通过朋友验证」 dialog. Every line must be a consensus vocabulary word except the
+/// remark field (between 备注 and 标签) and the tag field (between 标签 and 朋友权限).
+public func classifyFriendDialog(_ lines:[[String:Any]])->[String:Any] {
+ let sorted=lines.sorted{frY($0)<frY($1)}
+ func word(_ l:[String:Any])->String? {friendCanonical(l,.dialog)}
+ func first(_ w:String)->[String:Any]? {sorted.first{word($0)==w}}
+ guard first("通过朋友验证") != nil,let remark=first("备注"),let tag=first("标签"),let permission=first("朋友权限"),
+  frY(remark)<frY(tag),frY(tag)<frY(permission) else {return ["error":friendUnknown("dialog",sorted.first{word($0)==nil})]}
+ let cancels=sorted.filter{word($0)=="取消"},confirms=sorted.filter{word($0)=="确定"}
+ guard cancels.count==1,confirms.count==1 else {return ["error":friendUnknown("dialog_button",nil)]}
+ let fields={(l:[String:Any])->Bool in frY(l)>frY(remark) && frY(l)<frY(tag) || frY(l)>frY(tag) && frY(l)<frY(permission)}
+ if let unknown=sorted.first(where:{word($0)==nil && !fields($0)}) {return ["error":friendUnknown("dialog",unknown)]}
+ return ["cancel":cancels[0],"confirm":confirms[0]]
+}
+
 #if BOT_WORKER
 import CoreGraphics
 import AppKit
@@ -155,7 +174,7 @@ private func friendRefine(_ image:CGImage,_ line:[String:Any],_ kind:FriendWordK
  }
  let match=friendWordConsensus(reads[0],reads[1],kind)
  result["fr_checked"]=true;result["fr_word"]=match.word;result["fr_scores"]=match.diagnostic
- result["fr_kind"]=kind == .status ? "status":kind == .source ? "source":"button"
+ result["fr_kind"]=kind == .status ? "status":kind == .source ? "source":kind == .dialog ? "dialog":"button"
  // Use the high-resolution text geometry, never the center of the crop, for clicking.
  if kind == .button,match.word != nil,!located.isEmpty {
   let left=located.map{$0["x"] as? Double ?? 0}.min()!,top=located.map{$0["y"] as? Double ?? 0}.min()!
@@ -212,10 +231,22 @@ private func friendDetailLines(_ window:[String:Any]) throws -> [[String:Any]] {
 private func friendDialogLines(_ image:CGImage)->[[String:Any]] {
  let lines=(try? recognizeContactLines(image:image,timeout:2)) ?? []
  return lines.map {line in
-  guard frY(line)>Double(image.height)*0.65 || friendWordMatch(frText(line),.button).best>=0.5 else{return line}
   let h=max(12,line["h"] as? Double ?? 0)
-  return friendRefine(image,line,.button,CGRect(x:(line["x"] as? Double ?? 0)-h/2,y:frY(line)-h,width:(line["w"] as? Double ?? 0)+h,height:h*2))
+  return friendRefine(image,line,.dialog,CGRect(x:(line["x"] as? Double ?? 0)-h/2,y:frY(line)-h,width:(line["w"] as? Double ?? 0)+h,height:h*2))
  }
+}
+/// Closes windows that appeared after 前往验证: unique consensus 取消, else Esc; then requires them gone.
+private func friendDismiss(_ main:[String:Any],opened before:Set<UInt32>) throws {
+ func extra()->[[String:Any]] {friendWindows(main).filter{!before.contains($0["window_id"] as? UInt32 ?? 0)}}
+ for w in extra() {
+  guard let image=try? windowImage(w) else {continue}
+  let sx=(w["width"] as! Double)/Double(image.width),sy=(w["height"] as! Double)/Double(image.height)
+  let cancels=friendDialogLines(image).filter{friendCanonical($0,.dialog)=="取消"}.map {l -> [String:Any] in var l=l;for k in ["x","w"]{l[k]=(l[k] as? Double ?? 0)*sx};for k in ["y","h"]{l[k]=(l[k] as? Double ?? 0)*sy};return l}
+  if cancels.count==1 {try? friendClick(cancels[0],window:w)} else {try? key(53)}
+  pauseUI(0.35)
+ }
+ if !extra().isEmpty {try? key(53);pauseUI(0.35)}
+ guard extra().isEmpty else {throw Failure.invalid("friend_request_dialog_left_open")}
 }
 private func friendWindows(_ main:[String:Any])->[[String:Any]] {
  let pid=main["pid"] as? Int ?? 0
@@ -288,11 +319,13 @@ func executeFriendRequestOperation(operation:String,params:[String:Any],manage:B
   try friendPrivateDirectory(directory.deletingLastPathComponent().deletingLastPathComponent())
   try friendPrivateDirectory(directory.deletingLastPathComponent())
   try friendPrivateDirectory(directory)
+  let opened=Set(friendWindows(window).compactMap{$0["window_id"] as? UInt32})
   try friendClick(verify,window:window)
-  var screens:[([String:Any],[[String:Any]])]=[]
   do {
+   // The dialog is a separate window; wait for it to appear instead of a fixed delay.
+   for _ in 0..<15 where friendWindows(window).allSatisfy({opened.contains($0["window_id"] as? UInt32 ?? 0)}) {pauseUI(0.15)}
    pauseUI(0.15)
-   screens=[]
+   var screens:[([String:Any],[[String:Any]])]=[]
    var windows=friendWindows(window)
    if !windows.contains(where:{($0["window_id"] as? UInt32)==(window["window_id"] as? UInt32)}){windows.append(window)}
    for (i,w) in windows.enumerated() {
@@ -309,20 +342,16 @@ func executeFriendRequestOperation(operation:String,params:[String:Any],manage:B
     let scaled=lines.map {l -> [String:Any] in var l=l;for k in ["x","w"]{l[k]=(l[k] as? Double ?? 0)*sx};for k in ["y","h"]{l[k]=(l[k] as? Double ?? 0)*sy};return l}
     screens.append((w,scaled))
    }
-  }
-  let candidates=screens.filter{$0.1.contains(where:{friendCanonical($0,.button)=="取消"})}
-  guard candidates.count==1,let (dialog,lines)=candidates.first else{throw Failure.invalid(friendUnknown("button",screens.flatMap{$0.1}.first{$0["fr_kind"] as? String == "button"}))}
-  if let unknown=lines.first(where:{$0["fr_kind"] as? String == "button" && friendCanonical($0,.button)==nil}) {throw Failure.invalid(friendUnknown("button",unknown))}
-  let allowed=(friendVocabulary[.button] ?? [])+["添加朋友","朋友验证","备注","标签","朋友权限","设置备注和标签","仅聊天","聊天、朋友圈、微信运动等","朋友","添加到通讯录"]
-  guard lines.allSatisfy({allowed.contains(friendCanonical($0,.button) ?? frText($0)) || frText($0)==name}),lines.contains(where:{["添加朋友","朋友验证","朋友权限"].contains(frText($0))}) else{throw Failure.invalid(friendUnknown("button",nil))}
-  if mode=="dry_run" {
-   guard let cancel=lines.first(where:{friendCanonical($0,.button)=="取消"}) else{throw Failure.invalid(friendUnknown("button",nil))}
-   try friendClick(cancel,window:dialog)
-  } else {
-   // Unobserved forms require review unless every control belongs to this small known vocabulary.
-   let buttons=lines.filter{["确定","完成","确认"].contains(friendCanonical($0,.button) ?? "")}
-   guard buttons.count==1 else{throw Failure.invalid(friendUnknown("button",nil))}
-   try friendClick(buttons[0],window:dialog)
+   let candidates=screens.filter{!opened.contains($0.0["window_id"] as? UInt32 ?? 0)}.map{($0.0,classifyFriendDialog($0.1))}
+   guard candidates.count==1,let (dialog,checked)=candidates.first else {throw Failure.invalid(friendUnknown("dialog",nil))}
+   if let error=checked["error"] as? String {throw Failure.invalid(error)}
+   try friendClick(checked[mode=="dry_run" ? "cancel":"confirm"] as! [String:Any],window:dialog)
+   pauseUI(0.35)
+   guard friendWindows(window).allSatisfy({opened.contains($0["window_id"] as? UInt32 ?? 0)}) else {throw Failure.invalid("friend_request_dialog_still_open")}
+  } catch {
+   // Never leave a verification dialog on screen: it blocks every later chat action.
+   do {try friendDismiss(window,opened:opened)} catch let dismissal {throw Failure.invalid("\(error) + \(dismissal)")}
+   throw error
   }
   pauseUI(0.35)
   try screenGate(window)
