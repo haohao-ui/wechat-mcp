@@ -410,46 +410,23 @@ public struct ConfigFormLogic {
         try reloader?()
     }
 
-    /// 默认 python-based config-check 调用
+    /// 默认 Rust config-check 调用，共用宿主带超时的命令执行器。
     public static func defaultCheckConfig(fileURL: URL) throws -> (ok: Bool, error: String?) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        let result = runControlCommand(executable: controlBinaryPath(), arguments: [
+            "control", "config-check", "--config", fileURL.path, "--json"
+        ], timeout: 20)
+        return configCheckResult(result)
+    }
 
-        let botDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".wechat-rpa/bot", isDirectory: true)
-
-        var env = ProcessInfo.processInfo.environment
-        let existingPyPath = env["PYTHONPATH"] ?? ""
-        env["PYTHONPATH"] = botDir.path + ":" + existingPyPath
-        process.environment = env
-        process.arguments = ["-m", "scripts.wechat_bot.control", "config-check", fileURL.path]
-
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return (false, "无法执行 config-check: \(error.localizedDescription)")
+    static func configCheckResult(_ result: ControlRun) -> (ok: Bool, error: String?) {
+        if result.timedOut { return (false, "config-check 超时") }
+        if let json = try? JSONSerialization.jsonObject(with: result.output) as? [String: Any] {
+            if result.status == 0 && json["ok"] as? Bool == true { return (true, nil) }
+            return (false, json["error"] as? String ?? "config-check 校验失败 (exit \(result.status))")
         }
-
-        let outData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        if let json = try? JSONSerialization.jsonObject(with: outData, options: []) as? [String: Any] {
-            let ok = json["ok"] as? Bool ?? false
-            let err = json["error"] as? String
-            return (ok, err)
-        }
-
-        if process.terminationStatus == 0 {
-            return (true, nil)
-        } else {
-            let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-            let errStr = String(data: errData, encoding: .utf8) ?? "未知校验错误"
-            return (false, errStr)
-        }
+        let diagnostic = String(data: result.output, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return (false, diagnostic.isEmpty ? "无法执行 config-check (exit \(result.status))" : diagnostic)
     }
 
     /// 默认机器人重载调用
@@ -461,4 +438,47 @@ public struct ConfigFormLogic {
         try process.run()
         process.waitUntilExit()
     }
+}
+
+public struct ControlRun {
+    public let status: Int32
+    public let output: Data
+    public let timedOut: Bool
+}
+
+/// 运行 wechat-mcp control 子命令并取标准输出。
+/// 必须边运行边读完输出再等结束：先 waitUntilExit 再读管道，输出超过管道缓冲（约 64KB）就会互相等死。
+/// 标准错误合并到同一输出管道，供失败诊断；超过 timeout 秒仍未结束则终止并返回 timedOut。
+public func runControlCommand(executable: String, arguments: [String], timeout: Double) -> ControlRun {
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: executable)
+    proc.arguments = arguments
+    let pipe = Pipe()
+    proc.standardOutput = pipe
+    proc.standardError = pipe
+    do { try proc.run() } catch { return ControlRun(status: -1, output: Data(), timedOut: false) }
+
+    let lock = NSLock()
+    var collected = Data()
+    let readDone = DispatchSemaphore(value: 0)
+    DispatchQueue.global(qos: .utility).async {
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        lock.lock(); collected = data; lock.unlock()
+        readDone.signal()
+    }
+    var timedOut = false
+    if readDone.wait(timeout: .now() + timeout) == .timedOut {
+        timedOut = true
+        proc.terminate()
+        _ = readDone.wait(timeout: .now() + 2)
+    }
+    proc.waitUntilExit()
+    lock.lock(); let out = collected; lock.unlock()
+    return ControlRun(status: proc.terminationStatus, output: out, timedOut: timedOut)
+}
+
+/// 宿主调用的 wechat-mcp 路径
+public func controlBinaryPath() -> String {
+    let rpaBin = (NSHomeDirectory() as NSString).appendingPathComponent(".wechat-rpa/bin/wechat-mcp")
+    return FileManager.default.isExecutableFile(atPath: rpaBin) ? rpaBin : "/usr/local/bin/wechat-mcp"
 }

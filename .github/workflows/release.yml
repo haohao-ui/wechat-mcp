@@ -10,17 +10,25 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  MACOSX_DEPLOYMENT_TARGET: "12.0"
 
 jobs:
   release:
     name: 构建 macOS 通用二进制并发布
     runs-on: macos-latest
     steps:
+      - name: 验证发布 tag
+        run: |
+          if [[ "$GITHUB_REF_TYPE" != tag || "$GITHUB_REF_NAME" != v* ]]; then
+            echo "请选择 v* tag 后再手动发布，不能使用分支名作为版本" >&2
+            exit 1
+          fi
       - uses: actions/checkout@v4
       - name: 敏感信息检查
         run: scripts/check_sensitive.sh
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
+          components: rustfmt, clippy
           targets: aarch64-apple-darwin, x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
       - name: 测试
@@ -39,27 +47,27 @@ jobs:
             target/aarch64-apple-darwin/release/wechat-mcp \
             target/x86_64-apple-darwin/release/wechat-mcp
           for t in wechat_ocr wechat_window; do
-            swiftc -O -target arm64-apple-macos13 native/$t.swift -o "/tmp/$t-arm64"
-            swiftc -O -target x86_64-apple-macos13 native/$t.swift -o "/tmp/$t-x86_64"
+            swiftc -O -target arm64-apple-macos12 native/$t.swift -o "/tmp/$t-arm64"
+            swiftc -O -target x86_64-apple-macos12 native/$t.swift -o "/tmp/$t-x86_64"
             lipo -create -output "dist/$OUT/$t" "/tmp/$t-arm64" "/tmp/$t-x86_64"
           done
-          swiftc -O -target arm64-apple-macos13 native/click/main.swift native/common/*.swift native/action/*.swift -o /tmp/wechat_click-arm64
-          swiftc -O -target x86_64-apple-macos13 native/click/main.swift native/common/*.swift native/action/*.swift -o /tmp/wechat_click-x86_64
+          swiftc -O -target arm64-apple-macos12 native/click/*.swift native/common/*.swift native/action/*.swift -o /tmp/wechat_click-arm64
+          swiftc -O -target x86_64-apple-macos12 native/click/*.swift native/common/*.swift native/action/*.swift -o /tmp/wechat_click-x86_64
           lipo -create -output "dist/$OUT/wechat_click" /tmp/wechat_click-arm64 /tmp/wechat_click-x86_64
           swiftc -O -target arm64-apple-macos12 native/interaction/*.swift native/common/Geometry.swift native/action/*.swift -o /tmp/desktop_helper-arm64
           swiftc -O -target x86_64-apple-macos12 native/interaction/*.swift native/common/Geometry.swift native/action/*.swift -o /tmp/desktop_helper-x86_64
           lipo -create -output "dist/$OUT/desktop_helper" /tmp/desktop_helper-arm64 /tmp/desktop_helper-x86_64
-          swiftc -O -parse-as-library -target arm64-apple-macos13 native/wechat_bubbles.swift native/common/*.swift native/eyes/*.swift -o /tmp/wechat_bubbles-arm64
-          swiftc -O -parse-as-library -target x86_64-apple-macos13 native/wechat_bubbles.swift native/common/*.swift native/eyes/*.swift -o /tmp/wechat_bubbles-x86_64
+          swiftc -O -parse-as-library -target arm64-apple-macos12 native/wechat_bubbles.swift native/common/*.swift native/eyes/*.swift -o /tmp/wechat_bubbles-arm64
+          swiftc -O -parse-as-library -target x86_64-apple-macos12 native/wechat_bubbles.swift native/common/*.swift native/eyes/*.swift -o /tmp/wechat_bubbles-x86_64
           lipo -create -output "dist/$OUT/wechat_bubbles" /tmp/wechat_bubbles-arm64 /tmp/wechat_bubbles-x86_64
           swiftc -O -parse-as-library -D BOT_WORKER -target arm64-apple-macos12 native/wechat_bubbles.swift native/common/*.swift native/eyes/*.swift native/action/*.swift native/bot/*.swift -o /tmp/wechat_bot_worker-arm64
           swiftc -O -parse-as-library -D BOT_WORKER -target x86_64-apple-macos12 native/wechat_bubbles.swift native/common/*.swift native/eyes/*.swift native/action/*.swift native/bot/*.swift -o /tmp/wechat_bot_worker-x86_64
           lipo -create -output "dist/$OUT/wechat_bot_worker" /tmp/wechat_bot_worker-arm64 /tmp/wechat_bot_worker-x86_64
-          swiftc -O -target arm64-apple-macos13 native/overlay/main.swift -o /tmp/wechat_overlay-arm64
-          swiftc -O -target x86_64-apple-macos13 native/overlay/main.swift -o /tmp/wechat_overlay-x86_64
+          swiftc -O -target arm64-apple-macos12 native/overlay/main.swift -o /tmp/wechat_overlay-arm64
+          swiftc -O -target x86_64-apple-macos12 native/overlay/main.swift -o /tmp/wechat_overlay-x86_64
           lipo -create -output "dist/$OUT/wechat_overlay" /tmp/wechat_overlay-arm64 /tmp/wechat_overlay-x86_64
-          swiftc -O -parse-as-library -target arm64-apple-macos13 native/macos/*.swift -o /tmp/wechat_runtime-arm64
-          swiftc -O -parse-as-library -target x86_64-apple-macos13 native/macos/*.swift -o /tmp/wechat_runtime-x86_64
+          swiftc -O -parse-as-library -target arm64-apple-macos12 native/macos/*.swift -o /tmp/wechat_runtime-arm64
+          swiftc -O -parse-as-library -target x86_64-apple-macos12 native/macos/*.swift -o /tmp/wechat_runtime-x86_64
           lipo -create -output "dist/$OUT/wechat_runtime" /tmp/wechat_runtime-arm64 /tmp/wechat_runtime-x86_64
           cp README.md gateway.example.json "dist/$OUT/"
           cp -R skills "dist/$OUT/"

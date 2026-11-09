@@ -269,49 +269,6 @@ public struct ContactsPageLogic {
 }
 
 
-public struct ControlRun {
-    public let status: Int32
-    public let output: Data
-    public let timedOut: Bool
-}
-
-/// 运行 wechat-mcp control 子命令并取标准输出。
-/// 必须边运行边读完输出再等结束：先 waitUntilExit 再读管道，输出超过管道缓冲（约 64KB）就会互相等死。
-/// 标准错误丢弃（不接从不读取的管道）；超过 timeout 秒仍未结束则终止并返回 timedOut。
-public func runControlCommand(executable: String, arguments: [String], timeout: Double) -> ControlRun {
-    let proc = Process()
-    proc.executableURL = URL(fileURLWithPath: executable)
-    proc.arguments = arguments
-    let pipe = Pipe()
-    proc.standardOutput = pipe
-    proc.standardError = FileHandle.nullDevice
-    do { try proc.run() } catch { return ControlRun(status: -1, output: Data(), timedOut: false) }
-
-    let lock = NSLock()
-    var collected = Data()
-    let readDone = DispatchSemaphore(value: 0)
-    DispatchQueue.global(qos: .utility).async {
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        lock.lock(); collected = data; lock.unlock()
-        readDone.signal()
-    }
-    var timedOut = false
-    if readDone.wait(timeout: .now() + timeout) == .timedOut {
-        timedOut = true
-        proc.terminate()
-        _ = readDone.wait(timeout: .now() + 2)
-    }
-    proc.waitUntilExit()
-    lock.lock(); let out = collected; lock.unlock()
-    return ControlRun(status: proc.terminationStatus, output: out, timedOut: timedOut)
-}
-
-/// 宿主调用的 wechat-mcp 路径
-public func controlBinaryPath() -> String {
-    let rpaBin = (NSHomeDirectory() as NSString).appendingPathComponent(".wechat-rpa/bin/wechat-mcp")
-    return FileManager.default.isExecutableFile(atPath: rpaBin) ? rpaBin : "/usr/local/bin/wechat-mcp"
-}
-
 public final class ContactsPageController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     private let context: StatusPanelController
 

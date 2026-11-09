@@ -7,7 +7,7 @@ host=$1 out=$2 name=$3
 mkdir -p "$out"
 remote='set -eu
 info=$("$HOME/.wechat-rpa/bin/wechat_window")
-id=$(printf "%s" "$info" | /usr/bin/python3 -c "import json,sys;print(json.load(sys.stdin)[\"window_id\"])")
+id=$(printf "%s" "$info" | /usr/bin/plutil -extract window_id raw -o - -)
 tmp=$(mktemp -d)
 /usr/sbin/screencapture -l "$id" -o -x "$tmp/f.png"
 printf "%s" "$info" > "$tmp/f.json"

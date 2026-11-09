@@ -22,6 +22,15 @@ func run() -> Int32 {
             return 1
         }
 
+        if command == "config_check_result" {
+            let output = (dict["output"] as? String ?? "").data(using: .utf8)!
+            let result = ConfigFormLogic.configCheckResult(ControlRun(
+                status: Int32(dict["status"] as? Int ?? 0), output: output,
+                timedOut: dict["timed_out"] as? Bool ?? false))
+            let data = try JSONSerialization.data(withJSONObject: ["ok": result.ok, "error": result.error ?? ""])
+            print(String(data: data, encoding: .utf8)!)
+            return 0
+        }
         if command == "run_control" {
             let exe = dict["executable"] as? String ?? "/bin/sh"
             let cmdArgs = dict["args"] as? [String] ?? []
