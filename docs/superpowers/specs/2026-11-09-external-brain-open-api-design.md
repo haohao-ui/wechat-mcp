@@ -131,14 +131,17 @@ claimed ──认领租期到期且未过 deadline──▶ queued（可被重�
   "account": {"account_id": "…"},
   "contact": {"contact_id": "c_…", "display_name": "…", "kind": "private|group"},
   "messages": [
-    {"message_id": "m_…", "kind": "text|image|file", "text": "…", "media_id": "md_…", "filename": "…",
-     "observed_at": "2026-11-09T08:00:00Z", "source": "desktop_ocr"}
+    {"message_id": null, "kind": "text", "text": "…", "source": "desktop_ocr"},
+    {"message_id": null, "kind": "image", "media_id": "md_…", "understanding": "本机图片理解的文字（可选）"},
+    {"message_id": null, "kind": "file", "media_id": "md_…", "filename": "…"}
   ],
-  "context": [{"role": "customer|assistant", "message_id": "m_…", "kind": "text|image|file", "text": "…", "media_id": "md_…"}],
+  "unavailable": [{"kind": "image|file", "reason": "media_id_unknown|download_failed|too_large|unsupported|…"}],
+  "context": [{"role": "customer|assistant", "message_id": null, "kind": "text|image|file", "text": "…", "media_id": "md_…"}],
   "deadline_at": "2026-11-09T08:02:00Z",
   "claim": {"claim_token": "…", "lease_expires_at": "2026-11-09T08:01:00Z"}
 }
 ```
+- 实施时确认（2026-11-09）：本期 `observed_at` 不输出（内部没有可靠来源）。图片和文件的 `media_id` 由内部轮次的 `media_refs` 直接携带（来自附件的原始气泡），不按路径反查——worker 下载路径不在历史库目录下，按路径反查在真实运行中必然失败。`understanding` 是开启图片理解时本机生成的描述，可能没有。
 - 时间一律用 RFC 3339 UTC。
 - `message_id` 可以为 `null`：内部 `Turn` 只有合并后的 `text` 和图片路径，不是每一项都能对应到历史库中的消息。能对应的给出 ID，对应不上的给 `null`，不编造。`media_id` 同理，对应不上的图片放进 `unavailable` 列表，并说明原因。
 - 不出现本机路径。图片和文件只给 `media_id`，通过受权限保护的 `history_get_media` 读取（按大小上限截断或分块）。
