@@ -852,6 +852,7 @@ impl BotService {
                 Ok(p) => p,
                 Err(err) => {
                     let err_str = format!("{err:#}");
+                    tracing::warn!(recipient = %self.recipient, attempt, error = %err_str, "gap_scroll_failed");
                     if action_interrupted(&err_str) {
                         return Err(err);
                     }
