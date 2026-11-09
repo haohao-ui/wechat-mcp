@@ -1435,6 +1435,7 @@ impl BotService {
                 media_id: img.media_id.clone().or_else(|| img.bubble.media_id.clone()),
                 filename: None,
                 understanding,
+                label: Some(img.label.clone()),
             });
         }
         for f in &files {
@@ -1443,6 +1444,7 @@ impl BotService {
                 media_id: f.bubble.media_id.clone(),
                 filename: Some(f.filename.clone()),
                 understanding: None,
+                label: Some(f.label.clone()),
             });
         }
 

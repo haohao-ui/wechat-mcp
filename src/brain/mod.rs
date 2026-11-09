@@ -54,6 +54,9 @@ pub struct MediaRef {
     pub media_id: Option<String>,
     pub filename: Option<String>,
     pub understanding: Option<String>,
+    /// 原始附件的标签，用来和 `failed` 中同一附件的失败原因对应。
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
