@@ -127,6 +127,57 @@ func attachTimeLabels(_ bubbles: inout [[String:Any]], texts: [Text], width: Int
 }
 /// End time separators
 
+/// Voice messages (observed 2026-11-09, docs/observations §10): a single-line inbound bubble with a
+/// speaker icon at its left and the duration ("5\"", seconds) after it. After 转文字 WeChat adds a
+/// left bubble ~6pt below the voice, aligned with it, holding the transcript; it is folded into the
+/// voice bubble so continuity (digest of the voice pixels) is unchanged.
+func markVoiceBubbles(_ bubbles: inout [[String:Any]], texts: [Text], ink: (Int,Int)->Bool) {
+    func box(_ b: [String:Any]) -> (Int,Int,Int,Int)? {
+        guard let x=b["x"] as? Int,let y=b["y"] as? Int,let w=b["width"] as? Int,let h=b["height"] as? Int else { return nil }
+        return (x,y,w,h)
+    }
+    func seconds(_ b: [String:Any]) -> Int?? {
+        guard b["direction"] as? String == "inbound_visual", (b["kind"] as? String ?? "text") == "text",
+              let (x,y,w,h)=box(b), h <= 48, w >= 40 else { return nil }
+        let body=texts.filter { $0.x>=Double(x) && $0.x<Double(x+w) && $0.y>=Double(y) && $0.y<Double(y+h) }
+            .sorted { $0.x < $1.x }.map(\.body).joined().filter { !$0.isWhitespace }
+        // Only icon glyph noise, the duration, and a closing seconds mark: no Chinese characters or
+        // Latin letters (OCR has read the digit as a kana, so other scripts are icon/digit noise).
+        let wordLike: (Character) -> Bool = { c in
+            c.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) || ($0.isASCII && CharacterSet.letters.contains($0)) }
+        }
+        guard !body.isEmpty, body.count <= 8, !body.contains(where:wordLike),
+              let mark=body.last, ["\"","”","″","“"].contains(mark) else { return nil }
+        var inkCount=0
+        for yy in (y+8)..<max(y+9,y+h-8) { for xx in (x+8)..<(x+30) where ink(xx,yy) { inkCount += 1 } }
+        guard inkCount >= 12 else { return nil }
+        let digits=body.dropLast().reversed().prefix { $0.isASCII && $0.isNumber }
+        return .some(Int(String(digits.reversed())))
+    }
+    var result: [[String:Any]] = []
+    var index=0
+    while index < bubbles.count {
+        var bubble=bubbles[index]
+        if let duration=seconds(bubble), let (x,y,_,h)=box(bubble) {
+            bubble["kind"]="voice"
+            bubble["media_id"]=bubble["digest"]
+            bubble["text"]=duration.map { "[语音\($0)秒]" } ?? "[语音]"
+            if let duration=duration { bubble["voice_seconds"]=duration }
+            if index+1 < bubbles.count, let (nx,ny,_,_)=box(bubbles[index+1]),
+               bubbles[index+1]["direction"] as? String == "inbound_visual",
+               (bubbles[index+1]["kind"] as? String ?? "text") == "text",
+               abs(nx-x) <= 12, (1...14).contains(ny-(y+h)) {
+                bubble["transcript"]=bubbles[index+1]["text"]
+                index += 1
+            }
+        }
+        result.append(bubble)
+        index += 1
+    }
+    bubbles=result
+}
+/// End voice messages
+
 /// Loads the text model once (Vision cold start is ~30s on macOS 26+).
 func warmUpRecognizer() {
     guard let context = CGContext(data:nil,width:200,height:60,bitsPerComponent:8,bytesPerRow:0,
@@ -511,6 +562,8 @@ func analyzeFrame(_ captured: CGImage, window: [String:Any], mediaRoot: URL? = n
     }
     bubbles.sort { ($0["y"] as! Int)<($1["y"] as! Int) }
     attachTimeLabels(&bubbles,texts:texts,width:width)
+    // Speaker-icon ink: any pixel that is not the inbound bubble fill.
+    markVoiceBubbles(&bubbles,texts:texts) { x,y in x>=0 && y>=0 && x<width && y<height && color(y*width+x) != 1 }
     if group {
         // Group chats print the member's name just above each left bubble, left-aligned with it.
         let boxes=bubbles.compactMap { b -> CGRect? in
