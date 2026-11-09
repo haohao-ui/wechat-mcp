@@ -964,6 +964,83 @@ impl WorkerClient {
                         continue;
                     }
                 }
+            } else if kind == "voice" {
+                // The transcript is the customer's words: hand it to the model as a text item.
+                let seconds = item.extra.get("voice_seconds").and_then(Value::as_i64);
+                let label = seconds.map_or("语音".to_string(), |s| format!("语音（{s}秒）"));
+                let known = item
+                    .extra
+                    .get("transcript")
+                    .and_then(Value::as_str)
+                    .filter(|t| !t.trim().is_empty())
+                    .map(str::to_string);
+                let transcript = match known {
+                    Some(text) => Ok(text),
+                    None => self
+                        .call(
+                            "transcribe_voice",
+                            json!({
+                                "media_id": item.media_id,
+                                "snapshot_id": current_frame.snapshot_id,
+                            }),
+                        )
+                        .await
+                        .and_then(|v| {
+                            v.get("transcript")
+                                .and_then(Value::as_str)
+                                .filter(|t| !t.trim().is_empty())
+                                .map(str::to_string)
+                                .context("voice_transcript_empty")
+                        }),
+                };
+                let text = match transcript {
+                    Ok(text) => text,
+                    Err(err) => {
+                        let err_str = format!("{err:#}");
+                        if action_interrupted(&err_str) {
+                            return Err(err);
+                        }
+                        failed.push(FailedAttachmentItem {
+                            label,
+                            kind: "voice".to_string(),
+                            reason: "transcribe_failed".to_string(),
+                            detail: Some(worker_code(&err_str)),
+                        });
+                        continue;
+                    }
+                };
+                if let Ok(f) = self.frame().await {
+                    current_frame = f;
+                    if index + 1 < items.len() {
+                        let relocated = crate::core::policy::relocate(
+                            &items[index + 1..],
+                            &current_frame.bubbles,
+                        );
+                        items.splice(index + 1.., relocated);
+                    }
+                }
+                let path = self.directory.join(format!(
+                    "voice-{}.json",
+                    item.media_id.as_deref().unwrap_or("x")
+                ));
+                let _ = crate::core::state::write_private(
+                    &path,
+                    &json!({"seconds": seconds, "transcript": text}),
+                );
+                let mut content = serde_json::Map::new();
+                content.insert("kind".to_string(), json!("voice_transcript"));
+                content.insert("text".to_string(), json!(text));
+                if let Some(s) = seconds {
+                    content.insert("seconds".to_string(), json!(s));
+                }
+                files.push(AttachmentFile {
+                    filename: label.clone(),
+                    label,
+                    original_bytes: true,
+                    path,
+                    bubble: item.clone(),
+                    content,
+                });
             } else if kind == "file" {
                 let mut label = item.filename.clone().unwrap_or_else(|| "文件".to_string());
                 let media_id = item.media_id.clone().unwrap_or_default();
@@ -2801,6 +2878,74 @@ mod tests {
         let ev = unavail_event.unwrap();
         assert_eq!(ev["reason"], "download_failed");
         assert_eq!(ev["detail"], "menu_not_found");
+    }
+
+    async fn voice_attachment(
+        transcribe: Value,
+        preset: Option<&str>,
+    ) -> (Vec<AttachmentFile>, Vec<FailedAttachmentItem>, Vec<String>) {
+        let temp = TestDir::new();
+        let sock = temp.path().join("bot-worker.sock");
+        let ops = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = ops.clone();
+        let _server = MockWorkerServer::spawn(sock.clone(), move |req| {
+            let op = req["operation"].as_str().unwrap_or("").to_string();
+            let id = req["id"].as_u64().unwrap_or(1);
+            seen.lock().unwrap().push(op.clone());
+            if op == "transcribe_voice" {
+                let mut reply = transcribe.clone();
+                reply["id"] = json!(id);
+                reply
+            } else {
+                json!({"protocol_version": 1, "id": id, "ok": true, "result": {}})
+            }
+        })
+        .await;
+        let mut client = setup_test_client(&temp, sock, None);
+        client.connect(5).await.unwrap();
+        let mut voice = test_bubble_helper("voice", &"7".repeat(64), None);
+        voice.extra.insert("voice_seconds".into(), json!(5));
+        if let Some(text) = preset {
+            voice.extra.insert("transcript".into(), json!(text));
+        }
+        let (_, files, failed) = client
+            .attachments(&[voice], &test_empty_frame())
+            .await
+            .unwrap();
+        let ops = ops.lock().unwrap().clone();
+        (files, failed, ops)
+    }
+
+    #[tokio::test]
+    async fn test_voice_is_transcribed_and_given_to_the_model_as_text() {
+        let ok =
+            json!({"protocol_version": 1, "ok": true, "result": {"transcript": "请问今天发货吗"}});
+        let (files, failed, ops) = voice_attachment(ok, None).await;
+        assert!(failed.is_empty());
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].label, "语音（5秒）");
+        assert_eq!(files[0].content["kind"], "voice_transcript");
+        assert_eq!(files[0].content["text"], "请问今天发货吗");
+        assert!(ops.contains(&"transcribe_voice".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_already_transcribed_voice_is_not_clicked_again() {
+        let never = json!({"protocol_version": 1, "ok": false, "error": "should_not_be_called"});
+        let (files, failed, ops) = voice_attachment(never, Some("你好你好")).await;
+        assert!(failed.is_empty());
+        assert_eq!(files[0].content["text"], "你好你好");
+        assert!(!ops.contains(&"transcribe_voice".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_untranscribable_voice_is_reported_not_guessed() {
+        let fail = json!({"protocol_version": 1, "ok": false, "error": "invalid(\"voice_transcribe_button_unknown\")"});
+        let (files, failed, _) = voice_attachment(fail, None).await;
+        assert!(files.is_empty());
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].kind, "voice");
+        assert_eq!(failed[0].reason, "transcribe_failed");
     }
 
     #[tokio::test]

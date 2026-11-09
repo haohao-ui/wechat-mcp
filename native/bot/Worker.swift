@@ -346,6 +346,39 @@ final class CaptureWorker {
 
     /// Keeps the last 40 analyzed window captures (0600, local only) so a skipped message can be
     /// explained afterwards from the exact pixels; core logs the snapshot_id it decided on.
+    /// 「转文字」 must be read the same at 2x and 3x (closed vocabulary of one word, edit distance ≤ 1);
+    /// returns its box in window points from the 3x read, or nil when the reads disagree.
+    func voiceTranscribeButton(_ image: CGImage, _ area: CGRect) throws -> CGRect? {
+        let rect=area.integral.intersection(CGRect(x:0,y:0,width:image.width,height:image.height))
+        guard !rect.isNull, let crop=image.cropping(to:rect) else { return nil }
+        func distance(_ a:[Character],_ b:[Character]) -> Int {
+            var previous=Array(0...b.count)
+            for (i,x) in a.enumerated() {
+                var row=[i+1]
+                for (j,y) in b.enumerated() { row.append(min(row[j]+1,previous[j+1]+1,previous[j]+(x==y ? 0:1))) }
+                previous=row
+            }
+            return previous[b.count]
+        }
+        var found:[CGRect]=[]
+        for scale in [2,3] {
+            guard let context=CGContext(data:nil,width:crop.width*scale,height:crop.height*scale,bitsPerComponent:8,bytesPerRow:0,
+                    space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+            context.interpolationQuality = .high
+            context.draw(crop,in:CGRect(x:0,y:0,width:crop.width*scale,height:crop.height*scale))
+            guard let big=context.makeImage() else { return nil }
+            let hits=try recognizeContactLines(image:big,timeout:3).filter { line in
+                let text=Array((line["text"] as? String ?? "").filter { !$0.isWhitespace && !"•·.。".contains($0) })
+                return text.count >= 2 && text.count <= 4 && distance(text,Array("转文字")) <= 1
+            }
+            guard hits.count==1,let h=hits.first else { return nil }
+            let s=Double(scale)
+            found.append(CGRect(x:rect.minX+(h["x"] as? Double ?? 0)/s,y:rect.minY+(h["y"] as? Double ?? 0)/s,
+                                width:(h["w"] as? Double ?? 0)/s,height:(h["h"] as? Double ?? 0)/s))
+        }
+        guard found.count==2, abs(found[0].midX-found[1].midX) < 8, abs(found[0].midY-found[1].midY) < 6 else { return nil }
+        return found[1]
+    }
     func keepDiagnosticFrame(_ image: CGImage, snapshot: String) {
         let directory=base.appendingPathComponent("tmp/frames")
         try? FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
@@ -535,6 +568,35 @@ final class CaptureWorker {
             var result:[String:Any]=["media_id":id,"filename":name,"extension":ext,"size":size,"original_bytes":true]
             if ext=="pdf" { result["extraction"]=try pdfContents(destination) }
             return result
+        }
+        if operation == "transcribe_voice" {
+            // Observed 2026-11-09: an unconverted voice shows a 「转文字」 button right of the bubble;
+            // one click adds the transcript bubble just below it (folded into the voice by capture).
+            guard let id=params["media_id"] as? String,let snapshot=params["snapshot_id"] as? String else { throw Failure.invalid("missing_voice_identity") }
+            func voice(_ frame:[String:Any]) -> [String:Any]? {
+                (frame["bubbles"] as? [[String:Any]])?.first { $0["media_id"] as? String==id && $0["kind"] as? String=="voice" }
+            }
+            let frame=try capture(recipient,accepted:accepted,manage:manage)
+            guard frame["snapshot_id"] as? String==snapshot,let item=voice(frame) else { throw Failure.invalid("voice_snapshot_changed") }
+            if let text=item["transcript"] as? String, !text.isEmpty { return ["transcript":text] }
+            guard let bx=item["x"] as? Int,let by=item["y"] as? Int,let bw=item["width"] as? Int,let bh=item["height"] as? Int else { throw Failure.invalid("voice_geometry_missing") }
+            let window=try readyWindow(manage:manage).window
+            try screenGate(window)
+            let content=try currentLayout().region("chat_content")
+            let image=try normalizedFrame(windowImage(window),window:window).image
+            let area=CGRect(x:content.x+Double(bx+bw),y:content.y+Double(by)-4,width:140,height:Double(bh)+8)
+            guard let button=try voiceTranscribeButton(image,area) else { throw Failure.invalid("voice_transcribe_button_unknown") }
+            guard let wx=window["x"] as? Double,let wy=window["y"] as? Double,
+                  area.contains(CGPoint(x:button.midX,y:button.midY)) else { throw Failure.invalid("voice_transcribe_coordinates") }
+            try act { try botActions.click(CGRect(x:wx+button.midX-2,y:wy+button.midY-2,width:4,height:4)) }
+            // Transcription takes a moment; poll read-only for the transcript bubble.
+            for _ in 0..<24 {
+                pauseUI(0.5)
+                if let text=voice(try capture(recipient,accepted:accepted,manage:manage))?["transcript"] as? String, !text.isEmpty {
+                    return ["transcript":text]
+                }
+            }
+            throw Failure.invalid("voice_transcript_timeout")
         }
         if operation == "prepare_image" {
             let maxBytes: Int

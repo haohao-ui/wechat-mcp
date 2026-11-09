@@ -23,6 +23,7 @@ pub fn unreadable_hints(reason: Option<&str>, max_attachment_mb: u64) -> String 
         Some("snapshot_changed") => "取文件时聊天画面变了，没取到，请对方重发一次".to_string(),
         Some("extract_failed") => "文件打不开或已加密，读不出内容，请对方另存为普通格式再发".to_string(),
         Some("empty") => "文件里没有可读的文字（可能是扫描件或空文件），请对方发文字版或截图".to_string(),
+        Some("transcribe_failed") => "这条语音没能转成文字，请对方打字再说一次".to_string(),
         _ => "这次没能取到文件，请对方重发一次".to_string(),
     }
 }
@@ -78,7 +79,7 @@ pub fn build_prompt(turn: &Turn) -> Result<String> {
          image_notes是本轮图片逐张的理解要点，等同于你看过这些图片。\
          recent_context里的图片和文件是之前发的，只作背景，不算这一轮收到的；本轮收到的图片数量以image_count为准。\
          附带的图片中前面是本轮的，最后earlier_images张是之前对话里的旧图，只作背景。unreadable列出的每一项都必须在回复里点名，并按该项hint说明原因和对方下一步怎么做。\
-         文件只根据提供的正文、表格或页面进行回答，注明截断或提取失败；不能仅凭文件名声称读过正文。语音尚未接入。"
+         文件只根据提供的正文、表格或页面进行回答，注明截断或提取失败；不能仅凭文件名声称读过正文。files里kind为voice_transcript的是对方本轮语音经微信转写的文字，把它当作对方说的话直接回应，不要说收到了文件；转写可能有错字，意思不清时请对方确认。"
     } else {
         "请为用户授权的个人微信测试 Bot 生成一条简短、自然的中文回复，不超过100字。说明这是自动回复测试。"
     };
