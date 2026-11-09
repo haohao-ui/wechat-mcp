@@ -5384,6 +5384,242 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pdf_after_image_reply_echo_is_not_already_replied() {
+        let td = TestDir::new();
+        let history = Arc::new(HistoryStore::open(td.path().join("h")).unwrap());
+        history.migrate().unwrap();
+        let cid = history
+            .ensure_contact(
+                "fixture",
+                &json!({"recipient": "午夜咖啡", "kind": "private"}),
+                false,
+            )
+            .unwrap();
+        let mut svc = BotService::new(
+            fixture_config(td.path()),
+            None,
+            Some(history.clone()),
+            Some(cid.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        svc.brain = Some(default_brain("PDF已收到"));
+        let mut image = test_bubble("[图片]", "inbound_visual");
+        image.kind = Some("image".into());
+        image.phash = Some("image-phash".into());
+        let baseline = test_frame(vec![image.clone()], "午夜咖啡");
+        svc.advance(baseline.clone()).unwrap();
+        history
+            .record_frame(
+                &cid,
+                &serde_json::to_value(&baseline).unwrap(),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        let image_ids = history
+            .match_recent_inbound(&cid, &baseline.bubbles)
+            .unwrap();
+        let sent = "@午夜咖啡 看到这款「海带丝（香辣味）」，包装配料写着海带、饮用水、食用盐";
+        let observed = "◎午夜咖啡 看到这款「海带丝（香辣味）」，包装配料写\n着海带、饮用水、食用盐";
+        history
+            .record_bot_reply(
+                &cid,
+                "image-send",
+                sent,
+                "triggered",
+                &json!({}),
+                &image_ids,
+                None,
+                None,
+            )
+            .unwrap();
+        write_private(
+            &svc.root.join("send-image.json"),
+            &json!({"reply": sent, "status": "triggered", "attempted_at": (svc.clock)()}),
+        )
+        .unwrap();
+        let pdf = test_bubble("岗位信息更新2.13.paf\nPDF\n220.3K 未下载", "inbound_visual");
+        let echo = test_bubble(observed, "outbound_visual");
+        assert!(svc.own_echo(&echo));
+        let frame = test_frame(vec![image, pdf, echo], "午夜咖啡");
+        let mut after = frame.clone();
+        after
+            .bubbles
+            .push(test_bubble("PDF已收到", "outbound_visual"));
+        let client = MockToolClient::new_default();
+        let mut cap = MockCapture::new(vec![frame.clone(), frame.clone(), frame, after]);
+        svc.cycle(&client, &mut cap).await.unwrap();
+        let senders: Vec<String> = history
+            .connection()
+            .lock()
+            .unwrap()
+            .prepare("SELECT sender FROM messages ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(senders, ["customer", "bot", "customer", "bot"]);
+        for journal in fs::read_dir(&svc.root)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("send-"))
+        {
+            let rec: Value = read_json(journal.path()).unwrap();
+            assert_ne!(rec["status"], "already_replied");
+        }
+        assert_eq!(
+            client
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(n, _)| n == "send_message")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn rebaseline_after_echo_does_not_mark_next_turn_replied() {
+        let td = TestDir::new();
+        let history = Arc::new(HistoryStore::open(td.path().join("h")).unwrap());
+        history.migrate().unwrap();
+        let cid = history
+            .ensure_contact(
+                "fixture",
+                &json!({"recipient": "午夜咖啡", "kind": "private"}),
+                false,
+            )
+            .unwrap();
+        let mut cfg = fixture_config(td.path());
+        cfg.turn_quiet_seconds = 10;
+        let mut svc = BotService::new(
+            cfg,
+            None,
+            Some(history.clone()),
+            Some(cid.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        let now = Arc::new(Mutex::new(1000.0));
+        let clock = now.clone();
+        svc.clock = Arc::new(move || *clock.lock().unwrap());
+        svc.brain = Some(default_brain("PDF已收到"));
+        let mut image = test_bubble("[图片]", "inbound_visual");
+        image.kind = Some("image".into());
+        image.phash = Some("image-phash".into());
+        let baseline = test_frame(vec![image.clone()], "午夜咖啡");
+        svc.advance(baseline.clone()).unwrap();
+        history
+            .record_frame(
+                &cid,
+                &serde_json::to_value(&baseline).unwrap(),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        let image_ids = history
+            .match_recent_inbound(&cid, &baseline.bubbles)
+            .unwrap();
+        let sent = "@午夜咖啡 看到这款「海带丝（香辣味）」，包装配料写着海带、饮用水、食用盐";
+        let observed = "◎午夜咖啡 看到这款「海带丝（香辣味）」，包装配料写\n着海带、饮用水、食用盐";
+        history
+            .record_bot_reply(
+                &cid,
+                "image-send",
+                sent,
+                "triggered",
+                &json!({}),
+                &image_ids,
+                None,
+                None,
+            )
+            .unwrap();
+        write_private(
+            &svc.root.join("send-image.json"),
+            &json!({"reply": sent, "status": "triggered", "attempted_at": (svc.clock)()}),
+        )
+        .unwrap();
+        // The first observation has already claimed this bot reply's digest.
+        let first_echo = test_frame(
+            vec![image.clone(), test_bubble(observed, "outbound_visual")],
+            "午夜咖啡",
+        );
+        history
+            .record_frame(
+                &cid,
+                &serde_json::to_value(&first_echo).unwrap(),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            history.send("image-send").unwrap().unwrap()["echo_observed"],
+            true
+        );
+        let pdf = test_bubble("岗位信息更新2.13.paf\nPDF\n220.3K 未下载", "inbound_visual");
+        let echo = test_bubble(observed, "outbound_visual");
+        assert!(svc.own_echo(&echo));
+        let frame = test_frame(vec![image, pdf, echo], "午夜咖啡");
+        let mut after = frame.clone();
+        after
+            .bubbles
+            .push(test_bubble("PDF已收到", "outbound_visual"));
+        let client = MockToolClient::new_default();
+        // PDF appears before the already-claimed echo: the history cursor loses
+        // continuity. The first stable frame opens the PDF turn; the second
+        // records all visible bubbles via rebaseline_gap before sending it.
+        let mut cap = MockCapture::new(vec![frame.clone(), frame.clone()]);
+        svc.cycle(&client, &mut cap).await.unwrap();
+        assert!(svc.turn.is_some());
+        *now.lock().unwrap() = 1011.0;
+        let mut cap = MockCapture::new(vec![frame.clone(), frame.clone(), frame, after]);
+        svc.cycle(&client, &mut cap).await.unwrap();
+        let capture: String = history.connection().lock().unwrap().query_row(
+            "SELECT capture FROM messages WHERE text LIKE '岗位信息%' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(capture, "rebaseline_gap");
+        let senders: Vec<String> = history
+            .connection()
+            .lock()
+            .unwrap()
+            .prepare("SELECT sender FROM messages ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        for journal in fs::read_dir(&svc.root)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("send-"))
+        {
+            let rec: Value = read_json(journal.path()).unwrap();
+            assert_ne!(rec["status"], "already_replied");
+        }
+        assert!(!senders.iter().any(|s| s == "self_other"));
+        assert_eq!(senders.iter().filter(|s| *s == "bot").count(), 2);
+        assert_eq!(
+            client
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(n, _)| n == "send_message")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn newer_message_during_send_still_gets_reply() {
         let td = TestDir::new();
         let history = Arc::new(HistoryStore::open(td.path().join("h")).unwrap());
