@@ -1228,6 +1228,7 @@ mod tests {
             image_count: Some(0),
             earlier_images: 0,
             max_attachment_mb: 50,
+            media_refs: Vec::new(),
         };
 
         let brain_handle = tokio::spawn(async move {

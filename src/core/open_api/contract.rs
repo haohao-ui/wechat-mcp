@@ -78,54 +78,104 @@ pub fn turn_v1(
         }));
     }
 
-    // 2. 本轮图片：可解析的进入 messages，未查到的进入 unavailable
-    for img_path in &turn.images {
-        match media.media_id_for_path(img_path) {
-            Some(media_id) => {
-                messages.push(serde_json::json!({
-                    "kind": "image",
-                    "media_id": media_id,
-                    "message_id": Value::Null,
-                }));
-            }
-            None => {
-                unavailable.push(serde_json::json!({
-                    "kind": "image",
-                    "reason": "media_not_in_history",
-                }));
+    // 2 & 3. 本轮图片与文件：media_refs 非空时优先使用，为空时保留基于 images/files 路径反查的后备
+    if !turn.media_refs.is_empty() {
+        for mr in &turn.media_refs {
+            match mr.kind.as_str() {
+                "image" => {
+                    if let Some(ref mid) = mr.media_id {
+                        let mut msg = serde_json::json!({
+                            "kind": "image",
+                            "media_id": mid,
+                            "message_id": Value::Null,
+                        });
+                        if let Some(ref und) = mr.understanding {
+                            msg.as_object_mut()
+                                .unwrap()
+                                .insert("understanding".to_string(), serde_json::json!(und));
+                        }
+                        messages.push(msg);
+                    } else {
+                        unavailable.push(serde_json::json!({
+                            "kind": "image",
+                            "reason": "media_id_unknown",
+                        }));
+                    }
+                }
+                "file" => {
+                    if let Some(ref mid) = mr.media_id {
+                        let mut msg = serde_json::json!({
+                            "filename": mr.filename.as_deref().unwrap_or(""),
+                            "kind": "file",
+                            "media_id": mid,
+                            "message_id": Value::Null,
+                        });
+                        if let Some(ref und) = mr.understanding {
+                            msg.as_object_mut()
+                                .unwrap()
+                                .insert("understanding".to_string(), serde_json::json!(und));
+                        }
+                        messages.push(msg);
+                    } else {
+                        unavailable.push(serde_json::json!({
+                            "kind": "file",
+                            "reason": "media_id_unknown",
+                        }));
+                    }
+                }
+                _ => {}
             }
         }
-    }
-
-    // 3. 本轮文件：有 media_id 直接用，有 path 尝试反查；查不到进 unavailable
-    for file_val in &turn.files {
-        let filename = file_val
-            .get("filename")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        let media_id = if let Some(mid) = file_val.get("media_id").and_then(|v| v.as_str()) {
-            Some(mid.to_string())
-        } else if let Some(p) = file_val.get("path").and_then(|v| v.as_str()) {
-            media.media_id_for_path(Path::new(p))
-        } else {
-            None
-        };
-
-        match media_id {
-            Some(mid) => {
-                messages.push(serde_json::json!({
-                    "filename": filename,
-                    "kind": "file",
-                    "media_id": mid,
-                    "message_id": Value::Null,
-                }));
+    } else {
+        // 后备路径：按 images 路径反查
+        for img_path in &turn.images {
+            match media.media_id_for_path(img_path) {
+                Some(media_id) => {
+                    messages.push(serde_json::json!({
+                        "kind": "image",
+                        "media_id": media_id,
+                        "message_id": Value::Null,
+                    }));
+                }
+                None => {
+                    unavailable.push(serde_json::json!({
+                        "kind": "image",
+                        "reason": "media_not_in_history",
+                    }));
+                }
             }
-            None => {
-                unavailable.push(serde_json::json!({
-                    "kind": "file",
-                    "reason": "media_not_in_history",
-                }));
+        }
+
+        // 后备路径：按 files 对象与路径反查
+        for file_val in &turn.files {
+            let filename = file_val
+                .get("filename")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let media_id = if let Some(mid) = file_val.get("media_id").and_then(|v| v.as_str()) {
+                Some(mid.to_string())
+            } else if let Some(p) = file_val.get("path").and_then(|v| v.as_str()) {
+                media.media_id_for_path(Path::new(p))
+            } else {
+                None
+            };
+
+            match media_id {
+                Some(mid) => {
+                    messages.push(serde_json::json!({
+                        "filename": filename,
+                        "kind": "file",
+                        "media_id": mid,
+                        "message_id": Value::Null,
+                    }));
+                }
+                None => {
+                    unavailable.push(serde_json::json!({
+                        "kind": "file",
+                        "reason": "media_not_in_history",
+                    }));
+                }
             }
         }
     }
@@ -272,6 +322,7 @@ mod tests {
             image_count: None,
             earlier_images: 0,
             max_attachment_mb: 50,
+            media_refs: vec![],
         };
         let claim = ClaimInfo {
             claim_token: "tok_claim_text".to_string(),
@@ -320,6 +371,7 @@ mod tests {
             image_count: None,
             earlier_images: 0,
             max_attachment_mb: 50,
+            media_refs: vec![],
         };
         let claim = ClaimInfo {
             claim_token: "tok_claim_img".to_string(),
@@ -377,6 +429,7 @@ mod tests {
             image_count: None,
             earlier_images: 0,
             max_attachment_mb: 50,
+            media_refs: vec![],
         };
         let claim = ClaimInfo {
             claim_token: "tok_claim_grp".to_string(),
@@ -429,6 +482,7 @@ mod tests {
             image_count: None,
             earlier_images: 0,
             max_attachment_mb: 50,
+            media_refs: vec![],
         };
         let claim = ClaimInfo {
             claim_token: "tok_safe_test".to_string(),
@@ -489,6 +543,7 @@ mod tests {
             image_count: None,
             earlier_images: 0,
             max_attachment_mb: 50,
+            media_refs: vec![],
         };
         let claim = ClaimInfo {
             claim_token: "tok_test".to_string(),
@@ -557,6 +612,7 @@ mod tests {
             image_count: None,
             earlier_images: 0,
             max_attachment_mb: 50,
+            media_refs: vec![],
         };
         let claim = ClaimInfo {
             claim_token: "tok_roles".to_string(),
@@ -641,6 +697,161 @@ mod tests {
         assert_eq!(
             lookup.media_id_for_path(&media_root.join("missing.jpg")),
             None
+        );
+    }
+
+    #[test]
+    fn turn_serialization_unchanged_by_media_refs() {
+        use crate::brain::MediaRef;
+        let turn = Turn {
+            turn_id: "t_serde".to_string(),
+            account_id: "acc_test".to_string(),
+            contact: ContactInfo {
+                name: "Alice".to_string(),
+                kind: "private".to_string(),
+            },
+            text: "Hello".to_string(),
+            mode: "service".to_string(),
+            chat_kind: "private".to_string(),
+            context: vec![],
+            images: vec![],
+            files: vec![],
+            notes: vec![],
+            failed: vec![],
+            image_count: None,
+            earlier_images: 0,
+            max_attachment_mb: 50,
+            media_refs: vec![MediaRef {
+                kind: "image".to_string(),
+                media_id: Some("mid_001".to_string()),
+                filename: None,
+                understanding: Some("理解文字".to_string()),
+            }],
+        };
+
+        let val = serde_json::to_value(&turn).unwrap();
+        assert!(val.get("media_refs").is_none(), "Turn 序列化结果绝对不能包含 media_refs 键");
+    }
+
+    #[test]
+    fn turn_v1_prefers_media_refs() {
+        use crate::brain::MediaRef;
+        let turn = Turn {
+            turn_id: "t_1004".to_string(),
+            account_id: "wx_bot_main".to_string(),
+            contact: ContactInfo {
+                name: "王五".to_string(),
+                kind: "private".to_string(),
+            },
+            text: "带理解的图片和正常附件".to_string(),
+            mode: "service".to_string(),
+            chat_kind: "private".to_string(),
+            context: vec![],
+            images: vec![],
+            files: vec![],
+            notes: vec![],
+            failed: vec![],
+            image_count: None,
+            earlier_images: 0,
+            max_attachment_mb: 50,
+            media_refs: vec![
+                MediaRef {
+                    kind: "image".to_string(),
+                    media_id: Some("media_img_with_und_01".to_string()),
+                    filename: None,
+                    understanding: Some("一张白色咖啡杯特写".to_string()),
+                },
+                MediaRef {
+                    kind: "file".to_string(),
+                    media_id: Some("media_file_doc_02".to_string()),
+                    filename: Some("产品手册.pdf".to_string()),
+                    understanding: None,
+                },
+                MediaRef {
+                    kind: "image".to_string(),
+                    media_id: None,
+                    filename: None,
+                    understanding: None,
+                },
+            ],
+        };
+        let claim = ClaimInfo {
+            claim_token: "tok_claim_mr".to_string(),
+            lease_until: 1700000060,
+            deadline_at: 1700000120,
+        };
+        let lookup = MockMediaLookup {
+            mapping: HashMap::new(),
+        };
+
+        let result = turn_v1(&turn, &claim, "c_wangwu_05", &lookup);
+        assert_json_matches_snapshot(&result, "turn_v1_media_refs.json");
+    }
+
+    #[test]
+    fn turn_v1_media_ref_without_id_is_unavailable() {
+        use crate::brain::MediaRef;
+        let turn = Turn {
+            turn_id: "t_no_id".to_string(),
+            account_id: "wx_acc".to_string(),
+            contact: ContactInfo {
+                name: "Eve".to_string(),
+                kind: "private".to_string(),
+            },
+            text: "test".to_string(),
+            mode: "service".to_string(),
+            chat_kind: "private".to_string(),
+            context: vec![],
+            images: vec![],
+            files: vec![],
+            notes: vec![],
+            failed: vec![],
+            image_count: None,
+            earlier_images: 0,
+            max_attachment_mb: 50,
+            media_refs: vec![
+                MediaRef {
+                    kind: "image".to_string(),
+                    media_id: None,
+                    filename: None,
+                    understanding: None,
+                },
+                MediaRef {
+                    kind: "file".to_string(),
+                    media_id: None,
+                    filename: Some("empty.bin".to_string()),
+                    understanding: None,
+                },
+            ],
+        };
+        let claim = ClaimInfo {
+            claim_token: "tok_no_id".to_string(),
+            lease_until: 1700000060,
+            deadline_at: 1700000120,
+        };
+        let lookup = MockMediaLookup {
+            mapping: HashMap::new(),
+        };
+
+        let result = turn_v1(&turn, &claim, "c_eve", &lookup);
+        let messages = result.get("messages").and_then(|v| v.as_array()).unwrap();
+        // 只有 1 条文本消息，没有 image 和 file
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].get("kind").and_then(|k| k.as_str()), Some("text"));
+
+        let unavailable = result.get("unavailable").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(
+            unavailable,
+            &vec![
+                serde_json::json!({
+                    "kind": "image",
+                    "reason": "media_id_unknown"
+                }),
+                serde_json::json!({
+                    "kind": "file",
+                    "reason": "media_id_unknown"
+                })
+            ]
         );
     }
 }

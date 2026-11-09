@@ -1,0 +1,44 @@
+{
+  "account": {
+    "account_id": "wx_bot_main"
+  },
+  "api_version": "1",
+  "claim": {
+    "claim_token": "tok_claim_mr",
+    "lease_expires_at": "2023-11-14T22:14:20Z"
+  },
+  "contact": {
+    "contact_id": "c_wangwu_05",
+    "display_name": "王五",
+    "kind": "private"
+  },
+  "context": [],
+  "deadline_at": "2023-11-14T22:15:20Z",
+  "messages": [
+    {
+      "kind": "text",
+      "message_id": null,
+      "source": "desktop_ocr",
+      "text": "带理解的图片和正常附件"
+    },
+    {
+      "kind": "image",
+      "media_id": "media_img_with_und_01",
+      "message_id": null,
+      "understanding": "一张白色咖啡杯特写"
+    },
+    {
+      "filename": "产品手册.pdf",
+      "kind": "file",
+      "media_id": "media_file_doc_02",
+      "message_id": null
+    }
+  ],
+  "turn_id": "t_1004",
+  "unavailable": [
+    {
+      "kind": "image",
+      "reason": "media_id_unknown"
+    }
+  ]
+}

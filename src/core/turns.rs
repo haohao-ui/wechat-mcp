@@ -44,7 +44,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use crate::brain::{Brain, BrainReply, ContactInfo, ContextItem, FailedAttachment, Turn as BrainTurn};
+use crate::brain::{Brain, BrainReply, ContactInfo, ContextItem, FailedAttachment, MediaRef, Turn as BrainTurn};
 use crate::core::config::{candidate_names, clean_title, BotConfig};
 use crate::core::delivery::{is_not_sent, EchoOutcome, ToolClient};
 use crate::core::history::store::{similar, HistoryStore};
@@ -1421,6 +1421,31 @@ impl BotService {
 
         let (notes, model_images, earlier) = self.understand_images(&full_text, &images, &mut failed, context_items).await?;
 
+        let mut media_refs = Vec::new();
+        for img in &images {
+            let understanding = notes.iter().find_map(|n| {
+                if n.get("label").and_then(|v| v.as_str()) == Some(&img.label) {
+                    n.get("notes").and_then(|v| v.as_str()).map(|s| s.to_string())
+                } else {
+                    None
+                }
+            });
+            media_refs.push(MediaRef {
+                kind: "image".to_string(),
+                media_id: img.media_id.clone().or_else(|| img.bubble.media_id.clone()),
+                filename: None,
+                understanding,
+            });
+        }
+        for f in &files {
+            media_refs.push(MediaRef {
+                kind: "file".to_string(),
+                media_id: f.bubble.media_id.clone(),
+                filename: Some(f.filename.clone()),
+                understanding: None,
+            });
+        }
+
         let brain_turn = BrainTurn {
             turn_id: key.to_string(),
             account_id: self.account.clone(),
@@ -1444,6 +1469,7 @@ impl BotService {
             image_count: Some(images.len()),
             earlier_images: earlier,
             max_attachment_mb: self.config.max_attachment_mb,
+            media_refs,
         };
 
         let brain_reply = if let Some(brain) = &self.brain {
@@ -5358,6 +5384,99 @@ mod tests {
         assert_eq!(file_obj.get("text").and_then(|v| v.as_str()), Some("表格第1行数据"));
         assert!(!file_obj.contains_key("path"), "模型文件视图中绝对不能包含本机文件路径 path");
         assert!(!file_obj.contains_key("bubble"), "模型文件视图中绝对不能包含屏幕气泡坐标与视觉几何 bubble");
+    }
+
+    #[tokio::test]
+    async fn turns_populates_media_refs() {
+        let td = TestDir::new();
+        let mut cfg = fixture_config(td.path());
+        cfg.images_per_model_call = 0;
+        cfg.model_config.backend = "openai-compatible".to_string();
+
+        let history = Arc::new(HistoryStore::open(td.path().join("h")).unwrap());
+        history.migrate().unwrap();
+        let entry = json!({"recipient": "示例联系人甲", "kind": "private"});
+        let cid = history.ensure_contact("fixture", &entry, false).unwrap();
+
+        let mut svc = BotService::new(cfg, None, Some(history.clone()), Some(cid), None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "示例联系人甲");
+        svc.advance(old).unwrap();
+
+        let mut img_bubble = test_bubble("[图片]", "inbound_visual");
+        img_bubble.kind = Some("image".to_string());
+        img_bubble.media_id = Some("img_media_id_111".to_string());
+
+        let mut file_bubble = test_bubble("[文件] 财务报表.xlsx", "inbound_visual");
+        file_bubble.kind = Some("file".to_string());
+        file_bubble.media_id = Some("file_media_id_222".to_string());
+
+        let current = test_frame(vec![test_bubble("old", "inbound_visual"), img_bubble.clone(), file_bubble.clone()], "示例联系人甲");
+        let sent = test_frame(vec![test_bubble("old", "inbound_visual"), img_bubble.clone(), file_bubble.clone(), test_bubble("好的", "outbound_visual")], "示例联系人甲");
+
+        let img_path = td.path().join("test_img.png");
+        fs::write(&img_path, "dummy image bytes").unwrap();
+        let file_path = td.path().join("财务报表.xlsx");
+        fs::write(&file_path, "dummy file bytes").unwrap();
+
+        let attachment_image = AttachmentImage {
+            path: img_path,
+            label: "第1张图片".to_string(),
+            source: "inbound_visual".to_string(),
+            bubble: img_bubble,
+            media_id: Some("img_media_id_111".to_string()),
+        };
+
+        let attachment_file = AttachmentFile {
+            filename: "财务报表.xlsx".to_string(),
+            label: "第1个文件".to_string(),
+            original_bytes: false,
+            path: file_path,
+            bubble: file_bubble,
+            content: serde_json::Map::new(),
+        };
+
+        svc.understand_fn = Some(Arc::new(move |_images, _, _, _| {
+            Box::pin(async move { vec![Some("这是图片理解文字".to_string())] })
+        }));
+
+        let captured_turn = Arc::new(Mutex::new(None));
+        let ct = captured_turn.clone();
+        svc.brain = Some(Arc::new(move |turn| {
+            *ct.lock().unwrap() = Some(turn.clone());
+            Box::pin(async {
+                Ok(BrainReply {
+                    reply: "好的".to_string(),
+                    metadata: HashMap::new(),
+                })
+            })
+        }));
+
+        let mut cap = MockCapture::new(vec![current.clone(), current.clone(), current.clone(), current.clone(), sent]);
+        let ai = attachment_image.clone();
+        let af = attachment_file.clone();
+        cap.attachments_fn = Some(Arc::new(move |_, _| {
+            Ok((vec![ai.clone()], vec![af.clone()], Vec::new()))
+        }));
+
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        let turn = captured_turn.lock().unwrap().take().expect("Turn 必须被交付给大脑");
+        assert_eq!(turn.media_refs.len(), 2, "media_refs 必须包含图片和文件");
+
+        let img_ref = &turn.media_refs[0];
+        assert_eq!(img_ref.kind, "image");
+        assert_eq!(img_ref.media_id, Some("77f1d16d5bb6f93c7366a352f518efc7dd1a492da3c4882959b266ac03560210".to_string()));
+        assert_eq!(img_ref.understanding, Some("这是图片理解文字".to_string()));
+        assert_eq!(img_ref.filename, None);
+
+        let file_ref = &turn.media_refs[1];
+        assert_eq!(file_ref.kind, "file");
+        assert_eq!(file_ref.media_id, Some("file_media_id_222".to_string()));
+        assert_eq!(file_ref.filename, Some("财务报表.xlsx".to_string()));
+        assert_eq!(file_ref.understanding, None);
     }
 
     #[tokio::test]
