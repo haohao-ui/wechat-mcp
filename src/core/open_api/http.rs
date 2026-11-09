@@ -317,7 +317,12 @@ async fn read_request(stream: &mut TcpStream) -> Result<Request, u16> {
     if headers.contains_key("transfer-encoding") {
         return Err(400);
     }
-    let length = headers.get("content-length").ok_or(411u16)?;
+    // A bodiless DELETE usually carries no Content-Length (curl, urllib, reqwest); treat it as empty.
+    let length = match headers.get("content-length") {
+        Some(length) => length.as_str(),
+        None if parts[0] == "DELETE" => "0",
+        None => return Err(411),
+    };
     if length.is_empty() || !length.bytes().all(|b| b.is_ascii_digit()) {
         return Err(400);
     }
@@ -644,7 +649,10 @@ async fn call_tool(
                         },
                     ))
                 })();
-                converted.map_err(|e| super::OpenApiError::Internal(e.to_string()))
+                // Same envelope as the idle case, so clients read one field either way.
+                converted
+                    .map(|turn| json!({ "turn": turn }))
+                    .map_err(|e| super::OpenApiError::Internal(e.to_string()))
             }
             Err(e) => Err(e),
         },
@@ -1024,12 +1032,27 @@ mod tests {
         assert_ne!(t.init().await, sid);
     }
     #[tokio::test]
+    async fn delete_without_content_length_ends_session() {
+        // curl -X DELETE and most HTTP clients send no Content-Length for an empty body.
+        let t = TestServer::new(Duration::from_secs(90)).await;
+        let sid = t.init().await;
+        let request = format!(
+            "DELETE /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nMcp-Session-Id: {}\r\n\r\n",
+            t.token, sid
+        );
+        let response = t.raw(&request).await;
+        assert!(response.starts_with("HTTP/1.1 204"), "{response}");
+        assert_eq!(t.rpc(Some(&sid), "tools/list", json!({})).await.status(), 404);
+        let next = t.init().await;
+        assert_ne!(next, sid, "a new session can start right away");
+    }
+    #[tokio::test]
     async fn delete_ends_session_and_requeues() {
         let t = TestServer::new(Duration::from_secs(90)).await;
         let sid = t.init().await;
         let pending = t.enqueue("turn-delete").await;
         let first = t.call(&sid, "next_turn", json!({"wait_seconds":0})).await;
-        assert!(first["result"]["structuredContent"]["claim"]["claim_token"].is_string());
+        assert!(first["result"]["structuredContent"]["turn"]["claim"]["claim_token"].is_string());
         assert_eq!(
             t.client
                 .delete(t.url())
@@ -1049,12 +1072,12 @@ mod tests {
         let sid = t.init().await;
         let second = t.call(&sid, "next_turn", json!({"wait_seconds":0})).await;
         assert_eq!(
-            second["result"]["structuredContent"]["turn_id"],
+            second["result"]["structuredContent"]["turn"]["turn_id"],
             "turn-delete"
         );
         assert_ne!(
-            first["result"]["structuredContent"]["claim"]["claim_token"],
-            second["result"]["structuredContent"]["claim"]["claim_token"]
+            first["result"]["structuredContent"]["turn"]["claim"]["claim_token"],
+            second["result"]["structuredContent"]["turn"]["claim"]["claim_token"]
         );
         pending.abort();
     }
@@ -1110,9 +1133,9 @@ mod tests {
         let sid = t.init().await;
         let pending = t.enqueue("v1").await;
         let r = t.call(&sid, "next_turn", json!({"wait_seconds":0})).await;
-        assert_eq!(r["result"]["structuredContent"]["api_version"], "1");
+        assert_eq!(r["result"]["structuredContent"]["turn"]["api_version"], "1");
         assert_eq!(
-            r["result"]["structuredContent"]["contact"]["contact_id"],
+            r["result"]["structuredContent"]["turn"]["contact"]["contact_id"],
             "allowed"
         );
         assert!(!r.to_string().contains("/private/local"));
@@ -1129,12 +1152,12 @@ mod tests {
         let polling = t.call(&sid, "next_turn", json!({"wait_seconds":30}));
         tokio::pin!(polling);
         tokio::select! {r=&mut polling=>panic!("poll returned early: {r}"),_=tokio::time::sleep(Duration::from_millis(50))=>{}}
-        let reply=tokio::time::timeout(Duration::from_secs(1),t.call(&sid,"reply",json!({"turn_id":"parallel","claim_token":claim["result"]["structuredContent"]["claim"]["claim_token"],"action":"send","text":"好的"}))).await.unwrap();
+        let reply=tokio::time::timeout(Duration::from_secs(1),t.call(&sid,"reply",json!({"turn_id":"parallel","claim_token":claim["result"]["structuredContent"]["turn"]["claim"]["claim_token"],"action":"send","text":"好的"}))).await.unwrap();
         assert_eq!(reply["result"]["structuredContent"]["accepted"], true);
         assert!(pending.await.unwrap().is_ok());
         let next = t.enqueue("parallel-next").await;
         assert_eq!(
-            polling.await["result"]["structuredContent"]["turn_id"],
+            polling.await["result"]["structuredContent"]["turn"]["turn_id"],
             "parallel-next"
         );
         next.abort();
@@ -1177,7 +1200,7 @@ mod tests {
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(1), &mut polling)
                 .await
-                .unwrap()["result"]["structuredContent"]["turn_id"],
+                .unwrap()["result"]["structuredContent"]["turn"]["turn_id"],
             "after-malformed"
         );
         drop(slow);
@@ -1203,10 +1226,10 @@ mod tests {
         let again = t
             .call(&new_sid, "next_turn", json!({"wait_seconds":0}))
             .await;
-        assert_eq!(again["result"]["structuredContent"]["turn_id"], "rotate");
+        assert_eq!(again["result"]["structuredContent"]["turn"]["turn_id"], "rotate");
         assert_ne!(
-            claim["result"]["structuredContent"]["claim"],
-            again["result"]["structuredContent"]["claim"]
+            claim["result"]["structuredContent"]["turn"]["claim"],
+            again["result"]["structuredContent"]["turn"]["claim"]
         );
         pending.abort();
     }
@@ -1279,7 +1302,7 @@ mod tests {
         let sid = t.init().await;
         let pending = t.enqueue("e2e").await;
         let claim = t.call(&sid, "next_turn", json!({"wait_seconds":0})).await;
-        let args = json!({"turn_id":"e2e","claim_token":claim["result"]["structuredContent"]["claim"]["claim_token"],"action":"send","text":"收到，谢谢"});
+        let args = json!({"turn_id":"e2e","claim_token":claim["result"]["structuredContent"]["turn"]["claim"]["claim_token"],"action":"send","text":"收到，谢谢"});
         let reply = t.call(&sid, "reply", args.clone()).await;
         assert_eq!(
             reply["result"]["structuredContent"],
