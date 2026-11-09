@@ -5,8 +5,8 @@ use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -17,6 +17,12 @@ use tokio::sync::{Mutex, Notify, oneshot};
 
 use crate::brain::{Brain, BrainReply, Turn as BrainTurn};
 use crate::core::config::{BrainConfig, BrainMode, ModelConfig, TimeoutAction};
+use crate::core::open_api::{
+    OpenApiError,
+    access::BrainAccess,
+    contract::ClaimInfo,
+    ledger::{TerminalRecord, TurnLedger, text_sha256},
+};
 use crate::core::policy::validate_reply;
 use crate::core::turns::BrainFn;
 
@@ -36,6 +42,34 @@ pub struct PendingTurn {
     pub claim_token: Option<String>,
     pub reply_sender: Option<oneshot::Sender<BrainReply>>,
     pub answered: bool,
+    strict_claim: Option<SessionClaim>,
+    access_warned: bool,
+}
+
+struct SessionClaim {
+    session_id: String,
+    contact_id: String,
+    lease_until: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClaimedTurn {
+    pub turn: crate::brain::Turn,
+    pub contact_id: String,
+    pub claim: ClaimInfo,
+}
+
+pub struct StrictReply {
+    pub turn_id: String,
+    pub claim_token: String,
+    pub action: String,
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplyOutcome {
+    pub accepted: bool,
+    pub duplicate: bool,
 }
 
 pub struct BrainState {
@@ -54,6 +88,8 @@ pub struct ExternalBrain {
     pub state: Mutex<BrainState>,
     pub notify_new_turn: Notify,
     pub socket_path: PathBuf,
+    claim_lease: AtomicU64,
+    ledger: Mutex<std::result::Result<TurnLedger, String>>,
 }
 
 impl ExternalBrain {
@@ -68,6 +104,10 @@ impl ExternalBrain {
         state_dir: PathBuf,
         socket_path: PathBuf,
     ) -> Arc<Self> {
+        let ledger = TurnLedger::open(&state_dir).map_err(|error| format!("{error:#}"));
+        if let Err(error) = &ledger {
+            tracing::error!(%error, "turn ledger unavailable; strict API disabled");
+        }
         let state = BrainState {
             mode: config.mode,
             timeout_seconds: config.external.timeout_seconds,
@@ -84,7 +124,247 @@ impl ExternalBrain {
             state: Mutex::new(state),
             notify_new_turn: Notify::new(),
             socket_path,
+            claim_lease: AtomicU64::new(60),
+            ledger: Mutex::new(ledger),
         })
+    }
+
+    /// Claim only turns authorized for this request's account and contact snapshot.
+    pub async fn claim_next(
+        &self,
+        session_id: &str,
+        wait: Duration,
+        access: &BrainAccess,
+    ) -> std::result::Result<Option<ClaimedTurn>, OpenApiError> {
+        let until = tokio::time::Instant::now() + wait.min(Duration::from_secs(60));
+        loop {
+            // Register before checking the queue so an enqueue cannot be missed.
+            let notified = self.notify_new_turn.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let mut next_lease = None;
+            {
+                let mut state = self.state.lock().await;
+                if state.mode != BrainMode::External {
+                    return Err(OpenApiError::BrainModeNotExternal);
+                }
+                let ledger = self.ledger.lock().await;
+                ledger.as_ref().map_err(ledger_unavailable)?;
+                let now = now_secs() as u64;
+                state.last_poll_at = Some(now_secs());
+                requeue_expired_claims(&mut state, now);
+                let order: Vec<_> = state.order.iter().cloned().collect();
+                for id in order {
+                    let Some(pending) = state.pending.get_mut(&id) else {
+                        continue;
+                    };
+                    if let Some(claim) = &pending.strict_claim {
+                        next_lease =
+                            Some(next_lease.map_or(claim.lease_until, |prev: u64| {
+                                prev.min(claim.lease_until)
+                            }));
+                    }
+                    if pending.claimed_by.is_some()
+                        || pending.answered
+                        || pending.deadline_at <= now
+                    {
+                        continue;
+                    }
+                    let contact = (pending.turn.account_id == access.account_id())
+                        .then(|| {
+                            access.contact_for_turn(
+                                &pending.turn.contact.name,
+                                &pending.turn.contact.kind,
+                            )
+                        })
+                        .flatten();
+                    let Some(contact_id) = contact.filter(|id| access.permit(id)) else {
+                        if !pending.access_warned {
+                            tracing::warn!(turn_id = %id, "turn contact is unresolved or not permitted");
+                            pending.access_warned = true;
+                        }
+                        continue;
+                    };
+                    let token = format!(
+                        "{}{}",
+                        uuid::Uuid::new_v4().simple(),
+                        uuid::Uuid::new_v4().simple()
+                    );
+                    let lease_until = now.saturating_add(self.claim_lease.load(Ordering::Relaxed));
+                    pending.claimed_by = Some(CLIENT_COUNTER.fetch_add(1, Ordering::Relaxed));
+                    pending.claim_token = Some(token.clone());
+                    pending.strict_claim = Some(SessionClaim {
+                        session_id: session_id.into(),
+                        contact_id: contact_id.clone(),
+                        lease_until,
+                    });
+                    return Ok(Some(ClaimedTurn {
+                        turn: pending.turn.clone(),
+                        contact_id,
+                        claim: ClaimInfo {
+                            claim_token: token,
+                            lease_until,
+                            deadline_at: pending.deadline_at,
+                        },
+                    }));
+                }
+            }
+            let remaining = until.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            // Lease expiry also makes work available, without an enqueue notification.
+            let pause = next_lease
+                .map(|t| Duration::from_secs(t.saturating_sub(now_secs() as u64)))
+                .unwrap_or(remaining)
+                .min(remaining);
+            tokio::select! { _ = &mut notified => {}, _ = tokio::time::sleep(pause) => {} }
+        }
+    }
+
+    pub async fn reply_strict(
+        &self,
+        req: StrictReply,
+        access: &BrainAccess,
+    ) -> std::result::Result<ReplyOutcome, OpenApiError> {
+        // All validation and persistence share this lock. Always acquire state before ledger.
+        let mut state = self.state.lock().await;
+        let mut ledger = self.ledger.lock().await;
+        let ledger = ledger.as_mut().map_err(|e| ledger_unavailable(e))?;
+        if let Some(record) = ledger.get(&req.turn_id) {
+            return match record.outcome.as_str() {
+                "expired" => Err(OpenApiError::TurnExpired),
+                "revoked" => Err(OpenApiError::TurnRevoked),
+                "accepted"
+                    if record.action.as_deref() == Some(req.action.as_str())
+                        && (req.action != "send"
+                            || record.text_sha256.as_deref()
+                                == Some(
+                                    text_sha256(req.text.as_deref().unwrap_or("")).as_str(),
+                                )) =>
+                {
+                    Ok(ReplyOutcome {
+                        accepted: true,
+                        duplicate: true,
+                    })
+                }
+                _ => Err(OpenApiError::AlreadyAnswered {
+                    action: record.action.clone().unwrap_or_default(),
+                }),
+            };
+        }
+        let now = now_secs() as u64;
+        let pending = state
+            .pending
+            .get(&req.turn_id)
+            .ok_or(OpenApiError::TurnNotFound)?;
+        let claim = pending
+            .strict_claim
+            .as_ref()
+            .filter(|c| c.lease_until > now)
+            .filter(|_| pending.claimed_by.is_some() && !pending.answered)
+            .ok_or(OpenApiError::InvalidClaimToken)?;
+        if req.claim_token.is_empty()
+            || pending.claim_token.as_deref() != Some(req.claim_token.as_str())
+        {
+            return Err(OpenApiError::InvalidClaimToken);
+        }
+        if now >= pending.deadline_at {
+            return Err(OpenApiError::TurnExpired);
+        }
+        if access.account_id() != pending.turn.account_id || !access.permit(&claim.contact_id) {
+            ledger
+                .record(TerminalRecord {
+                    turn_id: req.turn_id.clone(),
+                    outcome: "revoked".into(),
+                    action: None,
+                    text: None,
+                    text_sha256: None,
+                    at: now,
+                })
+                .map_err(|e| OpenApiError::Internal(e.to_string()))?;
+            deliver_reply(
+                &mut state,
+                &req.turn_id,
+                action_reply("skip", "", Some("revoked")),
+            );
+            return Err(OpenApiError::TurnRevoked);
+        }
+        if !["send", "skip", "handoff"].contains(&req.action.as_str()) {
+            return Err(OpenApiError::InvalidArguments("invalid action".into()));
+        }
+        let text = if req.action == "send" {
+            let text = req.text.as_deref().ok_or(OpenApiError::InvalidText)?;
+            validate_reply(text).map_err(|_| OpenApiError::InvalidText)?;
+            Some(text.to_string())
+        } else {
+            None
+        };
+        ledger
+            .record(TerminalRecord {
+                turn_id: req.turn_id.clone(),
+                outcome: "accepted".into(),
+                action: Some(req.action.clone()),
+                text_sha256: text.as_deref().map(text_sha256),
+                text: text.clone(),
+                at: now,
+            })
+            .map_err(|e| OpenApiError::Internal(e.to_string()))?;
+        deliver_reply(
+            &mut state,
+            &req.turn_id,
+            action_reply(&req.action, text.as_deref().unwrap_or(""), None),
+        );
+        Ok(ReplyOutcome {
+            accepted: true,
+            duplicate: false,
+        })
+    }
+
+    pub async fn turn_status(&self, turn_id: &str) -> std::result::Result<Value, OpenApiError> {
+        let mut state = self.state.lock().await;
+        let ledger = self.ledger.lock().await;
+        let ledger = ledger.as_ref().map_err(ledger_unavailable)?;
+        requeue_expired_claims(&mut state, now_secs() as u64);
+        if let Some(pending) = state.pending.get(turn_id) {
+            return Ok(
+                json!({ "state": if pending.claimed_by.is_some() { "claimed" } else { "queued" } }),
+            );
+        }
+        let record = ledger.get(turn_id).ok_or(OpenApiError::TurnNotFound)?;
+        Ok(
+            json!({ "state": record.outcome, "action": record.action, "send": {"status": send_status(&state.state_dir, turn_id)} }),
+        )
+    }
+
+    pub async fn renew_session(&self, session_id: &str) {
+        let mut state = self.state.lock().await;
+        let now = now_secs() as u64;
+        requeue_expired_claims(&mut state, now);
+        for pending in state.pending.values_mut() {
+            if let Some(claim) = &mut pending.strict_claim
+                && claim.session_id == session_id
+            {
+                claim.lease_until = now.saturating_add(self.claim_lease.load(Ordering::Relaxed));
+            }
+        }
+    }
+
+    pub async fn release_session(&self, session_id: &str) {
+        let mut state = self.state.lock().await;
+        for pending in state.pending.values_mut() {
+            if pending
+                .strict_claim
+                .as_ref()
+                .is_some_and(|c| c.session_id == session_id)
+            {
+                pending.strict_claim = None;
+                pending.claimed_by = None;
+                pending.claim_token = None;
+            }
+        }
+        drop(state);
+        self.notify_new_turn.notify_waiters();
     }
 
     /// 获取状态快照，用于写入 health.json 或响应 status 查询
@@ -128,11 +408,17 @@ impl ExternalBrain {
         }
 
         let turn_id = turn.turn_id.clone();
-        let (tx, rx) = oneshot::channel();
+        let (tx, mut rx) = oneshot::channel();
         let deadline_at = (now_secs() as u64) + timeout_sec;
 
         {
             let mut state = self.state.lock().await;
+            let ledger = self.ledger.lock().await;
+            if let Ok(ledger) = ledger.as_ref()
+                && let Some(record) = ledger.get(&turn_id)
+            {
+                return Ok(terminal_reply(record));
+            }
             state.pending.insert(
                 turn_id.clone(),
                 PendingTurn {
@@ -142,6 +428,8 @@ impl ExternalBrain {
                     claim_token: None,
                     reply_sender: Some(tx),
                     answered: false,
+                    strict_claim: None,
+                    access_warned: false,
                 },
             );
             state.order.push_back(turn_id.clone());
@@ -150,19 +438,35 @@ impl ExternalBrain {
 
         let timeout_dur = Duration::from_secs(timeout_sec);
         tokio::select! {
-            reply_res = rx => {
+            reply_res = &mut rx => {
                 match reply_res {
                     Ok(reply) => Ok(reply),
                     Err(_) => bail!("reply channel closed"),
                 }
             }
             _ = tokio::time::sleep(timeout_dur) => {
-                // 超时处理
                 let mut state = self.state.lock().await;
-                if let Some(mut pending) = state.pending.remove(&turn_id) {
-                    pending.answered = true;
-                    state.order.retain(|id| id != &turn_id);
+                let mut ledger = self.ledger.lock().await;
+                if let Ok(ledger) = ledger.as_ref()
+                    && let Some(record) = ledger.get(&turn_id)
+                {
+                    return Ok(terminal_reply(record));
                 }
+                // Legacy reply may have won while select chose the timeout branch.
+                if !state.pending.contains_key(&turn_id) {
+                    drop(ledger);
+                    drop(state);
+                    return rx.await.context("reply channel closed");
+                }
+                if let Ok(ledger) = ledger.as_mut() {
+                    ledger.record(TerminalRecord {
+                        turn_id: turn_id.clone(), outcome: "expired".into(),
+                        action: None, text: None, text_sha256: None, at: now_secs() as u64,
+                    })?;
+                }
+                state.pending.remove(&turn_id);
+                state.order.retain(|id| id != &turn_id);
+                drop(ledger);
                 drop(state);
 
                 match timeout_action {
@@ -440,6 +744,99 @@ impl ExternalBrain {
     }
 }
 
+fn ledger_unavailable(error: &String) -> OpenApiError {
+    OpenApiError::Internal(format!("turn_ledger_unavailable: {error}"))
+}
+
+fn action_reply(action: &str, text: &str, reason: Option<&str>) -> BrainReply {
+    let mut metadata = HashMap::from([("action".into(), json!(action))]);
+    if let Some(reason) = reason {
+        metadata.insert("reason".into(), json!(reason));
+    }
+    BrainReply {
+        reply: text.into(),
+        metadata,
+    }
+}
+
+fn terminal_reply(record: &TerminalRecord) -> BrainReply {
+    if record.outcome == "accepted" {
+        action_reply(
+            record.action.as_deref().unwrap_or("skip"),
+            record.text.as_deref().unwrap_or(""),
+            None,
+        )
+    } else {
+        action_reply("skip", "", Some(&record.outcome))
+    }
+}
+
+fn deliver_reply(state: &mut BrainState, id: &str, reply: BrainReply) {
+    if let Some(mut pending) = state.pending.remove(id)
+        && let Some(sender) = pending.reply_sender.take()
+    {
+        let _ = sender.send(reply);
+    }
+    state.order.retain(|candidate| candidate != id);
+}
+
+fn requeue_expired_claims(state: &mut BrainState, now: u64) {
+    for pending in state.pending.values_mut() {
+        if pending
+            .strict_claim
+            .as_ref()
+            .is_some_and(|claim| claim.lease_until <= now)
+        {
+            pending.strict_claim = None;
+            pending.claimed_by = None;
+            pending.claim_token = None;
+        }
+    }
+}
+
+fn send_status(state_dir: &Path, turn_id: &str) -> &'static str {
+    // Compare entry names rather than interpolating an untrusted ID into a path.
+    let filename = format!("send-{turn_id}.json");
+    let Ok(sessions) = fs::read_dir(state_dir.join("sessions")) else {
+        return "unknown";
+    };
+    let mut found = None;
+    for session in sessions.flatten() {
+        let Ok(files) = fs::read_dir(session.path()) else {
+            continue;
+        };
+        for file in files
+            .flatten()
+            .filter(|file| file.file_name() == filename.as_str())
+        {
+            // Multiple logs for one batch cannot establish a single send outcome.
+            if found.is_some() {
+                return "unknown";
+            }
+            let value = fs::read(file.path())
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+            found = Some(
+                match value
+                    .as_ref()
+                    .and_then(|v| v.get("status"))
+                    .and_then(Value::as_str)
+                {
+                    Some("triggered") => "triggered",
+                    Some(
+                        "not_sent" | "skipped_by_rule" | "skipped_by_brain" | "stopped_before_send",
+                    ) => "not_sent",
+                    Some("attempting" | "preparing_media" | "generating" | "generated") => {
+                        "pending"
+                    }
+                    _ => "unknown",
+                },
+            );
+        }
+    }
+    found.unwrap_or("unknown")
+}
+
 pub fn default_socket_path() -> PathBuf {
     if let Ok(path) = std::env::var("WECHAT_CORE_SOCK") {
         return PathBuf::from(path);
@@ -547,7 +944,7 @@ mod tests {
         PathBuf::from(format!("/tmp/c_{pid}_{count}.sock"))
     }
 
-    fn make_test_brain(mode: BrainMode, action: TimeoutAction, timeout: u64) -> (Arc<ExternalBrain>, PathBuf) {
+    pub(super) fn make_test_brain(mode: BrainMode, action: TimeoutAction, timeout: u64) -> (Arc<ExternalBrain>, PathBuf) {
         let td = std::env::temp_dir().join(format!("test-ext-brain-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&td).unwrap();
         let sock_path = short_temp_socket();
@@ -574,7 +971,7 @@ mod tests {
         (b, td)
     }
 
-    fn sample_turn(turn_id: &str) -> BrainTurn {
+    pub(super) fn sample_turn(turn_id: &str) -> BrainTurn {
         BrainTurn {
             turn_id: turn_id.to_string(),
             account_id: "test-acc".to_string(),
@@ -876,3 +1273,7 @@ mod tests {
         let _ = fs::remove_dir_all(td);
     }
 }
+
+#[cfg(test)]
+#[path = "open_api/turn_tests.rs"]
+mod strict_tests;
