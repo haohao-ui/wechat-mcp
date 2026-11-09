@@ -1467,6 +1467,8 @@ impl BotCoordinator {
             return Ok(());
         }
 
+        let _ = self.serve_friend_requests().await;
+
         // 处理通讯录同步请求与增量同步
         let _ = self.serve_contacts_sync().await;
 
@@ -1785,8 +1787,151 @@ impl BotCoordinator {
         }
     }
 
+    pub async fn serve_friend_requests(&mut self) -> Result<()> {
+        use crate::core::friend_requests as fr;
+        let now = (self.clock)();
+        let idle = self.pending.is_empty() && !self.sessions.values().any(|s| s.turn.is_some());
+        let c = self.rules()?.friend_requests;
+        if !c.enabled
+            || self.root.join("admin-pause.json").exists()
+            || !idle
+            || self.stop.load(Ordering::SeqCst)
+        {
+            return Ok(());
+        }
+        if self
+            .account_detector
+            .as_ref()
+            .is_some_and(|f| f().as_deref() != Some(self.config.account_id.as_str()))
+        {
+            return Ok(());
+        }
+        let mut state = fr::State::load(&self.root)?;
+        state.bind_account(&self.config.account_id);
+        if !fr::should_check(&c, false, idle, now, state.last_check) {
+            return Ok(());
+        }
+        if self.capture.is_none() || !self.ensure_capture_connected().await {
+            return Ok(());
+        }
+        state.last_check = Some(now);
+        state.save(&self.root)?;
+        let badge = self
+            .capture
+            .as_mut()
+            .unwrap()
+            .call("friend_request_badge", json!({}))
+            .await?;
+        let revisit = state.pending && state.last_scan.is_some_and(|t| now - t >= 1800.0);
+        if badge["red_pixels"].as_u64().unwrap_or(0) < BADGE_PIXELS && !revisit {
+            return Ok(());
+        }
+        let stop = self.stop.clone();
+        let pause = self.root.join("admin-pause.json");
+        let detect = self.account_detector.clone();
+        let account = self.config.account_id.clone();
+        let config_path = self.config_path.clone();
+        let stop_check = || {
+            stop.load(Ordering::SeqCst)
+                || pause.exists()
+                || !BotConfig::load(&config_path)
+                    .is_ok_and(|cfg| cfg.friend_requests == c && cfg.friend_requests.enabled)
+                || detect
+                    .as_ref()
+                    .is_some_and(|f| f().as_deref() != Some(account.as_str()))
+        };
+        let result = fr::scan(
+            self.capture.as_mut().unwrap().as_mut(),
+            &c,
+            &self.root,
+            &account,
+            now,
+            &stop_check,
+        )
+        .await;
+        self.log_event("friend_request_scan", json!({"success":result.is_ok()}));
+        // Navigating contacts invalidates the active chat on both success and failure.
+        let closed = self.close_connection().await;
+        match result {
+            Ok(report) => {
+                for event in report.events {
+                    let kind = if event["event"] == "friend_request_scan" {
+                        "friend_request_scan"
+                    } else {
+                        "friend_request_decision"
+                    };
+                    self.log_event(kind, event.clone());
+                    if kind == "friend_request_decision"
+                        && event["decision"] != "not_matched"
+                        && event["decision"] != "limit_reached"
+                    {
+                        self.log_event("friend_request_verify", event);
+                    }
+                }
+                let queued = match fr::queue_contacts_sync(
+                    &self.root,
+                    &account,
+                    now,
+                    c.mode,
+                    report.accepted,
+                ) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        self.log_event(
+                            "friend_request_contacts_sync_failed",
+                            json!({"reason":"queue_failed"}),
+                        );
+                        false
+                    }
+                };
+                if queued {
+                    // The normal control request consumer owns its own, separate lease.
+                    if self.serve_contacts_sync_with(false).await.is_err() {
+                        self.log_event(
+                            "friend_request_contacts_sync_failed",
+                            json!({"reason":"sync_failed"}),
+                        );
+                    } else if read_json::<Value>(self.root.join("contacts-sync-result.json"))
+                        .ok()
+                        .is_some_and(|v| v["complete"] == false)
+                    {
+                        self.log_event(
+                            "friend_request_contacts_sync_failed",
+                            json!({"reason":"incomplete"}),
+                        );
+                    }
+                }
+            }
+            Err(_) => {
+                self.log_event(
+                    "friend_request_scan",
+                    json!({"success":false,"reason":"scan_failed"}),
+                );
+            }
+        }
+        closed?;
+        Ok(())
+    }
+
     pub async fn serve_contacts_sync(&mut self) -> Result<()> {
-        self.serve_contacts_sync_with(true).await
+        self.serve_contacts_sync_with(true).await?;
+        if crate::core::friend_requests::promote_contacts_sync(
+            &self.root,
+            &self.config.account_id,
+            (self.clock)(),
+        )? {
+            if self.serve_contacts_sync_with(false).await.is_err()
+                || read_json::<Value>(self.root.join("contacts-sync-result.json"))
+                    .ok()
+                    .is_some_and(|v| v["complete"] == false)
+            {
+                self.log_event(
+                    "friend_request_contacts_sync_failed",
+                    json!({"reason":"queued_sync_failed"}),
+                );
+            }
+        }
+        Ok(())
     }
 
     /// allow_daily=false：只处理手动请求（暂停期间），不触发每日自动同步
@@ -2132,6 +2277,7 @@ mod tests {
             context_messages: 5,
             manage_window: true,
             capture_backend: "native".to_string(),
+            friend_requests: Default::default(),
             open_api: Default::default(),
             history_http: crate::core::config::HistoryHttpConfig {
                 bind: "127.0.0.1".to_string(),
@@ -6429,5 +6575,246 @@ mod tests {
         assert!(!should_daily_incremental_sync(false, 100000.0, 0.0));
         // Idle but sync within 20 hours
         assert!(!should_daily_incremental_sync(true, 100000.0, 90000.0));
+    }
+    #[tokio::test]
+    async fn friend_requests_disabled_paused_and_busy_do_not_trigger() {
+        let temp = TestDir::new();
+        let path = create_test_config(
+            temp.path(),
+            vec![AllowlistEntry {
+                recipient: "a".into(),
+                kind: "private".into(),
+                aliases: None,
+            }],
+        );
+        let mut coord = BotCoordinator::new(&path).unwrap();
+        let mock = MockCoordinatorCapture::new();
+        let calls = mock.calls.clone();
+        coord.capture = Some(Box::new(mock));
+        coord.serve_friend_requests().await.unwrap();
+        assert!(calls.lock().unwrap().is_empty());
+        coord.config.friend_requests.enabled = true;
+        write_private(&coord.config_path, &coord.config).unwrap();
+        write_private(coord.root.join("admin-pause.json"), &json!({})).unwrap();
+        coord.serve_friend_requests().await.unwrap();
+        assert!(calls.lock().unwrap().is_empty());
+        fs::remove_file(coord.root.join("admin-pause.json")).unwrap();
+        coord.pending.insert("busy".into(), (1.0, 1));
+        coord.serve_friend_requests().await.unwrap();
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    fn friend_fixture(
+        mode: crate::core::friend_requests::Mode,
+        matched: bool,
+    ) -> (TestDir, BotCoordinator, Arc<Mutex<Vec<(String, Value)>>>) {
+        let td = TestDir::new();
+        let path = create_test_config(
+            td.path(),
+            vec![AllowlistEntry {
+                recipient: "a".into(),
+                kind: "private".into(),
+                aliases: None,
+            }],
+        );
+        let mut coord = BotCoordinator::new(path).unwrap();
+        coord.config.friend_requests.enabled = true;
+        coord.config.friend_requests.mode = mode;
+        if !matched {
+            coord.config.friend_requests.accept_keywords = vec!["absent".into()];
+        }
+        write_private(&coord.config_path, &coord.config).unwrap();
+        let mut cap = MockCoordinatorCapture::new();
+        cap.call_responses
+            .insert("friend_request_badge".into(), json!({"red_pixels":25}));
+        cap.call_responses.insert(
+            "friend_request_scan".into(),
+            json!({"rows":[{"row_y":160.0,"name":"甲","status":"等待验证","message":"hello"}]}),
+        );
+        cap.call_responses.insert(
+            "friend_request_detail".into(),
+            json!({"source":"搜索","message":"hello","verify_button":{"x":0.5,"y":0.5}}),
+        );
+        cap.call_responses
+            .insert("friend_request_verify".into(), json!({"verified":true}));
+        let calls = cap.calls.clone();
+        coord.capture = Some(Box::new(cap));
+        (td, coord, calls)
+    }
+    #[tokio::test]
+    async fn accepted_triggers_incremental_contacts_sync() {
+        let (_td, mut coord, calls) =
+            friend_fixture(crate::core::friend_requests::Mode::Live, true);
+        coord.serve_friend_requests().await.unwrap();
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(op, _)| op == "friend_request_verify")
+                .count(),
+            1
+        );
+        let begins: Vec<_> = calls
+            .iter()
+            .enumerate()
+            .filter(|(_, (op, _))| op == "contacts_lease_begin")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            begins.len(),
+            2,
+            "scan and incremental sync each get their own lease: {calls:?}"
+        );
+        let end = calls
+            .iter()
+            .position(|(op, _)| op == "contacts_lease_end")
+            .unwrap();
+        assert!(end < begins[1]);
+        assert!(coord.logged_events.lock().unwrap().iter().any(|v| {
+            v.to_string()
+                .contains("friend_request_contacts_sync_failed")
+        }));
+    }
+    #[tokio::test]
+    async fn dry_run_does_not_trigger_sync() {
+        let (_td, mut coord, calls) =
+            friend_fixture(crate::core::friend_requests::Mode::DryRun, true);
+        coord.serve_friend_requests().await.unwrap();
+        assert_eq!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(op, _)| op == "contacts_lease_begin")
+                .count(),
+            1
+        );
+        assert!(!coord.root.join("contacts-sync-request.json").exists());
+    }
+    #[tokio::test]
+    async fn not_matched_does_not_trigger_sync() {
+        let (_td, mut coord, calls) =
+            friend_fixture(crate::core::friend_requests::Mode::Live, false);
+        coord.serve_friend_requests().await.unwrap();
+        assert!(
+            !calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(op, _)| op == "friend_request_verify")
+        );
+        assert!(!coord.root.join("contacts-sync-request.json").exists());
+    }
+    #[tokio::test]
+    async fn scan_failure_always_leaves_and_releases() {
+        let (_td, coord, calls) = friend_fixture(crate::core::friend_requests::Mode::Live, true);
+        // Missing rows is a protocol failure, after entering the contacts view.
+        let mut cap = MockCoordinatorCapture::new();
+        cap.calls = calls.clone();
+        let c = coord.config.friend_requests.clone();
+        assert!(
+            crate::core::friend_requests::scan(&mut cap, &c, &coord.root, "acct", 1000.0, &|| {
+                false
+            })
+            .await
+            .is_err()
+        );
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls[calls.len() - 2].0, "contacts_leave");
+        assert_eq!(calls[calls.len() - 1].0, "contacts_lease_end");
+    }
+    #[tokio::test]
+    async fn needs_review_is_not_retried_after_restart() {
+        use crate::core::friend_requests as fr;
+        let (_td, mut coord, calls) = friend_fixture(fr::Mode::Live, true);
+        let mut state = fr::State::default();
+        state.bind_account(&coord.config.account_id);
+        let id = fr::identity(&coord.config.account_id, "甲", "hello", "搜索");
+        state.record(
+            &id,
+            1,
+            "2026-11-09",
+            1.0,
+            fr::Mode::Live,
+            fr::Decision::NeedsReview,
+            vec![],
+        );
+        state.save(&coord.root).unwrap();
+        coord.serve_friend_requests().await.unwrap();
+        assert!(
+            !calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(op, _)| op == "friend_request_verify")
+        );
+    }
+    #[tokio::test]
+    async fn scans_at_most_five_new_requests_without_starving_later_rows() {
+        use crate::core::friend_requests as fr;
+        let (_td, coord, _) = friend_fixture(fr::Mode::Live, true);
+        let mut cap = MockCoordinatorCapture::new();
+        cap.call_responses.insert("friend_request_scan".into(),json!({"rows":(0..6).map(|i|json!({"row_y":100.0+f64::from(i),"name":format!("name{i}"),"status":"等待验证","message":"msg"})).collect::<Vec<_>>()}));
+        cap.call_responses.insert(
+            "friend_request_detail".into(),
+            json!({"source":"搜索","message":"msg","verify_button":{"x":1,"y":1}}),
+        );
+        cap.call_responses
+            .insert("friend_request_verify".into(), json!({"verified":true}));
+        let report = fr::scan(
+            &mut cap,
+            &coord.config.friend_requests,
+            &coord.root,
+            "a",
+            1000.0,
+            &|| false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.accepted, 5);
+        let report = fr::scan(
+            &mut cap,
+            &coord.config.friend_requests,
+            &coord.root,
+            "a",
+            2800.0,
+            &|| false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.accepted, 1);
+        let raw = fs::read_to_string(coord.root.join("friend-requests.json")).unwrap();
+        assert!(!raw.contains("name0"));
+        assert!(!raw.contains("msg"));
+        assert!(!raw.contains("搜索"));
+        assert_eq!(
+            fs::metadata(coord.root.join("friend-requests.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+    #[test]
+    fn accepted_sync_preserves_and_follows_an_existing_operator_request() {
+        use crate::core::friend_requests as fr;
+        let td = TestDir::new();
+        let manual = td.path().join("contacts-sync-request.json");
+        write_private(
+            &manual,
+            &json!({"id":"manual","mode":"full","account_id":"a"}),
+        )
+        .unwrap();
+        assert!(!fr::queue_contacts_sync(td.path(), "a", 1000.0, fr::Mode::Live, 3).unwrap());
+        assert_eq!(read_json::<Value>(&manual).unwrap()["id"], "manual");
+        assert!(!fr::promote_contacts_sync(td.path(), "a", 1001.0).unwrap());
+        fs::remove_file(&manual).unwrap();
+        assert!(!fr::promote_contacts_sync(td.path(), "other", 1002.0).unwrap());
+        assert!(fr::promote_contacts_sync(td.path(), "a", 1003.0).unwrap());
+        let request = read_json::<Value>(&manual).unwrap();
+        assert_eq!(request["mode"], "incremental");
+        assert_eq!(request["created_at"], 1003.0);
+        assert!(!fr::promote_contacts_sync(td.path(), "a", 1004.0).unwrap());
     }
 }

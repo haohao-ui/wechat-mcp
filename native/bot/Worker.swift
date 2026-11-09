@@ -419,6 +419,9 @@ final class CaptureWorker {
             }
             return result
         }
+        if operation.hasPrefix("friend_request_") {
+            return try executeFriendRequestOperation(operation:operation, params:params, manage:params["manage_window"] as? Bool ?? false)
+        }
         if isContactsOperation(operation) {
             return try executeContactsOperation(operation: operation, params: params, manage: params["manage_window"] as? Bool ?? false)
         }
