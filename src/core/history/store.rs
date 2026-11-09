@@ -884,15 +884,24 @@ impl HistoryStore {
         let sql = format!(
             "SELECT 1 FROM messages m LEFT JOIN sends s ON s.send_key=m.send_key
              WHERE m.contact_id=? AND m.seq>? AND m.direction='outbound'
-             AND NOT (m.sender='bot' AND (s.status IS NULL OR s.status IN ({})))
+             AND (m.sender!='bot' OR (
+                 s.status IS NOT NULL AND s.status NOT IN ({})
+                 AND EXISTS (SELECT 1 FROM json_each(s.input_message_ids) input
+                             WHERE input.value IN ({}))
+             ))
              AND (m.send_key IS NULL OR m.send_key IS NOT ?) LIMIT 1",
-            exc_marks
+            exc_marks, marks
         );
         let mut q_params: Vec<&dyn rusqlite::ToSql> = Vec::new();
         q_params.push(&contact_id);
         q_params.push(&last_seq);
         for s in EXCLUDED_SEND {
             q_params.push(s);
+        }
+        // A bot reply only covers the inputs recorded for that send, even if its
+        // outbound bubble appears after a newer customer's message.
+        for id in message_ids {
+            q_params.push(id);
         }
         q_params.push(&exclude_send_key);
 
@@ -3128,6 +3137,89 @@ mod tests {
             )
             .unwrap();
         assert_eq!(senders(&f), vec!["customer", "bot", "self_other"]);
+    }
+
+    fn reply_turn_fixture() -> (StoreFixture, Vec<String>) {
+        let f = setup_fixture();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![
+                    bub("A", "inbound_visual", "text"),
+                    bub("B", "inbound_visual", "text"),
+                ]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        let ids = f
+            .store
+            .connection()
+            .lock()
+            .unwrap()
+            .prepare("SELECT message_id FROM messages ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .unwrap();
+        (f, ids)
+    }
+
+    #[test]
+    fn bot_reply_to_earlier_turn_does_not_cover_newer_message() {
+        let (f, ids) = reply_turn_fixture();
+        f.store
+            .record_bot_reply(
+                &f.c,
+                "S1",
+                "R_A",
+                "triggered",
+                &json!({}),
+                &ids[..1],
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(!f.store.replied_after(&f.c, &ids[1..], Some("S2")).unwrap());
+    }
+
+    #[test]
+    fn bot_reply_covering_message_counts() {
+        let (f, ids) = reply_turn_fixture();
+        f.store
+            .record_bot_reply(
+                &f.c,
+                "S1",
+                "R_AB",
+                "triggered",
+                &json!({}),
+                &ids,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(f.store.replied_after(&f.c, &ids[1..], Some("S2")).unwrap());
+    }
+
+    #[test]
+    fn manual_outbound_after_message_counts() {
+        let (f, ids) = reply_turn_fixture();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![
+                    bub("A", "inbound_visual", "text"),
+                    bub("B", "inbound_visual", "text"),
+                    bub("manual reply", "outbound_visual", "text"),
+                ]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        assert!(f.store.replied_after(&f.c, &ids[1..], Some("S2")).unwrap());
     }
 
     #[test]
