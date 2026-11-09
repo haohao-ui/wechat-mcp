@@ -943,3 +943,96 @@ fn test_cli_rejects_invalid_engine() {
         stderr2
     );
 }
+
+// Exercise the production filename parser with exact OCR text, without Vision variability.
+fn file_card_names(body: &str) -> Vec<String> {
+    if !cfg!(target_os = "macos") {
+        return Vec::new();
+    }
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    let bin = BIN.get_or_init(|| {
+        let source = std::fs::read_to_string(repo_root().join("native/wechat_bubbles.swift")).unwrap();
+        let parser = source.split("let fileCardExtensions:").nth(1).unwrap()
+            .split("/// Stage C").next().unwrap();
+        let classification = source.split("        let names=").nth(1).unwrap()
+            .split("        let neutral=").next().unwrap();
+        let dir = repo_root().join("target/swift_filecard_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let swift = dir.join("main.swift");
+        std::fs::write(&swift, format!(
+            "import Foundation\nlet fileCardExtensions:{parser}\nlet body=CommandLine.arguments[1]\nlet names={classification}\nprint(String(data:try! JSONSerialization.data(withJSONObject:[\"names\":names,\"is_file\":isFile]),encoding:.utf8)!)\n"
+        )).unwrap();
+        let bin = dir.join("filecard");
+        let output = Command::new("swiftc").arg(&swift).arg("-o").arg(&bin).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        bin
+    });
+    let output = Command::new(bin).arg(body).output().unwrap();
+    assert!(output.status.success());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let names: Vec<String> = serde_json::from_value(result["names"].clone()).unwrap();
+    assert_eq!(result["is_file"], names.len() == 1, "{body}: {result}");
+    names
+}
+
+#[test]
+fn pdf_card_with_misread_extension_and_type_label() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    assert_eq!(
+        file_card_names("岗位信息更新2.13.paf\nPDF\n220.3K 未下载"),
+        ["岗位信息更新2.13.pdf"]
+    );
+}
+
+#[test]
+fn misread_extension_without_type_label_stays_text() {
+    assert!(file_card_names("岗位信息更新2.13.paf\n220.3K").is_empty());
+}
+
+#[test]
+fn type_label_does_not_override_valid_extension() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    assert_eq!(file_card_names("报价.xlsx\nPDF\n12K"), ["报价.xlsx"]);
+}
+
+#[test]
+fn edit_distance_two_not_corrected() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    assert_eq!(file_card_names("合同.pqf\nPDF\n1M"), ["合同.pdf"]);
+    assert!(file_card_names("合同.xyz\nPDF\n1M").is_empty());
+}
+
+#[test]
+fn file_card_type_labels_and_single_character_edits() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    for (body, expected) in [
+        ("合同.pf\n pdf \n1M", "合同.pdf"),
+        ("合同.pddf\nPDF\n1M", "合同.pdf"),
+        ("合同.do\nWord\n1M", "合同.doc"),
+        ("报价.xl\nExcel\n1M", "报价.xls"),
+        ("介绍.pp\nPowerPoint\n1M", "介绍.ppt"),
+        ("介绍.pp\nPPT\n1M", "介绍.ppt"),
+        ("归档.zap\nZIP\n1M", "归档.zip"),
+        ("说明.tzt\nTXT\n1M", "说明.txt"),
+        ("视频.mp5\nMP4\n1M", "视频.mp4"),
+        ("报价.xIs\nPDF\n12K 下载中", "报价.xls"),
+    ] {
+        assert_eq!(file_card_names(body), [expected], "{body}");
+    }
+    assert!(file_card_names("合同.paf\n类型 PDF\n1M").is_empty());
+    assert!(file_card_names("合同.paf\nPDF extra\n1M").is_empty());
+    assert!(file_card_names("合同.paaf\nPDF\n1M").is_empty());
+    // Recognized cards keep exactly the old list, even alongside an unknown suffix.
+    assert_eq!(
+        file_card_names("报价.xlsx\n合同.paf\nPDF\n12K"),
+        ["报价.xlsx"]
+    );
+}

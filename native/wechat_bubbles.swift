@@ -283,6 +283,50 @@ func fileNameLine(_ line: String) -> String? {
     return String(trimmed[..<dot])+"."+ext
 }
 
+/// Preserve recognized filenames before using a standalone type label to repair OCR.
+func fileNamesInCard(lines: [String]) -> [String] {
+    let names=lines.compactMap(fileNameLine)
+    guard names.isEmpty else { return names }
+    var hinted=Set<String>()
+    for line in lines {
+        let label=line.trimmingCharacters(in:.whitespacesAndNewlines).lowercased()
+        switch label {
+        case "word": hinted.formUnion(["doc","docx"])
+        case "excel": hinted.formUnion(["xls","xlsx"])
+        case "ppt", "powerpoint": hinted.formUnion(["ppt","pptx"])
+        default: if fileCardExtensions.contains(label) { hinted.insert(label) }
+        }
+    }
+    guard !hinted.isEmpty else { return [] }
+    return lines.compactMap { line in
+        let trimmed=line.trimmingCharacters(in:.whitespaces)
+        guard let dot=trimmed.lastIndex(of:"."), dot != trimmed.startIndex else { return nil }
+        let ext=String(trimmed[trimmed.index(after:dot)...]).lowercased()
+        guard !fileCardExtensions.contains(ext) else { return nil }
+        let matches=hinted.filter { extensionDiffersByOne(ext,$0) }
+        // Conflicting labels must not choose an arbitrary filename identity.
+        guard matches.count==1, let corrected=matches.first else { return nil }
+        return String(trimmed[..<dot])+"."+corrected
+    }
+}
+
+func extensionDiffersByOne(_ lhs: String, _ rhs: String) -> Bool {
+    let a=Array(lhs), b=Array(rhs)
+    if a.count==b.count { return zip(a,b).filter { $0 != $1 }.count==1 }
+    guard abs(a.count-b.count)==1 else { return false }
+    let shorter=a.count<b.count ? a : b
+    let longer=a.count<b.count ? b : a
+    var i=0, j=0
+    while i<shorter.count && j<longer.count {
+        if shorter[i]==longer[j] { i+=1; j+=1 }
+        else {
+            guard i==j else { return false }
+            j+=1
+        }
+    }
+    return true
+}
+
 /// Stage C screen check on the raw capture at its own scale; throws instead of letting anything read
 /// or click a screen that does not match the map. An unknown appearance keeps its own code (a known
 /// wait, e.g. a theme switch); everything else is `layout_mismatch:<failed anchors>`.
@@ -390,7 +434,7 @@ func analyzeFrame(_ captured: CGImage, window: [String:Any], mediaRoot: URL? = n
         if box.y+box.height>=height-2 { clippedBubble=true;continue }
         guard box.y>=2 else { continue }
         let body=texts.filter { $0.x>=Double(box.x) && $0.x<Double(box.x+box.width) && $0.y>=Double(box.y) && $0.y<Double(box.y+box.height) }.map(\.body).joined(separator:"\n")
-        let names=body.components(separatedBy:"\n").compactMap(fileNameLine)
+        let names=fileNamesInCard(lines:body.components(separatedBy:"\n"))
         // WeChat 4 writes sizes as "220.3K" as well as "12KB"; the transfer status shares that line.
         let sizePattern=#"\d+(\.\d+)?\s*(KB|MB|GB|K|M|G|字节|B)"#
         let sizeRange=body.range(of:sizePattern,options:[.regularExpression,.caseInsensitive])
