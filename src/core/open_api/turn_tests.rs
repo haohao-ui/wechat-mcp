@@ -623,3 +623,72 @@ async fn restart_with_revoked_record_returns_skip() {
     assert_eq!(reply.metadata["reason"], "revoked");
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn timeout_ledger_write_failure_removes_pending() {
+    for (action, expected) in [
+        (TimeoutAction::Skip, "skip"),
+        (TimeoutAction::Handoff, "handoff"),
+    ] {
+        let (b, dir) = make_test_brain(BrainMode::External, action, 1);
+        let task = queued(&b, "t").await;
+        fs::rename(dir.join("open-api"), dir.join("saved-ledger")).unwrap();
+        fs::write(dir.join("open-api"), "not a directory").unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply.metadata["action"], expected);
+        let state = b.state.lock().await;
+        assert!(state.pending.is_empty());
+        assert!(state.order.is_empty());
+        drop(state);
+        assert!(
+            b.claim_next("s", Duration::ZERO, &access())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            b.reply_strict(request("t", "stale", "skip", None), &access())
+                .await,
+            Err(OpenApiError::TurnNotFound)
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn revoked_ledger_write_failure_removes_pending_and_delivers_skip() {
+    let (b, dir, task, c) = setup().await;
+    fs::rename(dir.join("open-api"), dir.join("saved-ledger")).unwrap();
+    fs::write(dir.join("open-api"), "not a directory").unwrap();
+    let denied = BrainAccess::for_test("test-acc", &[], &[]);
+    assert!(matches!(
+        b.reply_strict(
+            request("t", &c.claim.claim_token, "send", Some("不可发送")),
+            &denied
+        )
+        .await,
+        Err(OpenApiError::Internal(_))
+    ));
+    let reply = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.metadata["action"], "skip");
+    assert_eq!(reply.metadata["reason"], "revoked");
+    let state = b.state.lock().await;
+    assert!(state.pending.is_empty());
+    assert!(state.order.is_empty());
+    drop(state);
+    assert!(
+        b.claim_next("s", Duration::ZERO, &access())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
