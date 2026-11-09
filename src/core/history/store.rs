@@ -433,10 +433,11 @@ impl HistoryStore {
         let root = ensure_private_dir(state_dir.as_ref().join("history"))?;
         let db_path = root.join("history.sqlite3");
         if !db_path.exists() {
+            // Never truncate: another process may create the database between the check and open.
             let file = OpenOptions::new()
                 .create(true)
                 .write(true)
-                .truncate(true)
+                .truncate(false)
                 .mode(0o600)
                 .open(&db_path)?;
             drop(file);
