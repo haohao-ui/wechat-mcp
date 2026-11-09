@@ -132,7 +132,7 @@ claimed ──认领租期到期且未过 deadline──▶ queued（可被重�
   "contact": {"contact_id": "c_…", "display_name": "…", "kind": "private|group"},
   "messages": [
     {"message_id": null, "kind": "text", "text": "…", "source": "desktop_ocr"},
-    {"message_id": null, "kind": "image", "media_id": "md_…", "understanding": "本机图片理解的文字（可选）"},
+    {"message_id": null, "kind": "image", "media_id": "md_…", "understanding": "本机图片理解的文字（可选）", "processing_failed": "too_large（可选）"},
     {"message_id": null, "kind": "file", "media_id": "md_…", "filename": "…"}
   ],
   "unavailable": [{"kind": "image|file", "reason": "media_id_unknown|download_failed|too_large|unsupported|…"}],
@@ -141,7 +141,7 @@ claimed ──认领租期到期且未过 deadline──▶ queued（可被重�
   "claim": {"claim_token": "…", "lease_expires_at": "2026-11-09T08:01:00Z"}
 }
 ```
-- 实施时确认（2026-11-09）：本期 `observed_at` 不输出（内部没有可靠来源）。图片和文件的 `media_id` 由内部轮次的 `media_refs` 直接携带（来自附件的原始气泡），不按路径反查——worker 下载路径不在历史库目录下，按路径反查在真实运行中必然失败。`understanding` 是开启图片理解时本机生成的描述，可能没有。
+- 实施时确认（2026-11-09）：本期 `observed_at` 不输出（内部没有可靠来源）。图片和文件的 `media_id` 由内部轮次的 `media_refs` 直接携带（来自附件的原始气泡），不按路径反查——worker 下载路径不在历史库目录下，按路径反查在真实运行中必然失败。`understanding` 是开启图片理解时本机生成的描述，可能没有。同一个附件只出现一次：有 `media_id` 的放在 `messages`，本机处理失败的原因写在该条的 `processing_failed`；没有 `media_id` 的只放在 `unavailable`，并使用具体的失败原因。
 - 时间一律用 RFC 3339 UTC。
 - `message_id` 可以为 `null`：内部 `Turn` 只有合并后的 `text` 和图片路径，不是每一项都能对应到历史库中的消息。能对应的给出 ID，对应不上的给 `null`，不编造。`media_id` 同理，对应不上的图片放进 `unavailable` 列表，并说明原因。
 - 不出现本机路径。图片和文件只给 `media_id`，通过受权限保护的 `history_get_media` 读取（按大小上限截断或分块）。

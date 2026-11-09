@@ -59,6 +59,15 @@ pub fn rfc3339(secs: u64) -> String {
 }
 
 /// 将内部 Turn 与认领上下文转为对外 v1 契约数据结构
+/// Failure reason recorded for the same attachment, matched by its original label.
+fn failure_for<'a>(turn: &'a crate::brain::Turn, media_ref: &crate::brain::MediaRef) -> Option<&'a str> {
+    let label = media_ref.label.as_deref()?;
+    turn.failed
+        .iter()
+        .find(|f| f.label == label)
+        .and_then(|f| f.reason.as_deref())
+}
+
 pub fn turn_v1(
     turn: &crate::brain::Turn,
     claim: &ClaimInfo,
@@ -81,50 +90,35 @@ pub fn turn_v1(
     // 2 & 3. 本轮图片与文件：media_refs 非空时优先使用，为空时保留基于 images/files 路径反查的后备
     if !turn.media_refs.is_empty() {
         for mr in &turn.media_refs {
-            match mr.kind.as_str() {
-                "image" => {
-                    if let Some(ref mid) = mr.media_id {
-                        let mut msg = serde_json::json!({
-                            "kind": "image",
-                            "media_id": mid,
-                            "message_id": Value::Null,
-                        });
-                        if let Some(ref und) = mr.understanding {
-                            msg.as_object_mut()
-                                .unwrap()
-                                .insert("understanding".to_string(), serde_json::json!(und));
-                        }
-                        messages.push(msg);
-                    } else {
-                        unavailable.push(serde_json::json!({
-                            "kind": "image",
-                            "reason": "media_id_unknown",
-                        }));
-                    }
-                }
-                "file" => {
-                    if let Some(ref mid) = mr.media_id {
-                        let mut msg = serde_json::json!({
-                            "filename": mr.filename.as_deref().unwrap_or(""),
-                            "kind": "file",
-                            "media_id": mid,
-                            "message_id": Value::Null,
-                        });
-                        if let Some(ref und) = mr.understanding {
-                            msg.as_object_mut()
-                                .unwrap()
-                                .insert("understanding".to_string(), serde_json::json!(und));
-                        }
-                        messages.push(msg);
-                    } else {
-                        unavailable.push(serde_json::json!({
-                            "kind": "file",
-                            "reason": "media_id_unknown",
-                        }));
-                    }
-                }
-                _ => {}
+            let kind = mr.kind.as_str();
+            if kind != "image" && kind != "file" {
+                continue;
             }
+            // The same attachment may also be listed in `failed`; report it once.
+            let failure = failure_for(turn, mr);
+            let Some(ref mid) = mr.media_id else {
+                unavailable.push(serde_json::json!({
+                    "kind": kind,
+                    "reason": failure.unwrap_or("media_id_unknown"),
+                }));
+                continue;
+            };
+            let mut msg = serde_json::json!({
+                "kind": kind,
+                "media_id": mid,
+                "message_id": Value::Null,
+            });
+            let fields = msg.as_object_mut().unwrap();
+            if kind == "file" {
+                fields.insert("filename".to_string(), serde_json::json!(mr.filename.as_deref().unwrap_or("")));
+            }
+            if let Some(ref und) = mr.understanding {
+                fields.insert("understanding".to_string(), serde_json::json!(und));
+            }
+            if let Some(reason) = failure {
+                fields.insert("processing_failed".to_string(), serde_json::json!(reason));
+            }
+            messages.push(msg);
         }
     } else {
         // 后备路径：按 images 路径反查
@@ -182,6 +176,9 @@ pub fn turn_v1(
 
     // 4. 附件接收/解析失败项
     for failed in &turn.failed {
+        if turn.media_refs.iter().any(|mr| mr.label.as_deref() == Some(failed.label.as_str())) {
+            continue; // already reported with its attachment above
+        }
         let kind = failed.kind.as_deref().unwrap_or("unknown");
         let reason = failed.reason.as_deref().unwrap_or("unknown");
         unavailable.push(serde_json::json!({
@@ -726,6 +723,7 @@ mod tests {
                 media_id: Some("mid_001".to_string()),
                 filename: None,
                 understanding: Some("理解文字".to_string()),
+                label: None,
             }],
         };
 
@@ -760,18 +758,21 @@ mod tests {
                     media_id: Some("media_img_with_und_01".to_string()),
                     filename: None,
                     understanding: Some("一张白色咖啡杯特写".to_string()),
+                    label: None,
                 },
                 MediaRef {
                     kind: "file".to_string(),
                     media_id: Some("media_file_doc_02".to_string()),
                     filename: Some("产品手册.pdf".to_string()),
                     understanding: None,
+                    label: None,
                 },
                 MediaRef {
                     kind: "image".to_string(),
                     media_id: None,
                     filename: None,
                     understanding: None,
+                    label: None,
                 },
             ],
         };
@@ -786,6 +787,61 @@ mod tests {
 
         let result = turn_v1(&turn, &claim, "c_wangwu_05", &lookup);
         assert_json_matches_snapshot(&result, "turn_v1_media_refs.json");
+    }
+
+    #[test]
+    fn failed_attachment_merges_with_media_ref_by_label() {
+        use crate::brain::MediaRef;
+        let failed = |label: &str, kind: &str, reason: &str| FailedAttachment {
+            label: label.to_string(),
+            kind: Some(kind.to_string()),
+            reason: Some(reason.to_string()),
+            hint: None,
+        };
+        let media_ref = |label: &str, media_id: Option<&str>| MediaRef {
+            kind: "image".to_string(),
+            media_id: media_id.map(str::to_string),
+            filename: None,
+            understanding: None,
+            label: Some(label.to_string()),
+        };
+        let turn = Turn {
+            turn_id: "t_merge".to_string(),
+            account_id: "wx_acc".to_string(),
+            contact: ContactInfo { name: "测试客户".to_string(), kind: "private".to_string() },
+            text: String::new(),
+            mode: "service".to_string(),
+            chat_kind: "private".to_string(),
+            context: vec![],
+            images: vec![],
+            files: vec![],
+            notes: vec![],
+            failed: vec![
+                failed("图1", "image", "too_large"),
+                failed("图2", "image", "download_failed"),
+                failed("其他附件", "file", "unsupported"),
+            ],
+            image_count: None,
+            earlier_images: 0,
+            max_attachment_mb: 50,
+            media_refs: vec![media_ref("图1", Some("md_a")), media_ref("图2", None)],
+        };
+        let claim = ClaimInfo { claim_token: "tok".to_string(), lease_until: 1700000060, deadline_at: 1700000120 };
+        let result = turn_v1(&turn, &claim, "c_x", &MockMediaLookup { mapping: HashMap::new() });
+
+        // 有媒体 ID 的图片只出现在 messages，附带本机处理失败的原因；不再重复出现在 unavailable。
+        assert_eq!(
+            result["messages"],
+            serde_json::json!([{"kind":"image","media_id":"md_a","message_id":null,"processing_failed":"too_large"}])
+        );
+        // 没有媒体 ID 的图片只出现一次，并使用真实的失败原因；对不上附件的失败项保持原样。
+        assert_eq!(
+            result["unavailable"],
+            serde_json::json!([
+                {"kind":"image","reason":"download_failed"},
+                {"kind":"file","reason":"unsupported"}
+            ])
+        );
     }
 
     #[test]
@@ -815,12 +871,14 @@ mod tests {
                     media_id: None,
                     filename: None,
                     understanding: None,
+                    label: None,
                 },
                 MediaRef {
                     kind: "file".to_string(),
                     media_id: None,
                     filename: Some("empty.bin".to_string()),
                     understanding: None,
+                    label: None,
                 },
             ],
         };
