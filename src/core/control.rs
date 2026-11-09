@@ -2362,10 +2362,7 @@ mod tests {
         let (cfg_path, state_dir) = write_test_config(dir.path());
 
         // 1. config-check 对比
-        let py_check = Command::new("python3")
-            .args(["-m", "scripts.wechat_bot.control", "config-check", cfg_path.to_str().unwrap()])
-            .output()
-            .unwrap();
+        // Captured from the Python implementation on 2026-11-09.
         let mut rust_stdout = Vec::new();
         let mut rust_stderr = Vec::new();
         let rust_code = execute_control(
@@ -2374,8 +2371,8 @@ mod tests {
             &mut rust_stderr,
             Some(false),
         );
-        assert_eq!(rust_code, py_check.status.code().unwrap());
-        let py_json: Value = serde_json::from_slice(&py_check.stdout).unwrap();
+        assert_eq!(rust_code, 0);
+        let py_json = json!({"ok": true});
         let rust_json: Value = serde_json::from_slice(&rust_stdout).unwrap();
         assert_eq!(rust_json, py_json);
 
@@ -2395,12 +2392,7 @@ mod tests {
         assert_eq!(rust_pause_json["file"], pause_file.to_string_lossy().to_string());
 
         // 3. resume 对比
-        let py_resume = Command::new("python3")
-            .args(["-m", "scripts.wechat_bot.control", "resume", "--config", cfg_path.to_str().unwrap()])
-            .output()
-            .unwrap();
-        assert_eq!(py_resume.status.code().unwrap(), 0);
-        let py_resume_json: Value = serde_json::from_slice(&py_resume.stdout).unwrap();
+        let py_resume_json = json!({"status": "resumed"});
 
         // 重新 pause 后由 Rust resume 并比对
         fs::write(&pause_file, r#"{"paused": true}"#).unwrap();
@@ -2417,10 +2409,6 @@ mod tests {
         assert_eq!(rust_resume_json, py_resume_json);
 
         // 4. calibrate (not started) 对比
-        let py_cal = Command::new("python3")
-            .args(["-m", "scripts.wechat_bot.control", "calibrate", "--config", cfg_path.to_str().unwrap()])
-            .output()
-            .unwrap();
         let mut rust_cal_stdout = Vec::new();
         let mut rust_cal_stderr = Vec::new();
         let rust_cal_code = execute_control(
@@ -2429,10 +2417,10 @@ mod tests {
             &mut rust_cal_stderr,
             Some(false),
         );
-        assert_eq!(rust_cal_code, py_cal.status.code().unwrap());
+        assert_eq!(rust_cal_code, 1);
         assert_eq!(
             String::from_utf8(rust_cal_stderr).unwrap(),
-            String::from_utf8(py_cal.stderr).unwrap()
+            "机器人未运行：请先 control start\n"
         );
     }
 

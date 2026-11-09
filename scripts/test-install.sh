@@ -22,15 +22,14 @@ OUT="$TMP_HOME/out.json"
 pass() { printf 'PASS %s\n' "$*"; }
 fail() { printf 'FAIL %s\n' "$*" >&2; exit 1; }
 
-json_check() { # $1=file, $2=python 表达式，变量 data 为已解析 JSON
-  python3 - "$1" "$2" <<'PY'
-import json, sys
-with open(sys.argv[1], encoding="utf-8") as handle:
-    data = json.load(handle)
-result = eval(sys.argv[2], {"data": data})
-if not result:
-    raise SystemExit("assertion failed: " + sys.argv[2])
-PY
+json_check() { # $1=file, $2=JavaScript assertion over data
+  osascript -l JavaScript - "$1" "$2" <<'JS'
+ObjC.import('Foundation');
+function run(args) {
+  var data = JSON.parse(ObjC.unwrap($.NSString.stringWithContentsOfFileEncodingError(args[0], $.NSUTF8StringEncoding, null)));
+  if (!new Function('data', 'return (' + args[1] + ')')(data)) throw Error('assertion failed: ' + args[1]);
+}
+JS
 }
 
 mkdir -p "$WECHAT_MCP_HOME/bin"
@@ -70,21 +69,14 @@ run() { # $1=输出文件，其余为参数
 
 echo '== 1. 配置全部客户端 =='
 run "$OUT" --configure-only --agent "$AGENTS" --json
-json_check "$OUT" 'data["ok"] is True and data["check"] == "passed" and len(data["agents"]) == 8'
-json_check "$OUT" 'data["skill"].endswith("/wechat-operator/SKILL.md")'
+json_check "$OUT" 'data["ok"] === true && data["check"] == "passed" && data["agents"].length == 8'
+json_check "$OUT" 'data["skill"].endsWith("/wechat-operator/SKILL.md")'
 pass 'JSON 摘要'
 
-json_file_entry() { # $1=json 文件，$2=/mcpServers/wechat 或 /mcp/wechat
-  python3 - "$1" "$2" <<'PY'
-import json, sys
-with open(sys.argv[1], encoding="utf-8") as handle:
-    data = json.load(handle)
-node = data
-for part in sys.argv[2].strip("/").split("/"):
-    node = node[part]
-assert node
-PY
+json_file_entry() { # $1=json file, $2=JSON pointer
+  json_check "$1" "'$2'.split('/').filter(Boolean).reduce((node, key) => node[key], data)"
 }
+
 for pair in \
   "$HOME/.claude.json:/mcpServers/wechat" \
   "$HOME/.gemini/settings.json:/mcpServers/wechat" \
@@ -103,16 +95,26 @@ for skill in wechat-operator wechat-article; do
     diff -qr "$ROOT/skills/$skill" "$base/$skill" || fail "Skill 分发不完整 $base/$skill"
   done
 done
-python3 - "$HOME/.codex/skills/wechat-operator" <<'PY'
-from pathlib import Path
-import re, sys
-root = Path(sys.argv[1])
-for file in root.rglob('*.md'):
-    for target in re.findall(r'\]\(([^)]+)\)', file.read_text()):
-        if '://' not in target:
-            path = (file.parent / target).resolve()
-            assert path.is_relative_to(root.resolve()) and path.is_file(), (file, target)
-PY
+osascript -l JavaScript - "$HOME/.codex/skills/wechat-operator" <<'JS'
+ObjC.import('Foundation');
+function run(args) {
+  var fm = $.NSFileManager.defaultManager;
+  var root = ObjC.unwrap($(args[0]).stringByStandardizingPath);
+  var files = ObjC.deepUnwrap(fm.subpathsAtPath(root));
+  files.forEach(function(rel) {
+    if (!rel.endsWith('.md')) return;
+    var file = root + '/' + rel;
+    var text = ObjC.unwrap($.NSString.stringWithContentsOfFileEncodingError(file, $.NSUTF8StringEncoding, null));
+    var regex = /\]\(([^)]+)\)/g, match;
+    while ((match = regex.exec(text)) !== null) {
+      if (match[1].indexOf('://') >= 0) continue;
+      var parent = ObjC.unwrap($(file).stringByDeletingLastPathComponent);
+      var target = ObjC.unwrap($(parent + '/' + match[1]).stringByStandardizingPath);
+      if (!target.startsWith(root + '/') || !fm.fileExistsAtPath(target)) throw Error(file + ': ' + match[1]);
+    }
+  });
+}
+JS
 grep -q 'User note to preserve' "$HOME/Documents/Cline/Rules/wechat-article.md" || fail '旧规则用户内容丢失'
 if grep -q 'wechat-mcp:begin' "$HOME/Documents/Cline/Rules/wechat-article.md"; then fail '旧文章规则没有迁移'; fi
 [[ -f "$HOME/Documents/Cline/Rules/wechat-mcp.md" ]] || fail '个人微信规则入口缺失'
@@ -124,7 +126,7 @@ pass '两个 skill、独立压缩包及自包含参考文件'
 
 echo '== 2. 幂等 =='
 run "$OUT.2" --configure-only --agent "$AGENTS" --json
-json_check "$OUT.2" 'data["ok"] is True'
+json_check "$OUT.2" 'data["ok"] === true'
 [[ "$(grep -c '^\[mcp_servers\.wechat\]' "$HOME/.codex/config.toml")" == 1 ]] || fail 'Codex TOML 重复'
 for marker in 'wechat-mcp:begin' 'wechat-mcp:end'; do
   [[ "$(grep -c "$marker" "$HOME/.codex/AGENTS.md")" == 1 ]] || fail "指令块 $marker 重复"
@@ -140,7 +142,7 @@ pass 'Codex 共享 skills 目录'
 
 echo '== 3. 自检 =='
 run "$OUT.3" --check --json
-json_check "$OUT.3" 'data["ok"] is True and data["check"] == "passed"'
+json_check "$OUT.3" 'data["ok"] === true && data["check"] == "passed"'
 pass 'MCP 自检'
 
 cat > "$BIN" <<'ARTICLE_ONLY'
@@ -150,13 +152,13 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18"}
 printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"fetch_article"}]}}'
 ARTICLE_ONLY
 if run "$OUT.article-only" --check --json; then fail '文章工具不能单独通过个人微信自检'; fi
-json_check "$OUT.article-only" 'data["ok"] is False and data["check"] == "failed"'
+json_check "$OUT.article-only" 'data["ok"] === false && data["check"] == "failed"'
 cp "$TMP_HOME/stub" "$BIN"
 pass '拒绝把文章工具暴露当作个人微信工具就绪'
 
 echo '== 4. 卸载 =='
 run "$OUT.4" --uninstall --json
-json_check "$OUT.4" 'data["ok"] is True and data["action"] == "uninstall"'
+json_check "$OUT.4" 'data["ok"] === true && data["action"] == "uninstall"'
 for pair in \
   "$HOME/.claude.json:/mcpServers" \
   "$HOME/.gemini/settings.json:/mcpServers" \
@@ -167,15 +169,7 @@ for pair in \
   "$HOME/Library/Application Support/Claude/claude_desktop_config.json:/mcpServers"; do
   file="${pair%:*}"
   key="${pair#*:}"
-  python3 - "$file" "$key" <<'PY'
-import json, sys
-with open(sys.argv[1], encoding="utf-8") as handle:
-    data = json.load(handle)
-node = data
-for part in sys.argv[2].strip("/").split("/"):
-    node = node.get(part, {})
-assert "wechat" not in node
-PY
+  json_check "$file" "!('wechat' in '$key'.split('/').filter(Boolean).reduce((node, part) => node[part] || {}, data))"
 done
 [[ "$(grep -c 'mcp_servers\.wechat' "$HOME/.codex/config.toml" || true)" == 0 ]] || fail 'Codex TOML 残留'
 [[ ! -d "$WECHAT_MCP_HOME/bin" && ! -d "$WECHAT_MCP_HOME/skills" ]] || fail '二进制或 skill 残留'
@@ -191,7 +185,7 @@ pass '配置/数据库保留，条目与 skill 清理'
 
 echo '== 5. 重复卸载 =='
 run "$OUT.5" --uninstall --json
-json_check "$OUT.5" 'data["ok"] is True'
+json_check "$OUT.5" 'data["ok"] === true'
 pass '卸载幂等'
 
 echo '== 6. 参数与失败路径 =='
@@ -214,7 +208,7 @@ if ! bash "$PARTIAL/scripts/install.sh" --configure-only --agent codex --json > 
   cat "$OUT.partial.err" >&2
   fail '不完整 skill 场景安装失败'
 fi
-json_check "$OUT.partial" 'data["ok"] is True and data["skill"] == "" and data["agents"][0]["skill"] == "skipped"'
+json_check "$OUT.partial" 'data["ok"] === true && data["skill"] == "" && data["agents"][0]["skill"] == "skipped"'
 [[ ! -e "$WECHAT_MCP_HOME/skills/wechat-operator" ]] || fail '不完整主 skill 被安装'
 [[ -f "$WECHAT_MCP_HOME/skills/wechat-article/SKILL.md" ]] || fail '可用附属 skill 未保留'
 pass '缺少参考文件时跳过主 skill，不混用文章入口'

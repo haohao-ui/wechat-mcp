@@ -16,9 +16,9 @@
 在项目工作目录执行：
 
 ```bash
-python3 -m scripts.wechat_bot.control status
-python3 -m scripts.wechat_bot.control stop
-python3 -m scripts.wechat_bot.control start
+wechat-mcp control status
+wechat-mcp control stop
+wechat-mcp control start
 ```
 
 `stop`禁用登录自启并卸载当前任务，避免下次登录又自动回复；`start`重新启用并加载。已经被UI接受的发送需完成清理，不会为了停止而换键补发。模型生成期间收到停止信号后，不进入发送。
@@ -65,7 +65,7 @@ python3 -m scripts.wechat_bot.control start
 
 此版本是使用可见界面的多私聊受控客服实现；没有商品知识库、订单系统或退款工具，不宣称完整生产客服平台。控制端、SSH网络、远端登录桌面与GUI宿主均需保持可用。服务占用远端GUI宿主唯一MCP连接，不应另起客户端争用。
 
-测试：`tests/test_wechat_bot.py`覆盖15项，`tests/test_wechat_bot_service.py`覆盖14项；测试使用假模型/假桌面，不会发送微信。真实模型和发送结果另以实机记录为准。
+测试：`cargo test --locked` 运行 Rust 测试；测试使用假模型/假桌面，不会发送微信。真实模型和发送结果另以实机记录为准。
 
 
 ## 自定义模型（OpenAI 兼容接口）
@@ -162,7 +162,7 @@ tail -F "$HOME/Library/Application Support/WeChatRPABot/logs/stdout.log"
 - **存储**：`<state_dir>/history/history.sqlite3`（SQLite WAL，0600）；附件 `<state_dir>/history/media/`，按内容 SHA-256 命名。永久保留，无删除功能。
 - **记录内容**：Bot 看到的每条可见消息，按联系人追加。`sender` 为 `customer`（客户）/ `bot`（Bot 自动回复，关联发送状态与回显）/ `self_other`（我方人工或无法区分）；`capture` 标明来源：`live`、`baseline`（首次可见历史）、`rebaseline_gap`、`ambiguous`（重复消息条数不确定）、`imported`（旧发送流水）。图片在出现时先存聊天缩略图，回复时另存为的原图（`source=original`）和模型理解要点（`media.understanding`，迁移 3）也挂到同一条消息；文件在回复时另存为原件，没有回复的文件在空闲时排队下载，已滚出屏幕的标记为 `gone`。只读接口（HTTP、MCP）返回附件的 `source` 与 `understanding`，搜索也匹配理解要点。
 - **模型上下文**：该联系人最近 `context_messages` 条（默认 5，0..100）+ 本批消息。
-- **会话目录**：`state_dir/sessions/<contact_id>/`。从旧版本升级先 `control stop`，再运行 `python3 -m scripts.wechat_bot.control migrate-history`；存在旧哈希目录时 Bot 拒绝启动。
+- **会话目录**：`state_dir/sessions/<contact_id>/`。从旧版本升级先 `control stop`，再运行 `wechat-mcp control migrate-history`；存在旧哈希目录时 Bot 拒绝启动。
 
 ### 联系人名称与改名
 
@@ -175,8 +175,8 @@ tail -F "$HOME/Library/Application Support/WeChatRPABot/logs/stdout.log"
 客户改备注后：把新名写进 `recipient`，旧名放进 `aliases`，历史不中断。历史已经分成两个联系人时用：
 
 ```
-python3 -m scripts.wechat_bot.control merge-contact --from 旧名或c_ID --into 新名或c_ID --note 改名
-python3 -m scripts.wechat_bot.control unmerge-contact --merge-id N
+wechat-mcp control merge-contact --from 旧名或c_ID --into 新名或c_ID --note 改名
+wechat-mcp control unmerge-contact --merge-id N
 ```
 
 名称最长 64 个字符。`control history-status` 显示每个联系人的消息数、未匹配的识别名称，以及合并后建议加进目标联系人 `aliases` 的名称（`alias_suggestions`，照做不会冲突）；`control history-backup --to <新文件>` 在线备份。
@@ -186,8 +186,7 @@ python3 -m scripts.wechat_bot.control unmerge-contact --merge-id N
 **MCP**（stdio）：
 
 ```json
-{"mcpServers": {"wechat-history": {"command": "python3",
-  "args": ["-m", "scripts.wechat_bot.history.mcp_server"], "cwd": "<本仓库路径>"}}}
+{"mcpServers": {"wechat": {"command": "/absolute/path/wechat-mcp"}}}
 ```
 
 工具：`history_list_contacts`、`history_get_contact`、`history_get_recent_messages`、`history_get_history`、`history_search_messages`、`history_get_message`、`history_get_media`。

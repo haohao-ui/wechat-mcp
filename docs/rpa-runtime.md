@@ -88,9 +88,9 @@ cargo test --locked
 cargo clippy --all-targets --locked -- -D warnings
 cargo fmt --all -- --check
 ./target/release/wechat_runtime --self-test
-python3 tests/desktop_runtime_smoke.py target/debug/wechat-mcp
-python3 tests/protocol_smoke.py target/debug/wechat-mcp
-python3 tests/service_smoke.py target/release/wechat-mcp
+cargo test --locked --test desktop_runtime_smoke
+cargo test --locked --test protocol_smoke
+cargo test --locked service_tests
 bash scripts/test-install.sh
 ```
 

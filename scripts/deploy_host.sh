@@ -164,4 +164,8 @@ if [ $APP -eq 1 ]; then
     echo "now grant Screen Recording and Accessibility to 微信客服助手 in System Settings, then press 刷新检查"'
 fi
 
-echo "=== $([ $YES -eq 1 ] && echo done || echo 'dry-run finished; add --yes to run') ==="
+if [ "$YES" -eq 1 ]; then
+  echo "=== done ==="
+else
+  echo "=== dry-run finished; add --yes to run ==="
+fi

@@ -2670,3 +2670,20 @@ fn test_pages_never_replace_nsbox_content_view() {
     }
     assert!(offenders.is_empty(), "分组框内容必须用 setContent(_:)：\n{}", offenders.join("\n"));
 }
+
+#[test]
+fn config_check_reports_rust_errors() {
+    if !has_swiftc() { return; }
+    for (status, output, ok, error) in [
+        (0, r#"{"ok":true}"#, true, ""),
+        (0, r#"{"ok":false,"error":"配置无效"}"#, false, "配置无效"),
+        (2, r#"{"ok":true}"#, false, "config-check 校验失败 (exit 2)"),
+        (2, "stderr diagnostic", false, "stderr diagnostic"),
+    ] {
+        let result = run_task6_cmd("config_check_result", &serde_json::json!({
+            "status": status, "output": output
+        })).unwrap();
+        assert_eq!(result["ok"], ok);
+        assert_eq!(result["error"], error);
+    }
+}

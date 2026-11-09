@@ -144,9 +144,9 @@ mod tests {
     use super::*;
 
     fn fake(body: &str) -> Session {
-        let mut command = Command::new("python3");
+        let mut command = Command::new("/bin/sh");
         let mut child = command
-            .args(["-u", "-c", body])
+            .args(["-c", body])
             .kill_on_drop(true)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -162,14 +162,19 @@ mod tests {
     #[tokio::test]
     async fn visual_protocol_acknowledges_hide_before_capture_and_rejects_bad_replies() {
         let mut session = fake(
-            "import sys,json\nfor line in sys.stdin:\n e=json.loads(line)\n assert e['event'] in ['window','hide','resume']\n print('{\"ok\":true}',flush=True)",
+            r#"while IFS= read -r line; do
+                case "$line" in
+                    *'"event":"window"'*|*'"event":"hide"'*|*'"event":"resume"'*) printf '%s\n' '{"ok":true}' ;;
+                    *) exit 1 ;;
+                esac
+            done"#,
         );
         for event in ["window", "hide", "resume"] {
             session.exchange(json!({"event":event})).await.unwrap();
         }
-        let mut bad = fake("import sys\nsys.stdin.readline()\nprint('x'*100,flush=True)");
+        let mut bad = fake("IFS= read -r line; printf '%100s\\n' ''");
         assert!(bad.exchange(json!({"event":"hide"})).await.is_err());
-        let mut closed = fake("import sys\nsys.stdin.readline()");
+        let mut closed = fake("IFS= read -r line");
         assert!(closed.exchange(json!({"event":"hide"})).await.is_err());
     }
 }
