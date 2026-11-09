@@ -484,6 +484,22 @@ mod tests {
     }
 
 
+    /// serve-core makes an idle backup that touches the gateway database; keep it inside the test dir.
+    /// The caller must hold `crate::core::env_lock()`.
+    struct GatewayEnv(Option<String>);
+    fn isolate_gateway(dir: &TempDir) -> GatewayEnv {
+        let previous = std::env::var("MESSAGE_GATEWAY_DB").ok();
+        unsafe { std::env::set_var("MESSAGE_GATEWAY_DB", dir.path().join("gateway.sqlite3")) };
+        GatewayEnv(previous)
+    }
+    impl Drop for GatewayEnv {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(v) => unsafe { std::env::set_var("MESSAGE_GATEWAY_DB", v) },
+                None => unsafe { std::env::remove_var("MESSAGE_GATEWAY_DB") },
+            }
+        }
+    }
     struct TempDir(PathBuf);
     impl TempDir {
         fn new() -> Self {
@@ -585,6 +601,7 @@ mod tests {
     async fn test_run_serve_core_graceful_shutdown() {
         let _lock = crate::core::env_lock();
         let dir = TempDir::new();
+        let _gw = isolate_gateway(&dir);
         let (cfg_path, state_dir) = write_test_config(dir.path());
 
         let pid = std::process::id();
@@ -628,6 +645,7 @@ mod tests {
     async fn test_run_serve_core_external_brain_socket_and_health() {
         let _lock = crate::core::env_lock();
         let dir = TempDir::new();
+        let _gw = isolate_gateway(&dir);
         let state_dir = dir.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
         fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
@@ -741,6 +759,7 @@ mod tests {
     async fn test_serve_core_auto_backup_on_idle() {
         let _guard = crate::core::env_lock();
         let dir = TempDir::new();
+        let _gw = isolate_gateway(&dir);
         let (cfg_path, state_dir) = write_test_config(dir.path());
 
         // 创建并写入初始历史库
@@ -791,6 +810,7 @@ mod tests {
     async fn test_history_http_launchd_plist() {
         let _lock = crate::core::env_lock();
         let dir = TempDir::new();
+        let _gw = isolate_gateway(&dir);
         let (cfg_path, state_dir) = write_test_config(dir.path());
 
         let config = BotConfig::load(&cfg_path).unwrap();
