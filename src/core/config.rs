@@ -116,6 +116,8 @@ pub struct BotConfig {
     pub open_api: OpenApiConfig,
     pub model_config: ModelConfig,
     pub brain: BrainConfig,
+    #[serde(default)]
+    pub friend_requests: crate::core::friend_requests::Config,
 }
 
 const INVISIBLE_CHARS: &[char] = &[
@@ -573,6 +575,7 @@ impl BotConfig {
             "images_per_model_call",
             "max_attachment_mb",
             "brain",
+            "friend_requests",
         ];
 
         for k in map.keys() {
@@ -737,6 +740,12 @@ impl BotConfig {
             history_http,
             open_api,
             model_config,
+            friend_requests: serde_json::from_value(
+                map.get("friend_requests")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({})),
+            )
+            .context("invalid friend_requests")?,
             brain,
         })
     }

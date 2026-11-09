@@ -5,6 +5,7 @@ pub mod contacts;
 pub mod control;
 pub mod delivery;
 pub mod external_brain;
+pub mod friend_requests;
 pub mod history;
 pub mod mcp_client;
 pub mod model;
