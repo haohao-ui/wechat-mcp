@@ -9,6 +9,18 @@ use serde_json::{json, Value};
 use crate::core::config::BotConfig;
 use crate::core::state::write_private;
 
+fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| handle.block_on(f))
+    } else {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("create tokio runtime")
+            .block_on(f)
+    }
+}
+
 pub const BOT_LABEL: &str = "local.wechat-rpa.bot";
 pub const HISTORY_LABEL: &str = "local.wechat-rpa.history";
 pub const REMOTE_LAYOUT_DIR: &str = ".wechat-rpa/layout";
@@ -596,7 +608,7 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
     if action == "-h" || action == "--help" {
         let _ = writeln!(
             stdout,
-            "Usage: wechat-mcp control <status|start|stop|pause|resume|resume-session|config-check|calibrate|migrate-history|history-status|merge-contact|unmerge-contact|history-backup|contacts-list|mcp-info|contacts-sync> [--config <path>]"
+            "Usage: wechat-mcp control <status|start|stop|pause|resume|resume-session|config-check|calibrate|migrate-history|history-status|merge-contact|unmerge-contact|history-backup|contacts-list|mcp-info|contacts-sync|open-api-check|open-api-token> [--config <path>]"
         );
         return 0;
     }
@@ -1671,6 +1683,22 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             let http_ok = std::net::TcpStream::connect(&http_addr).is_ok();
             let http_val_str = format!("http://{}", http_addr);
 
+            let open_api_val_str = format!("http://{}:{}/mcp", cfg.open_api.bind, cfg.open_api.port);
+            let (open_api_ok, open_api_detail) = if !cfg.open_api.enabled {
+                (false, "已关闭".to_string())
+            } else {
+                let check = block_on(crate::core::open_api::http::self_check(&cfg.open_api, &cfg.state_dir));
+                let ok = check["ok"].as_bool().unwrap_or(false);
+                let detail = if check["busy"].as_bool() == Some(true) {
+                    "已有大脑连接中".to_string()
+                } else if ok {
+                    "可连接".to_string()
+                } else {
+                    check["error"].as_str().unwrap_or("连接失败").to_string()
+                };
+                (ok, detail)
+            };
+
             let endpoints = json!([
                 {
                     "id": "tools",
@@ -1692,6 +1720,13 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                     "value": http_val_str,
                     "ok": http_ok,
                     "detail": ""
+                },
+                {
+                    "id": "open_api",
+                    "label": "对外接口",
+                    "value": open_api_val_str,
+                    "ok": open_api_ok,
+                    "detail": open_api_detail
                 }
             ]);
 
@@ -1706,28 +1741,28 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 }
             }
 
-            let mut brain_tools = Vec::new();
-            let mut wechat_tools = Vec::new();
-            let mut customer_tools = Vec::new();
-            let mut history_tools = Vec::new();
-
+            let open_api_tools: Vec<String> = crate::core::open_api::http::open_tool_names()
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect();
+            let desktop_tools = vec![
+                "desktop_apps".to_string(),
+                "desktop_windows".to_string(),
+                "desktop_observe".to_string(),
+                "desktop_act".to_string(),
+                "desktop_stop".to_string(),
+            ];
+            let mut ops_tools = Vec::new();
             for t in all_tool_names {
-                if matches!(t.as_str(), "next_turn" | "reply" | "resume_session") {
-                    brain_tools.push(t);
-                } else if t.starts_with("history_") {
-                    history_tools.push(t);
-                } else if ["customer", "followup", "conversation", "metrics", "listener"].iter().any(|k| t.contains(k)) {
-                    customer_tools.push(t);
-                } else {
-                    wechat_tools.push(t);
+                if !open_api_tools.contains(&t) && !desktop_tools.contains(&t) {
+                    ops_tools.push(t);
                 }
             }
 
             let tool_groups = json!([
-                {"title": "外部大脑", "tools": brain_tools},
-                {"title": "微信操作", "tools": wechat_tools},
-                {"title": "客户", "tools": customer_tools},
-                {"title": "聊天历史", "tools": history_tools}
+                {"title": "对外接口", "tools": open_api_tools},
+                {"title": "运维", "tools": ops_tools},
+                {"title": "通用桌面", "tools": desktop_tools}
             ]);
 
             let out_obj = json!({
@@ -1736,6 +1771,88 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 "tool_groups": tool_groups,
             });
 
+            let _ = writeln!(stdout, "{}", serde_json::to_string_pretty(&out_obj).unwrap_or_default());
+            0
+        }
+        "open-api-check" => {
+            let mut config_file: Option<PathBuf> = None;
+            let mut idx = 1;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--config" if idx + 1 < args.len() => {
+                        config_file = Some(PathBuf::from(&args[idx + 1]));
+                        idx += 2;
+                    }
+                    _ => {
+                        idx += 1;
+                    }
+                }
+            }
+            let config_path = config_file.unwrap_or(default_config_path);
+            let cfg = match BotConfig::load(&config_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = writeln!(stderr, "failed to load config ({}): {e:#}", config_path.display());
+                    return 2;
+                }
+            };
+
+            let check = if !cfg.open_api.enabled {
+                json!({
+                    "ok": false,
+                    "busy": false,
+                    "tools": [],
+                    "error": "disabled"
+                })
+            } else {
+                block_on(crate::core::open_api::http::self_check(&cfg.open_api, &cfg.state_dir))
+            };
+            let _ = writeln!(stdout, "{}", serde_json::to_string_pretty(&check).unwrap_or_default());
+            0
+        }
+        "open-api-token" => {
+            let mut config_file: Option<PathBuf> = None;
+            let mut rotate = false;
+            let mut idx = 1;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--config" if idx + 1 < args.len() => {
+                        config_file = Some(PathBuf::from(&args[idx + 1]));
+                        idx += 2;
+                    }
+                    "--rotate" => {
+                        rotate = true;
+                        idx += 1;
+                    }
+                    _ => {
+                        idx += 1;
+                    }
+                }
+            }
+            let config_path = config_file.unwrap_or(default_config_path);
+            let cfg = match BotConfig::load(&config_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = writeln!(stderr, "failed to load config ({}): {e:#}", config_path.display());
+                    return 2;
+                }
+            };
+
+            let token_res = if rotate {
+                crate::core::open_api::http::rotate_token(&cfg.state_dir)
+            } else {
+                crate::core::open_api::http::ensure_token(&cfg.state_dir)
+            };
+            let token = match token_res {
+                Ok(t) => t,
+                Err(e) => {
+                    let _ = writeln!(stderr, "failed to get token: {e:#}");
+                    return 1;
+                }
+            };
+            let out_obj = json!({
+                "token": token
+            });
             let _ = writeln!(stdout, "{}", serde_json::to_string_pretty(&out_obj).unwrap_or_default());
             0
         }
@@ -3959,24 +4076,153 @@ mod tests {
         let out_val: Value = serde_json::from_slice(&stdout).expect("valid json output");
         assert!(out_val.get("brain").is_some());
         let endpoints = out_val["endpoints"].as_array().expect("endpoints array");
-        assert_eq!(endpoints.len(), 3);
+        assert_eq!(endpoints.len(), 4);
         assert!(endpoints.iter().any(|e| e["id"] == "tools"));
         assert!(endpoints.iter().any(|e| e["id"] == "core_sock"));
         assert!(endpoints.iter().any(|e| e["id"] == "history_http"));
+        assert!(endpoints.iter().any(|e| e["id"] == "open_api"));
+
+        let open_ep = endpoints.iter().find(|e| e["id"] == "open_api").unwrap();
+        assert_eq!(open_ep["label"], "对外接口");
+        assert_eq!(open_ep["value"], "http://127.0.0.1:8770/mcp");
+        assert_eq!(open_ep["ok"], false);
+        assert_eq!(open_ep["detail"], "已关闭");
 
         let tool_groups = out_val["tool_groups"].as_array().expect("tool_groups array");
-        assert_eq!(tool_groups.len(), 4);
+        assert_eq!(tool_groups.len(), 3);
         let titles: Vec<&str> = tool_groups.iter().map(|g| g["title"].as_str().unwrap()).collect();
-        assert_eq!(titles, vec!["外部大脑", "微信操作", "客户", "聊天历史"]);
+        assert_eq!(titles, vec!["对外接口", "运维", "通用桌面"]);
 
-        let brain_group = tool_groups.iter().find(|g| g["title"] == "外部大脑").unwrap();
-        let brain_tools = brain_group["tools"].as_array().unwrap();
-        assert!(brain_tools.iter().any(|t| t == "next_turn"));
-        assert!(brain_tools.iter().any(|t| t == "reply"));
-        assert!(brain_tools.iter().any(|t| t == "resume_session"));
+        let open_group = tool_groups.iter().find(|g| g["title"] == "对外接口").unwrap();
+        let open_tools: Vec<&str> = open_group["tools"].as_array().unwrap().iter().map(|t| t.as_str().unwrap()).collect();
+        assert_eq!(open_tools, crate::core::open_api::http::open_tool_names());
 
-        let hist_group = tool_groups.iter().find(|g| g["title"] == "聊天历史").unwrap();
-        let hist_tools = hist_group["tools"].as_array().unwrap();
-        assert!(hist_tools.iter().any(|t| t == "history_list_contacts"));
+        let desktop_group = tool_groups.iter().find(|g| g["title"] == "通用桌面").unwrap();
+        let desktop_tools: Vec<&str> = desktop_group["tools"].as_array().unwrap().iter().map(|t| t.as_str().unwrap()).collect();
+        assert_eq!(desktop_tools, vec!["desktop_apps", "desktop_windows", "desktop_observe", "desktop_act", "desktop_stop"]);
+
+        let ops_group = tool_groups.iter().find(|g| g["title"] == "运维").unwrap();
+        let ops_tools: Vec<&str> = ops_group["tools"].as_array().unwrap().iter().map(|t| t.as_str().unwrap()).collect();
+        for t in &desktop_tools {
+            assert!(!ops_tools.contains(t), "通用桌面工具 {t} 不应在运维组中");
+        }
+        for t in &open_tools {
+            assert!(!ops_tools.contains(t), "对外接口工具 {t} 不应在运维组中");
+        }
+    }
+
+    #[test]
+    fn test_open_api_token_rotate_changes_token() {
+        let temp = TempDir::new();
+        let cfg_path = temp.path().join("config.json");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+
+        let cfg = json!({
+            "schema_version": 1,
+            "host": "local",
+            "account_id": "test-desktop",
+            "state_dir": state_dir.to_str().unwrap(),
+            "allowlist": [{"recipient": "测试联系人", "kind": "private"}]
+        });
+        fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        // 1. 初次获取 token
+        let mut stdout1 = Vec::new();
+        let mut stderr1 = Vec::new();
+        let code1 = execute_control_full(
+            &["open-api-token".into(), "--json".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &mut stdout1,
+            &mut stderr1,
+            None,
+            None,
+        );
+        assert_eq!(code1, 0, "stderr: {}", String::from_utf8_lossy(&stderr1));
+        let val1: Value = serde_json::from_slice(&stdout1).unwrap();
+        let token1 = val1["token"].as_str().expect("token string");
+        assert_eq!(token1.len(), 64);
+
+        // 2. 再次获取（不带 --rotate），token 应该相同
+        let mut stdout2 = Vec::new();
+        let mut stderr2 = Vec::new();
+        let code2 = execute_control_full(
+            &["open-api-token".into(), "--json".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &mut stdout2,
+            &mut stderr2,
+            None,
+            None,
+        );
+        assert_eq!(code2, 0);
+        let val2: Value = serde_json::from_slice(&stdout2).unwrap();
+        let token2 = val2["token"].as_str().unwrap();
+        assert_eq!(token2, token1);
+
+        // 3. 轮换获取（带 --rotate），token 应该变化
+        let mut stdout3 = Vec::new();
+        let mut stderr3 = Vec::new();
+        let code3 = execute_control_full(
+            &["open-api-token".into(), "--rotate".into(), "--json".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &mut stdout3,
+            &mut stderr3,
+            None,
+            None,
+        );
+        assert_eq!(code3, 0);
+        let val3: Value = serde_json::from_slice(&stdout3).unwrap();
+        let token3 = val3["token"].as_str().unwrap();
+        assert_eq!(token3.len(), 64);
+        assert_ne!(token3, token1);
+
+        // 4. 轮换后再次获取，应该为新 token
+        let mut stdout4 = Vec::new();
+        let mut stderr4 = Vec::new();
+        let code4 = execute_control_full(
+            &["open-api-token".into(), "--json".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &mut stdout4,
+            &mut stderr4,
+            None,
+            None,
+        );
+        assert_eq!(code4, 0);
+        let val4: Value = serde_json::from_slice(&stdout4).unwrap();
+        let token4 = val4["token"].as_str().unwrap();
+        assert_eq!(token4, token3);
+    }
+
+    #[test]
+    fn test_open_api_check_disabled_reports_closed() {
+        let temp = TempDir::new();
+        let cfg_path = temp.path().join("config.json");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+
+        let cfg = json!({
+            "schema_version": 1,
+            "host": "local",
+            "account_id": "test-desktop",
+            "state_dir": state_dir.to_str().unwrap(),
+            "allowlist": [{"recipient": "测试联系人", "kind": "private"}],
+            "open_api": {
+                "enabled": false
+            }
+        });
+        fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &["open-api-check".into(), "--json".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+
+        let out: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(out["ok"], false);
+        assert_eq!(out["busy"], false);
+        assert_eq!(out["tools"].as_array().unwrap().len(), 0);
+        assert_eq!(out["error"], "disabled");
     }
 }
