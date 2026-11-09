@@ -1455,10 +1455,8 @@ impl HistoryStore {
         }
         drop(stmt);
 
-        for (index, (message_id, send_key, reply)) in rows.into_iter().enumerate() {
-            if policy::echo_matches(&bubble.text, &reply)
-                || (index == 0 && similar(&bubble.text, &reply, 0.85))
-            {
+        for (message_id, send_key, reply) in rows {
+            if policy::same_reply_text(&reply, &bubble.text) {
                 conn.execute(
                     "UPDATE messages SET bubble_digest=? WHERE message_id=?",
                     params![bubble.digest, message_id],
@@ -3137,6 +3135,105 @@ mod tests {
             )
             .unwrap();
         assert_eq!(senders(&f), vec!["customer", "bot", "self_other"]);
+    }
+
+    fn observed_reply_fixture(sent: &str, observed: &str) -> StoreFixture {
+        let f = setup_fixture();
+        f.store
+            .record_bot_reply(
+                &f.c,
+                "ocr-send",
+                sent,
+                "triggered",
+                &json!({}),
+                &[],
+                None,
+                None,
+            )
+            .unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub(observed, "outbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        f
+    }
+
+    fn assert_claimed_echo(f: &StoreFixture, observed: &str) {
+        assert_eq!(senders(f), vec!["bot"]);
+        let digest: String = f
+            .store
+            .connection()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT bubble_digest FROM messages WHERE sender='bot'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(digest, observed);
+        assert_eq!(
+            f.store.send("ocr-send").unwrap().unwrap()["echo_observed"],
+            true
+        );
+    }
+
+    #[test]
+    fn echo_with_ocr_confusions_is_claimed_as_bot() {
+        let observed = "◎示例联系人甲 看到这款「海带丝（香辣味）」，包装配料写\n着海带、饮用水、食用盐";
+        let f = observed_reply_fixture(
+            "@示例联系人甲 看到这款「海带丝（香辣味）」，包装配料写着海带、饮用水、食用盐",
+            observed,
+        );
+        assert_claimed_echo(&f, observed);
+    }
+
+    #[test]
+    fn echo_al_for_ai_is_claimed() {
+        let observed = "收到，我是Al客服助手。本轮消息已正常接收";
+        let f = observed_reply_fixture("收到，我是AI客服助手。本轮消息已正常接收", observed);
+        assert_claimed_echo(&f, observed);
+    }
+
+    #[test]
+    fn short_echo_with_all_ocr_confusions_is_claimed() {
+        let f = observed_reply_fixture("@IO1", "◎l0l");
+        assert_claimed_echo(&f, "◎l0l");
+    }
+
+    #[test]
+    fn real_manual_reply_stays_self_other() {
+        let f = observed_reply_fixture(
+            "收到，我是AI客服助手。本轮消息已正常接收",
+            "好的，我马上处理",
+        );
+        assert_eq!(senders(&f), vec!["bot", "self_other"]);
+    }
+
+    #[test]
+    fn short_text_requires_exact_match() {
+        let f = observed_reply_fixture("好的", "好吗");
+        assert_eq!(senders(&f), vec!["bot", "self_other"]);
+        // Even 19 characters must not use the old similarity fallback.
+        let f = observed_reply_fixture(
+            "甲乙丙丁戊己庚辛壬癸甲乙丙丁戊己庚辛壬",
+            "甲乙丙丁戊己庚辛壬癸甲乙丙丁戊己庚辛改",
+        );
+        assert_eq!(senders(&f), vec!["bot", "self_other"]);
+    }
+
+    #[test]
+    fn long_reply_over_five_percent_edits_is_not_claimed() {
+        let f = observed_reply_fixture(
+            "甲乙丙丁戊己庚辛壬癸甲乙丙丁戊己庚辛壬癸",
+            "甲乙丙丁戊己庚辛壬癸甲乙丙丁戊己庚辛改改",
+        );
+        assert_eq!(senders(&f), vec!["bot", "self_other"]);
     }
 
     fn reply_turn_fixture() -> (StoreFixture, Vec<String>) {

@@ -399,6 +399,37 @@ pub fn echo_matches(observed: &str, expected: &str) -> bool {
     edit_distance_within(&seen, &want, allowed)
 }
 
+/// Compare a recorded reply with its OCR echo. Preserve width normalization,
+/// ignore layout whitespace, and canonicalize known OCR confusions before
+/// allowing at most 5% edits for replies of 20 or more Unicode characters.
+pub(crate) fn same_reply_text(sent: &str, observed: &str) -> bool {
+    let normalize = |text: &str| -> Vec<char> {
+        text.nfkc()
+            .filter(|c| !c.is_whitespace())
+            .map(|c| match c {
+                '◎' => '@',
+                'I' | 'l' | '1' => '1',
+                'O' | '0' => '0',
+                c => c,
+            })
+            .collect()
+    };
+    let (sent, observed) = (normalize(sent), normalize(observed));
+    if sent == observed {
+        return true;
+    }
+    // The recorded reply is the reference length; integer division rounds
+    // down so the edit budget never exceeds 5%.
+    if sent.len() < 20 {
+        return false;
+    }
+    let allowed = sent.len() / 20;
+    if sent.len().abs_diff(observed.len()) > allowed {
+        return false;
+    }
+    edit_distance_within(&observed, &sent, allowed)
+}
+
 /// Levenshtein distance between `a` and `b` is at most `limit` (early exit once every cell exceeds it).
 fn edit_distance_within(a: &[char], b: &[char], limit: usize) -> bool {
     let mut previous: Vec<usize> = (0..=b.len()).collect();
@@ -1670,5 +1701,44 @@ mod tests {
                 .count();
         assert_eq!(total_sends, 1);
         assert_eq!(gen_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod reply_text_tests {
+    use super::same_reply_text;
+
+    #[test]
+    fn reply_text_normalizes_ocr_and_layout() {
+        assert!(same_reply_text("@ AI 01", "◎\nAl\u{3000}Ol"));
+        assert!(same_reply_text("你好～", "你好~"));
+        assert!(!same_reply_text("好的", "好吗"));
+        assert!(!same_reply_text(
+            "甲".repeat(19).as_str(),
+            &("甲".repeat(18) + "乙")
+        ));
+    }
+
+    #[test]
+    fn reply_text_edit_budget_uses_unicode_characters() {
+        for (length, edits, expected) in [
+            (20, 1, true),
+            (20, 2, false),
+            (39, 1, true),
+            (39, 2, false),
+            (40, 2, true),
+            (40, 3, false),
+        ] {
+            let sent = "甲".repeat(length);
+            let observed = "甲".repeat(length - edits) + &"乙".repeat(edits);
+            assert_eq!(
+                same_reply_text(&sent, &observed),
+                expected,
+                "length={length}, edits={edits}"
+            );
+        }
+        assert!(same_reply_text(&"甲".repeat(20), &"甲".repeat(19)));
+        assert!(same_reply_text(&"甲".repeat(20), &"甲".repeat(21)));
+        assert!(!same_reply_text(&"甲".repeat(20), &"甲".repeat(22)));
     }
 }
