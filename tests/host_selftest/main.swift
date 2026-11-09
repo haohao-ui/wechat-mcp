@@ -452,6 +452,43 @@ func run() -> Int32 {
                     return 0
                 }
             }
+        } else if command == "select_main_window" {
+            let wins = dict["windows"] as? [[String: Any]] ?? []
+            let tuples: [(bounds: CGRect, onScreen: Bool)] = wins.compactMap { d in
+                let onScreen = (d["on_screen"] as? Bool) ?? (d["onScreen"] as? Bool) ?? false
+                let x: Double
+                let y: Double
+                let w: Double
+                let h: Double
+                if let b = d["bounds"] as? [String: Any] {
+                    x = b["x"] as? Double ?? 0
+                    y = b["y"] as? Double ?? 0
+                    w = b["width"] as? Double ?? 0
+                    h = b["height"] as? Double ?? 0
+                } else {
+                    x = d["x"] as? Double ?? 0
+                    y = d["y"] as? Double ?? 0
+                    w = d["width"] as? Double ?? 0
+                    h = d["height"] as? Double ?? 0
+                }
+                return (bounds: CGRect(x: x, y: y, width: w, height: h), onScreen: onScreen)
+            }
+            if let chosen = selectMainWindowBounds(tuples) {
+                let resp: [String: Any] = [
+                    "x": chosen.origin.x,
+                    "y": chosen.origin.y,
+                    "width": chosen.size.width,
+                    "height": chosen.size.height
+                ]
+                let outputData = try JSONSerialization.data(withJSONObject: resp, options: [.sortedKeys])
+                if let outputStr = String(data: outputData, encoding: .utf8) {
+                    print(outputStr)
+                    return 0
+                }
+            } else {
+                print("null")
+                return 0
+            }
         }
 #endif
 

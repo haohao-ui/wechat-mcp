@@ -3001,3 +3001,54 @@ fn config_check_reports_rust_errors() {
         assert_eq!(result["error"], error);
     }
 }
+
+#[test]
+fn test_main_window_prefers_on_screen() {
+    if !has_swiftc() {
+        return;
+    }
+    let payload = serde_json::json!({
+        "windows": [
+            { "id": 23647, "x": 290.0, "y": 176.0, "width": 700.0, "height": 640.0, "on_screen": false },
+            { "id": 23645, "x": 10.0, "y": 183.0, "width": 880.0, "height": 640.0, "on_screen": true }
+        ]
+    });
+    let res = run_host_cmd("select_main_window", &payload).unwrap();
+    assert_eq!(res["width"], 880.0);
+    assert_eq!(res["height"], 640.0);
+    assert_eq!(res["x"], 10.0);
+    assert_eq!(res["y"], 183.0);
+}
+
+#[test]
+fn test_main_window_ignores_offscreen_only() {
+    if !has_swiftc() {
+        return;
+    }
+    let payload = serde_json::json!({
+        "windows": [
+            { "id": 23647, "x": 290.0, "y": 176.0, "width": 700.0, "height": 640.0, "on_screen": false }
+        ]
+    });
+    let res = run_host_cmd("select_main_window", &payload).unwrap();
+    assert!(res.is_null(), "expected null but got: {:?}", res);
+}
+
+#[test]
+fn test_main_window_largest_on_screen() {
+    if !has_swiftc() {
+        return;
+    }
+    let payload = serde_json::json!({
+        "windows": [
+            { "id": 23647, "x": 290.0, "y": 176.0, "width": 700.0, "height": 640.0, "on_screen": true },
+            { "id": 23645, "x": 10.0, "y": 183.0, "width": 880.0, "height": 640.0, "on_screen": true }
+        ]
+    });
+    let res = run_host_cmd("select_main_window", &payload).unwrap();
+    assert_eq!(res["width"], 880.0);
+    assert_eq!(res["height"], 640.0);
+    assert_eq!(res["x"], 10.0);
+    assert_eq!(res["y"], 183.0);
+}
+
