@@ -516,10 +516,15 @@ public final class StatusPanelController: NSViewController {
         let apps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.tencent.xinWeChat")
         let wechatPID = apps.first?.processIdentifier
         var mainRect: RectPayload? = nil
-        if let firstWin = probe.wechat_windows.first {
-            mainRect = RectPayload(x: firstWin.bounds.x, y: firstWin.bounds.y,
-                                   width: firstWin.bounds.width, height: firstWin.bounds.height)
+        let windowTuples = probe.wechat_windows.map {
+            (bounds: CGRect(x: $0.bounds.x, y: $0.bounds.y, width: $0.bounds.width, height: $0.bounds.height),
+             onScreen: $0.on_screen)
         }
+        if let chosen = selectMainWindowBounds(windowTuples) {
+            mainRect = RectPayload(x: chosen.origin.x, y: chosen.origin.y,
+                                   width: chosen.width, height: chosen.height)
+        }
+
 
         let rawWinList = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
         let rawCodables = rawWinList.map { dict -> [String: AnyCodable] in

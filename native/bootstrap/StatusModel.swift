@@ -616,3 +616,11 @@ public func generateDiagnostics(items: [StatusItem], appVersion: String, hostInf
     lines.append("============================")
     return lines.joined(separator: "\n")
 }
+
+public func selectMainWindowBounds(_ windows: [(bounds: CGRect, onScreen: Bool)]) -> CGRect? {
+    let visible = windows.filter { $0.onScreen }
+    guard !visible.isEmpty else { return nil }
+    return visible.max(by: { ($0.bounds.width * $0.bounds.height) < ($1.bounds.width * $1.bounds.height) })?.bounds
+}
+
+
