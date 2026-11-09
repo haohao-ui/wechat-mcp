@@ -129,6 +129,50 @@ async fn async_main() -> Result<()> {
                     }
                 }
             }
+            "restore" => {
+                let mut config_path: Option<std::path::PathBuf> = None;
+                let mut from_dir: Option<std::path::PathBuf> = None;
+                let mut i = 2;
+                while i < args.len() {
+                    if args[i] == "--from" && i + 1 < args.len() {
+                        from_dir = Some(std::path::PathBuf::from(&args[i + 1]));
+                        i += 2;
+                    } else if args[i] == "--config" && i + 1 < args.len() {
+                        config_path = Some(std::path::PathBuf::from(&args[i + 1]));
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                let Some(from_path) = from_dir else {
+                    eprintln!("error: restore requires --from <backup_dir>");
+                    std::process::exit(2);
+                };
+                let cfg_path = match config_path {
+                    Some(p) => p,
+                    None => {
+                        let (_, default_config, _) = core::control::locations();
+                        default_config
+                    }
+                };
+                let config = match core::config::BotConfig::load(&cfg_path) {
+                    Ok(cfg) => cfg,
+                    Err(err) => {
+                        eprintln!("configuration error in {}: {}", cfg_path.display(), err);
+                        std::process::exit(2);
+                    }
+                };
+                match core::backup::run_restore(&from_path, &config) {
+                    Ok(()) => {
+                        println!("Restore completed successfully from {}", from_path.display());
+                        std::process::exit(0);
+                    }
+                    Err(err) => {
+                        eprintln!("Restore failed: {}", err);
+                        std::process::exit(1);
+                    }
+                }
+            }
             "replay" => {
                 match core::replay::run_replay_cli(&args[2..]).await {
                     Ok(code) => std::process::exit(code),
