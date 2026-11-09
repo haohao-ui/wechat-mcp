@@ -2509,66 +2509,44 @@ mod tests {
 
     #[test]
     fn test_store_interoperability_python_rust() {
-        let py_check = std::process::Command::new("python3")
-            .arg("-c")
-            .arg("import sys; sys.exit(0)")
-            .status();
-        if py_check.is_err() || !py_check.unwrap().success() {
-            println!("skipping python interoperability test: python3 not available");
-            return;
-        }
-
+        // Python HistoryStore.recent_context captured on 2026-11-09:
+        // [{"role":"user","text":"Python写入的消息"},
+        //  {"role":"assistant","text":"Rust回复的消息"}].
         let temp = TestTempDir::new();
         let state = temp.path().join("state");
+        let store = HistoryStore::open(&state).unwrap();
+        let cid = store.ensure_contact("acct", &json!({
+            "recipient": "测试互通", "kind": "private", "aliases": ["别名"]
+        }), true).unwrap();
+        store.record_frame(&cid, &fr(vec![bub("Python写入的消息", "inbound_visual", "text")]), None, None, false).unwrap();
+        store.record_bot_reply(&cid, "send_key_1", "Rust回复的消息", "triggered", &json!({}), &[], None, None).unwrap();
+        drop(store);
 
-        // 1. Python writes, Rust reads
-        let py_writer = r#"
-import sys
-from pathlib import Path
-from scripts.wechat_bot.history.store import HistoryStore
-state = Path(sys.argv[1])
-store = HistoryStore.open(state)
-c = store.ensure_contact('acct', {'recipient': '测试互通', 'kind': 'private', 'aliases': ['别名']})
-store.record_frame(c, {'bubbles': [{'text': 'Python写入的消息', 'digest': 'd1', 'direction': 'inbound_visual', 'kind': 'text'}]})
-store.conn.close()
-"#;
-        let status = std::process::Command::new("python3")
-            .arg("-c")
-            .arg(py_writer)
-            .arg(state.to_str().unwrap())
-            .status()
-            .unwrap();
-        assert!(status.success(), "Python writer script failed");
-
-        let rust_store = HistoryStore::open(&state).unwrap();
-        let cid = rust_store.resolve("acct", "测试互通").unwrap().unwrap();
-        let ctx = rust_store.recent_context(&cid, 5, &HashSet::new()).unwrap();
-        assert_eq!(ctx.len(), 1);
-        assert_eq!(ctx[0]["text"].as_str().unwrap(), "Python写入的消息");
-
-        // 2. Rust writes, Python reads
-        rust_store.record_bot_reply(&cid, "send_key_1", "Rust回复的消息", "triggered", &json!({}), &[], None, None).unwrap();
-        drop(rust_store);
-
-        let py_reader = r#"
-import sys
-from pathlib import Path
-from scripts.wechat_bot.history.store import HistoryStore
-state = Path(sys.argv[1])
-store = HistoryStore.open(state)
-c = store.resolve('acct', '测试互通')
-ctx = store.recent_context(c, 5)
-texts = [x['text'] for x in ctx]
-assert 'Rust回复的消息' in texts, f'unexpected texts: {texts}'
-store.conn.close()
-"#;
-        let status2 = std::process::Command::new("python3")
-            .arg("-c")
-            .arg(py_reader)
-            .arg(state.to_str().unwrap())
-            .status()
-            .unwrap();
-        assert!(status2.success(), "Python reader script failed");
+        // Use the legacy reader's actual joins, projection and descending order.
+        // Opening a fresh connection also checks the persisted schema and fields.
+        let conn = Connection::open(state.join("history/history.sqlite3")).unwrap();
+        let resolved: String = conn.query_row(
+            "SELECT contact_id FROM contact_names WHERE account_id='acct' AND raw_name='别名'",
+            [], |r| r.get(0)).unwrap();
+        assert_eq!(resolved, cid);
+        let mut stmt = conn.prepare(
+            "SELECT m.message_id, m.sender, m.text, d.kind, d.filename, d.understanding, d.path FROM messages m \
+             LEFT JOIN sends s ON s.send_key=m.send_key LEFT JOIN media d ON d.media_id=m.media_id \
+             WHERE m.contact_id=?1 AND NOT (m.sender='bot' AND s.status IN ('superseded','stopped_before_send','skipped_by_rule','generated','preparing_media','generating','already_replied','not_sent')) \
+             ORDER BY m.observed_at DESC, m.rowid DESC").unwrap();
+        let mut rows: Vec<Value> = stmt.query_map([&cid], |r| {
+            let sender: String = r.get(1)?;
+            let text: String = r.get(2)?;
+            assert!(r.get::<_, Option<String>>(3)?.is_none());
+            Ok(json!({"role": if sender == "customer" {"user"} else {"assistant"}, "text": text}))
+        }).unwrap().map(|row| row.unwrap()).collect();
+        rows.reverse();
+        assert_eq!(rows, vec![json!({"role":"user","text":"Python写入的消息"}),
+            json!({"role":"assistant","text":"Rust回复的消息"})]);
+        let send: (String, String) = conn.query_row(
+            "SELECT reply_text, status FROM sends WHERE send_key='send_key_1'", [],
+            |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(send, ("Rust回复的消息".into(), "triggered".into()));
     }
 
     #[test]

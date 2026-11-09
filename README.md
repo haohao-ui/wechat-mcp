@@ -187,8 +187,8 @@ brew install tesseract tesseract-lang
 ```bash
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
-python3 tests/protocol_smoke.py target/release/wechat-mcp
-python3 tests/service_smoke.py target/release/wechat-mcp
+cargo test --locked --test protocol_smoke
+cargo test --locked service_tests
 ```
 
 单元测试覆盖账号隔离、并行领取、租约过期、重启恢复、发送幂等、任务生命周期和分析证据边界。协议及客服工作流测试运行真实 MCP 可执行文件并使用模拟数据，不会读取或发送真实微信消息。

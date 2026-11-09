@@ -993,14 +993,13 @@ install_binaries() {
     install -m 755 "$SRC_DIR/$t" "$BIN_DIR/$t"
   done
   # Older releases remain installable; native streaming is explicitly opt-in.
-  for optional in desktop_helper wechat_runtime wechat_overlay wechat_bubbles wechat_bot_worker rapidocr_server.py; do
+  for optional in desktop_helper wechat_runtime wechat_overlay wechat_bubbles wechat_bot_worker; do
     if [[ -f "$SRC_DIR/$optional" ]]; then
       install -m 755 "$SRC_DIR/$optional" "$BIN_DIR/$optional"
     fi
   done
   xattr -dr com.apple.quarantine "$BIN_DIR" 2>/dev/null || true
   install_layouts
-  install_rapidocr_if_requested
   if [[ -n "$VERSION" ]]; then
     printf '%s\n' "$VERSION" > "$VERSION_FILE"
   fi
@@ -1030,17 +1029,6 @@ install_layouts() {
     done
     info "已安装界面地图到 $layout_dir"
   fi
-  return 0
-}
-
-# Optional second OCR engine (switch with ~/.wechat-rpa/ocr.json). Off unless RPA_INSTALL_RAPIDOCR=1;
-# uses the system python (macOS 12 ships 3.9, which has onnxruntime 1.19.2 wheels for Intel and Apple silicon).
-install_rapidocr_if_requested() {
-  [[ "${RPA_INSTALL_RAPIDOCR:-0}" == "1" ]] || return 0
-  [[ -f "$BIN_DIR/rapidocr_server.py" ]] || { warn "安装包缺少 rapidocr_server.py，跳过 RapidOCR"; return 0; }
-  info "安装 RapidOCR（可选识别引擎）"
-  /usr/bin/python3 -m pip install --user --quiet "rapidocr_onnxruntime==${RAPIDOCR_VERSION:-1.4.4}" "onnxruntime==1.19.2" \
-    || { warn "RapidOCR 安装失败；仍使用 Vision"; return 0; }
   return 0
 }
 
