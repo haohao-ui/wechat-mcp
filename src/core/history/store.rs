@@ -1413,6 +1413,23 @@ impl HistoryStore {
         bubble: &Bubble,
         pair_imported: bool,
     ) -> Result<bool> {
+        // Rebaselining can observe an already-claimed bot bubble again. Check
+        // before pairing so it neither becomes self_other nor claims another
+        // pending bot reply with identical text. Manual repeats remain distinct.
+        let already_claimed: bool = conn.query_row(
+            "SELECT EXISTS (
+                 SELECT 1 FROM (
+                     SELECT sender, bubble_digest FROM messages
+                     WHERE contact_id=? ORDER BY seq DESC LIMIT 200
+                 ) WHERE sender='bot' AND bubble_digest=?
+             )",
+            params![contact_id, bubble.digest],
+            |r| r.get(0),
+        )?;
+        if already_claimed {
+            return Ok(true);
+        }
+
         let (window_clause, cutoff): (&str, i64) = if pair_imported {
             ("(m.capture='imported')", 0)
         } else {
@@ -3137,6 +3154,261 @@ mod tests {
             )
             .unwrap();
         assert_eq!(senders(&f), vec!["customer", "bot", "self_other"]);
+    }
+
+    #[test]
+    fn claimed_bot_echo_seen_again_is_not_recorded() {
+        let f = observed_reply_fixture("机器人回复", "机器人回复");
+        let other = fr(vec![bub("不连续的画面", "inbound_visual", "text")]);
+        for _ in 0..2 {
+            f.store
+                .record_frame(&f.c, &other, None, None, false)
+                .unwrap();
+        }
+        let before = texts(&f);
+        let echo = fr(vec![bub("机器人回复", "outbound_visual", "text")]);
+        for _ in 0..2 {
+            let rows = f
+                .store
+                .record_frame(&f.c, &echo, None, None, false)
+                .unwrap();
+            assert!(
+                rows.is_empty(),
+                "a claimed bot echo must not become self_other on rebaseline"
+            );
+        }
+        assert_eq!(texts(&f), before);
+        assert_eq!(senders(&f), ["bot", "customer"]);
+        assert_claimed_echo_digest(&f, "机器人回复");
+    }
+
+    #[test]
+    fn manual_duplicate_text_still_recorded() {
+        let f = setup_fixture();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("问题", "inbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![
+                    bub("问题", "inbound_visual", "text"),
+                    bub("好的", "outbound_visual", "text"),
+                    bub("好的", "outbound_visual", "text"),
+                ]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(senders(&f), ["customer", "self_other", "self_other"]);
+        let digests: Vec<String> = f
+            .store
+            .connection()
+            .lock()
+            .unwrap()
+            .prepare("SELECT bubble_digest FROM messages WHERE sender='self_other' ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(digests, ["好的", "好的"]);
+    }
+
+    #[test]
+    fn claimed_echo_deduplication_only_uses_last_200_contact_messages() {
+        for newer_count in [199, 200] {
+            let f = observed_reply_fixture("机器人回复", "机器人回复");
+            let mut bubbles = vec![bub("机器人回复", "outbound_visual", "text")];
+            for i in 0..newer_count {
+                bubbles.push(bub(&format!("问题{i}"), "inbound_visual", "text"));
+            }
+            f.store
+                .record_frame(&f.c, &fr(bubbles.clone()), None, None, false)
+                .unwrap();
+            bubbles.push(bub("机器人回复", "outbound_visual", "text"));
+            let rows = f
+                .store
+                .record_frame(&f.c, &fr(bubbles), None, None, false)
+                .unwrap();
+            assert_eq!(rows.len(), usize::from(newer_count == 200));
+            if newer_count == 200 {
+                assert_eq!(rows[0]["sender"], "self_other");
+            }
+        }
+    }
+
+    #[test]
+    fn claimed_echo_deduplication_does_not_cross_contacts() {
+        let f = observed_reply_fixture("机器人回复", "机器人回复");
+        let other = f
+            .store
+            .ensure_contact(
+                "fixture",
+                &json!({"recipient": "另一个客户", "kind": "private"}),
+                false,
+            )
+            .unwrap();
+        let rows = f
+            .store
+            .record_frame(
+                &other,
+                &fr(vec![bub("机器人回复", "outbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["sender"], "self_other");
+    }
+
+    #[test]
+    fn claimed_echo_does_not_claim_another_identical_bot_reply() {
+        let f = observed_reply_fixture("机器人回复", "机器人回复");
+        f.store
+            .record_bot_reply(
+                &f.c,
+                "next-send",
+                "机器人回复",
+                "triggered",
+                &json!({}),
+                &[],
+                None,
+                None,
+            )
+            .unwrap();
+        f.store
+            .connection()
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM contact_cursor WHERE contact_id=?",
+                params![f.c],
+            )
+            .unwrap();
+        let rows = f
+            .store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("机器人回复", "outbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        assert!(rows.is_empty());
+        let digest: Option<String> = f
+            .store
+            .connection()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT bubble_digest FROM messages WHERE send_key='next-send'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(digest.is_none());
+        assert_eq!(
+            f.store.send("next-send").unwrap().unwrap()["echo_observed"],
+            false
+        );
+        assert_eq!(senders(&f), ["bot", "bot"]);
+    }
+
+    fn assert_claimed_echo_digest(f: &StoreFixture, observed: &str) {
+        let digest: String = f
+            .store
+            .connection()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT bubble_digest FROM messages WHERE send_key='ocr-send'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(digest, observed);
+    }
+
+    fn observed_reply_fixture(sent: &str, observed: &str) -> StoreFixture {
+        let f = setup_fixture();
+        f.store
+            .record_bot_reply(
+                &f.c,
+                "ocr-send",
+                sent,
+                "triggered",
+                &json!({}),
+                &[],
+                None,
+                None,
+            )
+            .unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub(observed, "outbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        f
+    }
+
+    fn assert_claimed_echo(f: &StoreFixture, observed: &str) {
+        assert_eq!(senders(f), vec!["bot"]);
+        let digest: String = f
+            .store
+            .connection()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT bubble_digest FROM messages WHERE sender='bot'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(digest, observed);
+        assert_eq!(
+            f.store.send("ocr-send").unwrap().unwrap()["echo_observed"],
+            true
+        );
+    }
+
+    #[test]
+    fn echo_with_ocr_confusions_is_claimed_as_bot() {
+        let observed = "◎示例联系人甲 看到这款「海带丝（香辣味）」，包装配料写\n着海带、饮用水、食用盐";
+        let f = observed_reply_fixture(
+            "@示例联系人甲 看到这款「海带丝（香辣味）」，包装配料写着海带、饮用水、食用盐",
+            observed,
+        );
+        assert_claimed_echo(&f, observed);
+    }
+
+    #[test]
+    fn echo_al_for_ai_is_claimed() {
+        let observed = "收到，我是Al客服助手。本轮消息已正常接收";
+        let f = observed_reply_fixture("收到，我是AI客服助手。本轮消息已正常接收", observed);
+        assert_claimed_echo(&f, observed);
+    }
+
+    #[test]
+    fn real_manual_reply_stays_self_other() {
+        let f = observed_reply_fixture(
+            "收到，我是AI客服助手。本轮消息已正常接收",
+            "好的，我马上处理",
+        );
+        assert_eq!(senders(&f), vec!["bot", "self_other"]);
     }
 
     fn reply_turn_fixture() -> (StoreFixture, Vec<String>) {
