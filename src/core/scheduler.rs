@@ -1822,7 +1822,10 @@ impl BotCoordinator {
             .unwrap()
             .call("friend_request_badge", json!({}))
             .await?;
-        let revisit = state.pending && state.last_scan.is_some_and(|t| now - t >= 1800.0);
+        // Never scanned: a request whose badge was cleared by a person viewing it must still be found.
+        let never_scanned = state.last_scan.is_none();
+        let revisit =
+            never_scanned || (state.pending && state.last_scan.is_some_and(|t| now - t >= 1800.0));
         if badge["red_pixels"].as_u64().unwrap_or(0) < BADGE_PIXELS && !revisit {
             return Ok(());
         }
@@ -6640,6 +6643,36 @@ mod tests {
         let calls = cap.calls.clone();
         coord.capture = Some(Box::new(cap));
         (td, coord, calls)
+    }
+    #[tokio::test]
+    async fn first_enable_scans_without_badge() {
+        // A request whose badge was already cleared (opened once by a person) must still be handled.
+        let (_td, mut coord, calls) =
+            friend_fixture(crate::core::friend_requests::Mode::DryRun, true);
+        let mut cap = MockCoordinatorCapture::new();
+        cap.call_responses
+            .insert("friend_request_badge".into(), json!({"red_pixels":0}));
+        cap.call_responses.insert(
+            "friend_request_scan".into(),
+            json!({"rows":[{"row_y":160.0,"name":"甲","status":"等待验证","message":"hello"}]}),
+        );
+        cap.call_responses.insert(
+            "friend_request_detail".into(),
+            json!({"source":"搜索","message":"hello","verify_button":{"x":0.5,"y":0.5}}),
+        );
+        cap.call_responses
+            .insert("friend_request_verify".into(), json!({"verified":true}));
+        let calls = cap.calls.clone();
+        coord.capture = Some(Box::new(cap));
+        coord.serve_friend_requests().await.unwrap();
+        assert!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(op, _)| op == "friend_request_scan"),
+            "first enable must scan even without a badge"
+        );
     }
     #[tokio::test]
     async fn accepted_triggers_incremental_contacts_sync() {
