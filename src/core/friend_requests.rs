@@ -90,12 +90,47 @@ pub fn identity(account: &str, name: &str, message: &str, source: &str) -> Strin
         .map(|b| format!("{b:02x}"))
         .collect()
 }
+/// Classifies sources using stable anchors even when OCR misreads surrounding text.
+pub fn source_category(source: &str) -> Option<&'static str> {
+    let source: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+    if ["手机号", "微信号", "QQ号"]
+        .iter()
+        .any(|s| source.contains(s))
+    {
+        Some("搜索")
+    } else if source.contains('扫') {
+        Some("扫一扫")
+    } else if source.contains('群') {
+        Some("群聊")
+    } else if source.contains("名片") {
+        Some("名片分享")
+    } else if source.contains("附近") {
+        Some("附近的人")
+    } else if source.contains('摇') {
+        Some("摇一摇")
+    } else {
+        None
+    }
+}
+
+fn rule_hash(c: &Config) -> Result<String> {
+    Ok(identity(
+        "rules",
+        &serde_json::to_string(c)?,
+        "source_category_v1",
+        "",
+    ))
+}
+
 pub fn matches_rules(c: &Config, source: &str, message: &str) -> (bool, Vec<String>) {
+    let category = source_category(source);
     let source_hits: Vec<_> = c
         .accept_sources
         .iter()
         .enumerate()
-        .filter(|(_, s)| source.contains(s.as_str()))
+        .filter(|(_, s)| {
+            source.contains(s.as_str()) || category.is_some_and(|v| v.contains(s.as_str()))
+        })
         .map(|(i, _)| format!("source:{i}"))
         .collect();
     let keyword_hits: Vec<_> = c
@@ -253,7 +288,7 @@ async fn scan_inner(
 ) -> Result<ScanReport> {
     let mut state = State::load(root)?;
     state.bind_account(account);
-    state.rule_hash = identity("rules", &serde_json::to_string(c)?, "", "");
+    state.rule_hash = rule_hash(c)?;
     let day = local_day(now)?;
     let mut report = ScanReport::default();
     capture.call("contacts_enter", json!({})).await?;
@@ -345,7 +380,7 @@ async fn scan_inner(
             hits,
         );
         state.save(root)?;
-        report.events.push(json!({"event":"friend_request_decision","decision":decision,"name_length":row.name.chars().count(),"message_length":message.chars().count(),"source":source}));
+        report.events.push(json!({"event":"friend_request_decision","decision":decision,"name_length":row.name.chars().count(),"message_length":message.chars().count(),"source":source,"source_category":source_category(source)}));
     }
     Ok(report)
 }
@@ -390,6 +425,73 @@ pub fn promote_contacts_sync(root: &Path, account: &str, now: f64) -> Result<boo
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn source_categories() {
+        for (source, expected) in [
+            ("通过搜索微信号添加", Some("搜索")),
+            ("通过扫一扫添加", Some("扫一扫")),
+            ("通过群聊添加", Some("群聊")),
+            ("通过名片分享添加", Some("名片分享")),
+            ("通过附近添加", Some("附近的人")),
+            ("通过摇一摇添加", Some("摇一摇")),
+            ("通过 QQ 号添加", Some("搜索")),
+            ("手 机\n号 扫群名片附近摇", Some("搜索")),
+            ("扫群名片附近摇", Some("扫一扫")),
+            ("群名片附近摇", Some("群聊")),
+            ("名片附近摇", Some("名片分享")),
+            ("附近摇", Some("附近的人")),
+            ("乱码", None),
+        ] {
+            assert_eq!(source_category(source), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn rule_hash_changes_with_algorithm_version() {
+        let c = Config::default();
+        let old_hash = identity("rules", &serde_json::to_string(&c).unwrap(), "", "");
+        let new_hash = rule_hash(&c).unwrap();
+        assert_ne!(old_hash, new_hash);
+        let mut state = State {
+            rule_hash: old_hash,
+            ..State::default()
+        };
+        let source = "通过搜察手机号添加";
+        let id = identity("account", "name", "", source);
+        state.record(
+            &id,
+            4,
+            "2026-11-09",
+            1.,
+            c.mode,
+            Decision::NotMatched,
+            vec![],
+        );
+        assert_eq!(
+            state.decide(&c, &id, "2026-11-09", source, ""),
+            Some(Decision::NotMatched)
+        );
+        state.rule_hash = new_hash;
+        assert_eq!(state.decide(&c, &id, "2026-11-09", source, ""), None);
+        for decision in [Decision::NeedsReview, Decision::Accepted] {
+            state.records[0].decision = decision;
+            assert_eq!(
+                state.decide(&c, &id, "2026-11-09", source, ""),
+                Some(decision)
+            );
+        }
+    }
+
+    #[test]
+    fn ocr_misread_search_source_matches() {
+        assert!(matches_rules(&Config::default(), "通过搜察手机号添加", "").0);
+    }
+
+    #[test]
+    fn group_source_still_not_matched_by_default() {
+        assert!(!matches_rules(&Config::default(), "通过群聊添加", "").0);
+    }
+
     #[test]
     fn default_rules_accept_only_scan_and_search() {
         let c = Config::default();
