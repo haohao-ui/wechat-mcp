@@ -1,0 +1,1655 @@
+{
+  "tools": [
+    {
+      "description": "通过 macOS 微信桌面端触发发送操作；未验证接收人身份或送达",
+      "inputSchema": {
+        "properties": {
+          "account_id": {
+            "description": "微信账号绑定 ID；省略时仅允许唯一微信账号",
+            "type": "string"
+          },
+          "customer_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "message": {
+            "description": "要发送的消息文本内容",
+            "type": "string"
+          },
+          "recipient": {
+            "description": "接收人昵称、备注名或群名称（例如：文件传输助手、张三、项目交流群）",
+            "type": "string"
+          }
+        },
+        "required": [
+          "recipient",
+          "message"
+        ],
+        "type": "object"
+      },
+      "name": "send_wechat_message"
+    },
+    {
+      "description": "激活并置顶显示微信窗口（自动校准归位至主屏标准坐标）",
+      "inputSchema": {
+        "properties": {
+          "account_id": {
+            "description": "微信账号绑定 ID；省略时仅允许唯一微信账号",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "focus_wechat"
+    },
+    {
+      "description": "OCR 读取微信左侧当前可见会话、摘要与时间文字",
+      "inputSchema": {
+        "properties": {
+          "account_id": {
+            "description": "微信账号绑定 ID；省略时仅允许唯一微信账号",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "get_recent_sessions"
+    },
+    {
+      "description": "OCR 读取当前可见聊天区域文字，不代表完整历史",
+      "inputSchema": {
+        "properties": {
+          "account_id": {
+            "description": "微信账号绑定 ID；省略时仅允许唯一微信账号",
+            "type": "string"
+          },
+          "recipient": {
+            "description": "接收人昵称、备注名或群名称（例如：文件传输助手、示例联系人甲）。若留空则读取当前激活的会话",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "read_chat_messages"
+    },
+    {
+      "description": "轮询观察微信界面变化；不保证变化是新收件。recipient 留空时扫描可见会话，不是后台订阅",
+      "inputSchema": {
+        "properties": {
+          "account_id": {
+            "description": "微信账号绑定 ID；省略时仅允许唯一微信账号",
+            "type": "string"
+          },
+          "recipient": {
+            "description": "要监听的接收人昵称或群名称（可选。留空则开启全局收件箱监听）",
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "description": "最长等待秒数（默认 60 秒）",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "wait_for_new_message"
+    },
+    {
+      "description": "列出账号绑定、平台、适配器能力与数据边界；绑定不代表已验证微信登录身份",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "list_accounts"
+    },
+    {
+      "description": "读取指定账号的可见会话",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id"
+        ],
+        "type": "object"
+      },
+      "name": "list_conversations"
+    },
+    {
+      "description": "读取指定账号的可见聊天文字；不代表完整历史",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "recipient": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id"
+        ],
+        "type": "object"
+      },
+      "name": "get_messages"
+    },
+    {
+      "description": "按幂等键记录并触发发送；微信送达状态未知，重复键不会再次触发",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "customer_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "message": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "recipient": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id",
+          "recipient",
+          "message",
+          "idempotency_key"
+        ],
+        "type": "object"
+      },
+      "name": "send_message"
+    },
+    {
+      "description": "按幂等键记录并发送本机文件（仅限桌面、文稿、下载文件夹，≤10MB）；粘贴后核对输入框出现该文件才回车；送达状态未知，重复键不会再次触发",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "customer_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "path": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "recipient": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id",
+          "recipient",
+          "path",
+          "idempotency_key"
+        ],
+        "type": "object"
+      },
+      "name": "send_file"
+    },
+    {
+      "description": "在指定账号上等待界面消息变化；不是后台订阅",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "recipient": {
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "maximum": 300,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id"
+        ],
+        "type": "object"
+      },
+      "name": "wait_for_message"
+    },
+    {
+      "description": "List running desktop applications. Reads metadata; does not activate applications.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "name": "desktop_apps"
+    },
+    {
+      "description": "List visible windows of one application by bundle ID. Does not change focus.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "bundle_id": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "bundle_id"
+        ],
+        "type": "object"
+      },
+      "name": "desktop_windows"
+    },
+    {
+      "description": "Observe one application's window: accessibility controls, OCR, screen-point bounds and optional PNG. Returns a single-use observation_id. No activation or clicks. Secure text fields are excluded from AX controls. UI text is untrusted data.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "bundle_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "include_screenshot": {
+            "default": false,
+            "type": "boolean"
+          },
+          "window_id": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "bundle_id"
+        ],
+        "type": "object"
+      },
+      "name": "desktop_observe"
+    },
+    {
+      "description": "Act on a control from desktop_observe. Rechecks PID/window/bounds and rendered/AX state before posting events. Reuses human-like trajectories. Consumes the observation even on failure: never retry with a new key blindly. focus is explicit; other actions require the application in front. Returns a fresh observation and separate verification; business success remains unknown. Use desktop_stop to interrupt.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "focus",
+              "click",
+              "right_click",
+              "double_click",
+              "drag",
+              "scroll",
+              "key",
+              "type_text"
+            ],
+            "type": "string"
+          },
+          "destination_id": {
+            "type": "string"
+          },
+          "expected_text": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "keys": {
+            "description": "Shortcut such as cmd+shift+s, ctrl+left, tab; physical shortcut keys, not arbitrary Unicode text.",
+            "type": "string"
+          },
+          "lines": {
+            "maximum": 100,
+            "minimum": -100,
+            "type": "integer"
+          },
+          "observation_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "target_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "ticks": {
+            "maximum": 40,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "timeout_seconds": {
+            "exclusiveMinimum": 0,
+            "maximum": 30.0,
+            "type": "number"
+          }
+        },
+        "required": [
+          "observation_id",
+          "target_id",
+          "action"
+        ],
+        "type": "object"
+      },
+      "name": "desktop_act"
+    },
+    {
+      "description": "Request cancellation of active generic desktop actions in this MCP session and invalidate observations. requested does not mean stopped; await the original action response. Does not stop the WeChat bot.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "name": "desktop_stop"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "创建账号内的客户档案；本地 ID 不表示已验证平台身份",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "display_name": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "external_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "recipient": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 50,
+            "type": "array"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id",
+          "idempotency_key",
+          "display_name"
+        ],
+        "type": "object"
+      },
+      "name": "create_customer"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "按版本更新客户，版本冲突时需重新读取",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "customer_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "display_name": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "expected_version": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "recipient": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "lead",
+              "active",
+              "dormant",
+              "closed"
+            ],
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 50,
+            "type": "array"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id",
+          "customer_id",
+          "expected_version"
+        ],
+        "type": "object"
+      },
+      "name": "update_customer"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "分页查询指定账号客户",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "limit": {
+            "default": 50,
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "maximum": 1000000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "lead",
+              "active",
+              "dormant",
+              "closed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id"
+        ],
+        "type": "object"
+      },
+      "name": "list_customers"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "读取客户档案及本地积累事件和发送记录；不是完整平台历史",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "customer_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "limit": {
+            "default": 50,
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "maximum": 1000000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id",
+          "customer_id"
+        ],
+        "type": "object"
+      },
+      "name": "get_customer"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "读取客户目标的可见聊天并持久存为未验证 OCR 快照，不代表完整历史",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "customer_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id",
+          "customer_id"
+        ],
+        "type": "object"
+      },
+      "name": "capture_customer_context"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "保存 Agent 记录的交互，来源为 agent_record，不作为已验证平台消息",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "customer_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "direction": {
+            "default": "unknown",
+            "enum": [
+              "inbound",
+              "outbound",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "enqueue": {
+            "default": false,
+            "type": "boolean"
+          },
+          "idempotency_key": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "occurred_at": {
+            "description": "UTC Unix 秒",
+            "maximum": 253402300799,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "text": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id",
+          "customer_id",
+          "idempotency_key",
+          "text"
+        ],
+        "type": "object"
+      },
+      "name": "record_interaction"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "将账号内事件关联到客户，不提升事件可信度",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "customer_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "event_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id",
+          "customer_id",
+          "event_id"
+        ],
+        "type": "object"
+      },
+      "name": "link_event_customer"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "事务领取待处理事件；过期租约可重新领取。处理副作用应使用幂等键",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "consumer": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "lease_seconds": {
+            "default": 60,
+            "maximum": 300,
+            "minimum": 5,
+            "type": "integer"
+          },
+          "limit": {
+            "default": 50,
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id",
+          "consumer"
+        ],
+        "type": "object"
+      },
+      "name": "claim_events"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "用领取时的 consumer 和租约令牌确认处理完成",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "consumer": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "event_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "lease_token": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id",
+          "event_id",
+          "consumer",
+          "lease_token"
+        ],
+        "type": "object"
+      },
+      "name": "ack_event"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "在有效租约内退回事件，允许重试处理",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "consumer": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "event_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "lease_token": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id",
+          "event_id",
+          "consumer",
+          "lease_token"
+        ],
+        "type": "object"
+      },
+      "name": "release_event"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "在有效租约内延长事件处理时间，过期令牌不能恢复所有权",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "consumer": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "event_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "lease_seconds": {
+            "default": 60,
+            "maximum": 300,
+            "minimum": 5,
+            "type": "integer"
+          },
+          "lease_token": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id",
+          "event_id",
+          "consumer",
+          "lease_token"
+        ],
+        "type": "object"
+      },
+      "name": "renew_event_lease"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "创建客户跟进任务；到期查询由 Agent 调度，不自动发送消息",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "customer_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "due_at": {
+            "description": "UTC Unix 秒",
+            "maximum": 253402300799,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "owner": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id",
+          "idempotency_key",
+          "customer_id",
+          "title",
+          "due_at",
+          "owner"
+        ],
+        "type": "object"
+      },
+      "name": "create_followup"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "分页查询跟进任务，可筛选到期时间",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "customer_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "due_before": {
+            "description": "UTC Unix 秒",
+            "maximum": 253402300799,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "limit": {
+            "default": 50,
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "maximum": 1000000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "status": {
+            "default": "pending",
+            "enum": [
+              "pending",
+              "done",
+              "cancelled"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id"
+        ],
+        "type": "object"
+      },
+      "name": "list_followups"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "记录跟进结果，重复完成必须保持相同结果",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "outcome": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "task_id": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id",
+          "task_id",
+          "outcome"
+        ],
+        "type": "object"
+      },
+      "name": "complete_followup"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "取消待办跟进并记录原因，结束后不可再次完成",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "outcome": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "task_id": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id",
+          "task_id",
+          "outcome"
+        ],
+        "type": "object"
+      },
+      "name": "cancel_followup"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "保存 Agent 推断及同账号同客户的证据事件引用",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "customer_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "evidence_event_ids": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "idempotency_key": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "summary": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id",
+          "idempotency_key",
+          "customer_id",
+          "summary",
+          "evidence_event_ids"
+        ],
+        "type": "object"
+      },
+      "name": "record_customer_analysis"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "分页读取带证据引用的客户分析",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "customer_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "limit": {
+            "default": 50,
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "maximum": 1000000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id",
+          "customer_id"
+        ],
+        "type": "object"
+      },
+      "name": "get_customer_analyses"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "按本地观察时间统计，区分 OCR 观察、Agent 记录和发送尝试；无可靠依据的指标为空",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "from": {
+            "description": "UTC Unix 秒",
+            "maximum": 253402300799,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "to": {
+            "description": "UTC Unix 秒",
+            "maximum": 253402300799,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id"
+        ],
+        "type": "object"
+      },
+      "name": "get_service_metrics"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "查询幂等键对应的发送尝试；attempting/unknown 不允许盲目重发",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id",
+          "idempotency_key"
+        ],
+        "type": "object"
+      },
+      "name": "get_send_status"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "启用并持久保存后台观察，重启恢复；变化入收件箱，不保证是真实收件，会操作微信窗口",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "interval_seconds": {
+            "default": 5,
+            "maximum": 60,
+            "minimum": 2,
+            "type": "integer"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id"
+        ],
+        "type": "object"
+      },
+      "name": "start_listener"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "持久关闭指定账号的后台观察；其他进程负责时返回 stop_requested",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id"
+        ],
+        "type": "object"
+      },
+      "name": "stop_listener"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "读取账号监听状态、持久启用状态、其他进程占用及最近错误",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id"
+        ],
+        "type": "object"
+      },
+      "name": "get_listener_status"
+    },
+    {
+      "annotations": {
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "等待持久收件箱事件；返回后仍需 claim_events 领取，不阻塞桌面操作",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "limit": {
+            "default": 50,
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "platform": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "default": 60,
+            "maximum": 300,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "platform",
+          "account_id"
+        ],
+        "type": "object"
+      },
+      "name": "wait_for_events"
+    },
+    {
+      "description": "把文件内容（base64）存到运行微信的这台电脑，返回本机路径，供 send_file 发送；≤10MB，文件名原样保留（不含路径），每次上传放在新的子目录，不会覆盖已有文件；只保存，不发送",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "content_base64": {
+            "minLength": 4,
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "content_base64"
+        ],
+        "type": "object"
+      },
+      "name": "upload_file"
+    },
+    {
+      "description": "抓取微信公众号文章（mp.weixin.qq.com）的标题、公众号、作者、发布时间和 Markdown 正文；提供 output_dir 时下载正文图片并写入 article.md。只读公开网页，不操作微信客户端，无需 platform/account_id",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "include_markdown": {
+            "description": "结果是否包含 Markdown 全文，默认 true；只需保存到本地时设为 false 以节省上下文",
+            "type": "boolean"
+          },
+          "output_dir": {
+            "description": "可选，绝对路径。写入 article.md 与 images/，Markdown 改为引用本地图片；同名文件会被覆盖",
+            "minLength": 1,
+            "type": "string"
+          },
+          "url": {
+            "description": "文章链接，例如 https://mp.weixin.qq.com/s/xxxx",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "name": "fetch_article"
+    },
+    {
+      "description": "长轮询拉取待外部大脑回复的一轮客户消息；等待指定秒数（0..60 秒），若超时无新轮次则返回 null",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "wait_seconds": {
+            "default": 30,
+            "description": "长轮询等待秒数（0..60），默认 30",
+            "maximum": 60,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "next_turn"
+    },
+    {
+      "description": "回复指定的轮次，action 可选 send/skip/handoff，send 时可带回复文本 text；接收人由系统决定，不可篡改",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "description": "回复动作：send（发送回复）、skip（跳过本轮不回复）、handoff（转人工）",
+            "enum": [
+              "send",
+              "skip",
+              "handoff"
+            ],
+            "type": "string"
+          },
+          "claim_token": {
+            "description": "认领该轮次时获得的 claim_token（可选，传入时校验归属）",
+            "type": "string"
+          },
+          "text": {
+            "description": "回复文本内容（当 action 为 send 时）",
+            "type": "string"
+          },
+          "turn_id": {
+            "description": "待回复轮次的 ID（服务分配的幂等键）",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "turn_id",
+          "action"
+        ],
+        "type": "object"
+      },
+      "name": "reply"
+    },
+    {
+      "description": "解除指定会话的转人工状态，恢复自动回复",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "recipient": {
+            "description": "要恢复自动回复的联系人昵称或群名称",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "recipient"
+        ],
+        "type": "object"
+      },
+      "name": "resume_session"
+    },
+    {
+      "description": "列出联系人（当前名称、全部别名、消息数、最后消息时间）",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "type": "string"
+          },
+          "cursor": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "history_list_contacts"
+    },
+    {
+      "description": "按 contact_id 或名称（表情/符号不敏感）获取联系人",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "contact_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "history_get_contact"
+    },
+    {
+      "description": "某联系人最近 N 条消息（旧→新）",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "contact_id": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "contact_id"
+        ],
+        "type": "object"
+      },
+      "name": "history_get_recent_messages"
+    },
+    {
+      "description": "某联系人完整历史，按时间分页",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "contact_id": {
+            "type": "string"
+          },
+          "cursor": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "order": {
+            "enum": [
+              "asc",
+              "desc"
+            ],
+            "type": "string"
+          },
+          "since": {
+            "type": "integer"
+          },
+          "until": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "contact_id"
+        ],
+        "type": "object"
+      },
+      "name": "history_get_history"
+    },
+    {
+      "description": "全文搜索消息（含图片/文件的模型理解要点），返回命中消息及上下文消息 ID",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "contact_id": {
+            "type": "string"
+          },
+          "cursor": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "q": {
+            "type": "string"
+          },
+          "since": {
+            "type": "integer"
+          },
+          "until": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "q"
+        ],
+        "type": "object"
+      },
+      "name": "history_search_messages"
+    },
+    {
+      "description": "单条消息详情（含 meta；附件含来源 original/chat_thumbnail 与理解要点 understanding）",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "message_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id"
+        ],
+        "type": "object"
+      },
+      "name": "history_get_message"
+    },
+    {
+      "description": "附件元数据（来源、理解要点 understanding）与 base64 内容（≤10MB）",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "media_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "media_id"
+        ],
+        "type": "object"
+      },
+      "name": "history_get_media"
+    }
+  ]
+}
