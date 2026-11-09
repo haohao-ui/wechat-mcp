@@ -1,6 +1,7 @@
 use crate::core::model::{Bubble, Frame};
 use crate::core::state::write_private;
 use anyhow::{Result, bail};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use unicode_normalization::UnicodeNormalization;
@@ -69,6 +70,42 @@ pub fn certain_tail(old: &[Fingerprint], new: &[Fingerprint], current: &[Bubble]
     } else {
         current[end..].to_vec()
     }
+}
+
+fn time_label(bubble: &Bubble) -> Option<&str> {
+    bubble.extra.get("time_label").and_then(Value::as_str)
+}
+
+/// Minutes since midnight for a plain "HH:MM" separator; prefixed labels ("昨天 21:30") return None.
+fn clock_minutes(label: &str) -> Option<u32> {
+    let (h, m) = label.split_once(':')?;
+    let (h, m): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
+    (h < 24 && m < 60 && label.len() <= 5).then_some(h * 60 + m)
+}
+
+/// Identical texts are told apart by the time separator WeChat draws above them. When the newest
+/// separator in `current` was never seen in `previous` (and is later than every plain time there),
+/// the bubbles below it arrived after the last capture; only the newest one is returned so a burst
+/// of identical messages gets one reply. Empty when `previous` carries no labels (cannot compare).
+pub fn separator_tail(previous: &[Bubble], current: &[Bubble]) -> Vec<Bubble> {
+    let seen: Vec<&str> = previous.iter().filter_map(time_label).collect();
+    if seen.is_empty() {
+        return Vec::new();
+    }
+    let Some(index) = current.iter().rposition(|b| time_label(b).is_some()) else {
+        return Vec::new();
+    };
+    let label = time_label(&current[index]).unwrap_or_default();
+    if seen.contains(&label) {
+        return Vec::new();
+    }
+    let latest = seen.iter().filter_map(|l| clock_minutes(l)).max();
+    if let (Some(latest), Some(now)) = (latest, clock_minutes(label)) {
+        if now <= latest {
+            return Vec::new();
+        }
+    }
+    current.last().into_iter().cloned().collect()
 }
 
 #[derive(Debug, Clone, PartialEq)]
