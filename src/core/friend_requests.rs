@@ -39,7 +39,8 @@ impl Default for Config {
         Self {
             enabled: false,
             mode: Mode::DryRun,
-            accept_sources: vec![],
+            // An empty list means "any source"; default to the agreed scan/search rule instead.
+            accept_sources: vec!["扫一扫".to_string(), "搜索".to_string()],
             accept_keywords: vec![],
             r#match: Match::All,
             daily_limit: 20,
@@ -387,8 +388,20 @@ pub fn promote_contacts_sync(root: &Path, account: &str, now: f64) -> Result<boo
 mod tests {
     use super::*;
     #[test]
+    fn default_rules_accept_only_scan_and_search() {
+        let c = Config::default();
+        assert!(matches_rules(&c, "通过搜索手机号添加", "").0);
+        assert!(matches_rules(&c, "通过扫一扫添加", "").0);
+        assert!(!matches_rules(&c, "通过群聊添加", "").0);
+        assert!(!matches_rules(&c, "通过名片分享添加", "").0);
+    }
+
+    #[test]
     fn rules_sources_keywords_all_any_empty() {
-        let mut c = Config::default();
+        let mut c = Config {
+            accept_sources: vec![],
+            ..Config::default()
+        };
         assert!(matches_rules(&c, "任何", "任意").0);
         c.accept_sources = vec!["搜索".into()];
         c.accept_keywords = vec!["合作".into()];
@@ -456,7 +469,10 @@ mod tests {
     #[test]
     fn live_quota_resets_on_local_day_and_is_account_scoped() {
         let mut state = State::default();
-        let mut c = Config::default();
+        let mut c = Config {
+            accept_sources: vec![],
+            ..Config::default()
+        };
         c.mode = Mode::Live;
         c.daily_limit = 1;
         state.bind_account("a");
