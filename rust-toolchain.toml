@@ -1,3 +1,5 @@
 [toolchain]
 channel = "1.99.0"
 components = ["rustfmt", "clippy"]
+# deploy_host.sh cross-builds x86_64 for the dedicated Mac; release builds both.
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
