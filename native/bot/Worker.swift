@@ -344,6 +344,19 @@ final class CaptureWorker {
         return titleMatches(titles[0], accepted)
     }
 
+    /// Keeps the last 40 analyzed window captures (0600, local only) so a skipped message can be
+    /// explained afterwards from the exact pixels; core logs the snapshot_id it decided on.
+    func keepDiagnosticFrame(_ image: CGImage, snapshot: String) {
+        let directory=base.appendingPathComponent("tmp/frames")
+        try? FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
+        let path=directory.appendingPathComponent(snapshot+".png")
+        FileManager.default.createFile(atPath:path.path,contents:nil,attributes:[.posixPermissions:0o600])
+        try? writePNG(image,path:path)
+        let files=((try? FileManager.default.contentsOfDirectory(at:directory,includingPropertiesForKeys:[.contentModificationDateKey])) ?? [])
+            .sorted { ((try? $0.resourceValues(forKeys:[.contentModificationDateKey]).contentModificationDate) ?? .distantPast) >
+                      ((try? $1.resourceValues(forKeys:[.contentModificationDateKey]).contentModificationDate) ?? .distantPast) }
+        for old in files.dropFirst(40) { try? FileManager.default.removeItem(at:old) }
+    }
     func capture(_ recipient: String, accepted: Set<String>, manage: Bool) throws -> [String:Any] {
         let began=ProcessInfo.processInfo.systemUptime
         let (window, resized) = try readyWindow(manage:manage)
@@ -367,6 +380,7 @@ final class CaptureWorker {
             }
             cached["bubbles"]=bubbles
             cachedID=snapshot; cachedWindow=window
+            keepDiagnosticFrame(image,snapshot:snapshot)
         }
         guard titleAccepted(accepted) else { throw Failure.invalid("allowlisted_title_mismatch") }
         try showIndicator(window)
