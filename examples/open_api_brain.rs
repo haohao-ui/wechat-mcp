@@ -213,11 +213,6 @@ impl BrainClient {
             return Ok(None);
         }
 
-        // 轮次数据 v1 结构
-        if structured.get("turn_id").is_some() {
-            return Ok(Some(structured.clone()));
-        }
-
         if let Some(turn) = structured.get("turn").filter(|t| !t.is_null()) {
             return Ok(Some(turn.clone()));
         }
@@ -701,7 +696,7 @@ mod tests {
                                         "result": {
                                             "content": [{"type": "text", "text": "..."}],
                                             "isError": false,
-                                            "structuredContent": {
+                                            "structuredContent": {"turn": {
                                                 "api_version": "1",
                                                 "turn_id": "turn-test-1",
                                                 "account": {"account_id": "A"},
@@ -713,7 +708,7 @@ mod tests {
                                                 ],
                                                 "context": [],
                                                 "unavailable": []
-                                            }
+                                            }}
                                         }
                                     }),
                                 );
@@ -944,12 +939,12 @@ mod tests {
                                         "result": {
                                             "content": [],
                                             "isError": false,
-                                            "structuredContent": {
+                                            "structuredContent": {"turn": {
                                                 "api_version": "1",
                                                 "turn_id": "turn-dup",
                                                 "claim": {"claim_token": "tok-dup"},
                                                 "messages": [{"kind": "text", "text": "重试测试"}]
-                                            }
+                                            }}
                                         }
                                     }),
                                 );
@@ -1049,12 +1044,12 @@ mod tests {
                                         "result": {
                                             "content": [],
                                             "isError": false,
-                                            "structuredContent": {
+                                            "structuredContent": {"turn": {
                                                 "api_version": "1",
                                                 "turn_id": "turn-exp",
                                                 "claim": {"claim_token": "tok-exp"},
                                                 "messages": [{"kind": "text", "text": "超时测试"}]
-                                            }
+                                            }}
                                         }
                                     }),
                                 );
