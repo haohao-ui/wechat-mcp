@@ -1056,6 +1056,29 @@ impl BotService {
                 }
             }
             Err(ContinuityError::ContinuityGap) => {
+                // Layout only (kind, direction, position): enough to explain a gap without content.
+                let layout = |bubbles: &[Bubble]| {
+                    bubbles
+                        .iter()
+                        .map(|b| {
+                            format!(
+                                "{}/{}@{}+{}",
+                                b.kind.as_deref().unwrap_or("-"),
+                                b.direction,
+                                b.y.unwrap_or(-1),
+                                b.height.unwrap_or(-1)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
+                tracing::warn!(
+                    recipient = %self.recipient,
+                    snapshot = frame.snapshot_id.as_deref().unwrap_or("-"),
+                    frame = %layout(&frame.bubbles),
+                    cursor_tail = %layout(&cursor_bubbles[cursor_bubbles.len().saturating_sub(4)..]),
+                    "continuity_gap"
+                );
                 match self.recover_gap(capture, &frame, GAP_SCROLL_PAGES).await? {
                     Some(recovered) => recovered,
                     None => {
@@ -1093,6 +1116,7 @@ impl BotService {
             tracing::warn!(
                 recipient = %self.recipient,
                 visible = confirmed.bubbles.len(),
+                snapshot = confirmed.snapshot_id.as_deref().unwrap_or("-"),
                 reason = %reason_text,
                 "rebaselined_without_reply"
             );
