@@ -84,7 +84,10 @@ fn parse_digits(s: &str) -> Option<i64> {
 /// 资料卡名字后面紧跟性别/企业图标，识别时常被读成末尾的一个符号（实测 2026-11-08：`_`、`＆`、`&`、`£`、`：`、空格）。
 /// 只去掉末尾的这类符号；名字中间的符号、成对括号的右半边都保留。
 pub fn strip_name_icon_suffix(text: &str) -> String {
-    const ICON_MISREADS: &[char] = &['_', '＿', '＆', '&', '£', '￡', '：', ':', '，', ',', '、', '。', '♂', '♀', '·', '•', ' ', '\u{3000}'];
+    const ICON_MISREADS: &[char] = &[
+        '_', '＿', '＆', '&', '£', '￡', '：', ':', '，', ',', '、', '。', '♂', '♀', '·', '•', ' ',
+        '\u{3000}',
+    ];
     let mut s = text.trim().to_string();
     while let Some(last) = s.chars().last() {
         if ICON_MISREADS.contains(&last) && s.chars().count() > 1 {
@@ -131,9 +134,10 @@ pub fn parse_profile(lines: &[OcrLine], category: &str) -> ProfileParse {
 
         // 字段名只出现在一行的最左边：同一行（y±6）左侧还有别的文字时，这一段是值，不是字段名
         // （例如 "来源 | 企业微信" 中的"企业微信"不能被当成字段"企业"）。
-        let has_left_peer = lines.iter().enumerate().any(|(p_idx, peer)| {
-            p_idx != idx && (peer.y - line.y).abs() <= 6.0 && peer.x < line.x
-        });
+        let has_left_peer = lines
+            .iter()
+            .enumerate()
+            .any(|(p_idx, peer)| p_idx != idx && (peer.y - line.y).abs() <= 6.0 && peer.x < line.x);
         if has_left_peer {
             continue;
         }
@@ -341,7 +345,14 @@ pub fn parse_group_headers(lines: &[OcrLine]) -> Vec<(String, u32, f64)> {
         let trimmed = line.text.trim();
         // 过滤展开箭头等前缀
         let clean = trimmed.trim_start_matches(|c: char| {
-            c == '▶' || c == '▼' || c == '▷' || c == '▽' || c == '>' || c == 'v' || c == '^' || c.is_whitespace()
+            c == '▶'
+                || c == '▼'
+                || c == '▷'
+                || c == '▽'
+                || c == '>'
+                || c == 'v'
+                || c == '^'
+                || c.is_whitespace()
         });
 
         // 分组标题必须与微信的分组名完全一致（只比较汉字：箭头各种字形、标点、空白、数量都去掉），
@@ -487,7 +498,10 @@ mod tests {
         assert_eq!(parsed.fields.category, "work");
         assert_eq!(parsed.fields.nickname, "张三@某某科技");
         assert_eq!(parsed.fields.wechat_id, None);
-        assert_eq!(parsed.fields.enterprise.as_deref(), Some("某某科技有限公司"));
+        assert_eq!(
+            parsed.fields.enterprise.as_deref(),
+            Some("某某科技有限公司")
+        );
         assert_eq!(parsed.fields.real_name.as_deref(), Some("张三"));
         assert!(parsed.missing.contains(&"wechat_id"));
     }
@@ -569,7 +583,10 @@ mod tests {
         ];
         let parsed = parse_profile(&lines, "work");
         assert_eq!(parsed.fields.source.as_deref(), Some("企业微信"));
-        assert_eq!(parsed.fields.enterprise.as_deref(), Some("测试企业有限公司"));
+        assert_eq!(
+            parsed.fields.enterprise.as_deref(),
+            Some("测试企业有限公司")
+        );
     }
 
     /// 联系人名字里含"联系人""群聊"等字样时不能被当成分组标题。
@@ -586,7 +603,10 @@ mod tests {
         let headers = parse_group_headers(&lines);
         assert_eq!(
             headers,
-            vec![("official".to_string(), 33, 113.0), ("personal".to_string(), 22, 186.0)]
+            vec![
+                ("official".to_string(), 33, 113.0),
+                ("personal".to_string(), 22, 186.0)
+            ]
         );
     }
 

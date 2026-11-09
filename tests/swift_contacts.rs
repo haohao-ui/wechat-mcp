@@ -18,12 +18,17 @@ fn build_contacts_test_bin(test_case: &str) -> Option<PathBuf> {
         return None;
     }
 
-    let dir = std::env::temp_dir().join(format!("contacts-test-{}-{}", std::process::id(), test_case));
+    let dir = std::env::temp_dir().join(format!(
+        "contacts-test-{}-{}",
+        std::process::id(),
+        test_case
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     let main = dir.join("main.swift");
 
     let main_code = match test_case {
-        "avatars" => r#"
+        "avatars" => {
+            r#"
 import Foundation
 import CoreGraphics
 // 列表截图（窗口内 x 60..300、y 40..640）：白底；联系人行左侧 28 高的头像；字母行只有小字；
@@ -48,8 +53,10 @@ guard got.count == centers.count, zip(got, centers).allSatisfy({ abs($0 - $1) <=
     print("FAIL: avatars \(got) want \(centers)"); exit(1)
 }
 print("PASS: avatar_rows_verified")
-"#,
-        "signature" => r#"
+"#
+        }
+        "signature" => {
+            r#"
 import Foundation
 import CoreGraphics
 func solid(_ v: UInt8, _ w: Int = 40, _ h: Int = 30) -> CGImage {
@@ -62,8 +69,10 @@ let a = profileSignature(solid(200)), a2 = profileSignature(solid(200)), b = pro
 guard !profileChanged(a, a2) else { print("FAIL: identical images reported changed"); exit(1) }
 guard profileChanged(a, b) else { print("FAIL: different images not detected"); exit(1) }
 print("PASS: profile_signature_verified")
-"#,
-        "filter" => r#"
+"#
+        }
+        "filter" => {
+            r#"
 import Foundation
 let spec = ContactsManagerFilterSpec(x: 40, tagY: 167, allY: 52)
 // 全部：固定位置
@@ -75,8 +84,10 @@ guard managerFilterPoint(kind: "tag", y: 167, windowHeight: 560, spec: spec) == 
 guard managerFilterPoint(kind: "tag", y: 600, windowHeight: 560, spec: spec) == nil else { print("FAIL: tag outside window"); exit(1) }
 guard managerFilterPoint(kind: "other", y: 208, windowHeight: 560, spec: spec) == nil else { print("FAIL: unknown kind"); exit(1) }
 print("PASS: manager_filter_point_verified")
-"#,
-        "layout" => r#"
+"#
+        }
+        "layout" => {
+            r#"
 import Foundation
 
 // 1. 正常解析带有 contacts 段的布局
@@ -171,8 +182,10 @@ do {
     print("FAIL: unexpected non-LayoutError \(error)")
     exit(1)
 }
-"#,
-        "forbidden" => r#"
+"#
+        }
+        "forbidden" => {
+            r#"
 import Foundation
 
 let layoutPath = "native/layout/wechat-4.1.15.json"
@@ -226,8 +239,10 @@ guard filtered.allSatisfy({ ($0["text"] as? String) != "发消息" && ($0["text"
 }
 
 print("PASS: forbidden_click_guard_verified")
-"#,
-        "pick" => r#"
+"#
+        }
+        "pick" => {
+            r#"
 import Foundation
 
 // 主窗口 880x640，管理窗口 720x560 标题"通讯录管理"
@@ -267,7 +282,8 @@ guard pickedNone == nil else {
 }
 
 print("PASS: manager_window_pick_verified")
-"#,
+"#
+        }
         _ => panic!("unknown test case"),
     };
 
@@ -301,9 +317,18 @@ fn layout_contacts_section_parses() {
     let out = Command::new(&bin).output().expect("failed to run test bin");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "run failed: {}", stdout);
-    assert!(stdout.contains("PASS: layout_contacts_parsed"), "stdout: {stdout}");
-    assert!(stdout.contains("PASS: layout_missing_contacts"), "stdout: {stdout}");
-    assert!(stdout.contains("PASS: layout_contacts_builtin_for_4115"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("PASS: layout_contacts_parsed"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("PASS: layout_missing_contacts"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("PASS: layout_contacts_builtin_for_4115"),
+        "stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -314,7 +339,10 @@ fn forbidden_click_guard_rejects_profile_buttons() {
     let out = Command::new(&bin).output().expect("failed to run test bin");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "run failed: {}", stdout);
-    assert!(stdout.contains("PASS: forbidden_click_guard_verified"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("PASS: forbidden_click_guard_verified"),
+        "stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -325,7 +353,10 @@ fn manager_window_pick_prefers_titled_manager() {
     let out = Command::new(&bin).output().expect("failed to run test bin");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "run failed: {}", stdout);
-    assert!(stdout.contains("PASS: manager_window_pick_verified"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("PASS: manager_window_pick_verified"),
+        "stdout: {stdout}"
+    );
 }
 
 /// 标签筛选的点击位置不能靠"标题 y + 序号 × 行高"推算（实测标签间距与表格行高不同，序号 0 会点到"标签"标题本身）。
@@ -337,7 +368,10 @@ fn manager_filter_point_requires_observed_tag_y() {
     let out = Command::new(&bin).output().expect("failed to run test bin");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "run failed: {}", stdout);
-    assert!(stdout.contains("PASS: manager_filter_point_verified"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("PASS: manager_filter_point_verified"),
+        "stdout: {stdout}"
+    );
 }
 
 /// 通讯录页没有聊天输入框分隔线和会话标题：通讯录操作只能核对会话列表区（list_border），
@@ -345,10 +379,17 @@ fn manager_filter_point_requires_observed_tag_y() {
 #[test]
 fn contacts_operations_check_only_session_list_anchors() {
     let src = std::fs::read_to_string("native/bot/Contacts.swift").unwrap();
-    let calls: Vec<&str> = src.lines().filter(|l| l.contains("checkedScreen(") && !l.trim_start().starts_with("//")).collect();
+    let calls: Vec<&str> = src
+        .lines()
+        .filter(|l| l.contains("checkedScreen(") && !l.trim_start().starts_with("//"))
+        .collect();
     assert!(!calls.is_empty(), "通讯录操作应当截图核对");
     for l in calls {
-        assert!(l.contains("regions: [\"session_list\"]"), "通讯录操作只能核对会话列表区: {}", l.trim());
+        assert!(
+            l.contains("regions: [\"session_list\"]"),
+            "通讯录操作只能核对会话列表区: {}",
+            l.trim()
+        );
     }
 }
 
@@ -357,28 +398,49 @@ fn contacts_operations_check_only_session_list_anchors() {
 #[test]
 fn contacts_leave_closes_manager_window_first() {
     let src = std::fs::read_to_string("native/bot/Contacts.swift").unwrap();
-    let start = src.find("operation == \"contacts_leave\"").expect("contacts_leave");
+    let start = src
+        .find("operation == \"contacts_leave\"")
+        .expect("contacts_leave");
     let body = &src[start..(start + 1200).min(src.len())];
-    let close = body.find("closeManagerWindow(").expect("contacts_leave 必须先关闭通讯录管理窗口");
+    let close = body
+        .find("closeManagerWindow(")
+        .expect("contacts_leave 必须先关闭通讯录管理窗口");
     let gate = body.find("screenGate(").expect("gate");
-    assert!(close < gate, "必须在界面检查之前关闭管理窗口（否则被它挡住、检查失败）");
+    assert!(
+        close < gate,
+        "必须在界面检查之前关闭管理窗口（否则被它挡住、检查失败）"
+    );
 }
 
 /// 实机：点完联系人立刻截图，资料卡还没刷新，读到的是上一个人的（名字核对全部不通过）。
 /// 打开资料卡必须先记下点击前的画面指纹，点击后等到画面变化再识别。
 #[test]
 fn open_row_waits_for_profile_to_change() {
-    let Some(bin) = build_contacts_test_bin("signature") else { panic!("build failed") };
+    let Some(bin) = build_contacts_test_bin("signature") else {
+        panic!("build failed")
+    };
     let out = Command::new(&bin).output().expect("run");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("PASS: profile_signature_verified"), "{stdout}");
+    assert!(
+        stdout.contains("PASS: profile_signature_verified"),
+        "{stdout}"
+    );
     let src = std::fs::read_to_string("native/bot/Contacts.swift").unwrap();
-    let start = src.find("operation == \"contacts_open_row\"").expect("open_row");
+    let start = src
+        .find("operation == \"contacts_open_row\"")
+        .expect("open_row");
     let body = &src[start..(start + 2600).min(src.len())];
-    let before = body.find("profileSignature(").expect("点击前要记下资料卡画面指纹");
+    let before = body
+        .find("profileSignature(")
+        .expect("点击前要记下资料卡画面指纹");
     let click = body.find("botActions.click").expect("click");
-    let wait = body.find("profileChanged(").expect("点击后要等资料卡画面变化");
-    assert!(before < click && click < wait, "顺序：先记指纹、再点击、再等变化");
+    let wait = body
+        .find("profileChanged(")
+        .expect("点击后要等资料卡画面变化");
+    assert!(
+        before < click && click < wait,
+        "顺序：先记指纹、再点击、再等变化"
+    );
 }
 
 /// 用户要求：初始化通讯录时先停对话监控、整个过程独占微信，别的进程（网关等）不能在两次操作之间插进来。
@@ -387,12 +449,24 @@ fn open_row_waits_for_profile_to_change() {
 #[test]
 fn worker_supports_exclusive_desktop_lease() {
     let src = std::fs::read_to_string("native/bot/Worker.swift").unwrap();
-    assert!(src.contains("\"contacts_lease_begin\""), "需要 contacts_lease_begin");
-    assert!(src.contains("\"contacts_lease_end\""), "需要 contacts_lease_end");
+    assert!(
+        src.contains("\"contacts_lease_begin\""),
+        "需要 contacts_lease_begin"
+    );
+    assert!(
+        src.contains("\"contacts_lease_end\""),
+        "需要 contacts_lease_end"
+    );
     let wd = src.find("func withDesktop").unwrap();
     let body = &src[wd..wd + 700];
-    assert!(body.contains("desktopLeaseFD"), "withDesktop 在持有租约时不再加锁");
-    let dispatch = src.find("let result=try withDesktop").or_else(|| src.find("withDesktop { try worker.request")).unwrap();
+    assert!(
+        body.contains("desktopLeaseFD"),
+        "withDesktop 在持有租约时不再加锁"
+    );
+    let dispatch = src
+        .find("let result=try withDesktop")
+        .or_else(|| src.find("withDesktop { try worker.request"))
+        .unwrap();
     let lease = src.find("handleDesktopLease(").expect("租约请求单独处理");
     assert!(lease < dispatch, "租约请求必须在 withDesktop 之前处理");
 }
@@ -401,7 +475,9 @@ fn worker_supports_exclusive_desktop_lease() {
 /// 头像识别必须不受滚动条、选中行灰底影响，字母行和半个头像不算。
 #[test]
 fn avatar_rows_ignore_scrollbar_and_letter_rows() {
-    let Some(bin) = build_contacts_test_bin("avatars") else { panic!("build failed") };
+    let Some(bin) = build_contacts_test_bin("avatars") else {
+        panic!("build failed")
+    };
     let out = Command::new(&bin).output().expect("run");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("PASS: avatar_rows_verified"), "{stdout}");

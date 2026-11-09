@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
-use serde_json::{json, Value};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use serde_json::{Value, json};
 
 use super::names::name_key;
 
@@ -76,9 +76,21 @@ pub fn decode_cursor(text: &str, expected_size: usize) -> Result<Vec<Value>, Que
     let mut out = Vec::new();
     for chunk in bytes.chunks(4) {
         let c0 = decode_val(chunk[0])?;
-        let c1 = if chunk.len() > 1 { decode_val(chunk[1])? } else { 0 };
-        let c2 = if chunk.len() > 2 { decode_val(chunk[2])? } else { 0 };
-        let c3 = if chunk.len() > 3 { decode_val(chunk[3])? } else { 0 };
+        let c1 = if chunk.len() > 1 {
+            decode_val(chunk[1])?
+        } else {
+            0
+        };
+        let c2 = if chunk.len() > 2 {
+            decode_val(chunk[2])?
+        } else {
+            0
+        };
+        let c3 = if chunk.len() > 3 {
+            decode_val(chunk[3])?
+        } else {
+            0
+        };
 
         out.push((c0 << 2) | (c1 >> 4));
         if chunk.len() > 2 {
@@ -88,8 +100,8 @@ pub fn decode_cursor(text: &str, expected_size: usize) -> Result<Vec<Value>, Que
             out.push(((c2 & 3) << 6) | c3);
         }
     }
-    let val: Value = serde_json::from_slice(&out)
-        .map_err(|_| QueryError::invalid_argument("invalid cursor"))?;
+    let val: Value =
+        serde_json::from_slice(&out).map_err(|_| QueryError::invalid_argument("invalid cursor"))?;
     match val {
         Value::Array(arr) if arr.len() == expected_size => Ok(arr),
         _ => Err(QueryError::invalid_argument("invalid cursor")),
@@ -105,13 +117,15 @@ pub fn check_limit(limit: i64, kind: &str) -> Result<i64, QueryError> {
         _ => 200,
     };
     if limit < 1 || limit > max {
-        return Err(QueryError::invalid_argument(format!("limit must be 1..{}", max)));
+        return Err(QueryError::invalid_argument(format!(
+            "limit must be 1..{}",
+            max
+        )));
     }
     Ok(limit)
 }
 
-pub const MESSAGE_SELECT: &str =
-    "SELECT m.rowid AS rid, m.message_id, m.contact_id, m.seq, m.direction, m.sender, m.kind, m.text, \
+pub const MESSAGE_SELECT: &str = "SELECT m.rowid AS rid, m.message_id, m.contact_id, m.seq, m.direction, m.sender, m.kind, m.text, \
      m.observed_at, m.capture, m.meta, m.send_key, s.status AS send_status, s.echo_observed, \
      m.media_id, md.kind AS media_kind, md.filename AS media_filename, md.source AS media_source, \
      md.understanding AS media_understanding \
@@ -125,13 +139,19 @@ pub struct HistoryQuery {
 }
 
 impl HistoryQuery {
-    pub fn open(db_path: impl AsRef<Path>, default_recent: Option<i64>) -> Result<Self, QueryError> {
+    pub fn open(
+        db_path: impl AsRef<Path>,
+        default_recent: Option<i64>,
+    ) -> Result<Self, QueryError> {
         let path = db_path.as_ref().to_path_buf();
         if !path.exists() {
             return Err(QueryError::not_found("history database does not exist"));
         }
-        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI)
-            .map_err(|e| QueryError::new("open_failed", e.to_string()))?;
+        let conn = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )
+        .map_err(|e| QueryError::new("open_failed", e.to_string()))?;
         conn.busy_timeout(std::time::Duration::from_millis(5000))
             .map_err(|e| QueryError::new("db_error", e.to_string()))?;
         Ok(Self {
@@ -159,7 +179,9 @@ impl HistoryQuery {
             .prepare("SELECT contact_id, merged_into FROM contacts")
             .map_err(|e| QueryError::new("db_error", e.to_string()))?;
         let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })
             .map_err(|e| QueryError::new("db_error", e.to_string()))?;
         let mut map = HashMap::new();
         for r in rows {
@@ -207,7 +229,13 @@ impl HistoryQuery {
             .query_row(
                 "SELECT contact_id, account_id, display_name FROM contacts WHERE contact_id=?",
                 params![root],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
             )
             .optional()
             .map_err(|e| QueryError::new("db_error", e.to_string()))?;
@@ -221,13 +249,16 @@ impl HistoryQuery {
             "SELECT DISTINCT raw_name FROM contact_names WHERE contact_id IN ({}) ORDER BY id",
             marks
         );
-        let params_vec: Vec<&dyn rusqlite::ToSql> = family.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let params_vec: Vec<&dyn rusqlite::ToSql> =
+            family.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
         let mut names_stmt = self
             .conn
             .prepare(&names_sql)
             .map_err(|e| QueryError::new("db_error", e.to_string()))?;
         let names_mapped = names_stmt
-            .query_map(rusqlite::params_from_iter(params_vec.clone()), |r| r.get::<_, String>(0))
+            .query_map(rusqlite::params_from_iter(params_vec.clone()), |r| {
+                r.get::<_, String>(0)
+            })
             .map_err(|e| QueryError::new("db_error", e.to_string()))?;
         let mut names = Vec::new();
         for n in names_mapped {
@@ -309,13 +340,16 @@ impl HistoryQuery {
         let lim = check_limit(limit.unwrap_or(50), "contacts")?;
         let after: i64 = if let Some(cur) = cursor {
             let decoded = decode_cursor(cur, 1)?;
-            decoded[0].as_i64().ok_or_else(|| QueryError::invalid_argument("invalid cursor"))?
+            decoded[0]
+                .as_i64()
+                .ok_or_else(|| QueryError::invalid_argument("invalid cursor"))?
         } else {
             0
         };
 
         let mut where_clause = "c.rowid > ? AND c.merged_into IS NULL".to_string();
-        let mut params_vec: Vec<rusqlite::types::Value> = vec![rusqlite::types::Value::Integer(after)];
+        let mut params_vec: Vec<rusqlite::types::Value> =
+            vec![rusqlite::types::Value::Integer(after)];
 
         if let Some(q) = query {
             where_clause.push_str(" AND EXISTS (SELECT 1 FROM contact_names n WHERE n.contact_id=c.contact_id AND instr(n.name_key, ?) > 0)");
@@ -347,10 +381,18 @@ impl HistoryQuery {
         );
         params_vec.push(rusqlite::types::Value::Integer(lim + 1));
 
-        let mut stmt = self.conn.prepare(&sql).map_err(|e| QueryError::new("db_error", e.to_string()))?;
-        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec
+            .iter()
+            .map(|p| p as &dyn rusqlite::ToSql)
+            .collect();
         let mapped = stmt
-            .query_map(rusqlite::params_from_iter(params_refs), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .query_map(rusqlite::params_from_iter(params_refs), |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })
             .map_err(|e| QueryError::new("db_error", e.to_string()))?;
 
         let mut rows_vec = Vec::new();
@@ -385,7 +427,9 @@ impl HistoryQuery {
         name: Option<&str>,
     ) -> Result<Value, QueryError> {
         if contact_id.is_some() == name.is_some() {
-            return Err(QueryError::invalid_argument("give exactly one of contact_id or name"));
+            return Err(QueryError::invalid_argument(
+                "give exactly one of contact_id or name",
+            ));
         }
         let target_cid = if let Some(n) = name {
             let merged = self._merged()?;
@@ -406,7 +450,9 @@ impl HistoryQuery {
                 return Err(QueryError::not_found("unknown contact name"));
             }
             if owners.len() > 1 {
-                return Err(QueryError::invalid_argument("name matches several contacts; use contact_id"));
+                return Err(QueryError::invalid_argument(
+                    "name matches several contacts; use contact_id",
+                ));
             }
             owners.into_iter().next().unwrap()
         } else {
@@ -426,23 +472,57 @@ impl HistoryQuery {
     // Messages -----------------------------------------------------------------
 
     fn _message(&self, row: &rusqlite::Row, with_meta: bool) -> Result<Value, QueryError> {
-        let message_id: String = row.get("message_id").map_err(|e| QueryError::new("db_error", e.to_string()))?;
-        let contact_id: String = row.get("contact_id").map_err(|e| QueryError::new("db_error", e.to_string()))?;
-        let seq: i64 = row.get("seq").map_err(|e| QueryError::new("db_error", e.to_string()))?;
-        let direction: String = row.get("direction").map_err(|e| QueryError::new("db_error", e.to_string()))?;
-        let sender: String = row.get("sender").map_err(|e| QueryError::new("db_error", e.to_string()))?;
-        let kind: String = row.get("kind").map_err(|e| QueryError::new("db_error", e.to_string()))?;
-        let text: String = row.get("text").map_err(|e| QueryError::new("db_error", e.to_string()))?;
-        let observed_at: i64 = row.get("observed_at").map_err(|e| QueryError::new("db_error", e.to_string()))?;
-        let capture: String = row.get("capture").map_err(|e| QueryError::new("db_error", e.to_string()))?;
-        let send_key: Option<String> = row.get("send_key").map_err(|e| QueryError::new("db_error", e.to_string()))?;
-        let send_status: Option<String> = row.get("send_status").map_err(|e| QueryError::new("db_error", e.to_string()))?;
-        let echo_observed: Option<i64> = row.get("echo_observed").map_err(|e| QueryError::new("db_error", e.to_string()))?;
-        let media_id: Option<String> = row.get("media_id").map_err(|e| QueryError::new("db_error", e.to_string()))?;
-        let media_kind: Option<String> = row.get("media_kind").map_err(|e| QueryError::new("db_error", e.to_string()))?;
-        let media_filename: Option<String> = row.get("media_filename").map_err(|e| QueryError::new("db_error", e.to_string()))?;
-        let media_source: Option<String> = row.get("media_source").map_err(|e| QueryError::new("db_error", e.to_string()))?;
-        let media_understanding: Option<String> = row.get("media_understanding").map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let message_id: String = row
+            .get("message_id")
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let contact_id: String = row
+            .get("contact_id")
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let seq: i64 = row
+            .get("seq")
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let direction: String = row
+            .get("direction")
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let sender: String = row
+            .get("sender")
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let kind: String = row
+            .get("kind")
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let text: String = row
+            .get("text")
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let observed_at: i64 = row
+            .get("observed_at")
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let capture: String = row
+            .get("capture")
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let send_key: Option<String> = row
+            .get("send_key")
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let send_status: Option<String> = row
+            .get("send_status")
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let echo_observed: Option<i64> = row
+            .get("echo_observed")
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let media_id: Option<String> = row
+            .get("media_id")
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let media_kind: Option<String> = row
+            .get("media_kind")
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let media_filename: Option<String> = row
+            .get("media_filename")
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let media_source: Option<String> = row
+            .get("media_source")
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let media_understanding: Option<String> = row
+            .get("media_understanding")
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
 
         let send = if let Some(sk) = send_key {
             Some(json!({
@@ -481,7 +561,9 @@ impl HistoryQuery {
         });
 
         if with_meta {
-            let meta_str: String = row.get("meta").map_err(|e| QueryError::new("db_error", e.to_string()))?;
+            let meta_str: String = row
+                .get("meta")
+                .map_err(|e| QueryError::new("db_error", e.to_string()))?;
             let meta_val: Value = serde_json::from_str(&meta_str).unwrap_or(json!({}));
             item["meta"] = meta_val;
         }
@@ -559,13 +641,23 @@ impl HistoryQuery {
         q_params.push(Box::new(lim + 1));
 
         let params_refs: Vec<&dyn rusqlite::ToSql> = q_params.iter().map(|b| b.as_ref()).collect();
-        let mut stmt = self.conn.prepare(&sql).map_err(|e| QueryError::new("db_error", e.to_string()))?;
-        let mut rows = stmt.query(rusqlite::params_from_iter(params_refs)).map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let mut rows = stmt
+            .query(rusqlite::params_from_iter(params_refs))
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
 
         let mut items = Vec::new();
         let mut rids = Vec::new();
-        while let Some(row) = rows.next().map_err(|e| QueryError::new("db_error", e.to_string()))? {
-            let rid: i64 = row.get("rid").map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?
+        {
+            let rid: i64 = row
+                .get("rid")
+                .map_err(|e| QueryError::new("db_error", e.to_string()))?;
             rids.push(rid);
             items.push(self._message(row, false)?);
         }
@@ -632,8 +724,13 @@ impl HistoryQuery {
         let family = if let Some(cid) = contact_id {
             self._family(cid)?.1
         } else {
-            let mut stmt = self.conn.prepare("SELECT contact_id FROM contacts").map_err(|e| QueryError::new("db_error", e.to_string()))?;
-            let mapped = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(|e| QueryError::new("db_error", e.to_string()))?;
+            let mut stmt = self
+                .conn
+                .prepare("SELECT contact_id FROM contacts")
+                .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+            let mapped = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(|e| QueryError::new("db_error", e.to_string()))?;
             let mut all_c = Vec::new();
             for c in mapped {
                 all_c.push(c.map_err(|e| QueryError::new("db_error", e.to_string()))?);
@@ -672,13 +769,23 @@ impl HistoryQuery {
         params.push(Box::new(lim + 1));
 
         let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
-        let mut stmt = self.conn.prepare(&sql).map_err(|e| QueryError::new("db_error", e.to_string()))?;
-        let mut rows = stmt.query(rusqlite::params_from_iter(params_refs)).map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let mut rows = stmt
+            .query(rusqlite::params_from_iter(params_refs))
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
 
         let mut items = Vec::new();
         let mut rids = Vec::new();
-        while let Some(row) = rows.next().map_err(|e| QueryError::new("db_error", e.to_string()))? {
-            let rid: i64 = row.get("rid").map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?
+        {
+            let rid: i64 = row
+                .get("rid")
+                .map_err(|e| QueryError::new("db_error", e.to_string()))?;
             rids.push(rid);
             let mut item = self._message(row, false)?;
 
@@ -687,7 +794,11 @@ impl HistoryQuery {
             let mut ctx_stmt = self.conn.prepare(
                 "SELECT message_id FROM messages WHERE contact_id=? AND seq BETWEEN ? AND ? AND seq != ? ORDER BY seq",
             ).map_err(|e| QueryError::new("db_error", e.to_string()))?;
-            let ctx_rows = ctx_stmt.query_map(params![cid, seq - 2, seq + 2, seq], |r| r.get::<_, String>(0)).map_err(|e| QueryError::new("db_error", e.to_string()))?;
+            let ctx_rows = ctx_stmt
+                .query_map(params![cid, seq - 2, seq + 2, seq], |r| {
+                    r.get::<_, String>(0)
+                })
+                .map_err(|e| QueryError::new("db_error", e.to_string()))?;
             let mut ctx_ids = Vec::new();
             for id in ctx_rows {
                 ctx_ids.push(id.map_err(|e| QueryError::new("db_error", e.to_string()))?);
@@ -739,7 +850,9 @@ impl HistoryQuery {
         let family: Vec<String> = contacts.iter().cloned().collect();
 
         let (mut where_clause, mut params) = self._range(&family, since, until, cursor, "desc")?;
-        where_clause.push_str(" AND m.account_id = (SELECT account_id FROM contacts WHERE contact_id=m.contact_id)");
+        where_clause.push_str(
+            " AND m.account_id = (SELECT account_id FROM contacts WHERE contact_id=m.contact_id)",
+        );
         let escaped_like = format!(
             "%{}%",
             trimmed_q
@@ -770,13 +883,23 @@ impl HistoryQuery {
         params.push(Box::new(lim + 1));
 
         let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
-        let mut stmt = self.conn.prepare(&sql).map_err(|e| QueryError::new("db_error", e.to_string()))?;
-        let mut rows = stmt.query(rusqlite::params_from_iter(params_refs)).map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let mut rows = stmt
+            .query(rusqlite::params_from_iter(params_refs))
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
 
         let mut items = Vec::new();
         let mut rids = Vec::new();
-        while let Some(row) = rows.next().map_err(|e| QueryError::new("db_error", e.to_string()))? {
-            let rid: i64 = row.get("rid").map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?
+        {
+            let rid: i64 = row
+                .get("rid")
+                .map_err(|e| QueryError::new("db_error", e.to_string()))?;
             rids.push(rid);
             let mut item = self._message(row, false)?;
 
@@ -785,7 +908,11 @@ impl HistoryQuery {
             let mut ctx_stmt = self.conn.prepare(
                 "SELECT message_id FROM messages WHERE contact_id=? AND account_id=(SELECT account_id FROM contacts WHERE contact_id=messages.contact_id) AND seq BETWEEN ? AND ? AND seq != ? ORDER BY seq",
             ).map_err(|e| QueryError::new("db_error", e.to_string()))?;
-            let ctx_rows = ctx_stmt.query_map(params![cid, seq - 2, seq + 2, seq], |r| r.get::<_, String>(0)).map_err(|e| QueryError::new("db_error", e.to_string()))?;
+            let ctx_rows = ctx_stmt
+                .query_map(params![cid, seq - 2, seq + 2, seq], |r| {
+                    r.get::<_, String>(0)
+                })
+                .map_err(|e| QueryError::new("db_error", e.to_string()))?;
             let mut ctx_ids = Vec::new();
             for id in ctx_rows {
                 ctx_ids.push(id.map_err(|e| QueryError::new("db_error", e.to_string()))?);
@@ -816,20 +943,35 @@ impl HistoryQuery {
 
     /// Media belongs to messages, rather than directly to a contact or account.
     #[allow(dead_code)]
-    pub fn media_owners(&self, media_id: &str) -> Result<Vec<(String, String, String)>, QueryError> {
-        let mut stmt = self.conn.prepare("SELECT message_id, contact_id, account_id FROM messages WHERE media_id=?")
+    pub fn media_owners(
+        &self,
+        media_id: &str,
+    ) -> Result<Vec<(String, String, String)>, QueryError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT message_id, contact_id, account_id FROM messages WHERE media_id=?")
             .map_err(|e| QueryError::new("db_error", e.to_string()))?;
-        stmt.query_map([media_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-            .map_err(|e| QueryError::new("db_error", e.to_string()))?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|e| QueryError::new("db_error", e.to_string()))
+        stmt.query_map([media_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(|e| QueryError::new("db_error", e.to_string()))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| QueryError::new("db_error", e.to_string()))
     }
 
     pub fn get_message(&self, message_id: &str) -> Result<Value, QueryError> {
         let sql = format!("{} WHERE m.message_id=?", MESSAGE_SELECT);
-        let mut stmt = self.conn.prepare(&sql).map_err(|e| QueryError::new("db_error", e.to_string()))?;
-        let mut rows = stmt.query(params![message_id]).map_err(|e| QueryError::new("db_error", e.to_string()))?;
-        if let Some(r) = rows.next().map_err(|e| QueryError::new("db_error", e.to_string()))? {
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        let mut rows = stmt
+            .query(params![message_id])
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?;
+        if let Some(r) = rows
+            .next()
+            .map_err(|e| QueryError::new("db_error", e.to_string()))?
+        {
             self._message(r, true)
         } else {
             Err(QueryError::not_found("unknown message"))
@@ -858,10 +1000,11 @@ impl HistoryQuery {
             .optional()
             .map_err(|e| QueryError::new("db_error", e.to_string()))?;
 
-        let (mid, kind, filename, extension, size, source, rel_path, understanding, understood_at) = match row_opt {
-            Some(v) => v,
-            None => return Err(QueryError::not_found("unknown media")),
-        };
+        let (mid, kind, filename, extension, size, source, rel_path, understanding, understood_at) =
+            match row_opt {
+                Some(v) => v,
+                None => return Err(QueryError::not_found("unknown media")),
+            };
 
         let media_root = self
             .path
@@ -897,10 +1040,10 @@ impl HistoryQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use crate::core::history::store::HistoryStore;
     use crate::core::model::Bubble;
     use serde_json::json;
+    use std::fs;
 
     fn bub(text: &str, direction: &str, kind: &str) -> Bubble {
         Bubble {
@@ -931,7 +1074,10 @@ mod tests {
     struct TestTempDir(PathBuf);
     impl TestTempDir {
         fn new() -> Self {
-            let p = std::env::temp_dir().join(format!("wechat-history-test-{}", uuid::Uuid::new_v4().simple()));
+            let p = std::env::temp_dir().join(format!(
+                "wechat-history-test-{}",
+                uuid::Uuid::new_v4().simple()
+            ));
             fs::create_dir_all(&p).unwrap();
             Self(p)
         }
@@ -961,7 +1107,11 @@ mod tests {
         let state = temp.path().join("state");
         let writer = HistoryStore::open(&state).unwrap();
         let c = writer
-            .ensure_contact("acct", &json!({"recipient": "🍓小美", "kind": "private"}), true)
+            .ensure_contact(
+                "acct",
+                &json!({"recipient": "🍓小美", "kind": "private"}),
+                true,
+            )
             .unwrap();
         let c2 = writer
             .ensure_contact("acct", &json!({"recipient": "乙", "kind": "private"}), true)
@@ -974,18 +1124,37 @@ mod tests {
             bub("收到", "inbound_visual", "text"),
         ];
 
-        writer.record_frame(&c, &fr(visible.clone()), None, None, false).unwrap();
         writer
-            .record_bot_reply(&c, "k1", "好的，已为您登记", "generated", &json!({}), &[], None, None)
+            .record_frame(&c, &fr(visible.clone()), None, None, false)
+            .unwrap();
+        writer
+            .record_bot_reply(
+                &c,
+                "k1",
+                "好的，已为您登记",
+                "generated",
+                &json!({}),
+                &[],
+                None,
+                None,
+            )
             .unwrap();
         writer.update_send("k1", "triggered", None).unwrap();
 
         let mut frame2_bubbles = visible.clone();
         frame2_bubbles.push(bub("好的，已为您登记", "outbound_visual", "text"));
-        writer.record_frame(&c, &fr(frame2_bubbles), None, None, false).unwrap();
+        writer
+            .record_frame(&c, &fr(frame2_bubbles), None, None, false)
+            .unwrap();
 
         writer
-            .record_frame(&c2, &fr(vec![bub("乙的消息", "inbound_visual", "text")]), None, None, false)
+            .record_frame(
+                &c2,
+                &fr(vec![bub("乙的消息", "inbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
             .unwrap();
 
         let expected_texts = vec![
@@ -1032,7 +1201,8 @@ mod tests {
     #[test]
     fn test_query_recent_messages_default_limit_and_order() {
         let f = setup_fixture();
-        let q = HistoryQuery::open(f.state.join("history").join("history.sqlite3"), Some(3)).unwrap();
+        let q =
+            HistoryQuery::open(f.state.join("history").join("history.sqlite3"), Some(3)).unwrap();
         assert_eq!(
             texts(&q.get_recent_messages(&f.c, None).unwrap()),
             vec!["已发顺丰", "收到", "好的，已为您登记"]
@@ -1042,16 +1212,22 @@ mod tests {
     #[test]
     fn test_query_pagination_stable_while_writing() {
         let f = setup_fixture();
-        let mut page = f.q.get_history(&f.c, None, None, None, Some(3), None).unwrap();
+        let mut page =
+            f.q.get_history(&f.c, None, None, None, Some(3), None)
+                .unwrap();
         let mut seen = texts(&page);
 
         let mut frame_new = f.visible.clone();
         frame_new.push(bub("好的，已为您登记", "outbound_visual", "text"));
         frame_new.push(bub("新", "inbound_visual", "text"));
-        f.writer.record_frame(&f.c, &fr(frame_new), None, None, false).unwrap();
+        f.writer
+            .record_frame(&f.c, &fr(frame_new), None, None, false)
+            .unwrap();
 
         while let Some(cur) = page["next_cursor"].as_str() {
-            page = f.q.get_history(&f.c, None, None, Some(cur), Some(3), None).unwrap();
+            page =
+                f.q.get_history(&f.c, None, None, Some(cur), Some(3), None)
+                    .unwrap();
             seen.extend(texts(&page));
         }
 
@@ -1063,28 +1239,38 @@ mod tests {
     #[test]
     fn test_query_tail_cursor_follows_new_messages() {
         let f = setup_fixture();
-        let page = f.q.get_history(&f.c, None, None, None, Some(500), None).unwrap();
+        let page =
+            f.q.get_history(&f.c, None, None, None, Some(500), None)
+                .unwrap();
         assert!(page["next_cursor"].is_null());
 
         let mut frame_new = f.visible.clone();
         frame_new.push(bub("好的，已为您登记", "outbound_visual", "text"));
         frame_new.push(bub("后来的", "inbound_visual", "text"));
-        f.writer.record_frame(&f.c, &fr(frame_new), None, None, false).unwrap();
+        f.writer
+            .record_frame(&f.c, &fr(frame_new), None, None, false)
+            .unwrap();
 
         let tail = page["tail_cursor"].as_str().unwrap();
-        let newer = f.q.get_history(&f.c, None, None, Some(tail), None, None).unwrap();
+        let newer =
+            f.q.get_history(&f.c, None, None, Some(tail), None, None)
+                .unwrap();
         assert_eq!(texts(&newer), vec!["后来的"]);
     }
 
     #[test]
     fn test_query_clock_rollback_does_not_skip_messages() {
         let f = setup_fixture();
-        let page = f.q.get_history(&f.c, None, None, None, Some(500), None).unwrap();
+        let page =
+            f.q.get_history(&f.c, None, None, None, Some(500), None)
+                .unwrap();
 
         let mut frame_new = f.visible.clone();
         frame_new.push(bub("好的，已为您登记", "outbound_visual", "text"));
         frame_new.push(bub("回拨后", "inbound_visual", "text"));
-        f.writer.record_frame(&f.c, &fr(frame_new), None, None, false).unwrap();
+        f.writer
+            .record_frame(&f.c, &fr(frame_new), None, None, false)
+            .unwrap();
 
         f.writer
             .connection()
@@ -1094,47 +1280,76 @@ mod tests {
             .unwrap();
 
         let tail = page["tail_cursor"].as_str().unwrap();
-        let res = f.q.get_history(&f.c, None, None, Some(tail), None, None).unwrap();
+        let res =
+            f.q.get_history(&f.c, None, None, Some(tail), None, None)
+                .unwrap();
         assert_eq!(texts(&res), vec!["回拨后"]);
     }
 
     #[test]
     fn test_query_desc_order_and_time_range() {
         let f = setup_fixture();
-        let page = f.q.get_history(&f.c, None, None, None, Some(2), Some("desc")).unwrap();
+        let page =
+            f.q.get_history(&f.c, None, None, None, Some(2), Some("desc"))
+                .unwrap();
         assert_eq!(texts(&page), vec!["好的，已为您登记", "收到"]);
 
-        let future = f.q.get_history(&f.c, Some(10i64.pow(15)), None, None, None, None).unwrap();
+        let future =
+            f.q.get_history(&f.c, Some(10i64.pow(15)), None, None, None, None)
+                .unwrap();
         assert_eq!(future["items"].as_array().unwrap().len(), 0);
     }
 
     #[test]
     fn test_query_concurrent_read_during_open_write_transaction() {
         let f = setup_fixture();
-        f.writer.connection().lock().unwrap().execute("BEGIN IMMEDIATE", []).unwrap();
-        f.writer.connection().lock().unwrap().execute(
-            "insert into merges(from_contact,into_contact,created_at) values('a','b',1)",
-            [],
-        ).unwrap();
+        f.writer
+            .connection()
+            .lock()
+            .unwrap()
+            .execute("BEGIN IMMEDIATE", [])
+            .unwrap();
+        f.writer
+            .connection()
+            .lock()
+            .unwrap()
+            .execute(
+                "insert into merges(from_contact,into_contact,created_at) values('a','b',1)",
+                [],
+            )
+            .unwrap();
 
         let recent = f.q.get_recent_messages(&f.c, None).unwrap();
         assert_eq!(recent["items"].as_array().unwrap().len(), 5);
 
-        f.writer.connection().lock().unwrap().execute("ROLLBACK", []).unwrap();
+        f.writer
+            .connection()
+            .lock()
+            .unwrap()
+            .execute("ROLLBACK", [])
+            .unwrap();
     }
 
     #[test]
     fn test_query_search_trigram_and_short_term_fallback() {
         let f = setup_fixture();
         assert_eq!(
-            texts(&f.q.search_messages("上次那个", None, None, None, None, None).unwrap()),
+            texts(
+                &f.q.search_messages("上次那个", None, None, None, None, None)
+                    .unwrap()
+            ),
             vec!["还是上次那个款"]
         );
         assert_eq!(
-            texts(&f.q.search_messages("顺丰", None, None, None, None, None).unwrap()),
+            texts(
+                &f.q.search_messages("顺丰", None, None, None, None, None)
+                    .unwrap()
+            ),
             vec!["已发顺丰"]
         );
-        let hits = f.q.search_messages("上次那个", None, None, None, None, None).unwrap();
+        let hits =
+            f.q.search_messages("上次那个", None, None, None, None, None)
+                .unwrap();
         let hit = &hits["items"][0];
         assert_eq!(hit["context_ids"].as_array().unwrap().len(), 3);
     }
@@ -1142,10 +1357,14 @@ mod tests {
     #[test]
     fn test_query_search_scoped_to_contact() {
         let f = setup_fixture();
-        let scoped = f.q.search_messages("消息", Some(&f.c), None, None, None, None).unwrap();
+        let scoped =
+            f.q.search_messages("消息", Some(&f.c), None, None, None, None)
+                .unwrap();
         assert_eq!(scoped["items"].as_array().unwrap().len(), 0);
 
-        let hit = f.q.search_messages("乙的消息", None, None, None, None, None).unwrap();
+        let hit =
+            f.q.search_messages("乙的消息", None, None, None, None, None)
+                .unwrap();
         assert_eq!(texts(&hit), vec!["乙的消息"]);
     }
 
@@ -1164,7 +1383,9 @@ mod tests {
             .collect();
         assert_eq!(listed, vec![f.c.clone()]);
         assert_eq!(
-            f.q.get_contact(Some(&f.c2), None).unwrap()["contact_id"].as_str().unwrap(),
+            f.q.get_contact(Some(&f.c2), None).unwrap()["contact_id"]
+                .as_str()
+                .unwrap(),
             f.c
         );
     }
@@ -1185,16 +1406,22 @@ mod tests {
     #[test]
     fn test_query_limits_cursor_and_unknown_ids() {
         let f = setup_fixture();
-        let err1 = f.q.get_history(&f.c, None, None, None, Some(501), None).unwrap_err();
+        let err1 =
+            f.q.get_history(&f.c, None, None, None, Some(501), None)
+                .unwrap_err();
         assert_eq!(err1.code, "invalid_argument");
 
-        let err2 = f.q.get_history(&f.c, None, None, Some("garbage"), None, None).unwrap_err();
+        let err2 =
+            f.q.get_history(&f.c, None, None, Some("garbage"), None, None)
+                .unwrap_err();
         assert_eq!(err2.code, "invalid_argument");
 
         let err3 = f.q.get_message("m_missing").unwrap_err();
         assert_eq!(err3.code, "not_found");
 
-        let err4 = f.q.get_history("c_missing", None, None, None, None, None).unwrap_err();
+        let err4 =
+            f.q.get_history("c_missing", None, None, None, None, None)
+                .unwrap_err();
         assert_eq!(err4.code, "not_found");
     }
 
@@ -1205,7 +1432,12 @@ mod tests {
         let b = f.q.get_contact(None, Some("小美")).unwrap();
         assert_eq!(a["contact_id"], b["contact_id"]);
         assert_eq!(a["message_count"], 5);
-        let names: Vec<String> = a["names"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        let names: Vec<String> = a["names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
         assert!(names.contains(&"🍓小美".to_string()));
     }
 
@@ -1240,7 +1472,8 @@ mod tests {
             .to_string();
         let src = f._temp.path().join("q.png");
         fs::write(&src, b"img2").unwrap();
-        let media_id = f.writer
+        let media_id = f
+            .writer
             .attach_media(&mid, &src, "image", None, "original", None)
             .unwrap();
         f.writer
@@ -1248,13 +1481,21 @@ mod tests {
             .unwrap();
 
         let message = f.q.get_message(&mid).unwrap();
-        assert_eq!(message["media"]["understanding"].as_str().unwrap(), "顺丰快递面单，单号SF123");
+        assert_eq!(
+            message["media"]["understanding"].as_str().unwrap(),
+            "顺丰快递面单，单号SF123"
+        );
         assert_eq!(message["media"]["source"].as_str().unwrap(), "original");
 
         let (info, _) = f.q.get_media(&media_id).unwrap();
-        assert_eq!(info["understanding"].as_str().unwrap(), "顺丰快递面单，单号SF123");
+        assert_eq!(
+            info["understanding"].as_str().unwrap(),
+            "顺丰快递面单，单号SF123"
+        );
 
-        let hits = f.q.search_messages("快递面单", Some(&f.c), None, None, None, None).unwrap();
+        let hits =
+            f.q.search_messages("快递面单", Some(&f.c), None, None, None, None)
+                .unwrap();
         let hit_mids: Vec<String> = hits["items"]
             .as_array()
             .unwrap()
@@ -1263,7 +1504,9 @@ mod tests {
             .collect();
         assert_eq!(hit_mids, vec![mid.clone()]);
 
-        let hits2 = f.q.search_messages("SF", Some(&f.c), None, None, None, None).unwrap();
+        let hits2 =
+            f.q.search_messages("SF", Some(&f.c), None, None, None, None)
+                .unwrap();
         let hit2_mids: Vec<String> = hits2["items"]
             .as_array()
             .unwrap()
@@ -1285,7 +1528,8 @@ mod tests {
 
         let src = f._temp.path().join("p.png");
         fs::write(&src, b"img").unwrap();
-        let media_id = f.writer
+        let media_id = f
+            .writer
             .attach_media(&mid, &src, "image", None, "chat_thumbnail", None)
             .unwrap();
 
@@ -1293,7 +1537,9 @@ mod tests {
         assert_eq!(info["kind"].as_str().unwrap(), "image");
         assert_eq!(fs::read(path).unwrap(), b"img");
         assert_eq!(
-            f.q.get_message(&mid).unwrap()["media"]["media_id"].as_str().unwrap(),
+            f.q.get_message(&mid).unwrap()["media"]["media_id"]
+                .as_str()
+                .unwrap(),
             media_id
         );
     }

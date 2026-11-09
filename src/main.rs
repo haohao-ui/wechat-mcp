@@ -79,7 +79,13 @@ async fn async_main() -> Result<()> {
                     eprintln!("error: serve-core requires --config <path>");
                     std::process::exit(2);
                 };
-                match core::serve::run_serve_core_with(&cfg_path, None, core::serve::AccountSource::WeChat).await {
+                match core::serve::run_serve_core_with(
+                    &cfg_path,
+                    None,
+                    core::serve::AccountSource::WeChat,
+                )
+                .await
+                {
                     Ok(code) => std::process::exit(code),
                     Err(err) => {
                         eprintln!("{}", err);
@@ -164,7 +170,10 @@ async fn async_main() -> Result<()> {
                 };
                 match core::backup::run_restore(&from_path, &config) {
                     Ok(()) => {
-                        println!("Restore completed successfully from {}", from_path.display());
+                        println!(
+                            "Restore completed successfully from {}",
+                            from_path.display()
+                        );
                         std::process::exit(0);
                     }
                     Err(err) => {
@@ -173,15 +182,13 @@ async fn async_main() -> Result<()> {
                     }
                 }
             }
-            "replay" => {
-                match core::replay::run_replay_cli(&args[2..]).await {
-                    Ok(code) => std::process::exit(code),
-                    Err(err) => {
-                        eprintln!("{}", err);
-                        std::process::exit(2);
-                    }
+            "replay" => match core::replay::run_replay_cli(&args[2..]).await {
+                Ok(code) => std::process::exit(code),
+                Err(err) => {
+                    eprintln!("{}", err);
+                    std::process::exit(2);
                 }
-            }
+            },
             _ => {}
         }
     }
@@ -494,7 +501,8 @@ mod tests {
         assert_eq!(exit_code_for_serve_error(&load_err), 2);
 
         // 运行时临时错误（文件锁、端口绑定、socket 争用、数据库 IO）：必须返回退出码 1
-        let lock_err = anyhow!("state lock error in /path/to/state: Resource temporarily unavailable");
+        let lock_err =
+            anyhow!("state lock error in /path/to/state: Resource temporarily unavailable");
         assert_eq!(exit_code_for_serve_error(&lock_err), 1);
 
         let bind_err = anyhow!("failed to bind core.sock: Address already in use");

@@ -1,14 +1,14 @@
+use anyhow::{Context, Result};
+use fs2::FileExt;
+use serde_json::json;
 use std::fs::{self, File, OpenOptions};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::time::Duration;
-use anyhow::{Context, Result};
-use fs2::FileExt;
-use serde_json::json;
 
 use crate::core::config::{BotConfig, BrainMode};
-use crate::core::external_brain::{bind_core_socket, start_socket_server, ExternalBrain};
+use crate::core::external_brain::{ExternalBrain, bind_core_socket, start_socket_server};
 use crate::core::mcp_client::McpSocketClient;
 use crate::core::scheduler::BotCoordinator;
 use crate::core::state::{read_json, write_private};
@@ -88,8 +88,12 @@ pub fn acquire_core_lock(state_dir: &Path) -> Result<File> {
         .with_context(|| format!("failed to open lock file {}", lock_path.display()))?;
     let _ = fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600));
 
-    file.try_lock_exclusive()
-        .with_context(|| format!("failed to acquire core.lock at {}: another instance is running", lock_path.display()))?;
+    file.try_lock_exclusive().with_context(|| {
+        format!(
+            "failed to acquire core.lock at {}: another instance is running",
+            lock_path.display()
+        )
+    })?;
 
     Ok(file)
 }
@@ -178,12 +182,21 @@ pub async fn run_serve_core_with(
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 };
                 // 第一次识别到账号：旧数据分不清属于哪个号，备份后清空，当前号从零开始（只做一次）
-                if crate::core::wechat_account::start_fresh_once(&config.state_dir, &config.account_id, &acc, now_secs())
-                    .context("account start-fresh failed")?
+                if crate::core::wechat_account::start_fresh_once(
+                    &config.state_dir,
+                    &config.account_id,
+                    &acc,
+                    now_secs(),
+                )
+                .context("account start-fresh failed")?
                 {
                     eprintln!("wechat account bound: previous data backed up and cleared");
                 }
-                crate::core::wechat_account::record_current_account(&config.state_dir, &acc, now_secs())?;
+                crate::core::wechat_account::record_current_account(
+                    &config.state_dir,
+                    &acc,
+                    now_secs(),
+                )?;
                 Some(acc)
             }
         };
@@ -210,22 +223,28 @@ async fn run_core_for_account(
     let sock_path = external_brain.socket_path.clone();
     let listener = bind_core_socket(&sock_path)?;
     let (server_stop_tx, server_stop_rx) = tokio::sync::watch::channel(false);
-    let socket_server_handle = start_socket_server(
-        external_brain.clone(),
-        listener,
-        Some(server_stop_rx),
-    );
+    let socket_server_handle =
+        start_socket_server(external_brain.clone(), listener, Some(server_stop_rx));
 
     let open_api_server = if config.open_api.enabled {
-        Some(crate::core::open_api::http::OpenApiServer::start(
-            &config.open_api, external_brain.clone(), std::sync::Arc::new(config.clone()),
-        ).await?)
-    } else { None };
+        Some(
+            crate::core::open_api::http::OpenApiServer::start(
+                &config.open_api,
+                external_brain.clone(),
+                std::sync::Arc::new(config.clone()),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
 
     // 4. 运行调度器
     let mut coordinator = BotCoordinator::new_with_account(config_path, account.clone())?;
     if source == AccountSource::WeChat {
-        coordinator.account_detector = Some(std::sync::Arc::new(crate::core::wechat_account::detect_logged_in_account));
+        coordinator.account_detector = Some(std::sync::Arc::new(
+            crate::core::wechat_account::detect_logged_in_account,
+        ));
     }
     if let Some(acc) = &account {
         coordinator.log_event("wechat_account", json!({"account_id": acc}));
@@ -297,12 +316,25 @@ async fn run_core_for_account(
     //    仍被旧的 Python 历史服务占用）只记录事件，不能让核心退出、停止回复客户。
     let history_dir = config.state_dir.join("history");
     let start_history = || -> Result<crate::core::history::serve::HttpServer> {
-        let http_token = crate::core::history::serve::ensure_token(&history_dir)
-            .with_context(|| format!("failed to ensure history http token in {}", history_dir.display()))?;
+        let http_token =
+            crate::core::history::serve::ensure_token(&history_dir).with_context(|| {
+                format!(
+                    "failed to ensure history http token in {}",
+                    history_dir.display()
+                )
+            })?;
         let history_db_path = history_dir.join("history.sqlite3");
         let history_query = std::sync::Arc::new(std::sync::Mutex::new(
-            crate::core::history::query::HistoryQuery::open(&history_db_path, Some(config.context_messages as i64))
-                .with_context(|| format!("failed to open history database for query at {}", history_db_path.display()))?,
+            crate::core::history::query::HistoryQuery::open(
+                &history_db_path,
+                Some(config.context_messages as i64),
+            )
+            .with_context(|| {
+                format!(
+                    "failed to open history database for query at {}",
+                    history_db_path.display()
+                )
+            })?,
         ));
         crate::core::history::serve::HttpServer::start(
             history_query,
@@ -310,15 +342,26 @@ async fn run_core_for_account(
             &config.history_http.bind,
             config.history_http.port,
         )
-        .with_context(|| format!("failed to start history http server on {}:{}", config.history_http.bind, config.history_http.port))
+        .with_context(|| {
+            format!(
+                "failed to start history http server on {}:{}",
+                config.history_http.bind, config.history_http.port
+            )
+        })
     };
     let history_server = match start_history() {
         Ok(server) => {
-            coordinator.log_event("history_http_started", json!({"bind": config.history_http.bind, "port": server.port()}));
+            coordinator.log_event(
+                "history_http_started",
+                json!({"bind": config.history_http.bind, "port": server.port()}),
+            );
             Some(server)
         }
         Err(error) => {
-            coordinator.log_event("history_http_failed", json!({"error": format!("{error:#}").chars().take(300).collect::<String>()}));
+            coordinator.log_event(
+                "history_http_failed",
+                json!({"error": format!("{error:#}").chars().take(300).collect::<String>()}),
+            );
             None
         }
     };
@@ -335,11 +378,16 @@ async fn run_core_for_account(
         }
 
         // 定期看当前登录的是不是同一个微信号；换号了就按新账号重建（旧号数据原样保留）
-        if source == AccountSource::WeChat && now_secs() - last_account_check >= ACCOUNT_CHECK_SECONDS {
+        if source == AccountSource::WeChat
+            && now_secs() - last_account_check >= ACCOUNT_CHECK_SECONDS
+        {
             last_account_check = now_secs();
             if let Some(now_acc) = crate::core::wechat_account::detect_logged_in_account() {
                 if Some(&now_acc) != account.as_ref() {
-                    coordinator.log_event("wechat_account_changed", json!({"from": account, "to": now_acc}));
+                    coordinator.log_event(
+                        "wechat_account_changed",
+                        json!({"from": account, "to": now_acc}),
+                    );
                     account_changed = true;
                     break;
                 }
@@ -386,7 +434,8 @@ async fn run_core_for_account(
 
         // 检查自动备份：空闲且距离上次备份满 24 小时
         let now = (coordinator.clock)();
-        let is_idle = coordinator.pending.is_empty() && !coordinator.sessions.values().any(|s| s.turn.is_some());
+        let is_idle = coordinator.pending.is_empty()
+            && !coordinator.sessions.values().any(|s| s.turn.is_some());
         if crate::core::backup::should_auto_backup(is_idle, now, last_backup_at) {
             match crate::core::backup::run_backup(&coordinator.config, None) {
                 Ok(out_path) => {
@@ -451,7 +500,9 @@ async fn run_core_for_account(
     // 停止并清理 core.sock
     let _ = server_stop_tx.send(true);
     socket_server_handle.abort();
-    if let Some(server) = open_api_server { server.shutdown(); }
+    if let Some(server) = open_api_server {
+        server.shutdown();
+    }
     let _ = fs::remove_file(&sock_path);
 
     // 停止历史 HTTP 服务
@@ -482,7 +533,6 @@ mod tests {
         assert!(call.contains("configured_account_id"), "{call}");
         assert!(!call.contains("config.account_id"), "{call}");
     }
-
 
     /// serve-core makes an idle backup that touches the gateway database; keep it inside the test dir.
     /// The caller must hold `crate::core::env_lock()`.
@@ -566,7 +616,12 @@ mod tests {
         assert_eq!(core_lock_path(&state), state.join("core.lock"));
         assert!(core_is_running(&state));
         assert!(acquire_core_lock(&state).is_err());
-        assert!(acquire_core_lock_for_maintenance(&state).unwrap_err().to_string().contains("先停止服务"));
+        assert!(
+            acquire_core_lock_for_maintenance(&state)
+                .unwrap_err()
+                .to_string()
+                .contains("先停止服务")
+        );
         drop(maintenance);
         assert!(!core_is_running(&state));
         let core = acquire_core_lock(&state).unwrap();
@@ -722,7 +777,8 @@ mod tests {
 
         // 验证 health.json 记录的 brain 状态
         let health_file = state_dir.join("health.json");
-        let health: serde_json::Value = serde_json::from_str(&fs::read_to_string(&health_file).unwrap()).unwrap();
+        let health: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&health_file).unwrap()).unwrap();
         assert_eq!(health["brain"]["mode"], "external");
 
         let _ = fs::remove_dir_all(&sock_dir);
@@ -752,7 +808,9 @@ mod tests {
         let res = run_serve_core(&cfg_path, None).await;
         assert!(res.is_err());
         let err_str = res.err().unwrap().to_string();
-        assert!(err_str.contains("state lock error") || err_str.contains("failed to acquire core.lock"));
+        assert!(
+            err_str.contains("state lock error") || err_str.contains("failed to acquire core.lock")
+        );
     }
 
     #[tokio::test]
@@ -770,8 +828,9 @@ mod tests {
             let conn = rusqlite::Connection::open(&db_path).unwrap();
             conn.execute_batch(
                 "CREATE TABLE auto_test (id INT PRIMARY KEY, name TEXT);
-                 INSERT INTO auto_test VALUES (1, 'hello');"
-            ).unwrap();
+                 INSERT INTO auto_test VALUES (1, 'hello');",
+            )
+            .unwrap();
         }
 
         let (tx, rx) = tokio::sync::watch::channel(false);
@@ -796,14 +855,19 @@ mod tests {
                 let backup_db = entry.path().join("history.sqlite3");
                 if backup_db.exists() {
                     let conn = rusqlite::Connection::open(&backup_db).unwrap();
-                    let check: String = conn.query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap();
+                    let check: String = conn
+                        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+                        .unwrap();
                     assert_eq!(check, "ok");
                     found_backup = true;
                     break;
                 }
             }
         }
-        assert!(found_backup, "Automatic backup of history.sqlite3 should exist in backups dir");
+        assert!(
+            found_backup,
+            "Automatic backup of history.sqlite3 should exist in backups dir"
+        );
     }
 
     #[tokio::test]
@@ -841,7 +905,10 @@ mod tests {
                     let mut buf = vec![0u8; 1024];
                     let n = stream.read(&mut buf).await.unwrap_or(0);
                     let resp = String::from_utf8_lossy(&buf[..n]);
-                    assert!(resp.starts_with("HTTP/1.1 401"), "Expected 401, got: {resp}");
+                    assert!(
+                        resp.starts_with("HTTP/1.1 401"),
+                        "Expected 401, got: {resp}"
+                    );
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -855,12 +922,17 @@ mod tests {
 
             if let Ok(mut stream) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
                 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                let req = format!("GET /v1/contacts HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n");
+                let req = format!(
+                    "GET /v1/contacts HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+                );
                 let _ = stream.write_all(req.as_bytes()).await;
                 let mut buf = vec![0u8; 2048];
                 let n = stream.read(&mut buf).await.unwrap_or(0);
                 let resp = String::from_utf8_lossy(&buf[..n]);
-                assert!(resp.starts_with("HTTP/1.1 200"), "Expected 200, got: {resp}");
+                assert!(
+                    resp.starts_with("HTTP/1.1 200"),
+                    "Expected 200, got: {resp}"
+                );
             }
 
             let _ = tx.send(true);
@@ -896,8 +968,14 @@ mod tests {
         // 执行信号处理器
         handle_signal(SIGTERM);
 
-        assert!(STOP_SIGNAL.load(Ordering::SeqCst), "STOP_SIGNAL 必须被置为 true");
-        assert!(coordinator_stop.load(Ordering::SeqCst), "OS 信号到达时必须实时通过共享指针将 coordinator.stop 设为 true");
+        assert!(
+            STOP_SIGNAL.load(Ordering::SeqCst),
+            "STOP_SIGNAL 必须被置为 true"
+        );
+        assert!(
+            coordinator_stop.load(Ordering::SeqCst),
+            "OS 信号到达时必须实时通过共享指针将 coordinator.stop 设为 true"
+        );
 
         SHARED_STOP.store(std::ptr::null_mut(), Ordering::SeqCst);
         STOP_SIGNAL.store(false, Ordering::SeqCst);

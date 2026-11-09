@@ -10,8 +10,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
@@ -65,11 +65,21 @@ fn host_selftest_bin() -> Option<&'static PathBuf> {
         let bin_path = out_dir.join("host_selftest");
 
         let files_to_compile = [
-            root.join("native").join("bootstrap").join("Supervisor.swift"),
-            root.join("native").join("bootstrap").join("CoreSupervisor.swift"),
-            root.join("native").join("bootstrap").join("SocketWorker.swift"),
-            root.join("native").join("bootstrap").join("StatusModel.swift"),
-            root.join("native").join("bootstrap").join("ConfigForm.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("Supervisor.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("CoreSupervisor.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("SocketWorker.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("StatusModel.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("ConfigForm.swift"),
             root.join("native").join("bootstrap").join("Actions.swift"),
             root.join("native").join("eyes").join("Screens.swift"),
             root.join("tests").join("host_selftest").join("main.swift"),
@@ -312,8 +322,18 @@ fn test_status_waiting_session_yellow_names_code() {
         .collect();
     assert!(item_map.contains_key("sessions"));
     assert_eq!(item_map["sessions"]["level"], "yellow");
-    assert!(item_map["sessions"]["reason"].as_str().unwrap().contains("user_vip"));
-    assert!(item_map["sessions"]["reason"].as_str().unwrap().contains("screen_not_main:other_wechat_window"));
+    assert!(
+        item_map["sessions"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("user_vip")
+    );
+    assert!(
+        item_map["sessions"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("screen_not_main:other_wechat_window")
+    );
 }
 
 #[test]
@@ -338,7 +358,12 @@ fn test_status_front_window_red_behind_ok() {
         .map(|i| (i["key"].as_str().unwrap().to_string(), i.clone()))
         .collect();
     assert_eq!(dict_front["wechat"]["level"], "red");
-    assert!(dict_front["wechat"]["reason"].as_str().unwrap().contains('挡'));
+    assert!(
+        dict_front["wechat"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains('挡')
+    );
 
     // 2. 窗口在后面
     let mut inp_behind = default_input();
@@ -411,7 +436,12 @@ fn test_config_form_rejects_invalid_without_write() {
 
     let res = run_host_cmd("config", &payload).unwrap();
     assert_eq!(res["ok"], false);
-    assert!(res["error"].as_str().unwrap().contains("unsupported bot config"));
+    assert!(
+        res["error"]
+            .as_str()
+            .unwrap()
+            .contains("unsupported bot config")
+    );
 
     assert_eq!(fs::read_to_string(&target_path).unwrap(), original_content);
 
@@ -463,7 +493,11 @@ fn test_config_save_backs_up_then_replaces() {
 
     let mut bak_files = Vec::new();
     for entry in fs::read_dir(&td.path).unwrap().flatten() {
-        if entry.file_name().to_string_lossy().starts_with("config.json.bak-") {
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("config.json.bak-")
+        {
             bak_files.push(entry.path());
         }
     }
@@ -551,7 +585,11 @@ fn test_config_allowlist_preserves_group_and_ignorelist_deep_equal() {
         "max_attachment_mb": 50,
         "manage_window": true
     });
-    fs::write(&target_path, serde_json::to_string(&original_config).unwrap()).unwrap();
+    fs::write(
+        &target_path,
+        serde_json::to_string(&original_config).unwrap(),
+    )
+    .unwrap();
 
     // 1. 无修改保存
     let payload_unchanged = serde_json::json!({
@@ -671,7 +709,12 @@ fn test_config_integer_fields_strictly_validated() {
         "max_replies_per_hour",
         "context_messages",
     ] {
-        assert!(saved[field].is_i64(), "{} must be a real int, got {:?}", field, saved[field]);
+        assert!(
+            saved[field].is_i64(),
+            "{} must be a real int, got {:?}",
+            field,
+            saved[field]
+        );
     }
 }
 
@@ -700,7 +743,11 @@ fn test_config_save_preserves_untouched_keys_deep_equal() {
         "max_attachment_mb": 50,
         "cooldown_seconds": 15
     });
-    fs::write(&target_path, serde_json::to_string(&original_config).unwrap()).unwrap();
+    fs::write(
+        &target_path,
+        serde_json::to_string(&original_config).unwrap(),
+    )
+    .unwrap();
 
     let payload = serde_json::json!({
         "op": "update_and_save_form",
@@ -738,7 +785,8 @@ fn test_config_save_fails_if_backup_fails_without_modifying_target() {
     }
     let td = TempDir::new("cfg_bak_fail");
     let target_path = td.path.join("config.json");
-    let original_content = serde_json::json!({"schema_version": 1, "account_id": "orig"}).to_string();
+    let original_content =
+        serde_json::json!({"schema_version": 1, "account_id": "orig"}).to_string();
     fs::write(&target_path, &original_content).unwrap();
 
     let payload = serde_json::json!({
@@ -768,7 +816,10 @@ fn test_config_temp_file_secure_permissions_and_directory() {
     assert_eq!(res["ok"], true);
     assert_eq!(res["dir_permissions"], 0o700);
     assert_eq!(res["file_permissions"], 0o600);
-    assert_eq!(res["in_shared_tmp_root"], false, "Must not be directly in /tmp root");
+    assert_eq!(
+        res["in_shared_tmp_root"], false,
+        "Must not be directly in /tmp root"
+    );
 }
 
 #[test]
@@ -795,7 +846,12 @@ fn test_restore_wechat_window_pure_logic() {
     )
     .unwrap();
     assert_eq!(res_multi["status"], "rejected");
-    assert!(res_multi["message"].as_str().unwrap().contains("微信有多个窗口，请先关闭其他窗口"));
+    assert!(
+        res_multi["message"]
+            .as_str()
+            .unwrap()
+            .contains("微信有多个窗口，请先关闭其他窗口")
+    );
 
     // 2. 1个非最小化窗口 + 1个最小化窗口 -> 允许并调整
     let windows_one_min = serde_json::json!([
@@ -878,7 +934,11 @@ fn test_mask_config_key_file_counts_as_configured() {
     )
     .unwrap();
     assert_eq!(res["api_key_status"], "已配置");
-    assert!(!serde_json::to_string(&res).unwrap().contains("/x/model.key"));
+    assert!(
+        !serde_json::to_string(&res)
+            .unwrap()
+            .contains("/x/model.key")
+    );
 }
 
 #[test]
@@ -889,7 +949,8 @@ fn test_form_empty_integer_fields_keep_original_or_default() {
     }
     let td = TempDir::new("form_empty_int");
     let target = td.path.join("config.json");
-    let original = serde_json::json!({"schema_version": 1, "account_id": "a", "cooldown_seconds": 3});
+    let original =
+        serde_json::json!({"schema_version": 1, "account_id": "a", "cooldown_seconds": 3});
     fs::write(&target, serde_json::to_string(&original).unwrap()).unwrap();
     let res = run_host_cmd(
         "config",
@@ -930,7 +991,11 @@ fn test_mask_config_includes_brain_setting() {
             }
         }
     });
-    let res = run_host_cmd("config", &serde_json::json!({"op": "mask_config", "config": cfg})).unwrap();
+    let res = run_host_cmd(
+        "config",
+        &serde_json::json!({"op": "mask_config", "config": cfg}),
+    )
+    .unwrap();
     let editable = &res["editable"];
     assert!(editable.get("brain").is_some());
     assert_eq!(editable["brain"]["mode"], "external");
@@ -1084,7 +1149,12 @@ fn test_status_external_brain_unconnected_yellow_and_pending_count() {
         .collect();
     assert!(item_map.contains_key("brain"));
     assert_eq!(item_map["brain"]["level"], "yellow");
-    assert!(item_map["brain"]["reason"].as_str().unwrap().contains("外部大脑未连接"));
+    assert!(
+        item_map["brain"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("外部大脑未连接")
+    );
     assert!(item_map["brain"]["reason"].as_str().unwrap().contains('3'));
 }
 
@@ -1132,8 +1202,18 @@ fn test_status_sessions_handoff_lists_name() {
         .collect();
     assert!(item_map.contains_key("sessions"));
     assert_eq!(item_map["sessions"]["level"], "yellow");
-    assert!(item_map["sessions"]["reason"].as_str().unwrap().contains("客户张三"));
-    assert!(item_map["sessions"]["reason"].as_str().unwrap().contains("转人工"));
+    assert!(
+        item_map["sessions"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("客户张三")
+    );
+    assert!(
+        item_map["sessions"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("转人工")
+    );
 }
 
 // ============================================================================
@@ -1172,7 +1252,11 @@ fn test_clean_exits_do_not_trigger_give_up_and_abnormal_exits_give_up() {
             })
         })
         .collect();
-    let res2 = run_host_cmd("child_exit", &serde_json::json!({"events": abnormal_events})).unwrap();
+    let res2 = run_host_cmd(
+        "child_exit",
+        &serde_json::json!({"events": abnormal_events}),
+    )
+    .unwrap();
     assert_eq!(res2["is_given_up"], true);
     assert_eq!(res2["accepting_connections"], false);
     assert_eq!(res2["status"]["state"], "stopped");
@@ -1181,7 +1265,8 @@ fn test_clean_exits_do_not_trigger_give_up_and_abnormal_exits_give_up() {
     // 3. reset 清除 give_up
     let mut reset_events = abnormal_events;
     reset_events.push(serde_json::json!({"op": "reset"}));
-    let res_reset = run_host_cmd("child_exit", &serde_json::json!({"events": reset_events})).unwrap();
+    let res_reset =
+        run_host_cmd("child_exit", &serde_json::json!({"events": reset_events})).unwrap();
     assert_eq!(res_reset["is_given_up"], false);
     assert_eq!(res_reset["accepting_connections"], true);
 }
@@ -1279,7 +1364,10 @@ fn test_reset_clears() {
 
 #[test]
 fn test_info_plist_names() {
-    let plist_path = repo_root().join("native").join("bootstrap").join("Info.plist");
+    let plist_path = repo_root()
+        .join("native")
+        .join("bootstrap")
+        .join("Info.plist");
     assert!(plist_path.exists(), "Info.plist must exist");
     let data = read_plist_as_json(&plist_path);
     assert_eq!(data["CFBundleName"], "微信客服助手");
@@ -1302,10 +1390,12 @@ fn test_launchagent_keepalive_only_on_crash() {
     assert_eq!(data["KeepAlive"]["SuccessfulExit"], false);
     let args = data["ProgramArguments"].as_array().unwrap();
     assert!(!args.is_empty());
-    assert!(args[0]
-        .as_str()
-        .unwrap()
-        .ends_with("微信客服助手.app/Contents/MacOS/wechat-cs-host"));
+    assert!(
+        args[0]
+            .as_str()
+            .unwrap()
+            .ends_with("微信客服助手.app/Contents/MacOS/wechat-cs-host")
+    );
 }
 
 #[test]
@@ -1316,7 +1406,11 @@ fn test_deploy_script_dry_run_by_default() {
     let fake_bin = TempDir::new("fake_bin");
     for name in &["ssh", "scp"] {
         let p = fake_bin.path.join(name);
-        fs::write(&p, "#!/bin/sh\necho \"FORBIDDEN_CALL: $0 $*\" >&2\nexit 99\n").unwrap();
+        fs::write(
+            &p,
+            "#!/bin/sh\necho \"FORBIDDEN_CALL: $0 $*\" >&2\nexit 99\n",
+        )
+        .unwrap();
         let mut perms = fs::metadata(&p).unwrap().permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&p, perms).unwrap();
@@ -1349,7 +1443,10 @@ fn test_deploy_script_has_no_pkill() {
     let script_path = repo_root().join("scripts").join("deploy_host.sh");
     assert!(script_path.exists(), "deploy_host.sh must exist");
     let content = fs::read_to_string(&script_path).unwrap();
-    assert!(!content.contains("pkill"), "deploy_host.sh must never use pkill");
+    assert!(
+        !content.contains("pkill"),
+        "deploy_host.sh must never use pkill"
+    );
 }
 
 // ============================================================================
@@ -1675,10 +1772,12 @@ fn test_panel_bot_status_stopping() {
         .find(|i| i["key"] == "bot")
         .unwrap();
     assert_eq!(bot_item["level"], "yellow");
-    assert!(bot_item["reason"]
-        .as_str()
-        .unwrap()
-        .contains("正在停止 Rust 核心（等待当前一轮完成）"));
+    assert!(
+        bot_item["reason"]
+            .as_str()
+            .unwrap()
+            .contains("正在停止 Rust 核心（等待当前一轮完成）")
+    );
 }
 
 #[test]
@@ -1887,16 +1986,33 @@ fn test_panel_shows_folder_permission_needed() {
         return;
     }
     let mut inp = default_status_input();
-    inp["permissions"]["folder_permission_blocked"] = serde_json::json!("folder_access_blocked:Desktop");
+    inp["permissions"]["folder_permission_blocked"] =
+        serde_json::json!("folder_access_blocked:Desktop");
     let items = run_host_cmd("status", &inp).unwrap();
-    let item = items.as_array().unwrap().iter().find(|i| i["key"] == "permissions").unwrap();
+    let item = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["key"] == "permissions")
+        .unwrap();
     assert_eq!(item["level"], "red");
-    assert!(item["reason"].as_str().unwrap().contains("Desktop"), "{item}");
-    assert!(item["fix"].as_str().unwrap().contains("文件和文件夹"), "{item}");
+    assert!(
+        item["reason"].as_str().unwrap().contains("Desktop"),
+        "{item}"
+    );
+    assert!(
+        item["fix"].as_str().unwrap().contains("文件和文件夹"),
+        "{item}"
+    );
 
     // 没有标记时保持原样（绿色）
     let ok = run_host_cmd("status", &default_status_input()).unwrap();
-    let item = ok.as_array().unwrap().iter().find(|i| i["key"] == "permissions").unwrap();
+    let item = ok
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["key"] == "permissions")
+        .unwrap();
     assert_eq!(item["level"], "green");
 }
 
@@ -1905,12 +2021,23 @@ fn test_panel_shows_folder_permission_needed() {
 #[test]
 fn test_host_turns_sigterm_into_orderly_terminate() {
     let src = fs::read_to_string("native/bootstrap/main.swift").unwrap();
-    assert!(src.contains("signal(SIGTERM, SIG_IGN)"), "必须先忽略默认 SIGTERM 处理");
-    let at = src.find("makeSignalSource(signal: SIGTERM").expect("必须为 SIGTERM 建立 DispatchSource");
+    assert!(
+        src.contains("signal(SIGTERM, SIG_IGN)"),
+        "必须先忽略默认 SIGTERM 处理"
+    );
+    let at = src
+        .find("makeSignalSource(signal: SIGTERM")
+        .expect("必须为 SIGTERM 建立 DispatchSource");
     let handler = &src[at..(at + 400).min(src.len())];
-    assert!(handler.contains("terminate("), "SIGTERM 处理必须调用 NSApplication terminate，以执行 applicationWillTerminate");
+    assert!(
+        handler.contains("terminate("),
+        "SIGTERM 处理必须调用 NSApplication terminate，以执行 applicationWillTerminate"
+    );
     let plist = fs::read_to_string("native/bootstrap/local.wechat-mcp.host.plist").unwrap();
-    assert!(plist.contains("<key>ExitTimeOut</key>"), "LaunchAgent 要给宿主足够时间停止核心");
+    assert!(
+        plist.contains("<key>ExitTimeOut</key>"),
+        "LaunchAgent 要给宿主足够时间停止核心"
+    );
 }
 
 fn host_task5_selftest_bin() -> Option<&'static PathBuf> {
@@ -1926,19 +2053,37 @@ fn host_task5_selftest_bin() -> Option<&'static PathBuf> {
 
         let files_to_compile = [
             root.join("native").join("bootstrap").join("Probe.swift"),
-            root.join("native").join("bootstrap").join("Supervisor.swift"),
-            root.join("native").join("bootstrap").join("CoreSupervisor.swift"),
-            root.join("native").join("bootstrap").join("SocketWorker.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("Supervisor.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("CoreSupervisor.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("SocketWorker.swift"),
             root.join("native").join("bootstrap").join("Actions.swift"),
-            root.join("native").join("bootstrap").join("StatusModel.swift"),
-            root.join("native").join("bootstrap").join("ConfigForm.swift"),
-            root.join("native").join("bootstrap").join("StatusPanel.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("StatusModel.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("ConfigForm.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("StatusPanel.swift"),
             root.join("native").join("bootstrap").join("LogTail.swift"),
-            root.join("native").join("bootstrap").join("Permissions.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("Permissions.swift"),
             root.join("native").join("bootstrap").join("Shell.swift"),
-            root.join("native").join("bootstrap").join("SettingsPage.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("SettingsPage.swift"),
             root.join("native").join("eyes").join("Screens.swift"),
-            root.join("tests").join("host_task5_selftest").join("main.swift"),
+            root.join("tests")
+                .join("host_task5_selftest")
+                .join("main.swift"),
         ];
 
         for f in &files_to_compile {
@@ -1970,7 +2115,8 @@ fn host_task5_selftest_bin() -> Option<&'static PathBuf> {
 }
 
 fn run_task5_cmd(command: &str, payload: &Value) -> Result<Value, String> {
-    let bin = host_task5_selftest_bin().ok_or_else(|| "host_task5_selftest binary not available".to_string())?;
+    let bin = host_task5_selftest_bin()
+        .ok_or_else(|| "host_task5_selftest binary not available".to_string())?;
     let payload_str = serde_json::to_string(payload).unwrap();
     let output = Command::new(bin)
         .arg(command)
@@ -2057,7 +2203,12 @@ fn test_session_state_copy_for_missing_row() {
         }
     });
     let items = run_host_cmd("status", &inp).unwrap();
-    let session_item = items.as_array().unwrap().iter().find(|i| i["key"] == "sessions").unwrap();
+    let session_item = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["key"] == "sessions")
+        .unwrap();
     let reason_text = session_item["reason"].as_str().unwrap();
     assert!(
         reason_text.contains("会话不在列表可见范围"),
@@ -2084,37 +2235,83 @@ fn test_session_state_copy_for_missing_row() {
 #[test]
 fn test_every_legacy_panel_control_has_new_home() {
     // 源码检查——spec §8.2 每一项（保存配置、重启桌面服务、重启机器人、放回标准位置、恢复自动回复、打开附件文件夹、打开日志文件夹、复制诊断信息、请求屏幕录制权限、请求辅助功能权限、自动管理微信主窗口、各配置字段键名）在新页面文件里都有对应调用。
-    let overview_src = fs::read_to_string("native/bootstrap/OverviewPage.swift").expect("OverviewPage.swift 必须存在");
-    let sessions_src = fs::read_to_string("native/bootstrap/SessionsPage.swift").expect("SessionsPage.swift 必须存在");
-    let settings_src = fs::read_to_string("native/bootstrap/SettingsPage.swift").expect("SettingsPage.swift 必须存在");
-    let logs_src = fs::read_to_string("native/bootstrap/LogsPage.swift").expect("LogsPage.swift 必须存在");
-    let perm_src = fs::read_to_string("native/bootstrap/Permissions.swift").expect("Permissions.swift 必须存在");
-    let shell_src = fs::read_to_string("native/bootstrap/Shell.swift").expect("Shell.swift 必须存在");
+    let overview_src = fs::read_to_string("native/bootstrap/OverviewPage.swift")
+        .expect("OverviewPage.swift 必须存在");
+    let sessions_src = fs::read_to_string("native/bootstrap/SessionsPage.swift")
+        .expect("SessionsPage.swift 必须存在");
+    let settings_src = fs::read_to_string("native/bootstrap/SettingsPage.swift")
+        .expect("SettingsPage.swift 必须存在");
+    let logs_src =
+        fs::read_to_string("native/bootstrap/LogsPage.swift").expect("LogsPage.swift 必须存在");
+    let perm_src = fs::read_to_string("native/bootstrap/Permissions.swift")
+        .expect("Permissions.swift 必须存在");
+    let shell_src =
+        fs::read_to_string("native/bootstrap/Shell.swift").expect("Shell.swift 必须存在");
 
-    let all_new_src = format!("{}\n{}\n{}\n{}\n{}\n{}", overview_src, sessions_src, settings_src, logs_src, perm_src, shell_src);
+    let all_new_src = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}",
+        overview_src, sessions_src, settings_src, logs_src, perm_src, shell_src
+    );
 
     // 1. 保存配置
-    assert!(all_new_src.contains("保存配置") || all_new_src.contains("saveConfig"), "必须包含保存配置操作");
+    assert!(
+        all_new_src.contains("保存配置") || all_new_src.contains("saveConfig"),
+        "必须包含保存配置操作"
+    );
     // 2. 重启桌面服务
-    assert!(all_new_src.contains("重启桌面服务") || all_new_src.contains("restartDesktopService"), "必须包含重启桌面服务操作");
+    assert!(
+        all_new_src.contains("重启桌面服务") || all_new_src.contains("restartDesktopService"),
+        "必须包含重启桌面服务操作"
+    );
     // 3. 重启机器人
-    assert!(all_new_src.contains("重启机器人") || all_new_src.contains("restartBot"), "必须包含重启机器人操作");
+    assert!(
+        all_new_src.contains("重启机器人") || all_new_src.contains("restartBot"),
+        "必须包含重启机器人操作"
+    );
     // 4. 放回标准位置
-    assert!(all_new_src.contains("放回标准位置") || all_new_src.contains("repositionWechat"), "必须包含微信放回标准位置操作");
+    assert!(
+        all_new_src.contains("放回标准位置") || all_new_src.contains("repositionWechat"),
+        "必须包含微信放回标准位置操作"
+    );
     // 5. 恢复自动回复
-    assert!(all_new_src.contains("恢复自动回复") || all_new_src.contains("resumeHandoff"), "必须包含恢复自动回复操作");
+    assert!(
+        all_new_src.contains("恢复自动回复") || all_new_src.contains("resumeHandoff"),
+        "必须包含恢复自动回复操作"
+    );
     // 6. 打开附件文件夹
-    assert!(all_new_src.contains("打开附件文件夹") || all_new_src.contains("openAttachments"), "必须包含打开附件文件夹操作");
+    assert!(
+        all_new_src.contains("打开附件文件夹") || all_new_src.contains("openAttachments"),
+        "必须包含打开附件文件夹操作"
+    );
     // 7. 打开日志文件夹
-    assert!(all_new_src.contains("打开日志文件夹") || all_new_src.contains("openLogs"), "必须包含打开日志文件夹操作");
+    assert!(
+        all_new_src.contains("打开日志文件夹") || all_new_src.contains("openLogs"),
+        "必须包含打开日志文件夹操作"
+    );
     // 8. 复制诊断信息
-    assert!(all_new_src.contains("复制诊断信息") || all_new_src.contains("copyDiagnostics"), "必须包含复制诊断信息操作");
+    assert!(
+        all_new_src.contains("复制诊断信息") || all_new_src.contains("copyDiagnostics"),
+        "必须包含复制诊断信息操作"
+    );
     // 9. 请求屏幕录制权限
-    assert!(all_new_src.contains("screen") && (all_new_src.contains("requestPermission") || all_new_src.contains("requestScreenRecording")), "必须包含请求屏幕录制权限");
+    assert!(
+        all_new_src.contains("screen")
+            && (all_new_src.contains("requestPermission")
+                || all_new_src.contains("requestScreenRecording")),
+        "必须包含请求屏幕录制权限"
+    );
     // 10. 请求辅助功能权限
-    assert!(all_new_src.contains("accessibility") && (all_new_src.contains("requestPermission") || all_new_src.contains("requestAccessibility")), "必须包含请求辅助功能权限");
+    assert!(
+        all_new_src.contains("accessibility")
+            && (all_new_src.contains("requestPermission")
+                || all_new_src.contains("requestAccessibility")),
+        "必须包含请求辅助功能权限"
+    );
     // 11. 自动管理微信主窗口
-    assert!(all_new_src.contains("manage_window") || all_new_src.contains("自动管理微信主窗口"), "必须包含自动管理微信主窗口控件");
+    assert!(
+        all_new_src.contains("manage_window") || all_new_src.contains("自动管理微信主窗口"),
+        "必须包含自动管理微信主窗口控件"
+    );
 
     // 12. 各配置字段键名
     for key in &[
@@ -2125,7 +2322,11 @@ fn test_every_legacy_panel_control_has_new_home() {
         "max_replies_per_hour",
         "context_messages",
     ] {
-        assert!(settings_src.contains(key), "SettingsPage 必须包含配置字段键名: {}", key);
+        assert!(
+            settings_src.contains(key),
+            "SettingsPage 必须包含配置字段键名: {}",
+            key
+        );
     }
 }
 
@@ -2162,13 +2363,18 @@ fn test_settings_fields_keep_validation_ranges() {
 #[test]
 fn test_host_loads_status_controller_so_core_supervision_runs() {
     let src = fs::read_to_string("native/bootstrap/main.swift").unwrap();
-    let created = src.find("StatusPanelController(worker:").expect("controller created");
+    let created = src
+        .find("StatusPanelController(worker:")
+        .expect("controller created");
     let shell = src.find("ShellViewController()").expect("shell created");
-    let load = src.find("_ = controller.view").expect("main.swift 必须访问 controller.view 以触发 viewDidLoad");
-    assert!(created < load && load < shell, "必须在创建页面之前加载控制器（页面需要它已读入的配置）");
+    let load = src
+        .find("_ = controller.view")
+        .expect("main.swift 必须访问 controller.view 以触发 viewDidLoad");
+    assert!(
+        created < load && load < shell,
+        "必须在创建页面之前加载控制器（页面需要它已读入的配置）"
+    );
 }
-
-
 
 fn host_task6_selftest_bin() -> Option<&'static PathBuf> {
     static BIN: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -2183,21 +2389,41 @@ fn host_task6_selftest_bin() -> Option<&'static PathBuf> {
 
         let files_to_compile = [
             root.join("native").join("bootstrap").join("Probe.swift"),
-            root.join("native").join("bootstrap").join("Supervisor.swift"),
-            root.join("native").join("bootstrap").join("CoreSupervisor.swift"),
-            root.join("native").join("bootstrap").join("SocketWorker.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("Supervisor.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("CoreSupervisor.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("SocketWorker.swift"),
             root.join("native").join("bootstrap").join("Actions.swift"),
-            root.join("native").join("bootstrap").join("StatusModel.swift"),
-            root.join("native").join("bootstrap").join("ConfigForm.swift"),
-            root.join("native").join("bootstrap").join("StatusPanel.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("StatusModel.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("ConfigForm.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("StatusPanel.swift"),
             root.join("native").join("bootstrap").join("LogTail.swift"),
-            root.join("native").join("bootstrap").join("Permissions.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("Permissions.swift"),
             root.join("native").join("bootstrap").join("Shell.swift"),
-            root.join("native").join("bootstrap").join("SettingsPage.swift"),
-            root.join("native").join("bootstrap").join("ContactsPage.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("SettingsPage.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("ContactsPage.swift"),
             root.join("native").join("bootstrap").join("McpPage.swift"),
             root.join("native").join("eyes").join("Screens.swift"),
-            root.join("tests").join("host_task6_selftest").join("main.swift"),
+            root.join("tests")
+                .join("host_task6_selftest")
+                .join("main.swift"),
         ];
 
         for f in &files_to_compile {
@@ -2229,7 +2455,8 @@ fn host_task6_selftest_bin() -> Option<&'static PathBuf> {
 }
 
 fn run_task6_cmd(command: &str, payload: &Value) -> Result<Value, String> {
-    let bin = host_task6_selftest_bin().ok_or_else(|| "host_task6_selftest binary not available".to_string())?;
+    let bin = host_task6_selftest_bin()
+        .ok_or_else(|| "host_task6_selftest binary not available".to_string())?;
     let payload_str = serde_json::to_string(payload).unwrap();
     let output = Command::new(bin)
         .arg(command)
@@ -2269,9 +2496,15 @@ fn test_apply_handling_ignore_moves_to_ignorelist() {
     assert_eq!(res["ok"], true);
     let updated = &res["updated"];
     let ignorelist = updated["ignorelist"].as_array().expect("ignorelist array");
-    assert!(ignorelist.iter().any(|item| item["recipient"] == "李四"), "李四 必须在 ignorelist 中");
+    assert!(
+        ignorelist.iter().any(|item| item["recipient"] == "李四"),
+        "李四 必须在 ignorelist 中"
+    );
     let allowlist = updated["allowlist"].as_array().expect("allowlist array");
-    assert!(allowlist.iter().any(|item| item["recipient"] == "张三"), "张三 必须仍保留在 allowlist 中");
+    assert!(
+        allowlist.iter().any(|item| item["recipient"] == "张三"),
+        "张三 必须仍保留在 allowlist 中"
+    );
 }
 
 #[test]
@@ -2342,9 +2575,15 @@ fn test_apply_handling_unignore_restores_previous() {
     assert_eq!(r2["ok"], true);
     let conf_restored = &r2["updated"];
     let restored_ignores = conf_restored["ignorelist"].as_array().unwrap();
-    assert!(!restored_ignores.iter().any(|i| i["recipient"] == "张三"), "取消忽略后不在 ignorelist");
+    assert!(
+        !restored_ignores.iter().any(|i| i["recipient"] == "张三"),
+        "取消忽略后不在 ignorelist"
+    );
     let restored_allows = conf_restored["allowlist"].as_array().unwrap();
-    assert!(restored_allows.iter().any(|i| i["recipient"] == "张三"), "取消忽略后自动恢复在 allowlist 中");
+    assert!(
+        restored_allows.iter().any(|i| i["recipient"] == "张三"),
+        "取消忽略后自动恢复在 allowlist 中"
+    );
 }
 
 #[test]
@@ -2500,28 +2739,61 @@ fn test_contacts_page_wechat_id_text_and_titles() {
             {"contact_id": "c4", "category": "personal", "display_name": "聊天丁", "handling": "auto_reply"}
         ]
     });
-    let res = run_task6_cmd("parse_contacts_list", &serde_json::json!({"json_str": sample.to_string()})).expect("parse");
-    assert_eq!(res["list_wechat"], serde_json::json!(["—", "—", "wxid_c", "—"]));
+    let res = run_task6_cmd(
+        "parse_contacts_list",
+        &serde_json::json!({"json_str": sample.to_string()}),
+    )
+    .expect("parse");
+    assert_eq!(
+        res["list_wechat"],
+        serde_json::json!(["—", "—", "wxid_c", "—"])
+    );
     let detail = res["detail_wechat"].as_array().unwrap();
     assert!(detail[0].as_str().unwrap().contains("企业微信"));
-    assert!(!detail[1].as_str().unwrap().contains("企"), "联系人分组不能显示成企微: {}", detail[1]);
-    assert_eq!(res["titles"], serde_json::json!(["联系人", "企业微信", "群聊", "公众号"]));
+    assert!(
+        !detail[1].as_str().unwrap().contains("企"),
+        "联系人分组不能显示成企微: {}",
+        detail[1]
+    );
+    assert_eq!(
+        res["titles"],
+        serde_json::json!(["联系人", "企业微信", "群聊", "公众号"])
+    );
 }
 
 /// 用户 2026-11-08 截图：企业微信 12 人列表只显示 7 行（列表没占满剩余高度、被截断）；详情面板一直显示。
 /// 列表必须占满剩余高度；详情面板默认隐藏，选中联系人才出现。
 #[test]
 fn test_contacts_page_list_fills_height_and_detail_on_select() {
-    let src = std::fs::read_to_string(repo_root().join("native/bootstrap/ContactsPage.swift")).unwrap();
-    assert!(src.contains("mainStack.distribution = .fill"), "主区域要把剩余高度分给列表");
-    assert!(src.contains("contentRow.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)"));
-    assert!(!src.contains("NSSplitView()"), "详情面板隐藏再显示时分栏会把它留成 0 宽");
-    let setup = &src[src.find("private func setupUI()").unwrap()..src.find("private func setupDetailBox()").unwrap()];
-    assert!(setup.contains("detailBox.isHidden = true"), "详情面板默认隐藏");
+    let src =
+        std::fs::read_to_string(repo_root().join("native/bootstrap/ContactsPage.swift")).unwrap();
+    assert!(
+        src.contains("mainStack.distribution = .fill"),
+        "主区域要把剩余高度分给列表"
+    );
+    assert!(src.contains(
+        "contentRow.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)"
+    ));
+    assert!(
+        !src.contains("NSSplitView()"),
+        "详情面板隐藏再显示时分栏会把它留成 0 宽"
+    );
+    let setup = &src[src.find("private func setupUI()").unwrap()
+        ..src.find("private func setupDetailBox()").unwrap()];
+    assert!(
+        setup.contains("detailBox.isHidden = true"),
+        "详情面板默认隐藏"
+    );
     let show = &src[src.find("private func showDetail(").unwrap()..];
-    assert!(show[..400].contains("detailBox.isHidden = false"), "选中联系人才显示详情");
+    assert!(
+        show[..400].contains("detailBox.isHidden = false"),
+        "选中联系人才显示详情"
+    );
     let clear = &src[src.find("private func clearDetail()").unwrap()..];
-    assert!(clear[..200].contains("detailBox.isHidden = true"), "取消选择收起详情");
+    assert!(
+        clear[..200].contains("detailBox.isHidden = true"),
+        "取消选择收起详情"
+    );
     assert!(!src.contains("企微无微信号"));
     // 用户 2026-11-08 截图：名字被直接裁掉，看起来不完整。放不下要显示"…"并可悬停看全名
     let name_cell = &src[src.find("case \"NameCol\":").unwrap()..];
@@ -2579,7 +2851,8 @@ fn test_contacts_and_mcp_pages_registered_in_shell_order() {
 
 #[test]
 fn test_settings_page_brain_and_allowlist_pointers() {
-    let settings_src = fs::read_to_string("native/bootstrap/SettingsPage.swift").expect("SettingsPage.swift exists");
+    let settings_src = fs::read_to_string("native/bootstrap/SettingsPage.swift")
+        .expect("SettingsPage.swift exists");
     assert!(
         settings_src.contains("联系人") && settings_src.contains("MCP"),
         "SettingsPage 必须包含指向联系人页和 MCP 页的说明"
@@ -2609,9 +2882,13 @@ fn test_run_control_command_reads_large_output_without_deadlock() {
     assert_eq!(big["bytes"], 300000, "{big}");
     assert_eq!(big["timed_out"], false, "{big}");
 
-    let hung = run_task6_cmd("run_control", &serde_json::json!({
-        "executable": "/bin/sh", "args": ["-c", "sleep 60"], "timeout": 1
-    })).unwrap();
+    let hung = run_task6_cmd(
+        "run_control",
+        &serde_json::json!({
+            "executable": "/bin/sh", "args": ["-c", "sleep 60"], "timeout": 1
+        }),
+    )
+    .unwrap();
     assert_eq!(hung["timed_out"], true, "{hung}");
     assert!(hung["seconds"].as_f64().unwrap() < 5.0, "{hung}");
 }
@@ -2635,16 +2912,33 @@ fn test_native_sources_avoid_syntax_newer_than_swift_5_7() {
                     if t.starts_with("//") {
                         continue;
                     }
-                    for bad in ["@retroactive", "extension String: Error", "throws(", "#Preview", "package func ", "consuming ", "borrowing "] {
+                    for bad in [
+                        "@retroactive",
+                        "extension String: Error",
+                        "throws(",
+                        "#Preview",
+                        "package func ",
+                        "consuming ",
+                        "borrowing ",
+                    ] {
                         if line.contains(bad) {
-                            offenders.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+                            offenders.push(format!(
+                                "{}:{}: {}",
+                                path.display(),
+                                i + 1,
+                                line.trim()
+                            ));
                         }
                     }
                 }
             }
         }
     }
-    assert!(offenders.is_empty(), "设备上的 Swift 5.7 不支持这些写法:\n{}", offenders.join("\n"));
+    assert!(
+        offenders.is_empty(),
+        "设备上的 Swift 5.7 不支持这些写法:\n{}",
+        offenders.join("\n")
+    );
 }
 
 /// NSBox 直接替换 contentView 时，框的高度不会随内容撑开：内容溢出、互相重叠（2026-11-08 设备上
@@ -2660,29 +2954,49 @@ fn test_pages_never_replace_nsbox_content_view() {
         let src = fs::read_to_string(&path).unwrap();
         for (i, line) in src.lines().enumerate() {
             let t = line.trim();
-            if t.starts_with("//") || t.contains("scrollView") || t.contains("window.") || t.contains("guard let host") || t.contains("self.contentView = content") {
+            if t.starts_with("//")
+                || t.contains("scrollView")
+                || t.contains("window.")
+                || t.contains("guard let host")
+                || t.contains("self.contentView = content")
+            {
                 continue;
             }
             if t.contains(".contentView = ") {
-                offenders.push(format!("{}:{}: {}", path.file_name().unwrap().to_string_lossy(), i + 1, t));
+                offenders.push(format!(
+                    "{}:{}: {}",
+                    path.file_name().unwrap().to_string_lossy(),
+                    i + 1,
+                    t
+                ));
             }
         }
     }
-    assert!(offenders.is_empty(), "分组框内容必须用 setContent(_:)：\n{}", offenders.join("\n"));
+    assert!(
+        offenders.is_empty(),
+        "分组框内容必须用 setContent(_:)：\n{}",
+        offenders.join("\n")
+    );
 }
 
 #[test]
 fn config_check_reports_rust_errors() {
-    if !has_swiftc() { return; }
+    if !has_swiftc() {
+        return;
+    }
     for (status, output, ok, error) in [
         (0, r#"{"ok":true}"#, true, ""),
         (0, r#"{"ok":false,"error":"配置无效"}"#, false, "配置无效"),
         (2, r#"{"ok":true}"#, false, "config-check 校验失败 (exit 2)"),
         (2, "stderr diagnostic", false, "stderr diagnostic"),
     ] {
-        let result = run_task6_cmd("config_check_result", &serde_json::json!({
-            "status": status, "output": output
-        })).unwrap();
+        let result = run_task6_cmd(
+            "config_check_result",
+            &serde_json::json!({
+                "status": status, "output": output
+            }),
+        )
+        .unwrap();
         assert_eq!(result["ok"], ok);
         assert_eq!(result["error"], error);
     }

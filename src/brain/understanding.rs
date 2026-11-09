@@ -1,7 +1,7 @@
-use std::path::PathBuf;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::path::PathBuf;
 
 use crate::brain::model_api::generate_api_with_requester;
 use crate::core::config::ModelConfig;
@@ -14,17 +14,17 @@ pub struct ImageItem {
 
 pub fn note_checker(count: usize) -> impl Fn(&Value) -> Result<Value> + Send + Sync + 'static {
     move |val| {
-        let arr = val
-            .as_array()
-            .ok_or_else(|| anyhow::anyhow!("notes must list one 1..300 character note per image"))?;
+        let arr = val.as_array().ok_or_else(|| {
+            anyhow::anyhow!("notes must list one 1..300 character note per image")
+        })?;
         if arr.len() != count {
             bail!("notes must list one 1..300 character note per image");
         }
         let mut notes = Vec::with_capacity(count);
         for item in arr {
-            let s = item
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("notes must list one 1..300 character note per image"))?;
+            let s = item.as_str().ok_or_else(|| {
+                anyhow::anyhow!("notes must list one 1..300 character note per image")
+            })?;
             let trimmed = s.trim();
             let c_count = trimmed.chars().count();
             if c_count < 1 || c_count > 300 {
@@ -42,13 +42,9 @@ pub async fn understand(
     config: &ModelConfig,
     batch_size: usize,
 ) -> Vec<Option<String>> {
-    understand_with_requester(
-        images,
-        text,
-        config,
-        batch_size,
-        |cfg, payload| Box::pin(async move { crate::brain::model_api::request_completion(&cfg, &payload).await }),
-    )
+    understand_with_requester(images, text, config, batch_size, |cfg, payload| {
+        Box::pin(async move { crate::brain::model_api::request_completion(&cfg, &payload).await })
+    })
     .await
 }
 
@@ -60,7 +56,10 @@ pub async fn understand_with_requester<R>(
     requester: R,
 ) -> Vec<Option<String>>
 where
-    R: Fn(ModelConfig, Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>
+    R: Fn(
+            ModelConfig,
+            Value,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>
         + Clone
         + Send
         + Sync
@@ -230,30 +229,24 @@ mod tests {
 
         let p1_name = images[0].path.to_str().unwrap().to_string();
 
-        let notes = understand_with_requester(
-            &images,
-            "",
-            &cfg,
-            4,
-            move |_config, payload| {
-                let p1 = p1_name.clone();
-                Box::pin(async move {
-                    let payload_str = payload.to_string();
-                    if payload_str.contains(&p1) {
-                        bail!("model response missing or incomplete");
-                    }
-                    Ok(json!({
-                        "model": "m",
-                        "choices": [{
-                            "finish_reason": "stop",
-                            "message": {
-                                "content": json!({"notes": ["ok", "ok"]}).to_string()
-                            }
-                        }]
-                    }))
-                })
-            },
-        )
+        let notes = understand_with_requester(&images, "", &cfg, 4, move |_config, payload| {
+            let p1 = p1_name.clone();
+            Box::pin(async move {
+                let payload_str = payload.to_string();
+                if payload_str.contains(&p1) {
+                    bail!("model response missing or incomplete");
+                }
+                Ok(json!({
+                    "model": "m",
+                    "choices": [{
+                        "finish_reason": "stop",
+                        "message": {
+                            "content": json!({"notes": ["ok", "ok"]}).to_string()
+                        }
+                    }]
+                }))
+            })
+        })
         .await;
 
         assert_eq!(
@@ -275,25 +268,19 @@ mod tests {
         let images = sample_images(2, temp.path());
         let cfg = test_config();
 
-        let notes = understand_with_requester(
-            &images,
-            "",
-            &cfg,
-            4,
-            move |_config, _payload| {
-                Box::pin(async move {
-                    Ok(json!({
-                        "model": "m",
-                        "choices": [{
-                            "finish_reason": "stop",
-                            "message": {
-                                "content": json!({"notes": ["only one"]}).to_string()
-                            }
-                        }]
-                    }))
-                })
-            },
-        )
+        let notes = understand_with_requester(&images, "", &cfg, 4, move |_config, _payload| {
+            Box::pin(async move {
+                Ok(json!({
+                    "model": "m",
+                    "choices": [{
+                        "finish_reason": "stop",
+                        "message": {
+                            "content": json!({"notes": ["only one"]}).to_string()
+                        }
+                    }]
+                }))
+            })
+        })
         .await;
 
         assert_eq!(notes, vec![None, None]);

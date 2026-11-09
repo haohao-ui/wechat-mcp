@@ -8,9 +8,9 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{channel, Receiver};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 fn repo_root() -> PathBuf {
@@ -39,7 +39,10 @@ fn desktop_selftest_bin() -> Option<&'static PathBuf> {
         fs::create_dir_all(&out_dir).ok()?;
         let bin_path = out_dir.join("desktop_smoke_selftest");
 
-        let main_swift = root.join("tests").join("desktop_smoke_selftest").join("main.swift");
+        let main_swift = root
+            .join("tests")
+            .join("desktop_smoke_selftest")
+            .join("main.swift");
 
         let mut cmd = Command::new("swiftc");
         cmd.arg("-O");
@@ -137,7 +140,9 @@ impl TestProcess {
     fn send(&mut self, request: &Value) {
         let s = serde_json::to_string(request).expect("serialize request");
         let stdin = self.stdin.as_mut().expect("stdin closed");
-        stdin.write_all(format!("{}\n", s).as_bytes()).expect("write to stdin");
+        stdin
+            .write_all(format!("{}\n", s).as_bytes())
+            .expect("write to stdin");
         stdin.flush().expect("flush stdin");
     }
 
@@ -218,7 +223,10 @@ fn run_case(mode: &str) {
     if legacy_case {
         write_executable(
             &case_dir.join("screencapture"),
-            &format!("#!/bin/sh\nexec \"{}\" legacy_capture \"$@\"\n", selftest_str),
+            &format!(
+                "#!/bin/sh\nexec \"{}\" legacy_capture \"$@\"\n",
+                selftest_str
+            ),
         );
     } else {
         write_executable(&case_dir.join("screencapture"), "#!/bin/sh\nexit 0\n");
@@ -267,27 +275,62 @@ fi
             "adapter": "wechat_desktop"
         }]
     });
-    fs::write(case_dir.join("accounts.json"), serde_json::to_string(&accounts_json).unwrap()).unwrap();
+    fs::write(
+        case_dir.join("accounts.json"),
+        serde_json::to_string(&accounts_json).unwrap(),
+    )
+    .unwrap();
 
     let mut env: HashMap<String, String> = std::env::vars().collect();
     env.insert(
         "WECHAT_MCP_DESKTOP_RUNTIME".into(),
-        if legacy_case { "legacy".into() } else { "stream".into() },
+        if legacy_case {
+            "legacy".into()
+        } else {
+            "stream".into()
+        },
     );
-    env.insert("WECHAT_MCP_DESKTOP_HELPER".into(), case_dir.join("helper").to_str().unwrap().into());
+    env.insert(
+        "WECHAT_MCP_DESKTOP_HELPER".into(),
+        case_dir.join("helper").to_str().unwrap().into(),
+    );
     env.insert("HELPER_CASE".into(), mode.into());
-    env.insert("HELPER_STARTS".into(), case_dir.join("starts").to_str().unwrap().into());
-    env.insert("HELPER_CLICKS".into(), case_dir.join("clicks").to_str().unwrap().into());
+    env.insert(
+        "HELPER_STARTS".into(),
+        case_dir.join("starts").to_str().unwrap().into(),
+    );
+    env.insert(
+        "HELPER_CLICKS".into(),
+        case_dir.join("clicks").to_str().unwrap().into(),
+    );
     env.insert("WECHAT_MCP_OPERATION_OVERLAY".into(), "1".into());
-    env.insert("OVERLAY_STATE".into(), case_dir.join("overlay-state").to_str().unwrap().into());
-    env.insert("OVERLAY_EVENTS".into(), case_dir.join("overlay-events").to_str().unwrap().into());
-    env.insert("MESSAGE_GATEWAY_DB".into(), case_dir.join("service.sqlite3").to_str().unwrap().into());
-    env.insert("MESSAGE_GATEWAY_CONFIG".into(), case_dir.join("accounts.json").to_str().unwrap().into());
+    env.insert(
+        "OVERLAY_STATE".into(),
+        case_dir.join("overlay-state").to_str().unwrap().into(),
+    );
+    env.insert(
+        "OVERLAY_EVENTS".into(),
+        case_dir.join("overlay-events").to_str().unwrap().into(),
+    );
+    env.insert(
+        "MESSAGE_GATEWAY_DB".into(),
+        case_dir.join("service.sqlite3").to_str().unwrap().into(),
+    );
+    env.insert(
+        "MESSAGE_GATEWAY_CONFIG".into(),
+        case_dir.join("accounts.json").to_str().unwrap().into(),
+    );
 
     let old_path = env.get("PATH").cloned().unwrap_or_default();
-    env.insert("PATH".into(), format!("{}:{}", case_dir.display(), old_path));
+    env.insert(
+        "PATH".into(),
+        format!("{}:{}", case_dir.display(), old_path),
+    );
 
-    let navigation_case = legacy_case || mode.starts_with("search_") || mode == "duplicate_target" || mode == "blank_window";
+    let navigation_case = legacy_case
+        || mode.starts_with("search_")
+        || mode == "duplicate_target"
+        || mode == "blank_window";
 
     let mut requests = Vec::new();
     if navigation_case {
@@ -305,13 +348,9 @@ fi
             }
         }));
     } else {
-        for (num, tool) in [
-            "list_conversations",
-            "list_conversations",
-            "get_messages",
-        ]
-        .into_iter()
-        .enumerate()
+        for (num, tool) in ["list_conversations", "list_conversations", "get_messages"]
+            .into_iter()
+            .enumerate()
         {
             requests.push(serde_json::json!({
                 "jsonrpc": "2.0",
@@ -332,35 +371,43 @@ fi
     let mut responses = Vec::new();
     for req in &requests {
         process.send(req);
-        let resp = process.receive(Duration::from_secs(10)).expect("receive response");
+        let resp = process
+            .receive(Duration::from_secs(10))
+            .expect("receive response");
         responses.push(resp);
     }
 
     if mode == "normal" {
-        let mut call_tool = |number: i64, name: &str, arguments: serde_json::Map<String, Value>| -> Value {
-            let mut args = arguments;
-            args.insert("platform".into(), serde_json::json!("wechat"));
-            args.insert("account_id".into(), serde_json::json!("fixture"));
-            process.send(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": number,
-                "method": "tools/call",
-                "params": {
-                    "name": name,
-                    "arguments": args
-                }
-            }));
-            let resp = process.receive(Duration::from_secs(10)).expect("receive tool response");
-            assert_eq!(resp["id"], number, "{:?}", resp);
-            let result = &resp["result"];
-            assert_eq!(result["isError"], false, "{:?}", result);
-            let text = result["content"][0]["text"].as_str().unwrap();
-            let parsed: Value = serde_json::from_str(text).unwrap();
-            parsed["data"].clone()
-        };
+        let mut call_tool =
+            |number: i64, name: &str, arguments: serde_json::Map<String, Value>| -> Value {
+                let mut args = arguments;
+                args.insert("platform".into(), serde_json::json!("wechat"));
+                args.insert("account_id".into(), serde_json::json!("fixture"));
+                process.send(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": number,
+                    "method": "tools/call",
+                    "params": {
+                        "name": name,
+                        "arguments": args
+                    }
+                }));
+                let resp = process
+                    .receive(Duration::from_secs(10))
+                    .expect("receive tool response");
+                assert_eq!(resp["id"], number, "{:?}", resp);
+                let result = &resp["result"];
+                assert_eq!(result["isError"], false, "{:?}", result);
+                let text = result["content"][0]["text"].as_str().unwrap();
+                let parsed: Value = serde_json::from_str(text).unwrap();
+                parsed["data"].clone()
+            };
 
         let mut cust_args = serde_json::Map::new();
-        cust_args.insert("idempotency_key".into(), serde_json::json!("fixture-customer"));
+        cust_args.insert(
+            "idempotency_key".into(),
+            serde_json::json!("fixture-customer"),
+        );
         cust_args.insert("display_name".into(), serde_json::json!("Alice"));
         cust_args.insert("recipient".into(), serde_json::json!("Alice"));
         let customer = call_tool(4, "create_customer", cust_args);
@@ -373,12 +420,29 @@ fi
         cap2_args.insert("customer_id".into(), customer["customer_id"].clone());
         let second = call_tool(6, "capture_customer_context", cap2_args);
 
-        assert_eq!(first["payload"]["text_continuity"]["state"], "baseline", "{:?}", first);
+        assert_eq!(
+            first["payload"]["text_continuity"]["state"], "baseline",
+            "{:?}",
+            first
+        );
         let continuity = &second["payload"]["text_continuity"];
-        assert_eq!(continuity["previous_event_id"], first["event_id"], "{:?}", second);
+        assert_eq!(
+            continuity["previous_event_id"], first["event_id"],
+            "{:?}",
+            second
+        );
         assert_eq!(continuity["state"], "unchanged", "{:?}", second);
-        assert_eq!(continuity["new_lines"], serde_json::json!([]), "{:?}", second);
-        assert_eq!(continuity["message_continuity_verified"], false, "{:?}", second);
+        assert_eq!(
+            continuity["new_lines"],
+            serde_json::json!([]),
+            "{:?}",
+            second
+        );
+        assert_eq!(
+            continuity["message_continuity_verified"], false,
+            "{:?}",
+            second
+        );
         assert_eq!(second["state"], "recorded", "{:?}", second);
         assert_eq!(second["verified"], false, "{:?}", second);
     }
@@ -415,7 +479,8 @@ fi
         assert_eq!(clicks, expected_clicks, "clicks for {}", mode);
 
         if clicks > 0 {
-            let events_str = fs::read_to_string(case_dir.join("overlay-events")).unwrap_or_default();
+            let events_str =
+                fs::read_to_string(case_dir.join("overlay-events")).unwrap_or_default();
             let events: Vec<&str> = events_str.lines().filter(|l| !l.is_empty()).collect();
             let move_count = events.iter().filter(|&&e| e == "move").count();
             let click_count = events.iter().filter(|&&e| e == "click").count();
@@ -424,7 +489,9 @@ fi
         }
 
         if mode == "blank_window" {
-            let txt = responses[0]["result"]["content"][0]["text"].as_str().unwrap();
+            let txt = responses[0]["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap();
             assert!(txt.contains("无可读文字"), "{:?}", responses);
         }
 
@@ -435,23 +502,37 @@ fi
             );
         } else {
             let starts = fs::read_to_string(case_dir.join("starts")).unwrap();
-            assert_eq!(starts.trim(), "1", "Native navigation unexpectedly restarted helper");
+            assert_eq!(
+                starts.trim(),
+                "1",
+                "Native navigation unexpectedly restarted helper"
+            );
         }
     } else if mode == "normal" {
         assert!(
-            responses.iter().all(|r| r["result"]["isError"].as_bool() == Some(false)),
+            responses
+                .iter()
+                .all(|r| r["result"]["isError"].as_bool() == Some(false)),
             "{:?}",
             responses
         );
         let outputs: Vec<Value> = responses
             .iter()
-            .map(|r| serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap())
+            .map(|r| {
+                serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+            })
             .collect();
 
-        assert_eq!(outputs[0]["data"]["conversations"][0]["display_name"], "Alice");
+        assert_eq!(
+            outputs[0]["data"]["conversations"][0]["display_name"],
+            "Alice"
+        );
         assert_eq!(outputs[0]["data"]["conversations"][0]["preview"], "preview");
         assert_eq!(outputs[1]["data"]["capture"]["sequence"], 2);
-        assert_eq!(outputs[2]["data"]["text_lines"], serde_json::json!(["收到", "收到"]));
+        assert_eq!(
+            outputs[2]["data"]["text_lines"],
+            serde_json::json!(["收到", "收到"])
+        );
         assert_eq!(outputs[2]["data"]["observation"]["kind"], "ocr_text_lines");
         assert_eq!(outputs[2]["data"]["direction"], "unknown");
 
@@ -459,7 +540,9 @@ fi
         assert_eq!(starts.trim(), "1", "Helper process was not reused");
     } else {
         assert!(
-            responses.iter().all(|r| r["result"]["isError"].as_bool() == Some(true)),
+            responses
+                .iter()
+                .all(|r| r["result"]["isError"].as_bool() == Some(true)),
             "{:?}",
             responses
         );

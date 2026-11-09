@@ -3,11 +3,11 @@ pub mod documents;
 pub mod model_api;
 pub mod understanding;
 
-use std::collections::HashMap;
-use std::path::PathBuf;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct ContactInfo {

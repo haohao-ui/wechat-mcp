@@ -1,6 +1,6 @@
-use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 
 /// 轮次对外认领信息（Spec 8 契约）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,7 +60,10 @@ pub fn rfc3339(secs: u64) -> String {
 
 /// 将内部 Turn 与认领上下文转为对外 v1 契约数据结构
 /// Failure reason recorded for the same attachment, matched by its original label.
-fn failure_for<'a>(turn: &'a crate::brain::Turn, media_ref: &crate::brain::MediaRef) -> Option<&'a str> {
+fn failure_for<'a>(
+    turn: &'a crate::brain::Turn,
+    media_ref: &crate::brain::MediaRef,
+) -> Option<&'a str> {
     let label = media_ref.label.as_deref()?;
     turn.failed
         .iter()
@@ -110,7 +113,10 @@ pub fn turn_v1(
             });
             let fields = msg.as_object_mut().unwrap();
             if kind == "file" {
-                fields.insert("filename".to_string(), serde_json::json!(mr.filename.as_deref().unwrap_or("")));
+                fields.insert(
+                    "filename".to_string(),
+                    serde_json::json!(mr.filename.as_deref().unwrap_or("")),
+                );
             }
             if let Some(ref und) = mr.understanding {
                 fields.insert("understanding".to_string(), serde_json::json!(und));
@@ -176,7 +182,11 @@ pub fn turn_v1(
 
     // 4. 附件接收/解析失败项
     for failed in &turn.failed {
-        if turn.media_refs.iter().any(|mr| mr.label.as_deref() == Some(failed.label.as_str())) {
+        if turn
+            .media_refs
+            .iter()
+            .any(|mr| mr.label.as_deref() == Some(failed.label.as_str()))
+        {
             continue; // already reported with its attachment above
         }
         let kind = failed.kind.as_deref().unwrap_or("unknown");
@@ -264,7 +274,8 @@ mod tests {
     fn sort_json(val: &Value) -> Value {
         match val {
             Value::Object(map) => {
-                let sorted: BTreeMap<_, _> = map.iter().map(|(k, v)| (k.clone(), sort_json(v))).collect();
+                let sorted: BTreeMap<_, _> =
+                    map.iter().map(|(k, v)| (k.clone(), sort_json(v))).collect();
                 Value::Object(sorted.into_iter().collect())
             }
             Value::Array(arr) => Value::Array(arr.iter().map(sort_json).collect()),
@@ -274,11 +285,17 @@ mod tests {
 
     fn assert_json_matches_snapshot(actual: &Value, snapshot_rel_path: &str) {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let full_path = manifest_dir.join("src/core/open_api/snapshots").join(snapshot_rel_path);
+        let full_path = manifest_dir
+            .join("src/core/open_api/snapshots")
+            .join(snapshot_rel_path);
         let expected_raw = std::fs::read_to_string(&full_path)
             .unwrap_or_else(|e| panic!("failed to read snapshot at {}: {e}", full_path.display()));
-        let expected: Value = serde_json::from_str(&expected_raw)
-            .unwrap_or_else(|e| panic!("failed to parse snapshot JSON at {}: {e}", full_path.display()));
+        let expected: Value = serde_json::from_str(&expected_raw).unwrap_or_else(|e| {
+            panic!(
+                "failed to parse snapshot JSON at {}: {e}",
+                full_path.display()
+            )
+        });
 
         let sorted_actual = sort_json(actual);
         let sorted_expected = sort_json(&expected);
@@ -492,7 +509,10 @@ mod tests {
         let serialized = serde_json::to_string(&output).unwrap();
 
         assert!(!serialized.contains("/Users/"), "must not contain /Users/");
-        assert!(!serialized.contains(&state_dir), "must not contain state_dir");
+        assert!(
+            !serialized.contains(&state_dir),
+            "must not contain state_dir"
+        );
 
         // 递归检查任何字符串值不以 '/' 开头
         fn verify_no_leading_slash(val: &Value) {
@@ -554,11 +574,16 @@ mod tests {
         let result = turn_v1(&turn, &claim, "c_charlie", &lookup);
         let messages = result.get("messages").and_then(|v| v.as_array()).unwrap();
         assert!(
-            messages.iter().all(|m| m.get("kind").and_then(|k| k.as_str()) != Some("image")),
+            messages
+                .iter()
+                .all(|m| m.get("kind").and_then(|k| k.as_str()) != Some("image")),
             "Unresolvable image should not appear in messages"
         );
 
-        let unavailable = result.get("unavailable").and_then(|v| v.as_array()).unwrap();
+        let unavailable = result
+            .get("unavailable")
+            .and_then(|v| v.as_array())
+            .unwrap();
         assert_eq!(
             unavailable,
             &vec![serde_json::json!({
@@ -636,7 +661,11 @@ mod tests {
     struct TempDir(PathBuf);
     impl TempDir {
         fn new(name: &str) -> Self {
-            let p = std::env::temp_dir().join(format!("contract-test-{}-{}", name, uuid::Uuid::new_v4()));
+            let p = std::env::temp_dir().join(format!(
+                "contract-test-{}-{}",
+                name,
+                uuid::Uuid::new_v4()
+            ));
             std::fs::create_dir_all(&p).unwrap();
             TempDir(p)
         }
@@ -728,7 +757,10 @@ mod tests {
         };
 
         let val = serde_json::to_value(&turn).unwrap();
-        assert!(val.get("media_refs").is_none(), "Turn 序列化结果绝对不能包含 media_refs 键");
+        assert!(
+            val.get("media_refs").is_none(),
+            "Turn 序列化结果绝对不能包含 media_refs 键"
+        );
     }
 
     #[test]
@@ -808,7 +840,10 @@ mod tests {
         let turn = Turn {
             turn_id: "t_merge".to_string(),
             account_id: "wx_acc".to_string(),
-            contact: ContactInfo { name: "测试客户".to_string(), kind: "private".to_string() },
+            contact: ContactInfo {
+                name: "测试客户".to_string(),
+                kind: "private".to_string(),
+            },
             text: String::new(),
             mode: "service".to_string(),
             chat_kind: "private".to_string(),
@@ -826,8 +861,19 @@ mod tests {
             max_attachment_mb: 50,
             media_refs: vec![media_ref("图1", Some("md_a")), media_ref("图2", None)],
         };
-        let claim = ClaimInfo { claim_token: "tok".to_string(), lease_until: 1700000060, deadline_at: 1700000120 };
-        let result = turn_v1(&turn, &claim, "c_x", &MockMediaLookup { mapping: HashMap::new() });
+        let claim = ClaimInfo {
+            claim_token: "tok".to_string(),
+            lease_until: 1700000060,
+            deadline_at: 1700000120,
+        };
+        let result = turn_v1(
+            &turn,
+            &claim,
+            "c_x",
+            &MockMediaLookup {
+                mapping: HashMap::new(),
+            },
+        );
 
         // 有媒体 ID 的图片只出现在 messages，附带本机处理失败的原因；不再重复出现在 unavailable。
         assert_eq!(
@@ -895,9 +941,15 @@ mod tests {
         let messages = result.get("messages").and_then(|v| v.as_array()).unwrap();
         // 只有 1 条文本消息，没有 image 和 file
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].get("kind").and_then(|k| k.as_str()), Some("text"));
+        assert_eq!(
+            messages[0].get("kind").and_then(|k| k.as_str()),
+            Some("text")
+        );
 
-        let unavailable = result.get("unavailable").and_then(|v| v.as_array()).unwrap();
+        let unavailable = result
+            .get("unavailable")
+            .and_then(|v| v.as_array())
+            .unwrap();
         assert_eq!(
             unavailable,
             &vec![

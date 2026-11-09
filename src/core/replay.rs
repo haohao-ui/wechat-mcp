@@ -1,12 +1,12 @@
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
 
 use crate::brain::{BrainReply, Turn as BrainTurn};
 use crate::core::config::{AllowlistEntry, BotConfig};
@@ -14,7 +14,9 @@ use crate::core::delivery::ToolClient;
 use crate::core::history::store::HistoryStore;
 use crate::core::model::{Bubble, Frame};
 use crate::core::state::read_json;
-use crate::core::turns::{AttachmentFile, AttachmentImage, BotService, Capture, FailedAttachmentItem};
+use crate::core::turns::{
+    AttachmentFile, AttachmentImage, BotService, Capture, FailedAttachmentItem,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReplayArgs {
@@ -145,7 +147,11 @@ impl Capture for ReplayCapture {
         async move { Ok(f) }
     }
 
-    fn scroll(&mut self, _direction: &str, _pages: u32) -> impl Future<Output = Result<Frame>> + Send {
+    fn scroll(
+        &mut self,
+        _direction: &str,
+        _pages: u32,
+    ) -> impl Future<Output = Result<Frame>> + Send {
         let f = self.current_frame.lock().unwrap().clone();
         async move { Ok(f) }
     }
@@ -158,7 +164,13 @@ impl Capture for ReplayCapture {
         &mut self,
         _items: &[Bubble],
         _frame: &Frame,
-    ) -> impl Future<Output = Result<(Vec<AttachmentImage>, Vec<AttachmentFile>, Vec<FailedAttachmentItem>)>> + Send {
+    ) -> impl Future<
+        Output = Result<(
+            Vec<AttachmentImage>,
+            Vec<AttachmentFile>,
+            Vec<FailedAttachmentItem>,
+        )>,
+    > + Send {
         async move { Ok((Vec::new(), Vec::new(), Vec::new())) }
     }
 }
@@ -177,12 +189,10 @@ impl ToolClient for ReplayToolClient {
                     calls.fetch_add(1, Ordering::SeqCst);
                     Ok(json!("triggered"))
                 }
-                "get_send_status" => {
-                    Ok(json!({
-                        "status": "triggered",
-                        "delivery": "unknown"
-                    }))
-                }
+                "get_send_status" => Ok(json!({
+                    "status": "triggered",
+                    "delivery": "unknown"
+                })),
                 _ => Ok(json!({})),
             }
         }
@@ -250,8 +260,9 @@ pub async fn execute_replay(args: &ReplayArgs) -> Result<ReplayReport> {
             bail!("--work directory must be empty");
         }
     } else {
-        fs::create_dir_all(&args.work)
-            .with_context(|| format!("failed to create --work directory {}", args.work.display()))?;
+        fs::create_dir_all(&args.work).with_context(|| {
+            format!("failed to create --work directory {}", args.work.display())
+        })?;
     }
 
     // 1. 读取帧文件并过滤出 recipient == args.session，按 t 排序
@@ -275,7 +286,10 @@ pub async fn execute_replay(args: &ReplayArgs) -> Result<ReplayReport> {
     recorded_frames.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     let frames_count = recorded_frames.len();
     let (first_t, last_t) = if frames_count > 0 {
-        (recorded_frames.first().unwrap().0, recorded_frames.last().unwrap().0)
+        (
+            recorded_frames.first().unwrap().0,
+            recorded_frames.last().unwrap().0,
+        )
     } else {
         (0.0, 0.0)
     };
@@ -290,7 +304,11 @@ pub async fn execute_replay(args: &ReplayArgs) -> Result<ReplayReport> {
     config.state_dir = state_dir.clone();
 
     // 保证 allowlist 匹配 session
-    let target_entry = if let Some(existing) = config.allowlist.iter().find(|e| e.recipient == args.session) {
+    let target_entry = if let Some(existing) = config
+        .allowlist
+        .iter()
+        .find(|e| e.recipient == args.session)
+    {
         existing.clone()
     } else {
         AllowlistEntry {
@@ -301,16 +319,13 @@ pub async fn execute_replay(args: &ReplayArgs) -> Result<ReplayReport> {
     };
     config.allowlist = vec![target_entry.clone()];
 
-    let contact_id = history.ensure_contact(&config.account_id, &serde_json::to_value(&target_entry)?, false)?;
-
-    let mut service = BotService::new(
-        config,
-        None,
-        Some(history),
-        Some(contact_id),
-        None,
-        None,
+    let contact_id = history.ensure_contact(
+        &config.account_id,
+        &serde_json::to_value(&target_entry)?,
+        false,
     )?;
+
+    let mut service = BotService::new(config, None, Some(history), Some(contact_id), None, None)?;
 
     // 3. 注入时钟与 sleep
     let current_time = Arc::new(Mutex::new(first_t));
@@ -704,14 +719,21 @@ mod tests {
         let parsed = parse_replay_args(&args).unwrap();
         assert_eq!(parsed.config, PathBuf::from("cfg.json"));
         assert_eq!(parsed.session, "alice");
-        assert_eq!(parsed.frames, vec![PathBuf::from("f1.jsonl"), PathBuf::from("f2.jsonl")]);
+        assert_eq!(
+            parsed.frames,
+            vec![PathBuf::from("f1.jsonl"), PathBuf::from("f2.jsonl")]
+        );
         assert_eq!(parsed.journals, PathBuf::from("py_dir"));
         assert_eq!(parsed.work, PathBuf::from("work_dir"));
 
         // 缺少参数测试
         let bad_args = vec!["--config".to_string(), "cfg.json".to_string()];
         assert!(parse_replay_args(&bad_args).is_err());
-        assert_eq!(run_replay_cli(&bad_args).await.unwrap(), 2, "参数不合法退出码为 2");
+        assert_eq!(
+            run_replay_cli(&bad_args).await.unwrap(),
+            2,
+            "参数不合法退出码为 2"
+        );
     }
 
     #[tokio::test]
@@ -804,12 +826,17 @@ mod tests {
         let journals_dir = td.path().join("journals_dir");
         fs::create_dir_all(&journals_dir).unwrap();
         let py_journal = journals_dir.join("send-test.json");
-        fs::write(&py_journal, json!({
-            "idempotency_key": "test_key",
-            "created_at": 1000.0,
-            "status": "triggered",
-            "reply": "python reply"
-        }).to_string()).unwrap();
+        fs::write(
+            &py_journal,
+            json!({
+                "idempotency_key": "test_key",
+                "created_at": 1000.0,
+                "status": "triggered",
+                "reply": "python reply"
+            })
+            .to_string(),
+        )
+        .unwrap();
 
         let frames_snap_before = snapshot_dir(&frames_dir);
         let journals_snap_before = snapshot_dir(&journals_dir);
@@ -827,8 +854,14 @@ mod tests {
         let frames_snap_after = snapshot_dir(&frames_dir);
         let journals_snap_after = snapshot_dir(&journals_dir);
 
-        assert_eq!(frames_snap_before, frames_snap_after, "frames 目录绝不被修改");
-        assert_eq!(journals_snap_before, journals_snap_after, "journals 目录绝不被修改");
+        assert_eq!(
+            frames_snap_before, frames_snap_after,
+            "frames 目录绝不被修改"
+        );
+        assert_eq!(
+            journals_snap_before, journals_snap_after,
+            "journals 目录绝不被修改"
+        );
     }
 
     #[tokio::test]
@@ -844,13 +877,31 @@ mod tests {
         // 构造基线帧和后续消息帧
         let f0 = test_frame(vec![test_bubble("旧消息", "inbound_visual")], "alice");
         let b1 = test_bubble("第一条新消息", "inbound_visual");
-        let f1 = test_frame(vec![test_bubble("旧消息", "inbound_visual"), b1.clone()], "alice");
+        let f1 = test_frame(
+            vec![test_bubble("旧消息", "inbound_visual"), b1.clone()],
+            "alice",
+        );
 
         let b2 = test_bubble("第二条新消息", "inbound_visual");
-        let f2 = test_frame(vec![test_bubble("旧消息", "inbound_visual"), b1.clone(), b2.clone()], "alice");
+        let f2 = test_frame(
+            vec![
+                test_bubble("旧消息", "inbound_visual"),
+                b1.clone(),
+                b2.clone(),
+            ],
+            "alice",
+        );
 
         let b3 = test_bubble("第三条新消息", "inbound_visual");
-        let f3 = test_frame(vec![test_bubble("旧消息", "inbound_visual"), b1.clone(), b2.clone(), b3.clone()], "alice");
+        let f3 = test_frame(
+            vec![
+                test_bubble("旧消息", "inbound_visual"),
+                b1.clone(),
+                b2.clone(),
+                b3.clone(),
+            ],
+            "alice",
+        );
 
         // 使用临时 BotService 计算 batch_key
         let tmp_dir = td.path().join("tmp_state");
@@ -863,7 +914,8 @@ mod tests {
             None,
             None,
             None,
-        ).unwrap();
+        )
+        .unwrap();
 
         let k1 = tmp_svc.batch_key(&f0, &[b1.clone()]);
         let k2 = tmp_svc.batch_key(&f1, &[b2.clone()]);
@@ -872,52 +924,97 @@ mod tests {
         // 写入 Python journals：
         // 1. k1 -> matched: Python status = triggered, reply 提供
         let k1_file = journals.join(format!("send-{k1}.json"));
-        fs::write(&k1_file, json!({
-            "idempotency_key": k1,
-            "created_at": 1001.0,
-            "status": "triggered",
-            "reply": "已收到第一条消息"
-        }).to_string()).unwrap();
+        fs::write(
+            &k1_file,
+            json!({
+                "idempotency_key": k1,
+                "created_at": 1001.0,
+                "status": "triggered",
+                "reply": "已收到第一条消息"
+            })
+            .to_string(),
+        )
+        .unwrap();
 
         // 2. k2 -> status_mismatch: Python status = not_sent, reply 提供
         let k2_file = journals.join(format!("send-{k2}.json"));
-        fs::write(&k2_file, json!({
-            "idempotency_key": k2,
-            "created_at": 1002.0,
-            "status": "not_sent",
-            "reply": "已收到第二条消息"
-        }).to_string()).unwrap();
+        fs::write(
+            &k2_file,
+            json!({
+                "idempotency_key": k2,
+                "created_at": 1002.0,
+                "status": "not_sent",
+                "reply": "已收到第二条消息"
+            })
+            .to_string(),
+        )
+        .unwrap();
 
         // 3. k3 -> rust_only + missing_reply: 不写入 journals，由 Rust 产生且缺 reply
 
         // 4. python_only -> 只有 Python 有（created_at 在范围内）
         let k_py_only = "py-only-key-123456";
         let k_py_file = journals.join(format!("send-{k_py_only}.json"));
-        fs::write(&k_py_file, json!({
-            "idempotency_key": k_py_only,
-            "created_at": 1002.5,
-            "status": "triggered",
-            "reply": "仅 Python 记录"
-        }).to_string()).unwrap();
+        fs::write(
+            &k_py_file,
+            json!({
+                "idempotency_key": k_py_only,
+                "created_at": 1002.5,
+                "status": "triggered",
+                "reply": "仅 Python 记录"
+            })
+            .to_string(),
+        )
+        .unwrap();
 
         // 5. 超出时间范围的 Python 日志 -> 应该被忽略
         let k_out_file = journals.join("send-out-of-range.json");
-        fs::write(&k_out_file, json!({
-            "idempotency_key": "out_of_range_key",
-            "created_at": 500.0,
-            "status": "triggered",
-            "reply": "早期消息"
-        }).to_string()).unwrap();
+        fs::write(
+            &k_out_file,
+            json!({
+                "idempotency_key": "out_of_range_key",
+                "created_at": 500.0,
+                "status": "triggered",
+                "reply": "早期消息"
+            })
+            .to_string(),
+        )
+        .unwrap();
 
         // 写入 frames 文件
         let frames_path = td.path().join("frames.jsonl");
         let mut file = File::create(&frames_path).unwrap();
-        writeln!(file, "{}", json!({"t": 1000.0, "op": "frame", "recipient": "alice", "frame": f0})).unwrap();
-        writeln!(file, "{}", json!({"t": 1001.0, "op": "frame", "recipient": "alice", "frame": f1})).unwrap();
-        writeln!(file, "{}", json!({"t": 1002.0, "op": "frame", "recipient": "alice", "frame": f2})).unwrap();
-        writeln!(file, "{}", json!({"t": 1003.0, "op": "frame", "recipient": "alice", "frame": f3})).unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"t": 1000.0, "op": "frame", "recipient": "alice", "frame": f0})
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"t": 1001.0, "op": "frame", "recipient": "alice", "frame": f1})
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"t": 1002.0, "op": "frame", "recipient": "alice", "frame": f2})
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"t": 1003.0, "op": "frame", "recipient": "alice", "frame": f3})
+        )
+        .unwrap();
         // 混入一条其他 recipient 的记录，验证过滤
-        writeln!(file, "{}", json!({"t": 1004.0, "op": "frame", "recipient": "bob", "frame": f3})).unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"t": 1004.0, "op": "frame", "recipient": "bob", "frame": f3})
+        )
+        .unwrap();
 
         let args = ReplayArgs {
             config: cfg,
@@ -935,8 +1032,12 @@ mod tests {
         // 验证四类对比
         assert_eq!(report.matched, vec![k1.clone()], "k1 应该匹配");
         assert_eq!(report.rust_only, vec![k3.clone()], "k3 只有 Rust 有");
-        assert_eq!(report.python_only, vec![k_py_only.to_string()], "k_py_only 只有 Python 有");
-        
+        assert_eq!(
+            report.python_only,
+            vec![k_py_only.to_string()],
+            "k_py_only 只有 Python 有"
+        );
+
         assert_eq!(report.status_mismatch.len(), 1);
         let mismatch = &report.status_mismatch[0];
         assert_eq!(mismatch.key, k2);
@@ -972,40 +1073,71 @@ mod tests {
 
         let f0 = test_frame(vec![test_bubble("初始", "inbound_visual")], "alice");
         let b1 = test_bubble("新消息", "inbound_visual");
-        let f1 = test_frame(vec![test_bubble("初始", "inbound_visual"), b1.clone()], "alice");
+        let f1 = test_frame(
+            vec![test_bubble("初始", "inbound_visual"), b1.clone()],
+            "alice",
+        );
 
         let tmp_dir = td.path().join("tmp_state");
         let tmp_cfg = td.path().join("tmp_cfg.json");
         write_test_config(&tmp_cfg, &tmp_dir, "alice");
-        let tmp_svc = BotService::new(BotConfig::load(&tmp_cfg).unwrap(), None, None, None, None, None).unwrap();
+        let tmp_svc = BotService::new(
+            BotConfig::load(&tmp_cfg).unwrap(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let k1 = tmp_svc.batch_key(&f0, &[b1.clone()]);
 
         // 写入由 Rust 核心生成的 journal（含 recipient: alice，嵌套在 sessions/c_alice_123/）
         let k1_file = alice_dir.join(format!("send-{k1}.json"));
-        fs::write(&k1_file, json!({
-            "account_id": "test_account",
-            "recipient": "alice",
-            "idempotency_key": k1,
-            "created_at": 1001.0,
-            "status": "triggered",
-            "reply": "Rust 核心在线回复"
-        }).to_string()).unwrap();
+        fs::write(
+            &k1_file,
+            json!({
+                "account_id": "test_account",
+                "recipient": "alice",
+                "idempotency_key": k1,
+                "created_at": 1001.0,
+                "status": "triggered",
+                "reply": "Rust 核心在线回复"
+            })
+            .to_string(),
+        )
+        .unwrap();
 
         // 写入另一个会话 bob 的 journal，验证不被混淆
         let bob_file = bob_dir.join("send-bobkey.json");
-        fs::write(&bob_file, json!({
-            "account_id": "test_account",
-            "recipient": "bob",
-            "idempotency_key": "bobkey",
-            "created_at": 1001.0,
-            "status": "triggered",
-            "reply": "Bob 回复"
-        }).to_string()).unwrap();
+        fs::write(
+            &bob_file,
+            json!({
+                "account_id": "test_account",
+                "recipient": "bob",
+                "idempotency_key": "bobkey",
+                "created_at": 1001.0,
+                "status": "triggered",
+                "reply": "Bob 回复"
+            })
+            .to_string(),
+        )
+        .unwrap();
 
         let frames_path = td.path().join("frames.jsonl");
         let mut file = File::create(&frames_path).unwrap();
-        writeln!(file, "{}", json!({"t": 1000.0, "op": "capture", "recipient": "alice", "frame": f0})).unwrap();
-        writeln!(file, "{}", json!({"t": 1001.0, "op": "scroll_chat", "recipient": "alice", "frame": f1})).unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"t": 1000.0, "op": "capture", "recipient": "alice", "frame": f0})
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"t": 1001.0, "op": "scroll_chat", "recipient": "alice", "frame": f1})
+        )
+        .unwrap();
 
         let args = ReplayArgs {
             config: cfg,
@@ -1021,7 +1153,13 @@ mod tests {
         assert_eq!(report.rust_only, Vec::<String>::new());
         assert_eq!(report.python_only, Vec::<String>::new());
         assert!(report.missing_reply.is_empty());
-        assert!(!report.python_logs.contains_key("bobkey"), "属于其他会话的 journal 不被混淆");
-        assert_eq!(report.python_logs.get(&k1).map(|s| s.as_str()), Some("triggered"));
+        assert!(
+            !report.python_logs.contains_key("bobkey"),
+            "属于其他会话的 journal 不被混淆"
+        );
+        assert_eq!(
+            report.python_logs.get(&k1).map(|s| s.as_str()),
+            Some("triggered")
+        );
     }
 }

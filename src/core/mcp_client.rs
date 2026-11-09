@@ -1,12 +1,12 @@
+use anyhow::{Context, Result, bail};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use anyhow::{bail, Context, Result};
-use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
@@ -62,9 +62,12 @@ impl McpSocketClient {
         req_timeout: Duration,
         counter: &mut u64,
     ) -> Result<McpTransport> {
-        let stream = UnixStream::connect(socket_path)
-            .await
-            .with_context(|| format!("failed to connect to MCP socket at {}", socket_path.display()))?;
+        let stream = UnixStream::connect(socket_path).await.with_context(|| {
+            format!(
+                "failed to connect to MCP socket at {}",
+                socket_path.display()
+            )
+        })?;
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
 
@@ -99,8 +102,8 @@ impl McpSocketClient {
             if n == 0 {
                 bail!("MCP closed before response");
             }
-            let reply: Value = serde_json::from_str(&line)
-                .context("invalid JSON in MCP initialize response")?;
+            let reply: Value =
+                serde_json::from_str(&line).context("invalid JSON in MCP initialize response")?;
             if reply.get("id").is_none() {
                 continue;
             }
@@ -121,14 +124,19 @@ impl McpSocketClient {
         write_half.write_all(notify).await?;
         write_half.flush().await?;
 
-        Ok(McpTransport { reader, writer: write_half })
+        Ok(McpTransport {
+            reader,
+            writer: write_half,
+        })
     }
 
     pub async fn request(&self, method: &str, params: Value) -> Result<Value> {
         let mut state = self.state.lock().await;
         let req_timeout = self.req_timeout;
 
-        let result = Self::request_internal(&mut state, &self.socket_path, req_timeout, method, params).await;
+        let result =
+            Self::request_internal(&mut state, &self.socket_path, req_timeout, method, params)
+                .await;
         if result.is_err() {
             // Discard broken transport on error, timeout, or EOF so next call auto-reconnects
             state.transport = None;
@@ -144,7 +152,8 @@ impl McpSocketClient {
         params: Value,
     ) -> Result<Value> {
         if state.transport.is_none() {
-            let transport = Self::connect_and_handshake(socket_path, req_timeout, &mut state.counter).await?;
+            let transport =
+                Self::connect_and_handshake(socket_path, req_timeout, &mut state.counter).await?;
             state.transport = Some(transport);
         }
 
@@ -172,8 +181,8 @@ impl McpSocketClient {
             if n == 0 {
                 bail!("MCP closed before response");
             }
-            let reply: Value = serde_json::from_str(&line)
-                .context("invalid JSON in MCP response")?;
+            let reply: Value =
+                serde_json::from_str(&line).context("invalid JSON in MCP response")?;
             if reply.get("id").is_none() {
                 continue;
             }
@@ -186,7 +195,10 @@ impl McpSocketClient {
                 let truncated: String = msg.chars().take(512).collect();
                 bail!("MCP RPC {code}: {truncated}");
             }
-            let res = reply.get("result").cloned().context("MCP response missing result")?;
+            let res = reply
+                .get("result")
+                .cloned()
+                .context("MCP response missing result")?;
             return Ok(res);
         }
     }
@@ -206,7 +218,11 @@ impl McpSocketClient {
         });
 
         let result = self.request("tools/call", params).await?;
-        if result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if result
+            .get("isError")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             let mut details = Vec::new();
             if let Some(content) = result.get("content").and_then(|v| v.as_array()) {
                 for c in content {
@@ -256,19 +272,25 @@ impl McpSocketClient {
 }
 
 impl ToolClient for McpSocketClient {
-    fn tool(&self, name: &str, args: Value) -> impl std::future::Future<Output = Result<Value>> + Send {
+    fn tool(
+        &self,
+        name: &str,
+        args: Value,
+    ) -> impl std::future::Future<Output = Result<Value>> + Send {
         let fut = self.tool(name, args);
         async move { fut.await }
     }
 }
 
 impl ToolClient for Arc<McpSocketClient> {
-    fn tool(&self, name: &str, args: Value) -> impl std::future::Future<Output = Result<Value>> + Send {
+    fn tool(
+        &self,
+        name: &str,
+        args: Value,
+    ) -> impl std::future::Future<Output = Result<Value>> + Send {
         let client = self.clone();
         let name = name.to_string();
-        async move {
-            McpSocketClient::tool(&client, &name, args).await
-        }
+        async move { McpSocketClient::tool(&client, &name, args).await }
     }
 }
 
@@ -342,7 +364,8 @@ mod tests {
                             }
                             if let Ok(val) = serde_json::from_str::<Value>(&line) {
                                 reqs.lock().await.push(val.clone());
-                                if val.get("method").and_then(|m| m.as_str()) == Some("initialize") {
+                                if val.get("method").and_then(|m| m.as_str()) == Some("initialize")
+                                {
                                     inits.fetch_add(1, Ordering::SeqCst);
                                     let id = val.get("id").cloned().unwrap_or(json!(1));
                                     let resp = json!({
@@ -358,7 +381,9 @@ mod tests {
                                     out.push(b'\n');
                                     let _ = write_half.write_all(&out).await;
                                     let _ = write_half.flush().await;
-                                } else if val.get("method").and_then(|m| m.as_str()) == Some("notifications/initialized") {
+                                } else if val.get("method").and_then(|m| m.as_str())
+                                    == Some("notifications/initialized")
+                                {
                                     // Notification: no response
                                 } else if let Some(reply) = handler(val) {
                                     let mut out = serde_json::to_vec(&reply).unwrap();
@@ -405,10 +430,14 @@ mod tests {
             } else {
                 None
             }
-        }).await;
+        })
+        .await;
 
         let client = McpSocketClient::new(server.sock_path.clone(), "test_account".to_string());
-        let res = client.tool("test_tool", json!({"foo": "bar"})).await.unwrap();
+        let res = client
+            .tool("test_tool", json!({"foo": "bar"}))
+            .await
+            .unwrap();
         assert_eq!(res["status"], "ok");
         assert_eq!(res["delivered"], true);
         assert_eq!(server.init_count.load(Ordering::SeqCst), 1);
@@ -429,7 +458,8 @@ mod tests {
                 let inner_json = serde_json::to_string(&json!({
                     "account": {"platform": "wechat", "account_id": "acc2"},
                     "data": {"found": 42}
-                })).unwrap();
+                }))
+                .unwrap();
                 Some(json!({
                     "jsonrpc": "2.0",
                     "id": id,
@@ -442,7 +472,8 @@ mod tests {
             } else {
                 None
             }
-        }).await;
+        })
+        .await;
 
         let client = McpSocketClient::new(server.sock_path.clone(), "acc2".to_string());
         let res = client.tool("search", json!({})).await.unwrap();
@@ -463,7 +494,8 @@ mod tests {
                     ]
                 }
             }))
-        }).await;
+        })
+        .await;
 
         let client = McpSocketClient::new(server.sock_path.clone(), "acc".to_string());
         let err = client.tool("send_message", json!({})).await.unwrap_err();
@@ -490,7 +522,8 @@ mod tests {
                     }
                 }
             }))
-        }).await;
+        })
+        .await;
 
         let client = McpSocketClient::new(server.sock_path.clone(), "my_account".to_string());
         let err = client.tool("info", json!({})).await.unwrap_err();
@@ -517,9 +550,14 @@ mod tests {
                     }
                 }))
             }
-        }).await;
+        })
+        .await;
 
-        let client = McpSocketClient::with_timeout(server.sock_path.clone(), "acc".to_string(), Duration::from_millis(200));
+        let client = McpSocketClient::with_timeout(
+            server.sock_path.clone(),
+            "acc".to_string(),
+            Duration::from_millis(200),
+        );
         let r1 = client.tool("first", json!({})).await.unwrap();
         assert_eq!(r1["step"], "first");
         assert_eq!(server.init_count.load(Ordering::SeqCst), 1);
@@ -548,7 +586,8 @@ mod tests {
                     "result": {}
                 }))
             }
-        }).await;
+        })
+        .await;
 
         let client = McpSocketClient::with_timeout(
             server.sock_path.clone(),

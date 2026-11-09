@@ -580,10 +580,9 @@ impl ExternalBrain {
                     .order
                     .iter()
                     .find(|id| {
-                        state
-                            .pending
-                            .get(*id)
-                            .map_or(false, |p| p.claimed_by.is_none() && !p.answered && p.deadline_at > cur_now)
+                        state.pending.get(*id).map_or(false, |p| {
+                            p.claimed_by.is_none() && !p.answered && p.deadline_at > cur_now
+                        })
                     })
                     .cloned();
 
@@ -666,10 +665,7 @@ impl ExternalBrain {
 
         let mut text = String::new();
         if action == "send" {
-            let t = req
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            let t = req.get("text").and_then(Value::as_str).unwrap_or("");
             if t.trim().is_empty() || validate_reply(t).is_err() {
                 // 放回状态，并返回 invalid_text
                 state.pending.insert(turn_id.to_string(), pending);
@@ -699,7 +695,8 @@ impl ExternalBrain {
     }
 
     pub async fn resume_contact(&self, display_name: &str) -> anyhow::Result<()> {
-        self.handle_resume_session(&json!({"recipient": display_name})).await?;
+        self.handle_resume_session(&json!({"recipient": display_name}))
+            .await?;
         Ok(())
     }
 
@@ -723,7 +720,9 @@ impl ExternalBrain {
                     if handoff_path.exists() {
                         if let Ok(data) = fs::read_to_string(&handoff_path) {
                             if let Ok(json_val) = serde_json::from_str::<Value>(&data) {
-                                if json_val.get("recipient").and_then(Value::as_str) == Some(recipient) {
+                                if json_val.get("recipient").and_then(Value::as_str)
+                                    == Some(recipient)
+                                {
                                     let _ = fs::remove_file(&handoff_path);
                                 }
                             }
@@ -956,7 +955,11 @@ mod tests {
         PathBuf::from(format!("/tmp/c_{pid}_{count}.sock"))
     }
 
-    pub(super) fn make_test_brain(mode: BrainMode, action: TimeoutAction, timeout: u64) -> (Arc<ExternalBrain>, PathBuf) {
+    pub(super) fn make_test_brain(
+        mode: BrainMode,
+        action: TimeoutAction,
+        timeout: u64,
+    ) -> (Arc<ExternalBrain>, PathBuf) {
         let td = std::env::temp_dir().join(format!("test-ext-brain-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&td).unwrap();
         let sock_path = short_temp_socket();
@@ -1022,7 +1025,10 @@ mod tests {
                 "action": "send",
                 "text": "回复测试"
             });
-            let resp = b_clone.dispatch_request(100, &req.to_string()).await.unwrap();
+            let resp = b_clone
+                .dispatch_request(100, &req.to_string())
+                .await
+                .unwrap();
             let v: Value = serde_json::from_str(&resp).unwrap();
             assert_eq!(v["ok"], true);
             assert_eq!(v["result"]["accepted"], true);
@@ -1030,7 +1036,10 @@ mod tests {
 
         let reply = b_fn(&sample_turn("turn-1")).await.unwrap();
         assert_eq!(reply.reply, "回复测试");
-        assert_eq!(reply.metadata.get("action").and_then(Value::as_str), Some("send"));
+        assert_eq!(
+            reply.metadata.get("action").and_then(Value::as_str),
+            Some("send")
+        );
 
         // 2. skip 回复
         let b_clone = brain.clone();
@@ -1042,12 +1051,18 @@ mod tests {
                 "turn_id": "turn-2",
                 "action": "skip"
             });
-            let _ = b_clone.dispatch_request(100, &req.to_string()).await.unwrap();
+            let _ = b_clone
+                .dispatch_request(100, &req.to_string())
+                .await
+                .unwrap();
         });
 
         let reply = b_fn(&sample_turn("turn-2")).await.unwrap();
         assert_eq!(reply.reply, "");
-        assert_eq!(reply.metadata.get("action").and_then(Value::as_str), Some("skip"));
+        assert_eq!(
+            reply.metadata.get("action").and_then(Value::as_str),
+            Some("skip")
+        );
 
         // 3. handoff 回复
         let b_clone = brain.clone();
@@ -1059,12 +1074,18 @@ mod tests {
                 "turn_id": "turn-3",
                 "action": "handoff"
             });
-            let _ = b_clone.dispatch_request(100, &req.to_string()).await.unwrap();
+            let _ = b_clone
+                .dispatch_request(100, &req.to_string())
+                .await
+                .unwrap();
         });
 
         let reply = b_fn(&sample_turn("turn-3")).await.unwrap();
         assert_eq!(reply.reply, "");
-        assert_eq!(reply.metadata.get("action").and_then(Value::as_str), Some("handoff"));
+        assert_eq!(
+            reply.metadata.get("action").and_then(Value::as_str),
+            Some("handoff")
+        );
 
         let _ = fs::remove_dir_all(td);
     }
@@ -1085,7 +1106,13 @@ mod tests {
                 "action": "send",
                 "text": "第一次回复"
             });
-            let resp1: Value = serde_json::from_str(&b_clone.dispatch_request(1, &req1.to_string()).await.unwrap()).unwrap();
+            let resp1: Value = serde_json::from_str(
+                &b_clone
+                    .dispatch_request(1, &req1.to_string())
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
             assert_eq!(resp1["ok"], true);
 
             // 第二次 reply 应该返回 already_answered 或 unknown_turn (已被移出)
@@ -1095,9 +1122,17 @@ mod tests {
                 "turn_id": "turn-dup",
                 "action": "skip"
             });
-            let resp2: Value = serde_json::from_str(&b_clone.dispatch_request(2, &req2.to_string()).await.unwrap()).unwrap();
+            let resp2: Value = serde_json::from_str(
+                &b_clone
+                    .dispatch_request(2, &req2.to_string())
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
             assert_eq!(resp2["ok"], false);
-            assert!(["already_answered", "unknown_turn"].contains(&resp2["error"].as_str().unwrap()));
+            assert!(
+                ["already_answered", "unknown_turn"].contains(&resp2["error"].as_str().unwrap())
+            );
         });
 
         let reply = b_fn(&sample_turn("turn-dup")).await.unwrap();
@@ -1112,14 +1147,20 @@ mod tests {
         let (brain_skip, td1) = make_test_brain(BrainMode::External, TimeoutAction::Skip, 1);
         let b_fn = brain_skip.brain_fn();
         let reply = b_fn(&sample_turn("turn-timeout-skip")).await.unwrap();
-        assert_eq!(reply.metadata.get("action").and_then(Value::as_str), Some("skip"));
+        assert_eq!(
+            reply.metadata.get("action").and_then(Value::as_str),
+            Some("skip")
+        );
         let _ = fs::remove_dir_all(td1);
 
         // 2. timeout_action: handoff
         let (brain_handoff, td2) = make_test_brain(BrainMode::External, TimeoutAction::Handoff, 1);
         let b_fn = brain_handoff.brain_fn();
         let reply = b_fn(&sample_turn("turn-timeout-handoff")).await.unwrap();
-        assert_eq!(reply.metadata.get("action").and_then(Value::as_str), Some("handoff"));
+        assert_eq!(
+            reply.metadata.get("action").and_then(Value::as_str),
+            Some("handoff")
+        );
         let _ = fs::remove_dir_all(td2);
     }
 
@@ -1137,22 +1178,35 @@ mod tests {
 
         // client 1 通过 next_turn 领取，返回包含 claim_token
         let req1 = json!({ "id": "1", "op": "next_turn", "wait_seconds": 1 });
-        let resp1: Value = serde_json::from_str(&brain.dispatch_request(1, &req1.to_string()).await.unwrap()).unwrap();
+        let resp1: Value =
+            serde_json::from_str(&brain.dispatch_request(1, &req1.to_string()).await.unwrap())
+                .unwrap();
         assert_eq!(resp1["result"]["turn"]["turn_id"], "turn-reclaim");
-        let claim_token = resp1["result"]["turn"]["claim_token"].as_str().unwrap().to_string();
+        let claim_token = resp1["result"]["turn"]["claim_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
         assert!(!claim_token.is_empty(), "must issue claim_token");
 
         // client 2 此时调用 next_turn(0) 互斥，拿不到该轮次
         let req2 = json!({ "id": "2", "op": "next_turn", "wait_seconds": 0 });
-        let resp2: Value = serde_json::from_str(&brain.dispatch_request(2, &req2.to_string()).await.unwrap()).unwrap();
+        let resp2: Value =
+            serde_json::from_str(&brain.dispatch_request(2, &req2.to_string()).await.unwrap())
+                .unwrap();
         assert_eq!(resp2["result"]["turn"], Value::Null);
 
         // client 1 单次调用断开（触发 on_client_disconnect）
         brain.on_client_disconnect(1).await;
 
         // 领取不随单次调用断开而释放：client 2 再次调用 next_turn(0) 依然互斥拿不到！
-        let resp3: Value = serde_json::from_str(&brain.dispatch_request(2, &req2.to_string()).await.unwrap()).unwrap();
-        assert_eq!(resp3["result"]["turn"], Value::Null, "turn must remain claimed across disconnects");
+        let resp3: Value =
+            serde_json::from_str(&brain.dispatch_request(2, &req2.to_string()).await.unwrap())
+                .unwrap();
+        assert_eq!(
+            resp3["result"]["turn"],
+            Value::Null,
+            "turn must remain claimed across disconnects"
+        );
 
         // client 2 伪造 claim_token 尝试 reply 应当被拒绝
         let fake_reply = json!({
@@ -1162,7 +1216,13 @@ mod tests {
             "action": "skip",
             "claim_token": "wrong_token_123"
         });
-        let resp_bad: Value = serde_json::from_str(&brain.dispatch_request(2, &fake_reply.to_string()).await.unwrap()).unwrap();
+        let resp_bad: Value = serde_json::from_str(
+            &brain
+                .dispatch_request(2, &fake_reply.to_string())
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(resp_bad["ok"], false);
         assert_eq!(resp_bad["error"], "invalid_claim_token");
 
@@ -1175,7 +1235,13 @@ mod tests {
             "text": "认领持久化测试正常",
             "claim_token": claim_token
         });
-        let resp_good: Value = serde_json::from_str(&brain.dispatch_request(1, &good_reply.to_string()).await.unwrap()).unwrap();
+        let resp_good: Value = serde_json::from_str(
+            &brain
+                .dispatch_request(1, &good_reply.to_string())
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(resp_good["ok"], true);
         assert_eq!(resp_good["result"]["accepted"], true);
 
@@ -1245,7 +1311,9 @@ mod tests {
                 "action": "send",
                 "text": "测试正常回复"
             });
-            let resp: Value = serde_json::from_str(&b_clone.dispatch_request(1, &req.to_string()).await.unwrap()).unwrap();
+            let resp: Value =
+                serde_json::from_str(&b_clone.dispatch_request(1, &req.to_string()).await.unwrap())
+                    .unwrap();
             assert_eq!(resp["ok"], true);
             assert_eq!(resp["result"]["accepted"], true);
         });
@@ -1279,7 +1347,9 @@ mod tests {
     async fn test_builtin_mode_next_turn_returns_null() {
         let (brain, td) = make_test_brain(BrainMode::Builtin, TimeoutAction::Skip, 60);
         let req = json!({ "id": "b1", "op": "next_turn", "wait_seconds": 1 });
-        let resp: Value = serde_json::from_str(&brain.dispatch_request(1, &req.to_string()).await.unwrap()).unwrap();
+        let resp: Value =
+            serde_json::from_str(&brain.dispatch_request(1, &req.to_string()).await.unwrap())
+                .unwrap();
         assert_eq!(resp["ok"], true);
         assert_eq!(resp["result"]["turn"], Value::Null);
 

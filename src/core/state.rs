@@ -1,11 +1,11 @@
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Health {
@@ -48,7 +48,12 @@ pub fn write_private(path: impl AsRef<Path>, value: &impl Serialize) -> Result<(
         .create_new(true)
         .mode(0o600)
         .open(&tmp_path)
-        .with_context(|| format!("failed to create temporary private file {}", tmp_path.display()))?;
+        .with_context(|| {
+            format!(
+                "failed to create temporary private file {}",
+                tmp_path.display()
+            )
+        })?;
 
     let json_bytes = serde_json::to_vec(value)?;
     file.write_all(&json_bytes)?;

@@ -1042,7 +1042,10 @@ mod tests {
         );
         let response = t.raw(&request).await;
         assert!(response.starts_with("HTTP/1.1 204"), "{response}");
-        assert_eq!(t.rpc(Some(&sid), "tools/list", json!({})).await.status(), 404);
+        assert_eq!(
+            t.rpc(Some(&sid), "tools/list", json!({})).await.status(),
+            404
+        );
         let next = t.init().await;
         assert_ne!(next, sid, "a new session can start right away");
     }
@@ -1226,7 +1229,10 @@ mod tests {
         let again = t
             .call(&new_sid, "next_turn", json!({"wait_seconds":0}))
             .await;
-        assert_eq!(again["result"]["structuredContent"]["turn"]["turn_id"], "rotate");
+        assert_eq!(
+            again["result"]["structuredContent"]["turn"]["turn_id"],
+            "rotate"
+        );
         assert_ne!(
             claim["result"]["structuredContent"]["turn"]["claim"],
             again["result"]["structuredContent"]["turn"]["claim"]

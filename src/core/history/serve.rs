@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::query::{HistoryQuery, QueryError};
 
@@ -289,12 +289,18 @@ fn call_tool(query: &HistoryQuery, name: &str, arguments: &Value) -> Result<Valu
             query.get_contact(contact_id, name)
         }
         "get_recent_messages" => {
-            let contact_id = args_obj.get("contact_id").and_then(|v| v.as_str()).unwrap_or("");
+            let contact_id = args_obj
+                .get("contact_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let limit = args_obj.get("limit").and_then(|v| v.as_i64());
             query.get_recent_messages(contact_id, limit)
         }
         "get_history" => {
-            let contact_id = args_obj.get("contact_id").and_then(|v| v.as_str()).unwrap_or("");
+            let contact_id = args_obj
+                .get("contact_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let since = args_obj.get("since").and_then(|v| v.as_i64());
             let until = args_obj.get("until").and_then(|v| v.as_i64());
             let cursor = args_obj.get("cursor").and_then(|v| v.as_str());
@@ -312,13 +318,20 @@ fn call_tool(query: &HistoryQuery, name: &str, arguments: &Value) -> Result<Valu
             query.search_messages(q, contact_id, since, until, cursor, limit)
         }
         "get_message" => {
-            let message_id = args_obj.get("message_id").and_then(|v| v.as_str()).unwrap_or("");
+            let message_id = args_obj
+                .get("message_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             query.get_message(message_id)
         }
         "get_media" => {
-            let media_id = args_obj.get("media_id").and_then(|v| v.as_str()).unwrap_or("");
+            let media_id = args_obj
+                .get("media_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let (info, path) = query.get_media(media_id)?;
-            let bytes = fs::read(&path).map_err(|e| QueryError::new("read_failed", e.to_string()))?;
+            let bytes =
+                fs::read(&path).map_err(|e| QueryError::new("read_failed", e.to_string()))?;
             let b64 = encode_base64(&bytes);
             Ok(json!({
                 "media": info,
@@ -357,9 +370,14 @@ pub fn handle_mcp_request(query: &HistoryQuery, request: &Value) -> Option<Value
         })
     } else if method == "tools/call" {
         let params = request.get("params");
-        let name = params.and_then(|p| p.get("name")).and_then(|v| v.as_str()).unwrap_or("");
+        let name = params
+            .and_then(|p| p.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let default_args = Value::Object(serde_json::Map::new());
-        let arguments = params.and_then(|p| p.get("arguments")).unwrap_or(&default_args);
+        let arguments = params
+            .and_then(|p| p.get("arguments"))
+            .unwrap_or(&default_args);
 
         match call_tool(query, name, arguments) {
             Ok(value) => {
@@ -404,7 +422,11 @@ pub fn handle_mcp_request(query: &HistoryQuery, request: &Value) -> Option<Value
 }
 
 /// Run read-only stdio MCP loop over conversation history.
-pub fn run_mcp_stdio(query: HistoryQuery, reader: impl BufRead, mut writer: impl Write) -> io::Result<()> {
+pub fn run_mcp_stdio(
+    query: HistoryQuery,
+    reader: impl BufRead,
+    mut writer: impl Write,
+) -> io::Result<()> {
     for line in reader.lines() {
         let l = line?;
         if l.trim().is_empty() {
@@ -440,7 +462,9 @@ pub fn run_mcp_stdio(query: HistoryQuery, reader: impl BufRead, mut writer: impl
 // ---------------------------------------------------------------------------
 
 fn is_hex_str(s: &str, len: usize) -> bool {
-    s.len() == len && s.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    s.len() == len
+        && s.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
 fn is_contact_id(s: &str) -> bool {
@@ -585,14 +609,22 @@ fn send_response(
 ) -> io::Result<()> {
     let headers = format!(
         "HTTP/1.1 {} {}\r\nServer: wechat-history/1\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
-        status, status_text, content_type, body.len()
+        status,
+        status_text,
+        content_type,
+        body.len()
     );
     stream.write_all(headers.as_bytes())?;
     stream.write_all(body)?;
     stream.flush()
 }
 
-fn send_json(stream: &mut TcpStream, status: u16, status_text: &str, val: &Value) -> io::Result<()> {
+fn send_json(
+    stream: &mut TcpStream,
+    status: u16,
+    status_text: &str,
+    val: &Value,
+) -> io::Result<()> {
     let body = serde_json::to_vec(val).unwrap_or_default();
     send_response(
         stream,
@@ -603,7 +635,13 @@ fn send_json(stream: &mut TcpStream, status: u16, status_text: &str, val: &Value
     )
 }
 
-fn send_error(stream: &mut TcpStream, status: u16, status_text: &str, code: &str, message: &str) -> io::Result<()> {
+fn send_error(
+    stream: &mut TcpStream,
+    status: u16,
+    status_text: &str,
+    code: &str,
+    message: &str,
+) -> io::Result<()> {
     let val = json!({"error": {"code": code, "message": message}});
     send_json(stream, status, status_text, &val)
 }
@@ -665,18 +703,33 @@ fn dispatch_http(
                 query.list_contacts(q, cursor, limit)?
             };
             let body = serde_json::to_vec(&res).unwrap_or_default();
-            Ok((200, "OK", "application/json; charset=utf-8".to_string(), body))
+            Ok((
+                200,
+                "OK",
+                "application/json; charset=utf-8".to_string(),
+                body,
+            ))
         }
         ActionRoute::GetContact(contact_id) => {
             let res = query.get_contact(Some(contact_id), None)?;
             let body = serde_json::to_vec(&res).unwrap_or_default();
-            Ok((200, "OK", "application/json; charset=utf-8".to_string(), body))
+            Ok((
+                200,
+                "OK",
+                "application/json; charset=utf-8".to_string(),
+                body,
+            ))
         }
         ActionRoute::GetRecentMessages(contact_id) => {
             let limit = int_args.get("limit").copied();
             let res = query.get_recent_messages(contact_id, limit)?;
             let body = serde_json::to_vec(&res).unwrap_or_default();
-            Ok((200, "OK", "application/json; charset=utf-8".to_string(), body))
+            Ok((
+                200,
+                "OK",
+                "application/json; charset=utf-8".to_string(),
+                body,
+            ))
         }
         ActionRoute::GetHistory(contact_id) => {
             let since = int_args.get("since").copied();
@@ -686,7 +739,12 @@ fn dispatch_http(
             let order = single_args.get("order").map(|s| s.as_str());
             let res = query.get_history(contact_id, since, until, cursor, limit, order)?;
             let body = serde_json::to_vec(&res).unwrap_or_default();
-            Ok((200, "OK", "application/json; charset=utf-8".to_string(), body))
+            Ok((
+                200,
+                "OK",
+                "application/json; charset=utf-8".to_string(),
+                body,
+            ))
         }
         ActionRoute::SearchMessages => {
             let q = match single_args.get("q") {
@@ -700,16 +758,27 @@ fn dispatch_http(
             let limit = int_args.get("limit").copied();
             let res = query.search_messages(q, contact_id, since, until, cursor, limit)?;
             let body = serde_json::to_vec(&res).unwrap_or_default();
-            Ok((200, "OK", "application/json; charset=utf-8".to_string(), body))
+            Ok((
+                200,
+                "OK",
+                "application/json; charset=utf-8".to_string(),
+                body,
+            ))
         }
         ActionRoute::GetMessage(message_id) => {
             let res = query.get_message(message_id)?;
             let body = serde_json::to_vec(&res).unwrap_or_default();
-            Ok((200, "OK", "application/json; charset=utf-8".to_string(), body))
+            Ok((
+                200,
+                "OK",
+                "application/json; charset=utf-8".to_string(),
+                body,
+            ))
         }
         ActionRoute::GetMedia(media_id) => {
             let (_info, path) = query.get_media(media_id)?;
-            let bytes = fs::read(&path).map_err(|e| QueryError::new("read_failed", e.to_string()))?;
+            let bytes =
+                fs::read(&path).map_err(|e| QueryError::new("read_failed", e.to_string()))?;
             let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             let mime = guess_mime_type(filename).to_string();
             Ok((200, "OK", mime, bytes))
@@ -748,7 +817,13 @@ fn handle_connection(
 
     let parts: Vec<&str> = req_line.split_whitespace().collect();
     if parts.len() < 2 {
-        return send_error(&mut stream, 400, "Bad Request", "invalid_argument", "malformed request line");
+        return send_error(
+            &mut stream,
+            400,
+            "Bad Request",
+            "invalid_argument",
+            "malformed request line",
+        );
     }
 
     let method = parts[0];
@@ -934,10 +1009,10 @@ impl Drop for HttpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use crate::core::config::BotConfig;
     use crate::core::history::store::HistoryStore;
     use serde_json::json;
+    use std::path::PathBuf;
 
     struct TempDir(PathBuf);
     impl TempDir {
@@ -984,7 +1059,11 @@ mod tests {
 
             let store = HistoryStore::open(&state).unwrap();
             let contact_id = store
-                .ensure_contact("acct", &json!({"recipient": "🍓小美", "kind": "private"}), true)
+                .ensure_contact(
+                    "acct",
+                    &json!({"recipient": "🍓小美", "kind": "private"}),
+                    true,
+                )
                 .unwrap();
             store
                 .record_frame(
@@ -1162,9 +1241,19 @@ mod tests {
         assert_eq!(status, 401);
 
         // Non-GET -> 405
-        let (status, _, _) = http_request(port, "POST", "/v1/contacts", Some(&format!("Bearer {}", token)));
+        let (status, _, _) = http_request(
+            port,
+            "POST",
+            "/v1/contacts",
+            Some(&format!("Bearer {}", token)),
+        );
         assert_eq!(status, 405);
-        let (status, _, _) = http_request(port, "DELETE", "/v1/contacts", Some(&format!("Bearer {}", token)));
+        let (status, _, _) = http_request(
+            port,
+            "DELETE",
+            "/v1/contacts",
+            Some(&format!("Bearer {}", token)),
+        );
         assert_eq!(status, 405);
 
         server.shutdown();
@@ -1313,7 +1402,8 @@ mod tests {
         // Trigger a database error by dropping the table via PRAGMA foreign_keys = OFF
         {
             let conn = rusqlite::Connection::open(&db_path).unwrap();
-            conn.execute_batch("PRAGMA foreign_keys = OFF; DROP TABLE contacts;").unwrap();
+            conn.execute_batch("PRAGMA foreign_keys = OFF; DROP TABLE contacts;")
+                .unwrap();
         }
 
         let (status, _, body) = http_request(port, "GET", "/v1/contacts", auth.as_deref());
@@ -1742,7 +1832,12 @@ mod tests {
         );
 
         // 405 method not allowed
-        let (status, _, body) = http_request(port, "POST", "/v1/contacts", Some(&format!("Bearer {}", token)));
+        let (status, _, body) = http_request(
+            port,
+            "POST",
+            "/v1/contacts",
+            Some(&format!("Bearer {}", token)),
+        );
         assert_eq!(status, 405);
         let val: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(
@@ -1751,7 +1846,12 @@ mod tests {
         );
 
         // 404 unknown route
-        let (status, _, body) = http_request(port, "GET", "/v1/nonexistent", Some(&format!("Bearer {}", token)));
+        let (status, _, body) = http_request(
+            port,
+            "GET",
+            "/v1/nonexistent",
+            Some(&format!("Bearer {}", token)),
+        );
         assert_eq!(status, 404);
         let val: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(

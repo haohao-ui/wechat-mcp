@@ -4,7 +4,11 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn has_swiftc() -> bool {
-    Command::new("xcrun").args(["--find", "swiftc"]).output().map(|o| o.status.success()).unwrap_or(false)
+    Command::new("xcrun")
+        .args(["--find", "swiftc"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn build_selftest() -> Option<PathBuf> {
@@ -44,7 +48,11 @@ catch { print("slow=\(error) after=\(Int(Date().timeIntervalSince(began) * 1000)
         .arg(&bin)
         .output()
         .unwrap();
-    assert!(out.status.success(), "swiftc failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "swiftc failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     Some(bin)
 }
 
@@ -55,10 +63,22 @@ fn bounded_returns_value_propagates_error_and_times_out_with_folder_label() {
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(text.contains("fast=42"), "{text}");
     assert!(text.contains("throws=E"), "{text}");
-    let slow = text.lines().find(|l| l.starts_with("slow=")).unwrap_or_default();
+    let slow = text
+        .lines()
+        .find(|l| l.starts_with("slow="))
+        .unwrap_or_default();
     assert!(slow.contains("folder_access_blocked:Desktop"), "{slow}");
-    let ms: u64 = slow.rsplit("after=").next().unwrap().trim().parse().unwrap();
-    assert!((400..3000).contains(&ms), "超时应在约 0.5 秒返回，实际 {ms}ms");
+    let ms: u64 = slow
+        .rsplit("after=")
+        .next()
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(
+        (400..3000).contains(&ms),
+        "超时应在约 0.5 秒返回，实际 {ms}ms"
+    );
 }
 
 fn save_attachment_source() -> String {
@@ -73,7 +93,9 @@ fn save_attachment_source() -> String {
 #[test]
 fn save_attachment_preflights_folders_before_any_click() {
     let body = save_attachment_source();
-    let preflight = body.find("preflightFolders(").expect("saveAttachment 必须调用 preflightFolders");
+    let preflight = body
+        .find("preflightFolders(")
+        .expect("saveAttachment 必须调用 preflightFolders");
     let first_click = body.find("rightClick(").expect("rightClick");
     assert!(preflight < first_click, "文件夹探测必须在右键点击之前");
 }
@@ -91,14 +113,21 @@ fn save_attachment_polling_never_touches_files_without_time_limit() {
     ] {
         for (i, _) in polling.match_indices(raw) {
             let line_start = polling[..i].rfind('\n').map(|n| n + 1).unwrap_or(0);
-            let line = &polling[line_start..polling[i..].find('\n').map(|n| i + n).unwrap_or(polling.len())];
+            let line = &polling[line_start
+                ..polling[i..]
+                    .find('\n')
+                    .map(|n| i + n)
+                    .unwrap_or(polling.len())];
             // 同一行带 bounded(，或位于一个以 bounded(...) { 开头、尚未闭合的块里
             let before = &polling[..line_start];
             let in_block = before.rfind("bounded(").map_or(false, |b| {
                 let opened = &polling[b..line_start];
                 opened.matches('{').count() > opened.matches('}').count()
             });
-            assert!(line.contains("bounded(") || in_block, "未加时限的文件访问: {line}");
+            assert!(
+                line.contains("bounded(") || in_block,
+                "未加时限的文件访问: {line}"
+            );
         }
     }
 }

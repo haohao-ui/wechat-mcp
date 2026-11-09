@@ -176,7 +176,8 @@ impl ZipArchive {
         }
 
         let eocd_idx = eocd_pos.context("not a valid zip file")?;
-        let entry_count = u16::from_le_bytes(data[eocd_idx + 10..eocd_idx + 12].try_into()?) as usize;
+        let entry_count =
+            u16::from_le_bytes(data[eocd_idx + 10..eocd_idx + 12].try_into()?) as usize;
         let _cd_size = u32::from_le_bytes(data[eocd_idx + 12..eocd_idx + 16].try_into()?) as usize;
         let cd_offset = u32::from_le_bytes(data[eocd_idx + 16..eocd_idx + 20].try_into()?) as usize;
 
@@ -202,7 +203,8 @@ impl ZipArchive {
             let uncompressed_size = u32::from_le_bytes(data[offset + 24..offset + 28].try_into()?);
             let name_len = u16::from_le_bytes(data[offset + 28..offset + 30].try_into()?) as usize;
             let extra_len = u16::from_le_bytes(data[offset + 30..offset + 32].try_into()?) as usize;
-            let comment_len = u16::from_le_bytes(data[offset + 32..offset + 34].try_into()?) as usize;
+            let comment_len =
+                u16::from_le_bytes(data[offset + 32..offset + 34].try_into()?) as usize;
             let local_offset = u32::from_le_bytes(data[offset + 42..offset + 46].try_into()?);
 
             if offset + 46 + name_len > data.len() {
@@ -253,7 +255,8 @@ impl ZipArchive {
         }
 
         let name_len = u16::from_le_bytes(self.data[offset + 26..offset + 28].try_into()?) as usize;
-        let extra_len = u16::from_le_bytes(self.data[offset + 28..offset + 30].try_into()?) as usize;
+        let extra_len =
+            u16::from_le_bytes(self.data[offset + 28..offset + 30].try_into()?) as usize;
 
         let data_start = offset + 30 + name_len + extra_len;
         let data_end = data_start + entry.compressed_size as usize;
@@ -352,7 +355,11 @@ pub fn extract(
                 let row_truncated: Vec<String> = r.into_iter().take(30).collect();
                 rows.push(row_truncated);
             }
-            let truncated = if text.is_empty() { false } else { total_rows > 100 };
+            let truncated = if text.is_empty() {
+                false
+            } else {
+                total_rows > 100
+            };
             return Ok(json!({
                 "rows": rows,
                 "truncated": truncated
@@ -388,7 +395,11 @@ pub fn extract(
     }
 
     // xlsx
-    let shared_strings = if archive.entries.iter().any(|e| e.filename == "xl/sharedStrings.xml") {
+    let shared_strings = if archive
+        .entries
+        .iter()
+        .any(|e| e.filename == "xl/sharedStrings.xml")
+    {
         let ss_xml = read_xml_part(&archive, "xl/sharedStrings.xml")?;
         extract_shared_strings(&ss_xml)
     } else {
@@ -403,7 +414,9 @@ pub fn extract(
 
     let mut sheets = Vec::new();
     for (sheet_name, rel_id) in sheets_meta.into_iter().take(3) {
-        let target = targets.get(&rel_id).context("relationship target not found")?;
+        let target = targets
+            .get(&rel_id)
+            .context("relationship target not found")?;
         let normalized_target = if target.starts_with('/') {
             target.trim_start_matches('/').to_string()
         } else {
@@ -679,14 +692,14 @@ mod tests {
             // Local file header (compression=0)
             body.extend_from_slice(b"PK\x03\x04");
             body.extend_from_slice(&20u16.to_le_bytes()); // version
-            body.extend_from_slice(&0u16.to_le_bytes());  // flag
-            body.extend_from_slice(&0u16.to_le_bytes());  // compression=0
-            body.extend_from_slice(&0u32.to_le_bytes());  // mod time
-            body.extend_from_slice(&0u32.to_le_bytes());  // crc32
+            body.extend_from_slice(&0u16.to_le_bytes()); // flag
+            body.extend_from_slice(&0u16.to_le_bytes()); // compression=0
+            body.extend_from_slice(&0u32.to_le_bytes()); // mod time
+            body.extend_from_slice(&0u32.to_le_bytes()); // crc32
             body.extend_from_slice(&(data.len() as u32).to_le_bytes()); // comp size
             body.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncomp size
             body.extend_from_slice(&(name.len() as u16).to_le_bytes()); // name len
-            body.extend_from_slice(&0u16.to_le_bytes());  // extra len
+            body.extend_from_slice(&0u16.to_le_bytes()); // extra len
             body.extend_from_slice(name.as_bytes());
             body.extend_from_slice(data);
 
@@ -694,18 +707,18 @@ mod tests {
             central_dir.extend_from_slice(b"PK\x01\x02");
             central_dir.extend_from_slice(&20u16.to_le_bytes()); // version made by
             central_dir.extend_from_slice(&20u16.to_le_bytes()); // version needed
-            central_dir.extend_from_slice(&0u16.to_le_bytes());  // flag
-            central_dir.extend_from_slice(&0u16.to_le_bytes());  // compression=0
-            central_dir.extend_from_slice(&0u32.to_le_bytes());  // mod time
-            central_dir.extend_from_slice(&0u32.to_le_bytes());  // crc32
+            central_dir.extend_from_slice(&0u16.to_le_bytes()); // flag
+            central_dir.extend_from_slice(&0u16.to_le_bytes()); // compression=0
+            central_dir.extend_from_slice(&0u32.to_le_bytes()); // mod time
+            central_dir.extend_from_slice(&0u32.to_le_bytes()); // crc32
             central_dir.extend_from_slice(&(data.len() as u32).to_le_bytes()); // comp size
             central_dir.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncomp size
             central_dir.extend_from_slice(&(name.len() as u16).to_le_bytes()); // name len
-            central_dir.extend_from_slice(&0u16.to_le_bytes());  // extra len
-            central_dir.extend_from_slice(&0u16.to_le_bytes());  // comment len
-            central_dir.extend_from_slice(&0u16.to_le_bytes());  // disk start
-            central_dir.extend_from_slice(&0u16.to_le_bytes());  // internal attr
-            central_dir.extend_from_slice(&0u32.to_le_bytes());  // external attr
+            central_dir.extend_from_slice(&0u16.to_le_bytes()); // extra len
+            central_dir.extend_from_slice(&0u16.to_le_bytes()); // comment len
+            central_dir.extend_from_slice(&0u16.to_le_bytes()); // disk start
+            central_dir.extend_from_slice(&0u16.to_le_bytes()); // internal attr
+            central_dir.extend_from_slice(&0u32.to_le_bytes()); // external attr
             central_dir.extend_from_slice(&local_offset.to_le_bytes());
             central_dir.extend_from_slice(name.as_bytes());
         }

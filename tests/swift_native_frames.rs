@@ -7,8 +7,8 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 fn repo_root() -> PathBuf {
@@ -56,7 +56,10 @@ fn frames_dir() -> PathBuf {
 }
 
 fn default_layout_path() -> PathBuf {
-    repo_root().join("native").join("layout").join("wechat-4.1.15.json")
+    repo_root()
+        .join("native")
+        .join("layout")
+        .join("wechat-4.1.15.json")
 }
 
 fn default_window_json() -> String {
@@ -149,13 +152,14 @@ use std::sync::Mutex;
 /// with CI=true or WECHAT_STRICT_VISION=1 it fails, so a skipped test is never counted as a pass in CI.
 fn skip_note(message: &str) {
     let strict = std::env::var("CI").map(|v| v == "true").unwrap_or(false)
-        || std::env::var("WECHAT_STRICT_VISION").map(|v| v == "1").unwrap_or(false);
+        || std::env::var("WECHAT_STRICT_VISION")
+            .map(|v| v == "1")
+            .unwrap_or(false);
     if strict {
         panic!("{message} (strict mode: skipping is a failure)");
     }
     eprintln!("{message}");
 }
-
 
 static VISION_LOCK: Mutex<()> = Mutex::new(());
 
@@ -173,7 +177,9 @@ fn run_bubbles(
     env: Option<&[(&str, &str)]>,
     timeout: Duration,
 ) -> RunResult {
-    let _lock = VISION_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _lock = VISION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let bin = match wechat_bubbles_bin() {
         Some(b) => b,
@@ -282,76 +288,140 @@ struct FrameCase {
 
 fn get_top_bubbles() -> Vec<ExpectedBubble> {
     vec![
-        ExpectedBubble { direction: "inbound_visual", kind: "text", text: "你好" },
-        ExpectedBubble { direction: "inbound_visual", kind: "text", text: "在吗" },
-        ExpectedBubble { direction: "outbound_visual", kind: "text", text: "客服助手" },
-        ExpectedBubble { direction: "inbound_visual", kind: "text", text: "你是美女吗" },
-        ExpectedBubble { direction: "outbound_visual", kind: "text", text: "没有外貌" },
+        ExpectedBubble {
+            direction: "inbound_visual",
+            kind: "text",
+            text: "你好",
+        },
+        ExpectedBubble {
+            direction: "inbound_visual",
+            kind: "text",
+            text: "在吗",
+        },
+        ExpectedBubble {
+            direction: "outbound_visual",
+            kind: "text",
+            text: "客服助手",
+        },
+        ExpectedBubble {
+            direction: "inbound_visual",
+            kind: "text",
+            text: "你是美女吗",
+        },
+        ExpectedBubble {
+            direction: "outbound_visual",
+            kind: "text",
+            text: "没有外貌",
+        },
     ]
 }
 
 fn get_bottom_bubbles() -> Vec<ExpectedBubble> {
     vec![
-        ExpectedBubble { direction: "inbound_visual", kind: "file", text: "岗位信息更新2.13.pdf" },
-        ExpectedBubble { direction: "inbound_visual", kind: "text", text: "测试结束" },
-        ExpectedBubble { direction: "inbound_visual", kind: "text", text: "浅色测试" },
+        ExpectedBubble {
+            direction: "inbound_visual",
+            kind: "file",
+            text: "岗位信息更新2.13.pdf",
+        },
+        ExpectedBubble {
+            direction: "inbound_visual",
+            kind: "text",
+            text: "测试结束",
+        },
+        ExpectedBubble {
+            direction: "inbound_visual",
+            kind: "text",
+            text: "浅色测试",
+        },
     ]
 }
 
 fn get_frame_cases() -> HashMap<&'static str, FrameCase> {
     let mut m = HashMap::new();
-    m.insert("r1-dark-top", FrameCase {
-        profile: "wechat-4-dark",
-        scale: Some(1),
-        title: "午夜咖啡",
-        bubbles: get_top_bubbles(),
-    });
-    m.insert("r1-dark-bottom", FrameCase {
-        profile: "wechat-4-dark",
-        scale: Some(1),
-        title: "午夜咖啡",
-        bubbles: get_bottom_bubbles(),
-    });
-    m.insert("r1-light-top", FrameCase {
-        profile: "wechat-4-light",
-        scale: Some(1),
-        title: "午夜咖啡",
-        bubbles: get_top_bubbles(),
-    });
-    m.insert("r1-light-bottom", FrameCase {
-        profile: "wechat-4-light",
-        scale: Some(1),
-        title: "午夜咖啡",
-        bubbles: get_bottom_bubbles(),
-    });
-    m.insert("retina-dark-top", FrameCase {
-        profile: "wechat-4-dark",
-        scale: Some(2),
-        title: "午夜咖啡",
-        bubbles: get_top_bubbles(),
-    });
-    m.insert("retina-light-top", FrameCase {
-        profile: "wechat-4-light",
-        scale: Some(2),
-        title: "午夜咖啡",
-        bubbles: get_top_bubbles(),
-    });
+    m.insert(
+        "r1-dark-top",
+        FrameCase {
+            profile: "wechat-4-dark",
+            scale: Some(1),
+            title: "午夜咖啡",
+            bubbles: get_top_bubbles(),
+        },
+    );
+    m.insert(
+        "r1-dark-bottom",
+        FrameCase {
+            profile: "wechat-4-dark",
+            scale: Some(1),
+            title: "午夜咖啡",
+            bubbles: get_bottom_bubbles(),
+        },
+    );
+    m.insert(
+        "r1-light-top",
+        FrameCase {
+            profile: "wechat-4-light",
+            scale: Some(1),
+            title: "午夜咖啡",
+            bubbles: get_top_bubbles(),
+        },
+    );
+    m.insert(
+        "r1-light-bottom",
+        FrameCase {
+            profile: "wechat-4-light",
+            scale: Some(1),
+            title: "午夜咖啡",
+            bubbles: get_bottom_bubbles(),
+        },
+    );
+    m.insert(
+        "retina-dark-top",
+        FrameCase {
+            profile: "wechat-4-dark",
+            scale: Some(2),
+            title: "午夜咖啡",
+            bubbles: get_top_bubbles(),
+        },
+    );
+    m.insert(
+        "retina-light-top",
+        FrameCase {
+            profile: "wechat-4-light",
+            scale: Some(2),
+            title: "午夜咖啡",
+            bubbles: get_top_bubbles(),
+        },
+    );
     let mut retina_dark_bot = get_bottom_bubbles();
-    retina_dark_bot.push(ExpectedBubble { direction: "inbound_visual", kind: "text", text: "你好" });
-    m.insert("retina-dark-bottom", FrameCase {
-        profile: "wechat-4-dark",
-        scale: Some(2),
-        title: "午夜咖啡",
-        bubbles: retina_dark_bot,
+    retina_dark_bot.push(ExpectedBubble {
+        direction: "inbound_visual",
+        kind: "text",
+        text: "你好",
     });
+    m.insert(
+        "retina-dark-bottom",
+        FrameCase {
+            profile: "wechat-4-dark",
+            scale: Some(2),
+            title: "午夜咖啡",
+            bubbles: retina_dark_bot,
+        },
+    );
     let mut retina_light_bot = get_bottom_bubbles();
-    retina_light_bot.push(ExpectedBubble { direction: "inbound_visual", kind: "text", text: "你好" });
-    m.insert("retina-light-bottom", FrameCase {
-        profile: "wechat-4-light",
-        scale: Some(2),
-        title: "午夜咖啡",
-        bubbles: retina_light_bot,
+    retina_light_bot.push(ExpectedBubble {
+        direction: "inbound_visual",
+        kind: "text",
+        text: "你好",
     });
+    m.insert(
+        "retina-light-bottom",
+        FrameCase {
+            profile: "wechat-4-light",
+            scale: Some(2),
+            title: "午夜咖啡",
+            bubbles: retina_light_bot,
+        },
+    );
     m
 }
 
@@ -366,11 +436,16 @@ fn test_missing_layout_is_refused() {
     let frame = match res {
         RunResult::Success(v) | RunResult::ErrorJson(v) => v,
         RunResult::Timeout => {
-            skip_note(&format!("SKIPPED: test_missing_layout_is_refused timed out under heavy load"));
+            skip_note(&format!(
+                "SKIPPED: test_missing_layout_is_refused timed out under heavy load"
+            ));
             return;
         }
         RunResult::VisionBusy(s) => {
-            skip_note(&format!("SKIPPED: test_missing_layout_is_refused Vision busy: {}", s));
+            skip_note(&format!(
+                "SKIPPED: test_missing_layout_is_refused Vision busy: {}",
+                s
+            ));
             return;
         }
         RunResult::Skipped(s) => {
@@ -390,7 +465,8 @@ fn test_missing_layout_is_refused() {
 #[test]
 fn test_layout_drives_the_crop() {
     let temp = TempDir::new("crop_layout");
-    let mut layout: Value = serde_json::from_str(&std::fs::read_to_string(default_layout_path()).unwrap()).unwrap();
+    let mut layout: Value =
+        serde_json::from_str(&std::fs::read_to_string(default_layout_path()).unwrap()).unwrap();
     let current_h = layout["regions"]["chat_content"]["h"].as_i64().unwrap();
     layout["regions"]["chat_content"]["h"] = serde_json::json!(current_h - 200);
 
@@ -406,11 +482,16 @@ fn test_layout_drives_the_crop() {
     let frame = match res {
         RunResult::Success(v) => v,
         RunResult::Timeout => {
-            skip_note(&format!("SKIPPED: test_layout_drives_the_crop timed out under heavy load"));
+            skip_note(&format!(
+                "SKIPPED: test_layout_drives_the_crop timed out under heavy load"
+            ));
             return;
         }
         RunResult::VisionBusy(s) => {
-            skip_note(&format!("SKIPPED: test_layout_drives_the_crop Vision busy: {}", s));
+            skip_note(&format!(
+                "SKIPPED: test_layout_drives_the_crop Vision busy: {}",
+                s
+            ));
             return;
         }
         RunResult::Skipped(s) => {
@@ -423,7 +504,11 @@ fn test_layout_drives_the_crop() {
     if let Some(bubbles) = frame.get("bubbles").and_then(|v| v.as_array()) {
         for b in bubbles {
             let t = b.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            assert!(!t.contains("浅色测试"), "found '浅色测试' in bubble text: {}", t);
+            assert!(
+                !t.contains("浅色测试"),
+                "found '浅色测试' in bubble text: {}",
+                t
+            );
         }
     }
 }
@@ -436,11 +521,17 @@ fn test_frames_report_a_passing_layout_check() {
         let frame = match res {
             RunResult::Success(v) => v,
             RunResult::Timeout => {
-                skip_note(&format!("SKIPPED: test_frames_report_a_passing_layout_check timed out on {}", name));
+                skip_note(&format!(
+                    "SKIPPED: test_frames_report_a_passing_layout_check timed out on {}",
+                    name
+                ));
                 return;
             }
             RunResult::VisionBusy(s) => {
-                skip_note(&format!("SKIPPED: test_frames_report_a_passing_layout_check Vision busy on {}: {}", name, s));
+                skip_note(&format!(
+                    "SKIPPED: test_frames_report_a_passing_layout_check Vision busy on {}: {}",
+                    name, s
+                ));
                 return;
             }
             RunResult::Skipped(s) => {
@@ -452,10 +543,18 @@ fn test_frames_report_a_passing_layout_check() {
         let check = frame.get("layout_check");
         assert!(check.is_some(), "missing layout_check in {}", name);
         let check = check.unwrap();
-        assert_eq!(check.get("theme").and_then(|v| v.as_str()), Some(case.profile));
+        assert_eq!(
+            check.get("theme").and_then(|v| v.as_str()),
+            Some(case.profile)
+        );
         let divider = check["measured"]["input_divider"].as_f64().unwrap();
         let border = check["measured"]["list_border"].as_f64().unwrap();
-        assert!((divider - 496.0).abs() <= 1.0, "{} divider: {}", name, divider);
+        assert!(
+            (divider - 496.0).abs() <= 1.0,
+            "{} divider: {}",
+            name,
+            divider
+        );
         assert!((border - 300.0).abs() <= 1.0, "{} border: {}", name, border);
     }
 }
@@ -463,7 +562,8 @@ fn test_frames_report_a_passing_layout_check() {
 #[test]
 fn test_layout_disagreeing_with_screen_is_refused() {
     let temp = TempDir::new("shifted_divider");
-    let mut layout: Value = serde_json::from_str(&std::fs::read_to_string(default_layout_path()).unwrap()).unwrap();
+    let mut layout: Value =
+        serde_json::from_str(&std::fs::read_to_string(default_layout_path()).unwrap()).unwrap();
     for region in &["chat", "chat_content"] {
         let h = layout["regions"][region]["h"].as_i64().unwrap();
         layout["regions"][region]["h"] = serde_json::json!(h - 30);
@@ -486,11 +586,17 @@ fn test_layout_disagreeing_with_screen_is_refused() {
         let frame = match res {
             RunResult::Success(v) | RunResult::ErrorJson(v) => v,
             RunResult::Timeout => {
-                skip_note(&format!("SKIPPED: test_layout_disagreeing_with_screen_is_refused timed out on {}", name));
+                skip_note(&format!(
+                    "SKIPPED: test_layout_disagreeing_with_screen_is_refused timed out on {}",
+                    name
+                ));
                 continue;
             }
             RunResult::VisionBusy(s) => {
-                skip_note(&format!("SKIPPED: test_layout_disagreeing_with_screen_is_refused Vision busy on {}: {}", name, s));
+                skip_note(&format!(
+                    "SKIPPED: test_layout_disagreeing_with_screen_is_refused Vision busy on {}: {}",
+                    name, s
+                ));
                 continue;
             }
             RunResult::Skipped(s) => {
@@ -499,8 +605,18 @@ fn test_layout_disagreeing_with_screen_is_refused() {
             }
         };
         let err = frame.get("error").and_then(|v| v.as_str()).unwrap_or("");
-        assert!(err.contains("layout_mismatch:"), "{}: error '{}' does not contain layout_mismatch:", name, err);
-        assert!(err.contains("input_divider"), "{}: error '{}' does not contain input_divider", name, err);
+        assert!(
+            err.contains("layout_mismatch:"),
+            "{}: error '{}' does not contain layout_mismatch:",
+            name,
+            err
+        );
+        assert!(
+            err.contains("input_divider"),
+            "{}: error '{}' does not contain input_divider",
+            name,
+            err
+        );
         assert!(frame.get("bubbles").is_none());
     }
 }
@@ -511,11 +627,16 @@ fn test_any_file_card_is_a_file_not_text() {
     let frame = match res {
         RunResult::Success(v) => v,
         RunResult::Timeout => {
-            skip_note(&format!("SKIPPED: test_any_file_card_is_a_file_not_text timed out under heavy load"));
+            skip_note(&format!(
+                "SKIPPED: test_any_file_card_is_a_file_not_text timed out under heavy load"
+            ));
             return;
         }
         RunResult::VisionBusy(s) => {
-            skip_note(&format!("SKIPPED: test_any_file_card_is_a_file_not_text Vision busy: {}", s));
+            skip_note(&format!(
+                "SKIPPED: test_any_file_card_is_a_file_not_text Vision busy: {}",
+                s
+            ));
             return;
         }
         RunResult::Skipped(s) => {
@@ -547,11 +668,17 @@ fn test_frames_parse_to_expected_bubbles() {
         let frame = match res {
             RunResult::Success(v) => v,
             RunResult::Timeout => {
-                skip_note(&format!("SKIPPED: test_frames_parse_to_expected_bubbles timed out on {}", name));
+                skip_note(&format!(
+                    "SKIPPED: test_frames_parse_to_expected_bubbles timed out on {}",
+                    name
+                ));
                 return;
             }
             RunResult::VisionBusy(s) => {
-                skip_note(&format!("SKIPPED: test_frames_parse_to_expected_bubbles Vision busy on {}: {}", name, s));
+                skip_note(&format!(
+                    "SKIPPED: test_frames_parse_to_expected_bubbles Vision busy on {}: {}",
+                    name, s
+                ));
                 return;
             }
             RunResult::Skipped(s) => {
@@ -560,7 +687,12 @@ fn test_frames_parse_to_expected_bubbles() {
             }
             RunResult::ErrorJson(e) => panic!("error for {}: {:?}", name, e),
         };
-        assert!(frame.get("error").is_none(), "frame {} had error: {:?}", name, frame.get("error"));
+        assert!(
+            frame.get("error").is_none(),
+            "frame {} had error: {:?}",
+            name,
+            frame.get("error")
+        );
         assert_eq!(frame["profile"], case.profile);
         if let Some(scale) = case.scale {
             assert_eq!(frame["scale"], scale);
@@ -614,7 +746,9 @@ fn test_image_bubbles_carry_phash() {
         }
     }
     if images.is_empty() {
-        skip_note(&format!("SKIPPED: test_image_bubbles_carry_phash (no image bubbles in committed fixtures yet)"));
+        skip_note(&format!(
+            "SKIPPED: test_image_bubbles_carry_phash (no image bubbles in committed fixtures yet)"
+        ));
         return;
     }
     for b in images {
@@ -630,11 +764,16 @@ fn test_default_engine_reports_vision() {
     let frame = match res {
         RunResult::Success(v) => v,
         RunResult::Timeout => {
-            skip_note(&format!("SKIPPED: test_default_engine_reports_vision timed out under heavy load"));
+            skip_note(&format!(
+                "SKIPPED: test_default_engine_reports_vision timed out under heavy load"
+            ));
             return;
         }
         RunResult::VisionBusy(s) => {
-            skip_note(&format!("SKIPPED: test_default_engine_reports_vision Vision busy: {}", s));
+            skip_note(&format!(
+                "SKIPPED: test_default_engine_reports_vision Vision busy: {}",
+                s
+            ));
             return;
         }
         RunResult::Skipped(s) => {
@@ -664,11 +803,16 @@ fn test_invalid_engine_is_refused() {
     let frame1 = match res1 {
         RunResult::Success(v) | RunResult::ErrorJson(v) => v,
         RunResult::Timeout => {
-            skip_note(&format!("SKIPPED: test_invalid_engine_is_refused timed out"));
+            skip_note(&format!(
+                "SKIPPED: test_invalid_engine_is_refused timed out"
+            ));
             return;
         }
         RunResult::VisionBusy(s) => {
-            skip_note(&format!("SKIPPED: test_invalid_engine_is_refused Vision busy: {}", s));
+            skip_note(&format!(
+                "SKIPPED: test_invalid_engine_is_refused Vision busy: {}",
+                s
+            ));
             return;
         }
         RunResult::Skipped(s) => {
@@ -677,7 +821,11 @@ fn test_invalid_engine_is_refused() {
         }
     };
     assert!(
-        frame1.get("error").and_then(|v| v.as_str()).unwrap_or("").contains("invalid_ocr_engine"),
+        frame1
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .contains("invalid_ocr_engine"),
         "expected invalid_ocr_engine, got {:?}",
         frame1
     );
@@ -691,11 +839,16 @@ fn test_invalid_engine_is_refused() {
     let frame2 = match res2 {
         RunResult::Success(v) | RunResult::ErrorJson(v) => v,
         RunResult::Timeout => {
-            skip_note(&format!("SKIPPED: test_invalid_engine_is_refused timed out"));
+            skip_note(&format!(
+                "SKIPPED: test_invalid_engine_is_refused timed out"
+            ));
             return;
         }
         RunResult::VisionBusy(s) => {
-            skip_note(&format!("SKIPPED: test_invalid_engine_is_refused Vision busy: {}", s));
+            skip_note(&format!(
+                "SKIPPED: test_invalid_engine_is_refused Vision busy: {}",
+                s
+            ));
             return;
         }
         RunResult::Skipped(s) => {
@@ -704,7 +857,11 @@ fn test_invalid_engine_is_refused() {
         }
     };
     assert!(
-        frame2.get("error").and_then(|v| v.as_str()).unwrap_or("").contains("invalid_ocr_engine"),
+        frame2
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .contains("invalid_ocr_engine"),
         "expected invalid_ocr_engine, got {:?}",
         frame2
     );
@@ -720,7 +877,10 @@ fn test_unknown_theme_refused() {
             return;
         }
         RunResult::VisionBusy(s) => {
-            skip_note(&format!("SKIPPED: test_unknown_theme_refused Vision busy: {}", s));
+            skip_note(&format!(
+                "SKIPPED: test_unknown_theme_refused Vision busy: {}",
+                s
+            ));
             return;
         }
         RunResult::Skipped(s) => {
@@ -737,7 +897,9 @@ fn test_cli_rejects_invalid_engine() {
     let bin = match wechat_ocr_bin() {
         Some(b) => b,
         None => {
-            skip_note(&format!("SKIPPED: test_cli_rejects_invalid_engine swiftc not available"));
+            skip_note(&format!(
+                "SKIPPED: test_cli_rejects_invalid_engine swiftc not available"
+            ));
             return;
         }
     };
@@ -748,7 +910,9 @@ fn test_cli_rejects_invalid_engine() {
 
     // The OCR CLI warms Vision too: serialize with the other Vision tests (parallel runs made the Neural
     // Engine fail with e5rtError, 2026-11-08).
-    let _lock = VISION_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _lock = VISION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     // Case 1: WECHAT_OCR_ENGINE="paddle"
     let out1 = Command::new(bin)
@@ -773,5 +937,9 @@ fn test_cli_rejects_invalid_engine() {
     let out2 = cmd2.output().expect("run ocr");
     assert!(!out2.status.success());
     let stderr2 = String::from_utf8_lossy(&out2.stderr);
-    assert!(stderr2.contains("invalid_ocr_engine"), "stderr: {}", stderr2);
+    assert!(
+        stderr2.contains("invalid_ocr_engine"),
+        "stderr: {}",
+        stderr2
+    );
 }

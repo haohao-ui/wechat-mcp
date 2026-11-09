@@ -3,9 +3,9 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
-use rusqlite::{params, OptionalExtension};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, bail};
+use rusqlite::{OptionalExtension, params};
+use serde_json::{Value, json};
 
 use super::store::HistoryStore;
 
@@ -110,7 +110,10 @@ pub fn migrate(config: &Value) -> Result<HashMap<String, usize>> {
         if binding.get("account_id").and_then(|v| v.as_str()) != Some(account_id)
             || binding.get("host").and_then(|v| v.as_str()) != Some(host)
         {
-            bail!("{} belongs to another account/host", legacy.file_name().unwrap().to_string_lossy());
+            bail!(
+                "{} belongs to another account/host",
+                legacy.file_name().unwrap().to_string_lossy()
+            );
         }
         let recipient = binding
             .get("recipient")
@@ -120,12 +123,20 @@ pub fn migrate(config: &Value) -> Result<HashMap<String, usize>> {
         let contact_id = store.ensure_contact(account_id, &entry, true)?;
         let target = sessions.join(&contact_id);
         if target.exists() {
-            bail!("both {} and {} exist; resolve manually", legacy.file_name().unwrap().to_string_lossy(), contact_id);
+            bail!(
+                "both {} and {} exist; resolve manually",
+                legacy.file_name().unwrap().to_string_lossy(),
+                contact_id
+            );
         }
         fs::rename(&legacy, &target)?;
         bind(&target, &contact_id)?;
         write_private(
-            &sessions.join(format!("MOVED-{}-TO-{}.txt", legacy.file_name().unwrap().to_string_lossy(), contact_id)),
+            &sessions.join(format!(
+                "MOVED-{}-TO-{}.txt",
+                legacy.file_name().unwrap().to_string_lossy(),
+                contact_id
+            )),
             &json!({
                 "from": legacy.file_name().unwrap().to_string_lossy(),
                 "to": contact_id,
@@ -208,7 +219,9 @@ pub fn migrate(config: &Value) -> Result<HashMap<String, usize>> {
                 }
             }
         }
-        journals.sort_by_key(|j| (j.get("created_at").and_then(|v| v.as_f64()).unwrap_or(0.0) * 1000.0) as i64);
+        journals.sort_by_key(|j| {
+            (j.get("created_at").and_then(|v| v.as_f64()).unwrap_or(0.0) * 1000.0) as i64
+        });
 
         for record in journals {
             let key = match record.get("idempotency_key").and_then(|v| v.as_str()) {
@@ -233,7 +246,11 @@ pub fn migrate(config: &Value) -> Result<HashMap<String, usize>> {
                 continue;
             }
 
-            let at = (record.get("created_at").and_then(|v| v.as_f64()).unwrap_or(0.0) * 1000.0) as i64;
+            let at = (record
+                .get("created_at")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0)
+                * 1000.0) as i64;
             let mut ids = Vec::new();
             if let Some(inputs) = record.get("input").and_then(|v| v.as_array()) {
                 for b_val in inputs {
@@ -249,9 +266,21 @@ pub fn migrate(config: &Value) -> Result<HashMap<String, usize>> {
                     .and_then(|v| v.as_f64())
                     .unwrap_or(0.0)
                     * 1000.0) as i64;
-                let status = record.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let status = record
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
                 let model = record.get("model").unwrap_or(&Value::Null);
-                store.record_bot_reply(&contact_id, key, reply, status, model, &ids, Some(sent_at), Some("imported"))?;
+                store.record_bot_reply(
+                    &contact_id,
+                    key,
+                    reply,
+                    status,
+                    model,
+                    &ids,
+                    Some(sent_at),
+                    Some("imported"),
+                )?;
                 let echo_observed = record.get("client_echo_observed").and_then(|v| v.as_bool());
                 store.update_send(key, status, echo_observed)?;
             }
@@ -308,9 +337,14 @@ pub fn history_status(store: &HistoryStore) -> Result<Value> {
     let conn = conn_guard.lock().unwrap();
 
     let mut contacts = Vec::new();
-    let mut stmt = conn.prepare("SELECT contact_id, display_name, merged_into FROM contacts ORDER BY rowid")?;
+    let mut stmt =
+        conn.prepare("SELECT contact_id, display_name, merged_into FROM contacts ORDER BY rowid")?;
     let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?))
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<String>>(2)?,
+        ))
     })?;
 
     for r in rows {
@@ -340,7 +374,8 @@ pub fn history_status(store: &HistoryStore) -> Result<Value> {
     drop(stmt);
 
     let mut suggestions = Vec::new();
-    let mut merged_stmt = conn.prepare("SELECT contact_id FROM contacts WHERE merged_into IS NOT NULL ORDER BY rowid")?;
+    let mut merged_stmt = conn
+        .prepare("SELECT contact_id FROM contacts WHERE merged_into IS NOT NULL ORDER BY rowid")?;
     let merged_rows: Vec<String> = merged_stmt
         .query_map([], |r| r.get::<_, String>(0))?
         .filter_map(Result::ok)
@@ -367,7 +402,11 @@ pub fn history_status(store: &HistoryStore) -> Result<Value> {
     }
 
     let total_messages: i64 = conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))?;
-    let pending_downloads: i64 = conn.query_row("SELECT COUNT(*) FROM media_jobs WHERE status='pending'", [], |r| r.get(0))?;
+    let pending_downloads: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM media_jobs WHERE status='pending'",
+        [],
+        |r| r.get(0),
+    )?;
     let db_bytes = fs::metadata(&db)?.len();
 
     Ok(json!({
@@ -385,7 +424,9 @@ pub fn resolve_contact(store: &HistoryStore, account_id: &str, value: &str) -> R
         let conn_guard = store.connection();
         let conn = conn_guard.lock().unwrap();
         let exists: bool = conn
-            .query_row("SELECT 1 FROM contacts WHERE contact_id=?", [value], |_| Ok(true))
+            .query_row("SELECT 1 FROM contacts WHERE contact_id=?", [value], |_| {
+                Ok(true)
+            })
             .optional()?
             .unwrap_or(false);
         if exists {
@@ -395,7 +436,11 @@ pub fn resolve_contact(store: &HistoryStore, account_id: &str, value: &str) -> R
         let conn_guard = store.connection();
         let conn = conn_guard.lock().unwrap();
         let exists: bool = conn
-            .query_row("SELECT 1 FROM contacts WHERE contact_id=?", [&found], |_| Ok(true))
+            .query_row(
+                "SELECT 1 FROM contacts WHERE contact_id=?",
+                [&found],
+                |_| Ok(true),
+            )
             .optional()?
             .unwrap_or(false);
         if exists {
@@ -415,7 +460,10 @@ mod tests {
     struct TestTempDir(PathBuf);
     impl TestTempDir {
         fn new() -> Self {
-            let p = std::env::temp_dir().join(format!("wechat-migrate-test-{}", uuid::Uuid::new_v4().simple()));
+            let p = std::env::temp_dir().join(format!(
+                "wechat-migrate-test-{}",
+                uuid::Uuid::new_v4().simple()
+            ));
             fs::create_dir_all(&p).unwrap();
             Self(p)
         }
@@ -509,7 +557,11 @@ mod tests {
         fs::write(dir.join("binding.json"), binding.to_string()).unwrap();
 
         let cursor_bubbles: Vec<Bubble> = cursor.iter().map(|&t| bub(t)).collect();
-        fs::write(dir.join("cursor.json"), json!({"bubbles": cursor_bubbles}).to_string()).unwrap();
+        fs::write(
+            dir.join("cursor.json"),
+            json!({"bubbles": cursor_bubbles}).to_string(),
+        )
+        .unwrap();
 
         for &(key, question, answer, created) in sends {
             let record = json!({
@@ -529,7 +581,10 @@ mod tests {
     fn column(f: &MigrateFixture, cid: &str, col: &str) -> Vec<String> {
         let db_path = f.state.join("history").join("history.sqlite3");
         let conn = rusqlite::Connection::open(db_path).unwrap();
-        let sql = format!("SELECT {} FROM messages WHERE contact_id=? ORDER BY seq", col);
+        let sql = format!(
+            "SELECT {} FROM messages WHERE contact_id=? ORDER BY seq",
+            col
+        );
         let mut stmt = conn.prepare(&sql).unwrap();
         let mapped = stmt.query_map([cid], |r| r.get::<_, String>(0)).unwrap();
         mapped.filter_map(Result::ok).collect()
@@ -549,16 +604,53 @@ mod tests {
         let cid = store.resolve("acct", "午夜咖啡").unwrap().unwrap();
 
         assert!(!legacy.exists());
-        assert!(f.state.join("sessions").join(&cid).join("cursor.json").exists());
-        let binding: Value = serde_json::from_slice(&fs::read(f.state.join("sessions").join(&cid).join("binding.json")).unwrap()).unwrap();
-        assert_eq!(binding, json!({"host": "fixture", "account_id": "acct", "contact_id": cid, "kind": "private"}));
-        assert!(f.state.join("sessions").join(format!("MOVED-{}-TO-{}.txt", legacy.file_name().unwrap().to_string_lossy(), cid)).exists());
+        assert!(
+            f.state
+                .join("sessions")
+                .join(&cid)
+                .join("cursor.json")
+                .exists()
+        );
+        let binding: Value = serde_json::from_slice(
+            &fs::read(f.state.join("sessions").join(&cid).join("binding.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            binding,
+            json!({"host": "fixture", "account_id": "acct", "contact_id": cid, "kind": "private"})
+        );
+        assert!(
+            f.state
+                .join("sessions")
+                .join(format!(
+                    "MOVED-{}-TO-{}.txt",
+                    legacy.file_name().unwrap().to_string_lossy(),
+                    cid
+                ))
+                .exists()
+        );
 
-        assert_eq!(column(&f, &cid, "text"), vec!["问1", "答1", "问2", "答2", "问2", "问3"]);
-        assert_eq!(column(&f, &cid, "capture"), vec!["imported", "imported", "imported", "imported", "baseline", "baseline"]);
-        assert_eq!(column(&f, &cid, "sender"), vec!["customer", "bot", "customer", "bot", "customer", "customer"]);
+        assert_eq!(
+            column(&f, &cid, "text"),
+            vec!["问1", "答1", "问2", "答2", "问2", "问3"]
+        );
+        assert_eq!(
+            column(&f, &cid, "capture"),
+            vec![
+                "imported", "imported", "imported", "imported", "baseline", "baseline"
+            ]
+        );
+        assert_eq!(
+            column(&f, &cid, "sender"),
+            vec!["customer", "bot", "customer", "bot", "customer", "customer"]
+        );
 
-        assert_eq!(store.send("k2").unwrap().unwrap()["echo_observed"].as_bool().unwrap(), true);
+        assert_eq!(
+            store.send("k2").unwrap().unwrap()["echo_observed"]
+                .as_bool()
+                .unwrap(),
+            true
+        );
         assert_eq!(stats.get("contacts"), Some(&1));
         assert_eq!(stats.get("moved_dirs"), Some(&1));
         assert_eq!(stats.get("imported_sends"), Some(&2));
@@ -571,7 +663,11 @@ mod tests {
         fs::set_permissions(f.state.join("sessions"), fs::Permissions::from_mode(0o755)).unwrap();
         make_legacy_session(&f, "a", &[], &["q"]);
         migrate(&f.config).unwrap();
-        let mode = fs::metadata(f.state.join("sessions")).unwrap().permissions().mode() & 0o777;
+        let mode = fs::metadata(f.state.join("sessions"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o700);
     }
 
@@ -593,14 +689,26 @@ mod tests {
     #[test]
     fn test_migrate_root_level_legacy_session_is_imported_once() {
         let f = setup_fixture();
-        fs::write(f.state.join("binding.json"), json!({"host": "fixture", "account_id": "acct", "recipient": "a", "kind": "private"}).to_string()).unwrap();
-        fs::write(f.state.join("cursor.json"), json!({"bubbles": [bub("q")]}).to_string()).unwrap();
+        fs::write(
+            f.state.join("binding.json"),
+            json!({"host": "fixture", "account_id": "acct", "recipient": "a", "kind": "private"})
+                .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            f.state.join("cursor.json"),
+            json!({"bubbles": [bub("q")]}).to_string(),
+        )
+        .unwrap();
         fs::write(f.state.join("send-k9.json"), json!({"idempotency_key": "k9", "status": "attempting", "input": [bub("q")], "created_at": 1.0}).to_string()).unwrap();
 
         migrate(&f.config).unwrap();
         let store = HistoryStore::open(&f.state).unwrap();
         let cid = store.resolve("acct", "a").unwrap().unwrap();
-        let send_k9: Value = serde_json::from_slice(&fs::read(f.state.join("sessions").join(&cid).join("send-k9.json")).unwrap()).unwrap();
+        let send_k9: Value = serde_json::from_slice(
+            &fs::read(f.state.join("sessions").join(&cid).join("send-k9.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(send_k9["status"].as_str().unwrap(), "attempting");
         drop(store);
 
@@ -619,13 +727,25 @@ mod tests {
     fn test_migrate_root_legacy_skipped_when_session_dir_already_has_it() {
         let f = setup_fixture();
         make_legacy_session(&f, "a", &[], &["q"]);
-        fs::write(f.state.join("binding.json"), json!({"host": "fixture", "account_id": "acct", "recipient": "a", "kind": "private"}).to_string()).unwrap();
-        fs::write(f.state.join("cursor.json"), json!({"bubbles": [bub("old")]}).to_string()).unwrap();
+        fs::write(
+            f.state.join("binding.json"),
+            json!({"host": "fixture", "account_id": "acct", "recipient": "a", "kind": "private"})
+                .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            f.state.join("cursor.json"),
+            json!({"bubbles": [bub("old")]}).to_string(),
+        )
+        .unwrap();
 
         migrate(&f.config).unwrap();
         let store = HistoryStore::open(&f.state).unwrap();
         let cid = store.resolve("acct", "a").unwrap().unwrap();
-        let cursor: Value = serde_json::from_slice(&fs::read(f.state.join("sessions").join(&cid).join("cursor.json")).unwrap()).unwrap();
+        let cursor: Value = serde_json::from_slice(
+            &fs::read(f.state.join("sessions").join(&cid).join("cursor.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(cursor["bubbles"][0]["text"].as_str().unwrap(), "q");
     }
 
@@ -641,8 +761,12 @@ mod tests {
     fn test_migrate_merge_unmerge_status_and_backup_commands() {
         let f = setup_fixture();
         let store = HistoryStore::open(&f.state).unwrap();
-        let a = store.ensure_contact("acct", &json!({"recipient": "甲", "kind": "private"}), true).unwrap();
-        let b = store.ensure_contact("acct", &json!({"recipient": "乙", "kind": "private"}), true).unwrap();
+        let a = store
+            .ensure_contact("acct", &json!({"recipient": "甲", "kind": "private"}), true)
+            .unwrap();
+        let b = store
+            .ensure_contact("acct", &json!({"recipient": "乙", "kind": "private"}), true)
+            .unwrap();
 
         // merge
         let src_id = resolve_contact(&store, "acct", "乙").unwrap();
@@ -661,7 +785,10 @@ mod tests {
 
         // status
         let status = history_status(&store).unwrap();
-        assert_eq!(status["alias_suggestions"], json!([{"into": a, "into_name": "甲", "add_aliases": ["乙"]}]));
+        assert_eq!(
+            status["alias_suggestions"],
+            json!([{"into": a, "into_name": "甲", "add_aliases": ["乙"]}])
+        );
         assert_eq!(status["messages"], json!(0));
         assert_eq!(status["contacts"].as_array().unwrap().len(), 2);
 
@@ -669,10 +796,15 @@ mod tests {
         let backup = f.base.join("backup.sqlite3");
         let bytes = history_backup(&store, &backup).unwrap();
         assert!(bytes > 0);
-        assert_eq!(fs::metadata(&backup).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
 
         let b_conn = rusqlite::Connection::open(&backup).unwrap();
-        let count: i64 = b_conn.query_row("SELECT count(*) FROM contacts", [], |r| r.get(0)).unwrap();
+        let count: i64 = b_conn
+            .query_row("SELECT count(*) FROM contacts", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(count, 2);
 
         let err = history_backup(&store, &backup);

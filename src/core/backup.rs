@@ -4,7 +4,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
@@ -58,7 +58,8 @@ pub fn file_sha256(path: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 8192];
     loop {
-        let n = file.read(&mut buf)
+        let n = file
+            .read(&mut buf)
             .with_context(|| format!("failed to read file for sha256: {}", path.display()))?;
         if n == 0 {
             break;
@@ -135,7 +136,9 @@ fn inspect_db(db_path: &Path, file_name: &str) -> Result<DatabaseManifestEntry> 
     )?;
     let user_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
 
-    let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")?;
+    let mut stmt = conn.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+    )?;
     let tables: Vec<String> = stmt
         .query_map([], |row| row.get(0))?
         .collect::<Result<Vec<_>, _>>()?;
@@ -144,7 +147,11 @@ fn inspect_db(db_path: &Path, file_name: &str) -> Result<DatabaseManifestEntry> 
     let mut total_rows = 0i64;
     for tbl in tables {
         let count: i64 = conn
-            .query_row(&format!("SELECT count(*) FROM \"{}\"", tbl.replace('"', "\"\"")), [], |r| r.get(0))
+            .query_row(
+                &format!("SELECT count(*) FROM \"{}\"", tbl.replace('"', "\"\"")),
+                [],
+                |r| r.get(0),
+            )
             .unwrap_or(0);
         table_rows.insert(tbl, count);
         total_rows += count;
@@ -173,10 +180,15 @@ pub fn backup_sqlite_db(source: &Path, destination: &Path) -> Result<()> {
         bail!("Source database does not exist: {}", source.display());
     }
     if destination.exists() {
-        bail!("Output already exists; choose a new backup path: {}", destination.display());
+        bail!(
+            "Output already exists; choose a new backup path: {}",
+            destination.display()
+        );
     }
 
-    let dest_parent = destination.parent().context("destination has no parent dir")?;
+    let dest_parent = destination
+        .parent()
+        .context("destination has no parent dir")?;
     if !dest_parent.exists() {
         fs::create_dir_all(dest_parent)?;
         fs::set_permissions(dest_parent, fs::Permissions::from_mode(0o700))?;
@@ -199,15 +211,18 @@ pub fn backup_sqlite_db(source: &Path, destination: &Path) -> Result<()> {
         let src_conn = Connection::open_with_flags(
             source,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-        ).with_context(|| format!("failed to open source database at {}", source.display()))?;
+        )
+        .with_context(|| format!("failed to open source database at {}", source.display()))?;
 
-        src_conn.busy_timeout(std::time::Duration::from_millis(5000))
+        src_conn
+            .busy_timeout(std::time::Duration::from_millis(5000))
             .context("failed to set busy_timeout on source database")?;
 
         let dst_conn = Connection::open(&temp_path)
             .with_context(|| format!("failed to open temp database at {}", temp_path.display()))?;
 
-        dst_conn.busy_timeout(std::time::Duration::from_millis(5000))
+        dst_conn
+            .busy_timeout(std::time::Duration::from_millis(5000))
             .context("failed to set busy_timeout on destination database")?;
 
         unsafe {
@@ -242,7 +257,11 @@ pub fn backup_sqlite_db(source: &Path, destination: &Path) -> Result<()> {
             let finish_rc = rusqlite::ffi::sqlite3_backup_finish(p_backup);
 
             if rc != rusqlite::ffi::SQLITE_DONE {
-                bail!("sqlite backup execution failed: step_rc={}, finish_rc={}", rc, finish_rc);
+                bail!(
+                    "sqlite backup execution failed: step_rc={}, finish_rc={}",
+                    rc,
+                    finish_rc
+                );
             }
         }
 
@@ -351,7 +370,9 @@ pub fn resolve_gateway_db_path() -> Option<PathBuf> {
     // $HOME would rewrite the developer's own gateway database.
     #[cfg(test)]
     if !std::env::var("HOME").is_ok_and(|home| Path::new(&home).starts_with(std::env::temp_dir())) {
-        panic!("test must isolate the gateway database: set MESSAGE_GATEWAY_DB or point HOME at a temp dir");
+        panic!(
+            "test must isolate the gateway database: set MESSAGE_GATEWAY_DB or point HOME at a temp dir"
+        );
     }
 
     if let Ok(home) = std::env::var("HOME") {
@@ -392,12 +413,18 @@ pub fn run_backup(config: &BotConfig, custom_out: Option<&Path>) -> Result<PathB
             .with_context(|| format!("failed to read directory {}", out_dir.display()))?;
         if entries.next().is_some() {
             if !is_program_backup_dir(&out_dir) {
-                bail!("Output directory exists, is not empty, and is not a valid backup directory: {}", out_dir.display());
+                bail!(
+                    "Output directory exists, is not empty, and is not a valid backup directory: {}",
+                    out_dir.display()
+                );
             }
         }
     }
 
-    let parent_dir = out_dir.parent().context("destination has no parent dir")?.to_path_buf();
+    let parent_dir = out_dir
+        .parent()
+        .context("destination has no parent dir")?
+        .to_path_buf();
     if !parent_dir.exists() {
         fs::create_dir_all(&parent_dir)
             .with_context(|| format!("failed to create parent dir {}", parent_dir.display()))?;
@@ -420,8 +447,9 @@ pub fn run_backup(config: &BotConfig, custom_out: Option<&Path>) -> Result<PathB
 
         if history_db.exists() {
             let target = temp_dir.join("history.sqlite3");
-            backup_sqlite_db(&history_db, &target)
-                .with_context(|| format!("failed to backup history db from {}", history_db.display()))?;
+            backup_sqlite_db(&history_db, &target).with_context(|| {
+                format!("failed to backup history db from {}", history_db.display())
+            })?;
             let entry = inspect_db(&target, "history.sqlite3")?;
             db_total_bytes += entry.size_bytes;
             database_entries.push(entry);
@@ -435,8 +463,9 @@ pub fn run_backup(config: &BotConfig, custom_out: Option<&Path>) -> Result<PathB
                     .and_then(|n| n.to_str())
                     .unwrap_or("test.sqlite3");
                 let target = temp_dir.join(gw_file_name);
-                backup_sqlite_db(gw_path, &target)
-                    .with_context(|| format!("failed to backup gateway db from {}", gw_path.display()))?;
+                backup_sqlite_db(gw_path, &target).with_context(|| {
+                    format!("failed to backup gateway db from {}", gw_path.display())
+                })?;
                 let entry = inspect_db(&target, gw_file_name)?;
                 db_total_bytes += entry.size_bytes;
                 database_entries.push(entry);
@@ -445,20 +474,27 @@ pub fn run_backup(config: &BotConfig, custom_out: Option<&Path>) -> Result<PathB
         }
 
         if backed_up_count == 0 {
-            bail!("No source databases found to backup (checked history at {} and gateway database)", history_db.display());
+            bail!(
+                "No source databases found to backup (checked history at {} and gateway database)",
+                history_db.display()
+            );
         }
 
         let src_media_dir = config.state_dir.join("history").join("media");
-        let (media_file_count, media_total_bytes) = if src_media_dir.exists() && src_media_dir.is_dir() {
-            let dst_media_dir = temp_dir.join("history").join("media");
-            copy_dir_all(&src_media_dir, &dst_media_dir)?
-        } else {
-            (0, 0)
-        };
+        let (media_file_count, media_total_bytes) =
+            if src_media_dir.exists() && src_media_dir.is_dir() {
+                let dst_media_dir = temp_dir.join("history").join("media");
+                copy_dir_all(&src_media_dir, &dst_media_dir)?
+            } else {
+                (0, 0)
+            };
 
         let manifest = BackupManifest {
             version: 2,
-            created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
             database_count: database_entries.len(),
             database_total_bytes: db_total_bytes,
             databases: database_entries,
@@ -475,8 +511,9 @@ pub fn run_backup(config: &BotConfig, custom_out: Option<&Path>) -> Result<PathB
         if out_dir.exists() {
             let trash_name = format!(".trash-{}", uuid::Uuid::new_v4().simple());
             let trash_dir = parent_dir.join(trash_name);
-            fs::rename(&out_dir, &trash_dir)
-                .with_context(|| format!("failed to move old backup to trash {}", trash_dir.display()))?;
+            fs::rename(&out_dir, &trash_dir).with_context(|| {
+                format!("failed to move old backup to trash {}", trash_dir.display())
+            })?;
             trash_dir_opt = Some(trash_dir);
         }
 
@@ -484,7 +521,8 @@ pub fn run_backup(config: &BotConfig, custom_out: Option<&Path>) -> Result<PathB
             if let Some(trash_dir) = &trash_dir_opt {
                 let _ = fs::rename(trash_dir, &out_dir);
             }
-            return Err(e).with_context(|| format!("failed to rename temp backup to {}", out_dir.display()));
+            return Err(e)
+                .with_context(|| format!("failed to rename temp backup to {}", out_dir.display()));
         }
         fs::set_permissions(&out_dir, fs::Permissions::from_mode(0o700))?;
 
@@ -546,17 +584,27 @@ pub fn should_auto_backup(is_idle: bool, now: f64, last_backup_at: f64) -> bool 
 /// The gateway database together with the WAL and shared-memory files SQLite keeps beside it.
 fn sqlite_family(db: &Path) -> [PathBuf; 3] {
     let name = db.as_os_str().to_string_lossy();
-    [db.to_path_buf(), PathBuf::from(format!("{name}-wal")), PathBuf::from(format!("{name}-shm"))]
+    [
+        db.to_path_buf(),
+        PathBuf::from(format!("{name}-wal")),
+        PathBuf::from(format!("{name}-shm")),
+    ]
 }
 
 pub fn run_restore(backup_dir: &Path, config: &BotConfig) -> Result<()> {
     if !backup_dir.exists() || !backup_dir.is_dir() {
-        bail!("Backup directory does not exist or is not a directory: {}", backup_dir.display());
+        bail!(
+            "Backup directory does not exist or is not a directory: {}",
+            backup_dir.display()
+        );
     }
 
     let manifest_path = backup_dir.join("manifest.json");
     if !manifest_path.exists() {
-        bail!("Manifest not found in backup directory: {}", manifest_path.display());
+        bail!(
+            "Manifest not found in backup directory: {}",
+            manifest_path.display()
+        );
     }
 
     let manifest_bytes = fs::read(&manifest_path)
@@ -572,7 +620,10 @@ pub fn run_restore(backup_dir: &Path, config: &BotConfig) -> Result<()> {
     for db_entry in &manifest.databases {
         let bak_db = backup_dir.join(&db_entry.file);
         if !bak_db.exists() {
-            bail!("Database file {} recorded in manifest does not exist in backup", db_entry.file);
+            bail!(
+                "Database file {} recorded in manifest does not exist in backup",
+                db_entry.file
+            );
         }
         let actual_sha = file_sha256(&bak_db)?;
         if actual_sha != db_entry.sha256 {
@@ -633,7 +684,9 @@ pub fn run_restore(backup_dir: &Path, config: &BotConfig) -> Result<()> {
                 if has_old_history {
                     let _ = fs::rename(old_backup_dir.join("history"), &current_history_dir);
                 }
-                return Err(e).with_context(|| format!("failed to move {} aside before restore", file.display()));
+                return Err(e).with_context(|| {
+                    format!("failed to move {} aside before restore", file.display())
+                });
             }
             gw_moved.push((file, parked));
         }
@@ -670,8 +723,9 @@ pub fn run_restore(backup_dir: &Path, config: &BotConfig) -> Result<()> {
                 }
             }
 
-            fs::copy(&src_db, &target_db)
-                .with_context(|| format!("failed to copy restored db to {}", target_db.display()))?;
+            fs::copy(&src_db, &target_db).with_context(|| {
+                format!("failed to copy restored db to {}", target_db.display())
+            })?;
             fs::set_permissions(&target_db, fs::Permissions::from_mode(0o600))?;
         }
 
@@ -693,31 +747,53 @@ pub fn run_restore(backup_dir: &Path, config: &BotConfig) -> Result<()> {
             let conn = Connection::open_with_flags(
                 &target_db,
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-            ).with_context(|| format!("failed to open restored database at {}", target_db.display()))?;
+            )
+            .with_context(|| {
+                format!(
+                    "failed to open restored database at {}",
+                    target_db.display()
+                )
+            })?;
 
             let integrity: String = conn
                 .query_row("PRAGMA integrity_check", [], |r| r.get(0))
-                .with_context(|| format!("failed to run integrity_check on {}", target_db.display()))?;
+                .with_context(|| {
+                    format!("failed to run integrity_check on {}", target_db.display())
+                })?;
             if integrity != "ok" {
-                bail!("Restored database integrity check failed on {}: {}", target_db.display(), integrity);
+                bail!(
+                    "Restored database integrity check failed on {}: {}",
+                    target_db.display(),
+                    integrity
+                );
             }
 
             let mut fk_stmt = conn.prepare("PRAGMA foreign_key_check")?;
-            let fk_rows = fk_stmt.query_map([], |row| {
-                let table: String = row.get(0)?;
-                let rowid: i64 = row.get(1)?;
-                let target: String = row.get(2)?;
-                let fkid: i64 = row.get(3)?;
-                Ok(format!("{}:{} -> {}:{}", table, rowid, target, fkid))
-            })?.collect::<Result<Vec<_>, _>>()?;
+            let fk_rows = fk_stmt
+                .query_map([], |row| {
+                    let table: String = row.get(0)?;
+                    let rowid: i64 = row.get(1)?;
+                    let target: String = row.get(2)?;
+                    let fkid: i64 = row.get(3)?;
+                    Ok(format!("{}:{} -> {}:{}", table, rowid, target, fkid))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
 
             if !fk_rows.is_empty() {
-                bail!("Restored database foreign_key_check failed on {}: {:?}", target_db.display(), fk_rows);
+                bail!(
+                    "Restored database foreign_key_check failed on {}: {:?}",
+                    target_db.display(),
+                    fk_rows
+                );
             }
 
             for (tbl, expected_count) in &db_entry.table_rows {
                 let actual_count: i64 = conn
-                    .query_row(&format!("SELECT count(*) FROM \"{}\"", tbl.replace('"', "\"\"")), [], |r| r.get(0))
+                    .query_row(
+                        &format!("SELECT count(*) FROM \"{}\"", tbl.replace('"', "\"\"")),
+                        [],
+                        |r| r.get(0),
+                    )
                     .with_context(|| format!("failed to count rows in table {}", tbl))?;
                 if actual_count != *expected_count {
                     bail!(
@@ -745,15 +821,19 @@ pub fn run_restore(backup_dir: &Path, config: &BotConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
+    use std::time::Duration;
 
     struct TempDir(PathBuf);
     impl TempDir {
         fn new(name: &str) -> Self {
-            let p = std::env::temp_dir().join(format!("wechat-backup-test-{}-{}", name, uuid::Uuid::new_v4().simple()));
+            let p = std::env::temp_dir().join(format!(
+                "wechat-backup-test-{}-{}",
+                name,
+                uuid::Uuid::new_v4().simple()
+            ));
             fs::create_dir_all(&p).unwrap();
             fs::set_permissions(&p, fs::Permissions::from_mode(0o700)).unwrap();
             TempDir(p)
@@ -822,7 +902,8 @@ mod tests {
         let dst = temp.0.join("dst.sqlite3");
 
         let conn = Connection::open(&src).unwrap();
-        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)", []).unwrap();
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)", [])
+            .unwrap();
         drop(conn);
 
         fs::write(&dst, b"existing").unwrap();
@@ -854,7 +935,8 @@ mod tests {
                 "PRAGMA journal_mode = WAL;
                  CREATE TABLE items (id INTEGER PRIMARY KEY, content TEXT);
                  INSERT INTO items (content) VALUES ('initial 1'), ('initial 2');",
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         // 2. 并发写入线程：在备份执行期间持续写入
@@ -890,10 +972,14 @@ mod tests {
 
         // 5. 验证备份数据库 integrity_check 和可用性
         let dst_conn = Connection::open(&dst).unwrap();
-        let integrity: String = dst_conn.query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap();
+        let integrity: String = dst_conn
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(integrity, "ok");
 
-        let count: i64 = dst_conn.query_row("SELECT count(*) FROM items", [], |r| r.get(0)).unwrap();
+        let count: i64 = dst_conn
+            .query_row("SELECT count(*) FROM items", [], |r| r.get(0))
+            .unwrap();
         assert!(count >= 2, "Expected at least initial items, got {}", count);
     }
 
@@ -943,7 +1029,8 @@ mod tests {
             let conn = Connection::open(&history_db).unwrap();
             conn.execute_batch(
                 "CREATE TABLE test_h (id INT PRIMARY KEY); INSERT INTO test_h VALUES (1);",
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         // 构造 gateway db 并通过环境变量指定
@@ -952,7 +1039,8 @@ mod tests {
             let conn = Connection::open(&gw_db).unwrap();
             conn.execute_batch(
                 "CREATE TABLE test_gw (id INT PRIMARY KEY); INSERT INTO test_gw VALUES (99);",
-            ).unwrap();
+            )
+            .unwrap();
         }
         unsafe {
             std::env::set_var("MESSAGE_GATEWAY_DB", gw_db.to_str().unwrap());
@@ -972,14 +1060,30 @@ mod tests {
         assert!(h_bak.exists());
         assert!(g_bak.exists());
 
-        assert_eq!(fs::metadata(&h_bak).unwrap().permissions().mode() & 0o777, 0o600);
-        assert_eq!(fs::metadata(&g_bak).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&h_bak).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&g_bak).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
 
         // 校验 integrity
         let conn_h = Connection::open(&h_bak).unwrap();
-        assert_eq!(conn_h.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0)).unwrap(), "ok");
+        assert_eq!(
+            conn_h
+                .query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
         let conn_g = Connection::open(&g_bak).unwrap();
-        assert_eq!(conn_g.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0)).unwrap(), "ok");
+        assert_eq!(
+            conn_g
+                .query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
 
         if let Some(g) = orig_gw {
             unsafe { std::env::set_var("MESSAGE_GATEWAY_DB", g) };
@@ -1025,7 +1129,10 @@ mod tests {
 
         // latest_backup_timestamp 应当忽略空目录或无效备份目录，返回 0.0
         let ts = latest_backup_timestamp(&backups_dir);
-        assert_eq!(ts, 0.0, "Empty or corrupted backup directory must not count as latest backup");
+        assert_eq!(
+            ts, 0.0,
+            "Empty or corrupted backup directory must not count as latest backup"
+        );
 
         // 同样，如果 run_backup 失败，不能留下未完成的空目标目录
         let history_dir = state_dir.join("history");
@@ -1040,7 +1147,10 @@ mod tests {
 
         // 验证失败后不会留下新的空目录
         let ts_after = latest_backup_timestamp(&backups_dir);
-        assert_eq!(ts_after, 0.0, "Failed backup attempt must not update latest_backup_timestamp");
+        assert_eq!(
+            ts_after, 0.0,
+            "Failed backup attempt must not update latest_backup_timestamp"
+        );
     }
 
     #[test]
@@ -1069,7 +1179,11 @@ mod tests {
             unsafe { std::env::set_var("MESSAGE_GATEWAY_DB", g) };
         }
 
-        assert_eq!(resolved, Some(service_db), "Should fallback to Library/Application Support/message-gateway/service.sqlite3 when test.sqlite3 is absent");
+        assert_eq!(
+            resolved,
+            Some(service_db),
+            "Should fallback to Library/Application Support/message-gateway/service.sqlite3 when test.sqlite3 is absent"
+        );
     }
 
     #[test]
@@ -1101,7 +1215,8 @@ mod tests {
                 "PRAGMA journal_mode = WAL;
                  CREATE TABLE counter (id INTEGER PRIMARY KEY, val INTEGER);
                  INSERT INTO counter VALUES (1, 0);",
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -1131,9 +1246,15 @@ mod tests {
         stop.store(true, Ordering::SeqCst);
         writer.join().unwrap();
 
-        assert!(res.is_ok(), "backup_sqlite_db should succeed during concurrent writes: {:?}", res.err());
+        assert!(
+            res.is_ok(),
+            "backup_sqlite_db should succeed during concurrent writes: {:?}",
+            res.err()
+        );
         let dst_conn = Connection::open(&dst).unwrap();
-        let integrity: String = dst_conn.query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap();
+        let integrity: String = dst_conn
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(integrity, "ok");
     }
 
@@ -1155,7 +1276,8 @@ mod tests {
                 "PRAGMA user_version = 42;
                  CREATE TABLE messages (id INTEGER PRIMARY KEY, content TEXT);
                  INSERT INTO messages VALUES (1, 'hello'), (2, 'world');",
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         // 写入测试媒体文件
@@ -1166,24 +1288,44 @@ mod tests {
         let out = run_backup(&config, None).unwrap();
 
         // 验证 history/media/ 相对路径被复制
-        let backed_media = out.join("history").join("media").join("ab").join("abcdef123456.jpg");
-        assert!(backed_media.exists(), "Media file must be preserved in backup relative path");
-        assert_eq!(fs::read(&backed_media).unwrap(), b"fake-jpg-content-123456789");
+        let backed_media = out
+            .join("history")
+            .join("media")
+            .join("ab")
+            .join("abcdef123456.jpg");
+        assert!(
+            backed_media.exists(),
+            "Media file must be preserved in backup relative path"
+        );
+        assert_eq!(
+            fs::read(&backed_media).unwrap(),
+            b"fake-jpg-content-123456789"
+        );
 
         // 验证 manifest 结构
         let manifest_bytes = fs::read(out.join("manifest.json")).unwrap();
         let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
 
         assert!(manifest.get("databases").is_some());
-        let dbs = manifest["databases"].as_array().expect("databases must be an array");
-        let h_entry = dbs.iter().find(|d| d["file"] == "history.sqlite3").expect("history.sqlite3 in manifest");
+        let dbs = manifest["databases"]
+            .as_array()
+            .expect("databases must be an array");
+        let h_entry = dbs
+            .iter()
+            .find(|d| d["file"] == "history.sqlite3")
+            .expect("history.sqlite3 in manifest");
         assert!(h_entry["sha256"].as_str().is_some());
         assert_eq!(h_entry["user_version"], 42);
         assert!(h_entry["size_bytes"].as_u64().unwrap() > 0);
 
-        let media_meta = manifest.get("media").expect("manifest must contain media metadata");
+        let media_meta = manifest
+            .get("media")
+            .expect("manifest must contain media metadata");
         assert_eq!(media_meta["file_count"], 1);
-        assert_eq!(media_meta["total_bytes"], b"fake-jpg-content-123456789".len() as u64);
+        assert_eq!(
+            media_meta["total_bytes"],
+            b"fake-jpg-content-123456789".len() as u64
+        );
     }
 
     #[test]
@@ -1207,7 +1349,10 @@ mod tests {
 
         let config = sample_config(&state_dir);
         let res = run_backup(&config, Some(&foreign_dir));
-        assert!(res.is_err(), "run_backup must refuse to overwrite foreign non-backup directory");
+        assert!(
+            res.is_err(),
+            "run_backup must refuse to overwrite foreign non-backup directory"
+        );
         assert!(foreign_file.exists(), "foreign file must remain intact");
         assert_eq!(fs::read(&foreign_file).unwrap(), b"do not delete me!");
     }
@@ -1246,7 +1391,11 @@ mod tests {
         let res = run_restore(&backup_dir, &config);
         assert!(res.is_err(), "run_restore must fail while core is running");
         let err_msg = res.unwrap_err().to_string();
-        assert!(err_msg.contains("core is running") || err_msg.contains("stop"), "Error msg: {}", err_msg);
+        assert!(
+            err_msg.contains("core is running") || err_msg.contains("stop"),
+            "Error msg: {}",
+            err_msg
+        );
     }
 
     #[test]
@@ -1263,7 +1412,8 @@ mod tests {
             conn.execute_batch(
                 "CREATE TABLE messages (id INT PRIMARY KEY, content TEXT);
                  INSERT INTO messages VALUES (1, 'initial_content');",
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         let config = sample_config(&state_dir);
@@ -1273,7 +1423,11 @@ mod tests {
         // 修改当前 state 中的数据库为 "modified_content"
         {
             let conn = Connection::open(&history_db).unwrap();
-            conn.execute("UPDATE messages SET content = 'original_unbroken' WHERE id = 1", []).unwrap();
+            conn.execute(
+                "UPDATE messages SET content = 'original_unbroken' WHERE id = 1",
+                [],
+            )
+            .unwrap();
         }
 
         // 篡改备份中的 history.sqlite3 导致 sha256 不匹配
@@ -1283,12 +1437,20 @@ mod tests {
         let res = run_restore(&backup_dir, &config);
         assert!(res.is_err(), "run_restore must fail on digest mismatch");
         let err_msg = res.unwrap_err().to_string();
-        assert!(err_msg.contains("SHA256") || err_msg.contains("mismatch"), "Error msg: {}", err_msg);
+        assert!(
+            err_msg.contains("SHA256") || err_msg.contains("mismatch"),
+            "Error msg: {}",
+            err_msg
+        );
 
         // 验证原数据自动回滚并保持完好
         assert!(history_db.exists(), "original database must be preserved");
         let conn = Connection::open(&history_db).unwrap();
-        let content: String = conn.query_row("SELECT content FROM messages WHERE id = 1", [], |r| r.get(0)).unwrap();
+        let content: String = conn
+            .query_row("SELECT content FROM messages WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
         assert_eq!(content, "original_unbroken");
     }
 
@@ -1302,10 +1464,14 @@ mod tests {
         let state_dir = temp.0.join("state");
         let history_dir = state_dir.join("history");
         fs::create_dir_all(&history_dir).unwrap();
-        Connection::open(history_dir.join("history.sqlite3")).unwrap()
-            .execute_batch("CREATE TABLE h (x TEXT); INSERT INTO h VALUES ('kept');").unwrap();
-        Connection::open(&gw).unwrap()
-            .execute_batch("CREATE TABLE t (x TEXT); INSERT INTO t VALUES ('backup-version');").unwrap();
+        Connection::open(history_dir.join("history.sqlite3"))
+            .unwrap()
+            .execute_batch("CREATE TABLE h (x TEXT); INSERT INTO h VALUES ('kept');")
+            .unwrap();
+        Connection::open(&gw)
+            .unwrap()
+            .execute_batch("CREATE TABLE t (x TEXT); INSERT INTO t VALUES ('backup-version');")
+            .unwrap();
         let config = sample_config(&state_dir);
         let backup_dir = temp.0.join("backup");
         run_backup(&config, Some(&backup_dir)).unwrap();
@@ -1322,10 +1488,19 @@ mod tests {
 
         run_restore(&backup_dir, &config).unwrap();
 
-        let rows: Vec<String> = Connection::open(&gw).unwrap()
-            .prepare("SELECT x FROM t ORDER BY rowid").unwrap()
-            .query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
-        assert_eq!(rows, vec!["backup-version".to_string()], "stale WAL frames were replayed");
+        let rows: Vec<String> = Connection::open(&gw)
+            .unwrap()
+            .prepare("SELECT x FROM t ORDER BY rowid")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            rows,
+            vec!["backup-version".to_string()],
+            "stale WAL frames were replayed"
+        );
     }
 
     #[test]
@@ -1345,7 +1520,8 @@ mod tests {
                 "PRAGMA user_version = 7;
                  CREATE TABLE users (id INT PRIMARY KEY, name TEXT);
                  INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob');",
-            ).unwrap();
+            )
+            .unwrap();
         }
         let media_file_a = media_dir_a.join("photo.png");
         fs::write(&media_file_a, b"png-binary-data-test").unwrap();
@@ -1364,7 +1540,8 @@ mod tests {
             conn.execute_batch(
                 "CREATE TABLE users (id INT PRIMARY KEY, name TEXT);
                  INSERT INTO users VALUES (99, 'OldGuy');",
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         let config_b = sample_config(&state_dir_b);
@@ -1373,12 +1550,18 @@ mod tests {
 
         // 验证数据库内容已恢复
         let conn_b = Connection::open(&db_b).unwrap();
-        let integrity: String = conn_b.query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap();
+        let integrity: String = conn_b
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(integrity, "ok");
 
-        let count: i64 = conn_b.query_row("SELECT count(*) FROM users", [], |r| r.get(0)).unwrap();
+        let count: i64 = conn_b
+            .query_row("SELECT count(*) FROM users", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(count, 2);
-        let name: String = conn_b.query_row("SELECT name FROM users WHERE id = 1", [], |r| r.get(0)).unwrap();
+        let name: String = conn_b
+            .query_row("SELECT name FROM users WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(name, "Alice");
 
         // 验证 media 已恢复

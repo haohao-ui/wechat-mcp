@@ -72,7 +72,11 @@ fn parse_base_url(raw: &str) -> Result<ParsedUrlParts> {
             let h = &host_port[1..end_bracket];
             let after = &host_port[end_bracket + 1..];
             let p = if let Some(port_str) = after.strip_prefix(':') {
-                Some(port_str.parse::<u16>().map_err(|_| anyhow::anyhow!("invalid port"))?)
+                Some(
+                    port_str
+                        .parse::<u16>()
+                        .map_err(|_| anyhow::anyhow!("invalid port"))?,
+                )
             } else {
                 None
             };
@@ -110,7 +114,9 @@ pub fn extract_host_from_base_url(raw: &str) -> String {
 }
 
 pub fn validate_config(config: &Value) -> Result<()> {
-    let obj = config.as_object().context("model_config must be an object")?;
+    let obj = config
+        .as_object()
+        .context("model_config must be an object")?;
     let backend = obj
         .get("backend")
         .and_then(|v| v.as_str())
@@ -145,10 +151,7 @@ pub fn validate_config(config: &Value) -> Result<()> {
         }
     }
 
-    let base_url_str = obj
-        .get("base_url")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let base_url_str = obj.get("base_url").and_then(|v| v.as_str()).unwrap_or("");
     parse_base_url(base_url_str)?;
 
     let model = obj
@@ -170,7 +173,9 @@ pub fn validate_config(config: &Value) -> Result<()> {
     if let Some(ake) = obj.get("api_key_env") {
         let s = ake.as_str().context("invalid api_key_env name")?;
         let is_valid_name = !s.is_empty()
-            && s.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+            && s.chars()
+                .next()
+                .map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
             && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
         if !is_valid_name {
             bail!("invalid api_key_env name");
@@ -245,16 +250,16 @@ pub fn resolve_key(config: &ModelConfig) -> Result<String> {
         "OPENAI_API_KEY"
     };
 
-    let env_name = config
-        .api_key_env
-        .as_deref()
-        .unwrap_or(default_env);
+    let env_name = config.api_key_env.as_deref().unwrap_or(default_env);
 
     let key = std::env::var(env_name).unwrap_or_default();
     let trimmed = key.trim();
 
     if trimmed.is_empty() {
-        bail!("model API key environment variable is missing: {}", env_name);
+        bail!(
+            "model API key environment variable is missing: {}",
+            env_name
+        );
     }
     if trimmed.len() > 4096 || trimmed.chars().any(|c| c.is_whitespace()) {
         bail!("invalid model API key environment variable: {}", env_name);
@@ -265,7 +270,11 @@ pub fn resolve_key(config: &ModelConfig) -> Result<String> {
 
 pub async fn request_completion(config: &ModelConfig, payload: &Value) -> Result<Value> {
     let key = resolve_key(config)?;
-    let base_url = config.base_url.as_deref().unwrap_or("").trim_end_matches('/');
+    let base_url = config
+        .base_url
+        .as_deref()
+        .unwrap_or("")
+        .trim_end_matches('/');
     let url = format!("{}/chat/completions", base_url);
 
     let timeout_secs = config.timeout_seconds.unwrap_or(60);
@@ -330,10 +339,8 @@ pub fn parse_json_object(content: &str) -> Option<Value> {
     None
 }
 
-const SYSTEM_REPLY: &str =
-    "只输出JSON对象，严格使用 {\"reply\":\"回复正文\"}，只允许reply一个字段，值为非空字符串。不要输出Markdown或其他字段。";
-const SYSTEM_NOTES: &str =
-    "只输出JSON对象，严格使用 {\"notes\":[\"第1张图片的要点\", \"...\"]}，只允许notes一个字段，数组长度等于图片数。不要输出Markdown或其他字段。";
+const SYSTEM_REPLY: &str = "只输出JSON对象，严格使用 {\"reply\":\"回复正文\"}，只允许reply一个字段，值为非空字符串。不要输出Markdown或其他字段。";
+const SYSTEM_NOTES: &str = "只输出JSON对象，严格使用 {\"notes\":[\"第1张图片的要点\", \"...\"]}，只允许notes一个字段，数组长度等于图片数。不要输出Markdown或其他字段。";
 
 fn encode_base64(data: &[u8]) -> String {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -371,9 +378,15 @@ pub async fn generate_api<F>(
 where
     F: Fn(&Value) -> Result<Value> + Send + Sync,
 {
-    generate_api_with_requester(prompt, images, config, metadata, field, check, |cfg, payload| {
-        Box::pin(async move { request_completion(&cfg, &payload).await })
-    })
+    generate_api_with_requester(
+        prompt,
+        images,
+        config,
+        metadata,
+        field,
+        check,
+        |cfg, payload| Box::pin(async move { request_completion(&cfg, &payload).await }),
+    )
     .await
 }
 
@@ -536,7 +549,10 @@ pub async fn generate_api_with_requester<F, R>(
 ) -> Result<Value>
 where
     F: Fn(&Value) -> Result<Value> + Send + Sync,
-    R: Fn(ModelConfig, Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>,
+    R: Fn(
+        ModelConfig,
+        Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>,
 {
     let config_val = serde_json::to_value(config)?;
     validate_config(&config_val)?;
@@ -657,10 +673,14 @@ where
         let has_tool_calls = message
             .and_then(|m| m.get("tool_calls"))
             .map_or(false, |tc| !tc.is_null());
-        let content_str = message.and_then(|m| m.get("content")).and_then(|c| c.as_str());
+        let content_str = message
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str());
 
         if has_tool_calls || content_str.is_none() {
-            return Err(ModelOutputError("expected model text without tool calls".to_string()).into());
+            return Err(
+                ModelOutputError("expected model text without tool calls".to_string()).into(),
+            );
         }
 
         let content = content_str.unwrap();
@@ -701,9 +721,15 @@ where
         let host = extract_host_from_base_url(config.base_url.as_deref().unwrap_or(""));
         meta.insert("provider".to_string(), json!(host));
         meta.insert("requested_model".to_string(), json!(config.model));
-        meta.insert("model".to_string(), last_result.get("model").cloned().unwrap_or(Value::Null));
+        meta.insert(
+            "model".to_string(),
+            last_result.get("model").cloned().unwrap_or(Value::Null),
+        );
         meta.insert("seconds".to_string(), json!(began.elapsed().as_secs_f64()));
-        meta.insert("usage".to_string(), last_result.get("usage").cloned().unwrap_or(Value::Null));
+        meta.insert(
+            "usage".to_string(),
+            last_result.get("usage").cloned().unwrap_or(Value::Null),
+        );
     }
 
     Ok(checked_reply)
@@ -715,8 +741,8 @@ mod tests {
     use serde_json::json;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct TempDir(PathBuf);
     impl TempDir {
@@ -857,7 +883,12 @@ mod tests {
         let p = recorded_payload.lock().await.clone();
         assert_eq!(p["model"], "fixture-model");
         assert_eq!(p["messages"][0]["role"], "system");
-        assert!(p["messages"][0]["content"].as_str().unwrap().contains("{\"reply\":"));
+        assert!(
+            p["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("{\"reply\":")
+        );
         assert_eq!(p["stream"], false);
         assert!(!p.to_string().contains("fixture-key"));
         assert_eq!(meta.get("model").unwrap(), &json!("fixture-actual"));
@@ -973,7 +1004,12 @@ mod tests {
 
         assert_eq!(val, json!(["一张收据"]));
         let p = recorded_payload.lock().await.clone();
-        assert!(p["messages"][0]["content"].as_str().unwrap().contains("{\"notes\":"));
+        assert!(
+            p["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("{\"notes\":")
+        );
 
         let res_default = f.result.clone();
         let err = generate_api_with_requester(
@@ -1023,7 +1059,10 @@ mod tests {
 
         let msg = err.to_string();
         assert!(msg.contains("length=7"), "expected length=7 in {}", msg);
-        assert!(!msg.contains("好的"), "chat body should never leak into error");
+        assert!(
+            !msg.contains("好的"),
+            "chat body should never leak into error"
+        );
     }
 
     #[tokio::test]
@@ -1072,7 +1111,12 @@ mod tests {
 
         let p = recorded.lock().await.clone();
         let content = &p["messages"][1]["content"];
-        assert!(content[1]["image_url"]["url"].as_str().unwrap().starts_with("data:image/png;base64,"));
+        assert!(
+            content[1]["image_url"]["url"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png;base64,")
+        );
     }
 
     #[tokio::test]
@@ -1102,7 +1146,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-            assert!(err.to_string().contains("model response missing or incomplete"));
+            assert!(
+                err.to_string()
+                    .contains("model response missing or incomplete")
+            );
         }
     }
 
@@ -1172,7 +1219,11 @@ mod tests {
             for (k, v) in delta.as_object().unwrap() {
                 bad[k] = v.clone();
             }
-            assert!(validate_config(&bad).is_err(), "expected error for delta {:?}", delta);
+            assert!(
+                validate_config(&bad).is_err(),
+                "expected error for delta {:?}",
+                delta
+            );
         }
     }
 
@@ -1227,7 +1278,12 @@ mod tests {
         });
 
         let base = serde_json::to_value(&cfg).unwrap();
-        for name in [json!(""), json!("BAD-NAME"), json!("key=value"), Value::Null] {
+        for name in [
+            json!(""),
+            json!("BAD-NAME"),
+            json!("key=value"),
+            Value::Null,
+        ] {
             let mut bad = base.clone();
             bad["api_key_env"] = name;
             assert!(validate_config(&bad).is_err());
@@ -1263,7 +1319,11 @@ mod tests {
             let req_str = String::from_utf8_lossy(&buf[..n]);
 
             assert!(req_str.starts_with("POST /v1/chat/completions HTTP/1.1"));
-            assert!(req_str.to_lowercase().contains("authorization: bearer fixture-key"));
+            assert!(
+                req_str
+                    .to_lowercase()
+                    .contains("authorization: bearer fixture-key")
+            );
 
             let body_str = serde_json::to_string(&res_clone).unwrap();
             let response = format!(
@@ -1342,13 +1402,7 @@ mod tests {
                 let count = c.fetch_add(1, Ordering::SeqCst);
                 let bad = bad.clone();
                 let ok = ok.clone();
-                Box::pin(async move {
-                    if count == 0 {
-                        Ok(bad)
-                    } else {
-                        Ok(ok)
-                    }
-                })
+                Box::pin(async move { if count == 0 { Ok(bad) } else { Ok(ok) } })
             },
         )
         .await
@@ -1496,7 +1550,8 @@ mod tests {
     #[tokio::test]
     async fn test_generate_codex_exec_success_and_metadata() {
         let _env_guard = CODEX_ENV_LOCK.lock().unwrap();
-        let temp_dir = std::env::temp_dir().join(format!("test-fake-codex-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("test-fake-codex-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let script_path = temp_dir.join("fake_codex.sh");
         let script_content = r#"#!/bin/bash
@@ -1535,7 +1590,9 @@ exit 0
         }
 
         let mut metadata = HashMap::new();
-        let reply = generate_codex_exec("测试输入", &[], Some(&mut metadata)).await.unwrap();
+        let reply = generate_codex_exec("测试输入", &[], Some(&mut metadata))
+            .await
+            .unwrap();
 
         unsafe {
             if let Some(old) = old_bin {
@@ -1557,7 +1614,8 @@ exit 0
     #[tokio::test]
     async fn test_generate_codex_exec_failure_or_missing_output() {
         let _env_guard = CODEX_ENV_LOCK.lock().unwrap();
-        let temp_dir = std::env::temp_dir().join(format!("test-fake-codex-fail-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("test-fake-codex-fail-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let script_path = temp_dir.join("fake_codex_fail.sh");
         let script_content = "#!/bin/bash\nexit 1\n";
@@ -1569,7 +1627,9 @@ exit 0
             std::env::set_var("WECHAT_CODEX_BIN", &script_path);
         }
 
-        let err = generate_codex_exec("测试失败", &[], None).await.unwrap_err();
+        let err = generate_codex_exec("测试失败", &[], None)
+            .await
+            .unwrap_err();
 
         unsafe {
             if let Some(old) = old_bin {
@@ -1581,7 +1641,8 @@ exit 0
         let _ = std::fs::remove_dir_all(&temp_dir);
 
         assert!(
-            err.to_string().contains("reply generation failed; not automatically retried"),
+            err.to_string()
+                .contains("reply generation failed; not automatically retried"),
             "got err: {}",
             err
         );
@@ -1589,17 +1650,21 @@ exit 0
 
     #[tokio::test]
     async fn test_generate_codex_exec_rejects_oversized_image() {
-        let temp_dir = std::env::temp_dir().join(format!("test-fake-codex-img-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("test-fake-codex-img-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let oversized_img = temp_dir.join("big.png");
         let file = std::fs::File::create(&oversized_img).unwrap();
         file.set_len(10 * 1024 * 1024 + 1).unwrap();
 
-        let err = generate_codex_exec("测试大图", &[oversized_img], None).await.unwrap_err();
+        let err = generate_codex_exec("测试大图", &[oversized_img], None)
+            .await
+            .unwrap_err();
         let _ = std::fs::remove_dir_all(&temp_dir);
 
         assert!(
-            err.to_string().contains("image attachment must be a file under 10MiB"),
+            err.to_string()
+                .contains("image attachment must be a file under 10MiB"),
             "got err: {}",
             err
         );

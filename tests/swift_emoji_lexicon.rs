@@ -10,7 +10,10 @@ fn repo_root() -> PathBuf {
 }
 
 fn load_lexicon() -> Value {
-    let path = repo_root().join("native").join("layout").join("emoji-lexicon.json");
+    let path = repo_root()
+        .join("native")
+        .join("layout")
+        .join("emoji-lexicon.json");
     let content = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
     serde_json::from_str(&content).expect("invalid json in emoji-lexicon.json")
@@ -25,7 +28,9 @@ fn is_valid_emoji_name(s: &str) -> bool {
 }
 
 fn is_valid_hex_hash(s: &str) -> bool {
-    s.len() == 16 && s.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    s.len() == 16
+        && s.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
 #[test]
@@ -39,7 +44,10 @@ fn test_header() {
 #[test]
 fn test_every_entry_is_complete() {
     let doc = load_lexicon();
-    let entries = doc.get("entries").and_then(|v| v.as_object()).expect("entries must be an object");
+    let entries = doc
+        .get("entries")
+        .and_then(|v| v.as_object())
+        .expect("entries must be an object");
 
     let expected_keys: HashSet<&str> = ["templates", "meaning", "chat_uses", "service_hint"]
         .into_iter()
@@ -51,7 +59,9 @@ fn test_every_entry_is_complete() {
             "emoji name '{}' does not match pattern ^\\[[^\\[\\]]+\\]$",
             name
         );
-        let entry_obj = entry.as_object().unwrap_or_else(|| panic!("entry {} is not an object", name));
+        let entry_obj = entry
+            .as_object()
+            .unwrap_or_else(|| panic!("entry {} is not an object", name));
 
         assert!(
             entry_obj.get("templates").map_or(false, |v| v.is_object()),
@@ -59,30 +69,59 @@ fn test_every_entry_is_complete() {
             name
         );
 
-        let meaning = entry_obj.get("meaning").and_then(|v| v.as_str()).unwrap_or("");
-        assert!(!meaning.trim().is_empty(), "entry {} meaning is empty", name);
+        let meaning = entry_obj
+            .get("meaning")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            !meaning.trim().is_empty(),
+            "entry {} meaning is empty",
+            name
+        );
 
         let chat_uses = entry_obj.get("chat_uses").and_then(|v| v.as_array());
-        assert!(chat_uses.is_some(), "entry {} chat_uses is not an array", name);
+        assert!(
+            chat_uses.is_some(),
+            "entry {} chat_uses is not an array",
+            name
+        );
         let chat_uses = chat_uses.unwrap();
         assert!(!chat_uses.is_empty(), "entry {} chat_uses is empty", name);
         for u in chat_uses {
             let s = u.as_str().unwrap_or("");
-            assert!(!s.trim().is_empty(), "entry {} chat_use element is empty", name);
+            assert!(
+                !s.trim().is_empty(),
+                "entry {} chat_use element is empty",
+                name
+            );
         }
 
-        let service_hint = entry_obj.get("service_hint").and_then(|v| v.as_str()).unwrap_or("");
-        assert!(!service_hint.trim().is_empty(), "entry {} service_hint is empty", name);
+        let service_hint = entry_obj
+            .get("service_hint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            !service_hint.trim().is_empty(),
+            "entry {} service_hint is empty",
+            name
+        );
 
         let actual_keys: HashSet<&str> = entry_obj.keys().map(|k| k.as_str()).collect();
-        assert_eq!(actual_keys, expected_keys, "entry {} has mismatching keys", name);
+        assert_eq!(
+            actual_keys, expected_keys,
+            "entry {} has mismatching keys",
+            name
+        );
     }
 }
 
 #[test]
 fn test_easily_misread_emoji_carry_their_wechat_sense() {
     let doc = load_lexicon();
-    let entries = doc.get("entries").and_then(|v| v.as_object()).expect("entries must be an object");
+    let entries = doc
+        .get("entries")
+        .and_then(|v| v.as_object())
+        .expect("entries must be an object");
 
     let smile = entries.get("[微笑]").expect("[微笑] not found");
     let smile_uses: String = smile["chat_uses"]
@@ -91,9 +130,15 @@ fn test_easily_misread_emoji_carry_their_wechat_sense() {
         .iter()
         .map(|v| v.as_str().unwrap())
         .collect();
-    assert!(smile_uses.contains("不满"), "微笑 chat_uses should contain 不满");
     assert!(
-        smile["service_hint"].as_str().unwrap().contains("不要当作满意"),
+        smile_uses.contains("不满"),
+        "微笑 chat_uses should contain 不满"
+    );
+    assert!(
+        smile["service_hint"]
+            .as_str()
+            .unwrap()
+            .contains("不要当作满意"),
         "微笑 service_hint should contain 不要当作满意"
     );
 
@@ -105,13 +150,19 @@ fn test_easily_misread_emoji_carry_their_wechat_sense() {
 
     let question = entries.get("[疑问]").expect("[疑问] not found");
     assert!(
-        question["service_hint"].as_str().unwrap().contains("必须回复"),
+        question["service_hint"]
+            .as_str()
+            .unwrap()
+            .contains("必须回复"),
         "疑问 service_hint should contain 必须回复"
     );
 
     let redpacket = entries.get("[红包]").expect("[红包] not found");
     assert!(
-        redpacket["meaning"].as_str().unwrap().contains("不是真红包"),
+        redpacket["meaning"]
+            .as_str()
+            .unwrap()
+            .contains("不是真红包"),
         "红包 meaning should contain 不是真红包"
     );
 }
@@ -119,7 +170,10 @@ fn test_easily_misread_emoji_carry_their_wechat_sense() {
 #[test]
 fn test_templates_are_perceptual_hashes_when_present() {
     let doc = load_lexicon();
-    let entries = doc.get("entries").and_then(|v| v.as_object()).expect("entries must be an object");
+    let entries = doc
+        .get("entries")
+        .and_then(|v| v.as_object())
+        .expect("entries must be an object");
 
     for (name, entry) in entries {
         let templates = entry["templates"].as_object().unwrap();

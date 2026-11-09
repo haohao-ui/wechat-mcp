@@ -76,8 +76,8 @@ fn run_cli(command: &str, payload: &Value) -> Option<Value> {
         "eyes_selftest failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let val: Value = serde_json::from_slice(&output.stdout)
-        .expect("invalid json output from eyes_selftest");
+    let val: Value =
+        serde_json::from_slice(&output.stdout).expect("invalid json output from eyes_selftest");
     Some(val)
 }
 
@@ -86,12 +86,20 @@ fn assert_json_num_eq(actual: &Value, expected: &Value) {
         (Value::Object(a), Value::Object(e)) => {
             assert_eq!(a.len(), e.len(), "keys count mismatch: {:?} vs {:?}", a, e);
             for (k, ev) in e {
-                let av = a.get(k).unwrap_or_else(|| panic!("missing key {} in {:?}", k, a));
+                let av = a
+                    .get(k)
+                    .unwrap_or_else(|| panic!("missing key {} in {:?}", k, a));
                 assert_json_num_eq(av, ev);
             }
         }
         (Value::Array(a), Value::Array(e)) => {
-            assert_eq!(a.len(), e.len(), "array length mismatch: {:?} vs {:?}", a, e);
+            assert_eq!(
+                a.len(),
+                e.len(),
+                "array length mismatch: {:?} vs {:?}",
+                a,
+                e
+            );
             for (av, ev) in a.iter().zip(e.iter()) {
                 assert_json_num_eq(av, ev);
             }
@@ -99,12 +107,7 @@ fn assert_json_num_eq(actual: &Value, expected: &Value) {
         (Value::Number(a), Value::Number(e)) => {
             let af = a.as_f64().expect("valid f64");
             let ef = e.as_f64().expect("valid f64");
-            assert!(
-                (af - ef).abs() < 1e-6,
-                "number mismatch: {} vs {}",
-                af,
-                ef
-            );
+            assert!((af - ef).abs() < 1e-6, "number mismatch: {} vs {}", af, ef);
         }
         _ => {
             assert_eq!(actual, expected);
@@ -138,7 +141,8 @@ fn test_main_window_only() {
     assert_eq!(res.get("screen").and_then(|v| v.as_str()), Some("main"));
 
     // Tolerates <= 2 points difference
-    payload["windows"][0]["bounds"] = serde_json::json!({"x": 100.0, "y": 80.0, "w": 881.5, "h": 638.5});
+    payload["windows"][0]["bounds"] =
+        serde_json::json!({"x": 100.0, "y": 80.0, "w": 881.5, "h": 638.5});
     let res2 = run_cli("identify", &payload).unwrap();
     assert_eq!(res2.get("screen").and_then(|v| v.as_str()), Some("main"));
 }
@@ -173,7 +177,10 @@ fn test_context_menu_popup() {
         Some(r) => r,
         None => return,
     };
-    assert_eq!(res.get("screen").and_then(|v| v.as_str()), Some("context_menu"));
+    assert_eq!(
+        res.get("screen").and_then(|v| v.as_str()),
+        Some("context_menu")
+    );
 }
 
 #[test]
@@ -199,7 +206,10 @@ fn test_save_panel_focus() {
         Some(r) => r,
         None => return,
     };
-    assert_eq!(res.get("screen").and_then(|v| v.as_str()), Some("save_panel"));
+    assert_eq!(
+        res.get("screen").and_then(|v| v.as_str()),
+        Some("save_panel")
+    );
 }
 
 #[test]
@@ -232,7 +242,10 @@ fn test_image_viewer_makes_other_window() {
         Some(r) => r,
         None => return,
     };
-    assert_eq!(res.get("screen").and_then(|v| v.as_str()), Some("other_wechat_window"));
+    assert_eq!(
+        res.get("screen").and_then(|v| v.as_str()),
+        Some("other_wechat_window")
+    );
 }
 
 #[test]
@@ -398,7 +411,10 @@ fn test_blocking_menu() {
         None => return,
     };
     assert_eq!(res.get("blocked").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(res.get("screen").and_then(|v| v.as_str()), Some("context_menu"));
+    assert_eq!(
+        res.get("screen").and_then(|v| v.as_str()),
+        Some("context_menu")
+    );
 }
 
 #[test]
@@ -429,7 +445,10 @@ fn test_blocking_image_viewer() {
         None => return,
     };
     assert_eq!(res.get("blocked").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(res.get("screen").and_then(|v| v.as_str()), Some("other_wechat_window"));
+    assert_eq!(
+        res.get("screen").and_then(|v| v.as_str()),
+        Some("other_wechat_window")
+    );
 }
 
 #[test]
@@ -453,7 +472,10 @@ fn test_blocking_save_panel_focus() {
         None => return,
     };
     assert_eq!(res.get("blocked").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(res.get("screen").and_then(|v| v.as_str()), Some("save_panel"));
+    assert_eq!(
+        res.get("screen").and_then(|v| v.as_str()),
+        Some("save_panel")
+    );
 }
 
 #[test]
@@ -523,7 +545,10 @@ fn test_window_in_front_of_main_blocks() {
         None => return,
     };
     assert_eq!(res.get("blocked").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(res.get("screen").and_then(|v| v.as_str()), Some("other_wechat_window"));
+    assert_eq!(
+        res.get("screen").and_then(|v| v.as_str()),
+        Some("other_wechat_window")
+    );
 }
 
 #[test]

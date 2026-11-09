@@ -92,10 +92,16 @@ mod tests {
         let bubble: Bubble = serde_json::from_value(raw.clone()).unwrap();
         assert_eq!(bubble.text, "[图片]");
         assert_eq!(bubble.kind.as_deref(), Some("image"));
-        assert_eq!(bubble.extra.get("custom_metadata_key"), Some(&json!("some_extra_val")));
+        assert_eq!(
+            bubble.extra.get("custom_metadata_key"),
+            Some(&json!("some_extra_val"))
+        );
 
         let serialized = serde_json::to_value(&bubble).unwrap();
-        assert_eq!(serialized.get("custom_metadata_key"), Some(&json!("some_extra_val")));
+        assert_eq!(
+            serialized.get("custom_metadata_key"),
+            Some(&json!("some_extra_val"))
+        );
     }
 
     #[test]
@@ -116,9 +122,15 @@ mod tests {
         assert_eq!(frame.title_lines, vec!["午夜咖啡"]);
         assert_eq!(frame.bubbles.len(), 1);
         assert_eq!(frame.bubbles[0].text, "你好");
-        assert_eq!(frame.extra.get("future_screen_check"), Some(&json!({"score": 99})));
+        assert_eq!(
+            frame.extra.get("future_screen_check"),
+            Some(&json!({"score": 99}))
+        );
 
         let serialized = serde_json::to_value(&frame).unwrap();
-        assert_eq!(serialized.get("future_screen_check"), Some(&json!({"score": 99})));
+        assert_eq!(
+            serialized.get("future_screen_check"),
+            Some(&json!({"score": 99}))
+        );
     }
 }

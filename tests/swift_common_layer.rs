@@ -43,7 +43,10 @@ fn common_selftest_bin() -> Option<&'static PathBuf> {
             }
         }
         sources.sort();
-        let main_swift = root.join("tests").join("common_selftest").join("main.swift");
+        let main_swift = root
+            .join("tests")
+            .join("common_selftest")
+            .join("main.swift");
 
         let mut cmd = Command::new("swiftc");
         cmd.arg("-O");
@@ -84,8 +87,8 @@ fn run_cli(case_name: &str) -> Option<Value> {
         "common_selftest failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let val: Value = serde_json::from_slice(&output.stdout)
-        .expect("invalid json output from common_selftest");
+    let val: Value =
+        serde_json::from_slice(&output.stdout).expect("invalid json output from common_selftest");
     Some(val)
 }
 
@@ -94,12 +97,20 @@ fn assert_json_eq(actual: &Value, expected: &Value) {
         (Value::Object(a), Value::Object(e)) => {
             assert_eq!(a.len(), e.len(), "keys count mismatch: {:?} vs {:?}", a, e);
             for (k, ev) in e {
-                let av = a.get(k).unwrap_or_else(|| panic!("missing key {} in {:?}", k, a));
+                let av = a
+                    .get(k)
+                    .unwrap_or_else(|| panic!("missing key {} in {:?}", k, a));
                 assert_json_eq(av, ev);
             }
         }
         (Value::Array(a), Value::Array(e)) => {
-            assert_eq!(a.len(), e.len(), "array length mismatch: {:?} vs {:?}", a, e);
+            assert_eq!(
+                a.len(),
+                e.len(),
+                "array length mismatch: {:?} vs {:?}",
+                a,
+                e
+            );
             for (av, ev) in a.iter().zip(e.iter()) {
                 assert_json_eq(av, ev);
             }
@@ -107,12 +118,7 @@ fn assert_json_eq(actual: &Value, expected: &Value) {
         (Value::Number(a), Value::Number(e)) => {
             let af = a.as_f64().expect("valid f64");
             let ef = e.as_f64().expect("valid f64");
-            assert!(
-                (af - ef).abs() < 1e-6,
-                "number mismatch: {} vs {}",
-                af,
-                ef
-            );
+            assert!((af - ef).abs() < 1e-6, "number mismatch: {} vs {}", af, ef);
         }
         _ => {
             assert_eq!(actual, expected);

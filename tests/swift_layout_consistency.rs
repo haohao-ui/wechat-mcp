@@ -14,7 +14,10 @@ fn source(rel_path: &str) -> String {
 }
 
 fn load_layout() -> Value {
-    let path = repo_root().join("native").join("layout").join("wechat-4.1.15.json");
+    let path = repo_root()
+        .join("native")
+        .join("layout")
+        .join("wechat-4.1.15.json");
     let content = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
     serde_json::from_str(&content).expect("invalid json in wechat-4.1.15.json")
@@ -48,18 +51,29 @@ fn test_session_list() {
 
 #[test]
 fn test_chat_area_for_scroll_and_media() {
-    assert!(!source("native/bot/Worker.swift").contains("CGRect(x:wx+315,y:wy+60,width:565,height:436)"));
-    assert!(!source("native/bot/Files.swift").contains("+315+Double(x),y:(window[\"y\"] as! Double)+60+Double(y)"));
+    assert!(
+        !source("native/bot/Worker.swift")
+            .contains("CGRect(x:wx+315,y:wy+60,width:565,height:436)")
+    );
+    assert!(
+        !source("native/bot/Files.swift")
+            .contains("+315+Double(x),y:(window[\"y\"] as! Double)+60+Double(y)")
+    );
 }
 
 #[test]
 fn test_chat_content_crop_for_bubbles() {
-    assert!(!source("native/wechat_bubbles.swift").contains("CGRect(x:315,y:60,width:full.width-325"));
+    assert!(
+        !source("native/wechat_bubbles.swift").contains("CGRect(x:315,y:60,width:full.width-325")
+    );
 }
 
 #[test]
 fn test_title_crop() {
-    assert!(!source("native/wechat_bubbles.swift").contains("CGRect(x:250,y:0,width:full.width-260,height:50)"));
+    assert!(
+        !source("native/wechat_bubbles.swift")
+            .contains("CGRect(x:250,y:0,width:full.width-260,height:50)")
+    );
 }
 
 #[test]
@@ -100,7 +114,10 @@ fn test_input_ocr_region_in_host() {
 fn test_scroll_tick() {
     let layout = load_layout();
     let tick = layout["scroll"]["points_per_tick"].as_i64().unwrap();
-    let policy_path = repo_root().join("scripts").join("wechat_bot").join("policy.py");
+    let policy_path = repo_root()
+        .join("scripts")
+        .join("wechat_bot")
+        .join("policy.py");
     if policy_path.exists() {
         let policy_content = std::fs::read_to_string(&policy_path).unwrap();
         let expected = format!("SCROLL_STEP_POINTS = {}", tick);
@@ -132,17 +149,31 @@ fn test_every_click_or_read_path_checks_anchors_first() {
     let worker = source("native/bot/Worker.swift");
     for op in &["sessions", "open_session"] {
         let target = format!("if operation == \"{}\"", op);
-        let start = worker.find(&target).unwrap_or_else(|| panic!("{} not found", target));
+        let start = worker
+            .find(&target)
+            .unwrap_or_else(|| panic!("{} not found", target));
         let rest = &worker[start..];
         let end = rest.find("\n        }\n").expect("end of branch");
         let branch = &rest[..end];
-        assert!(branch.contains("checkedScreen("), "checkedScreen( not in {}", op);
-        assert!(!branch.contains("normalizedFrame("), "normalizedFrame( found in {}", op);
+        assert!(
+            branch.contains("checkedScreen("),
+            "checkedScreen( not in {}",
+            op
+        );
+        assert!(
+            !branch.contains("normalizedFrame("),
+            "normalizedFrame( found in {}",
+            op
+        );
     }
     let bubbles = source("native/wechat_bubbles.swift");
-    let start = bubbles.find("func analyzeFrame(").expect("analyzeFrame not found");
+    let start = bubbles
+        .find("func analyzeFrame(")
+        .expect("analyzeFrame not found");
     let rest = &bubbles[start..];
-    let end = rest.find("guard let title").expect("guard let title not found");
+    let end = rest
+        .find("guard let title")
+        .expect("guard let title not found");
     let analyze = &rest[..end];
     assert!(analyze.contains("try checkAnchors(captured"));
 }
@@ -150,19 +181,36 @@ fn test_every_click_or_read_path_checks_anchors_first() {
 #[test]
 fn test_every_operation_gates_first() {
     let worker = source("native/bot/Worker.swift");
-    let cap_idx = worker.find("func capture(").expect("func capture( not found");
+    let cap_idx = worker
+        .find("func capture(")
+        .expect("func capture( not found");
     let cap_rest = &worker[cap_idx..];
     let cap_end = cap_rest.find("\n    }\n").expect("capture end");
     let capture_fn = &cap_rest[..cap_end];
-    assert!(capture_fn.contains("screenGate("), "capture must call screenGate");
+    assert!(
+        capture_fn.contains("screenGate("),
+        "capture must call screenGate"
+    );
 
-    for op in &["sessions", "open_session", "scroll_chat", "prepare_file", "prepare_image"] {
+    for op in &[
+        "sessions",
+        "open_session",
+        "scroll_chat",
+        "prepare_file",
+        "prepare_image",
+    ] {
         let target = format!("if operation == \"{}\"", op);
-        let start = worker.find(&target).unwrap_or_else(|| panic!("target {} not found", target));
+        let start = worker
+            .find(&target)
+            .unwrap_or_else(|| panic!("target {} not found", target));
         let rest = &worker[start..];
         let end = rest.find("\n        }\n").expect("end of branch");
         let branch = &rest[..end];
-        assert!(branch.contains("screenGate("), "{} must call screenGate", op);
+        assert!(
+            branch.contains("screenGate("),
+            "{} must call screenGate",
+            op
+        );
     }
 }
 
@@ -183,7 +231,9 @@ fn test_row_operations_check_only_session_list_anchors() {
     let worker = source("native/bot/Worker.swift");
     for op in &["sessions", "open_session"] {
         let target = format!("if operation == \"{}\"", op);
-        let start = worker.find(&target).unwrap_or_else(|| panic!("target {} not found", target));
+        let start = worker
+            .find(&target)
+            .unwrap_or_else(|| panic!("target {} not found", target));
         let rest = &worker[start..];
         let end = rest.find("\n        }\n").expect("end of branch");
         let branch = &rest[..end];

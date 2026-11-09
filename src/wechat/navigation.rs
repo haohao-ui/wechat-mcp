@@ -1,9 +1,9 @@
 //! Native visual navigation verifies the search query and an exact result before clicking.
 use super::{
     NameColumnMatch, OcrItem, SessionScreenshot, Snapshot, WechatWindow, WindowRect, clipboard,
-    ensure_native_snapshot_current, get_ocr_binary_path, key_press, longest_cjk_run, match_name_column,
-    mouse_click, native_items, normalize_chat_name, query_wechat_window, verify_chat_title,
-    verify_title_items,
+    ensure_native_snapshot_current, get_ocr_binary_path, key_press, longest_cjk_run,
+    match_name_column, mouse_click, native_items, normalize_chat_name, query_wechat_window,
+    verify_chat_title, verify_title_items,
 };
 use crate::desktop::{protocol::Region, runtime};
 use anyhow::{Context, Result, bail};
