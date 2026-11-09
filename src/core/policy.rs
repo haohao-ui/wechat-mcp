@@ -1,10 +1,8 @@
 use crate::core::model::{Bubble, Frame};
 use crate::core::state::write_private;
 use anyhow::{Result, bail};
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::time::Duration;
 use unicode_normalization::UnicodeNormalization;
 
 pub const PHASH_TOLERANCE: u32 = 12;
@@ -743,7 +741,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
+    use std::time::Duration;
 
     fn make_bubble(text: &str, direction: Option<&str>, digest: Option<&str>) -> Bubble {
         Bubble {
@@ -1321,9 +1320,7 @@ mod tests {
         let reply =
             "您好，我是AI客服助手，请问有什么可以帮您？订单问题请提供订单号，我们会尽快为您处理。";
         let one_off = reply.replacen("订单号", "订单弓", 1);
-        let two_off = one_off
-            .replacen("尽快", "尽快", 1)
-            .replacen("处理", "处埋", 1);
+        let two_off = one_off.replacen("处理", "处埋", 1);
         assert!(echo_matches(&one_off, reply));
         assert!(echo_matches(&two_off, reply));
         // Too many differences, or a clearly different message, is not our echo.

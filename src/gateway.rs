@@ -1128,6 +1128,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn brain_tools_dispatched_via_gateway() {
         let _guard = crate::core::env_lock();
         let prev_env = std::env::var("WECHAT_CORE_SOCK").ok();
@@ -1203,6 +1204,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_mcp_handle_request_through_gateway_to_core_sock_contract_and_mutex() {
         use std::os::unix::fs::PermissionsExt;
         let _guard = crate::core::env_lock();

@@ -53,12 +53,11 @@ jobs:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # 暂不检查 src/interaction.rs，避免与进行中的通用桌面交互会话冲突；该会话提交后恢复为 cargo fmt --all -- --check
       - name: cargo fmt
-        continue-on-error: true
-        run: cargo fmt --all -- --check
+        run: rustfmt --edition 2024 --check $(git ls-files '*.rs' | grep -v '^src/interaction.rs$')
       - name: cargo clippy
-        continue-on-error: true
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo clippy --all-targets --locked
       - name: cargo test
         run: cargo test --locked
       - name: 交叉编译检查

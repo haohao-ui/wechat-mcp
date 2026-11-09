@@ -653,6 +653,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_run_serve_core_graceful_shutdown() {
         let _lock = crate::core::env_lock();
         let dir = TempDir::new();
@@ -697,6 +698,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_run_serve_core_external_brain_socket_and_health() {
         let _lock = crate::core::env_lock();
         let dir = TempDir::new();
@@ -814,6 +816,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_serve_core_auto_backup_on_idle() {
         let _guard = crate::core::env_lock();
         let dir = TempDir::new();
@@ -871,6 +874,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_history_http_launchd_plist() {
         let _lock = crate::core::env_lock();
         let dir = TempDir::new();
