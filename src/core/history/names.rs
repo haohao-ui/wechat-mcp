@@ -73,7 +73,6 @@ pub fn is_so_sk_cf(c: char) -> bool {
     )
 }
 
-
 pub fn clean_title(raw: &str) -> String {
     raw.chars()
         .filter(|&c| !is_invisible(c))
@@ -88,15 +87,8 @@ pub fn name_key(raw: &str) -> String {
         .chars()
         .filter(|&c| !is_invisible(c) && !is_variation(c) && !c.is_whitespace())
         .collect();
-    let key: String = visible
-        .chars()
-        .filter(|&c| !is_so_sk_cf(c))
-        .collect();
-    if key.is_empty() {
-        visible
-    } else {
-        key
-    }
+    let key: String = visible.chars().filter(|&c| !is_so_sk_cf(c)).collect();
+    if key.is_empty() { visible } else { key }
 }
 
 pub fn candidate_names(entry: &Value) -> Vec<String> {

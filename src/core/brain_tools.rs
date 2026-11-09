@@ -246,8 +246,8 @@ async fn forward_to_socket(socket_path: &Path, request: Value) -> Result<Value> 
         .map_err(|_| anyhow!("core_not_running"))?
         .ok_or_else(|| anyhow!("core_not_running"))?;
 
-    let resp: CoreResponse = serde_json::from_str(&line)
-        .map_err(|e| anyhow!("core.sock 响应解析失败: {e}"))?;
+    let resp: CoreResponse =
+        serde_json::from_str(&line).map_err(|e| anyhow!("core.sock 响应解析失败: {e}"))?;
 
     if resp.ok {
         Ok(resp.result.unwrap_or(json!({})))
@@ -309,13 +309,9 @@ mod tests {
         assert_eq!(err.to_string(), "core_not_running");
 
         // resume_session
-        let err = execute_at(
-            &missing,
-            TOOL_RESUME_SESSION,
-            json!({"recipient": "alice"}),
-        )
-        .await
-        .expect_err("should fail when core.sock is missing");
+        let err = execute_at(&missing, TOOL_RESUME_SESSION, json!({"recipient": "alice"}))
+            .await
+            .expect_err("should fail when core.sock is missing");
         assert_eq!(err.to_string(), "core_not_running");
     }
 
@@ -330,7 +326,8 @@ mod tests {
         assert!(err.to_string().contains("wait_seconds 必须在 0..60 之间"));
 
         // next_turn: 不支持额外参数
-        let err = prepare_request(TOOL_NEXT_TURN, json!({"wait_seconds": 10, "extra": 1})).unwrap_err();
+        let err =
+            prepare_request(TOOL_NEXT_TURN, json!({"wait_seconds": 10, "extra": 1})).unwrap_err();
         assert!(err.to_string().contains("不支持的参数: extra"));
 
         // next_turn: 默认值 30
@@ -342,7 +339,8 @@ mod tests {
         assert!(err.to_string().contains("必须提供 turn_id"));
 
         // reply: 空 turn_id
-        let err = prepare_request(TOOL_REPLY, json!({"turn_id": " ", "action": "send"})).unwrap_err();
+        let err =
+            prepare_request(TOOL_REPLY, json!({"turn_id": " ", "action": "send"})).unwrap_err();
         assert!(err.to_string().contains("turn_id 不能为空"));
 
         // reply: 缺少 action
@@ -350,7 +348,8 @@ mod tests {
         assert!(err.to_string().contains("必须提供 action"));
 
         // reply: 非法 action
-        let err = prepare_request(TOOL_REPLY, json!({"turn_id": "t1", "action": "bogus"})).unwrap_err();
+        let err =
+            prepare_request(TOOL_REPLY, json!({"turn_id": "t1", "action": "bogus"})).unwrap_err();
         assert!(err.to_string().contains("无效的 action: bogus"));
 
         // reply: 拒绝客户端伪造接收人 recipient

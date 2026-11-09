@@ -4,8 +4,8 @@
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
@@ -69,7 +69,10 @@ fn layout_selftest_bin() -> Option<&'static PathBuf> {
             }
         }
         sources.sort();
-        let main_swift = root.join("tests").join("common_selftest").join("layout_main.swift");
+        let main_swift = root
+            .join("tests")
+            .join("common_selftest")
+            .join("layout_main.swift");
 
         let mut cmd = Command::new("swiftc");
         cmd.arg("-O");
@@ -111,8 +114,8 @@ fn run_cli(args: &[&str]) -> Option<Value> {
         output.status.code(),
         String::from_utf8_lossy(&output.stderr)
     );
-    let val: Value = serde_json::from_slice(&output.stdout)
-        .expect("invalid json output from layout_selftest");
+    let val: Value =
+        serde_json::from_slice(&output.stdout).expect("invalid json output from layout_selftest");
     Some(val)
 }
 
@@ -121,12 +124,20 @@ fn assert_json_num_eq(actual: &Value, expected: &Value) {
         (Value::Object(a), Value::Object(e)) => {
             assert_eq!(a.len(), e.len(), "keys count mismatch: {:?} vs {:?}", a, e);
             for (k, ev) in e {
-                let av = a.get(k).unwrap_or_else(|| panic!("missing key {} in {:?}", k, a));
+                let av = a
+                    .get(k)
+                    .unwrap_or_else(|| panic!("missing key {} in {:?}", k, a));
                 assert_json_num_eq(av, ev);
             }
         }
         (Value::Array(a), Value::Array(e)) => {
-            assert_eq!(a.len(), e.len(), "array length mismatch: {:?} vs {:?}", a, e);
+            assert_eq!(
+                a.len(),
+                e.len(),
+                "array length mismatch: {:?} vs {:?}",
+                a,
+                e
+            );
             for (av, ev) in a.iter().zip(e.iter()) {
                 assert_json_num_eq(av, ev);
             }
@@ -134,12 +145,7 @@ fn assert_json_num_eq(actual: &Value, expected: &Value) {
         (Value::Number(a), Value::Number(e)) => {
             let af = a.as_f64().expect("valid f64");
             let ef = e.as_f64().expect("valid f64");
-            assert!(
-                (af - ef).abs() < 1e-6,
-                "number mismatch: {} vs {}",
-                af,
-                ef
-            );
+            assert!((af - ef).abs() < 1e-6, "number mismatch: {} vs {}", af, ef);
         }
         _ => {
             assert_eq!(actual, expected);
@@ -149,7 +155,10 @@ fn assert_json_num_eq(actual: &Value, expected: &Value) {
 
 #[test]
 fn test_default_layout_loads() {
-    let default_path = repo_root().join("native").join("layout").join("wechat-4.1.15.json");
+    let default_path = repo_root()
+        .join("native")
+        .join("layout")
+        .join("wechat-4.1.15.json");
     let res = match run_cli(&["layout", default_path.to_str().unwrap()]) {
         Some(r) => r,
         None => return,
@@ -157,25 +166,46 @@ fn test_default_layout_loads() {
     assert_eq!(res["ok"], true);
     assert_eq!(res["schema"], 1);
     assert_eq!(res["wechat_version"], "4.1.15");
-    assert_json_num_eq(&res["window"], &serde_json::json!({"width": 880.0, "height": 640.0}));
-    assert_json_num_eq(&res["chat"], &serde_json::json!({"x": 315.0, "y": 60.0, "w": 565.0, "h": 436.0}));
-    assert_json_num_eq(&res["session_list"], &serde_json::json!({"x": 60.0, "y": 60.0, "w": 240.0, "h": 580.0}));
-    assert_json_num_eq(&res["title"], &serde_json::json!({"x": 250.0, "y": 0.0, "w": 620.0, "h": 50.0}));
-    assert_json_num_eq(&res["input"], &serde_json::json!({"x": 315.0, "y": 496.0, "w": 565.0, "h": 144.0}));
+    assert_json_num_eq(
+        &res["window"],
+        &serde_json::json!({"width": 880.0, "height": 640.0}),
+    );
+    assert_json_num_eq(
+        &res["chat"],
+        &serde_json::json!({"x": 315.0, "y": 60.0, "w": 565.0, "h": 436.0}),
+    );
+    assert_json_num_eq(
+        &res["session_list"],
+        &serde_json::json!({"x": 60.0, "y": 60.0, "w": 240.0, "h": 580.0}),
+    );
+    assert_json_num_eq(
+        &res["title"],
+        &serde_json::json!({"x": 250.0, "y": 0.0, "w": 620.0, "h": 50.0}),
+    );
+    assert_json_num_eq(
+        &res["input"],
+        &serde_json::json!({"x": 315.0, "y": 496.0, "w": 565.0, "h": 144.0}),
+    );
     assert_eq!(res["points_per_tick"].as_f64(), Some(90.0));
     assert_eq!(res["lines_per_tick"].as_i64(), Some(10));
     assert_eq!(res["anchors_count"].as_i64(), Some(3));
-    let save_as = res["menu_labels"]["save_as"].as_array().expect("save_as list");
+    let save_as = res["menu_labels"]["save_as"]
+        .as_array()
+        .expect("save_as list");
     assert!(save_as.iter().any(|v| v.as_str() == Some("另存为…")));
 }
 
 #[test]
 fn test_invalid_layouts_are_refused() {
-    let default_path = repo_root().join("native").join("layout").join("wechat-4.1.15.json");
+    let default_path = repo_root()
+        .join("native")
+        .join("layout")
+        .join("wechat-4.1.15.json");
     if !default_path.exists() {
         return;
     }
-    let valid_data: Value = serde_json::from_str(&std::fs::read_to_string(&default_path).unwrap()).unwrap();
+    let valid_data: Value =
+        serde_json::from_str(&std::fs::read_to_string(&default_path).unwrap()).unwrap();
 
     let temp = TempDir::new("layout_invalid");
     let tpath = &temp.path;

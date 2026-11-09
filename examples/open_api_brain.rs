@@ -3,8 +3,8 @@
 //! 运行方式：
 //! OPEN_API_URL=http://127.0.0.1:8770/mcp OPEN_API_TOKEN=<64位十六进制令牌> cargo run --example open_api_brain
 
-use std::{sync::Arc, time::Duration};
 use serde_json::{Value, json};
+use std::{sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 
 #[derive(Debug)]
@@ -109,7 +109,9 @@ impl BrainClient {
             return Err(BrainError::Conflict);
         }
         if status != 200 {
-            return Err(BrainError::Other(format!("initialize returned status {status}")));
+            return Err(BrainError::Other(format!(
+                "initialize returned status {status}"
+            )));
         }
 
         let sid = resp
@@ -184,7 +186,9 @@ impl BrainClient {
             return Err(BrainError::Conflict);
         }
         if status != 200 {
-            return Err(BrainError::Other(format!("next_turn returned HTTP {status}")));
+            return Err(BrainError::Other(format!(
+                "next_turn returned HTTP {status}"
+            )));
         }
 
         let val: Value = resp
@@ -193,7 +197,11 @@ impl BrainClient {
             .map_err(|e| BrainError::Other(format!("failed to parse json: {e}")))?;
 
         if val.get("isError").and_then(Value::as_bool) == Some(true)
-            || val.get("result").and_then(|r| r.get("isError")).and_then(Value::as_bool) == Some(true)
+            || val
+                .get("result")
+                .and_then(|r| r.get("isError"))
+                .and_then(Value::as_bool)
+                == Some(true)
         {
             let res = val.get("result").unwrap_or(&val);
             let code = res["structuredContent"]["error"]["code"]
@@ -279,7 +287,11 @@ impl BrainClient {
             .map_err(|e| BrainError::Other(format!("failed to parse json: {e}")))?;
 
         if val.get("isError").and_then(Value::as_bool) == Some(true)
-            || val.get("result").and_then(|r| r.get("isError")).and_then(Value::as_bool) == Some(true)
+            || val
+                .get("result")
+                .and_then(|r| r.get("isError"))
+                .and_then(Value::as_bool)
+                == Some(true)
         {
             let res = val.get("result").unwrap_or(&val);
             let code = res["structuredContent"]["error"]["code"]
@@ -297,7 +309,10 @@ impl BrainClient {
         let accepted = structured["accepted"].as_bool().unwrap_or(false);
         let duplicate = structured["duplicate"].as_bool().unwrap_or(false);
 
-        Ok(ReplyOutcome { accepted, duplicate })
+        Ok(ReplyOutcome {
+            accepted,
+            duplicate,
+        })
     }
 }
 
@@ -489,7 +504,9 @@ fn install_signals() {
 async fn main() -> anyhow::Result<()> {
     let url = std::env::var("OPEN_API_URL").unwrap_or_else(|_| "http://127.0.0.1:8770/mcp".into());
     let token = std::env::var("OPEN_API_TOKEN").map_err(|_| {
-        anyhow::anyhow!("缺少环境变量 OPEN_API_TOKEN（请在助手面板 MCP 页面中开启对外接口并复制令牌）")
+        anyhow::anyhow!(
+            "缺少环境变量 OPEN_API_TOKEN（请在助手面板 MCP 页面中开启对外接口并复制令牌）"
+        )
     })?;
 
     println!("启动外部大脑，连接目标: {url}");
@@ -804,7 +821,11 @@ mod tests {
                         );
                     }
                 }
-                (200, None, json!({"result":{"structuredContent":{"turn":null}}}))
+                (
+                    200,
+                    None,
+                    json!({"result":{"structuredContent":{"turn":null}}}),
+                )
             }
         })
         .await;

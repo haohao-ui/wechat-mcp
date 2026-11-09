@@ -308,7 +308,10 @@ mod tests {
             // 新增的三个外部大脑 MCP 工具
             assert!(tools.contains(&"next_turn"), "should include next_turn");
             assert!(tools.contains(&"reply"), "should include reply");
-            assert!(tools.contains(&"resume_session"), "should include resume_session");
+            assert!(
+                tools.contains(&"resume_session"),
+                "should include resume_session"
+            );
 
             // 新增的历史查询 MCP 工具
             for history_tool in [
@@ -338,7 +341,10 @@ mod tests {
                 "fetch_article",
                 "create_customer",
             ] {
-                assert!(tools.contains(&original), "should keep original tool {original}");
+                assert!(
+                    tools.contains(&original),
+                    "should keep original tool {original}"
+                );
             }
         }
     }

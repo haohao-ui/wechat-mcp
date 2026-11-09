@@ -1,11 +1,11 @@
-use std::collections::HashSet;
-use anyhow::{bail, Result};
-use sha2::{Digest, Sha256};
-use unicode_normalization::UnicodeNormalization;
 use crate::core::model::{Bubble, Frame};
 use crate::core::state::write_private;
-use std::time::Duration;
+use anyhow::{Result, bail};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+use std::time::Duration;
+use unicode_normalization::UnicodeNormalization;
 
 pub const PHASH_TOLERANCE: u32 = 12;
 pub const FINGERPRINT_VERSION: u32 = 2;
@@ -115,7 +115,10 @@ impl std::fmt::Display for PolicyError {
 
 impl std::error::Error for PolicyError {}
 
-pub fn new_bubbles(previous: &[Bubble], current: &[Bubble]) -> std::result::Result<Vec<Bubble>, ContinuityError> {
+pub fn new_bubbles(
+    previous: &[Bubble],
+    current: &[Bubble],
+) -> std::result::Result<Vec<Bubble>, ContinuityError> {
     let old: Vec<Fingerprint> = previous.iter().map(fingerprint).collect();
     let new: Vec<Fingerprint> = current.iter().map(fingerprint).collect();
     if old == new {
@@ -176,11 +179,16 @@ pub fn reconcile(previous: &[Bubble], current: &[Bubble]) -> Vec<Bubble> {
     for size in (1..=min_len).rev() {
         let prev_window = &previous[previous.len() - size..];
         let curr_window = &result[..size];
-        let all_same = prev_window.iter().zip(curr_window.iter()).all(|(o, n)| same_bubble(o, n));
+        let all_same = prev_window
+            .iter()
+            .zip(curr_window.iter())
+            .all(|(o, n)| same_bubble(o, n));
         if !all_same {
             continue;
         }
-        let all_images = curr_window.iter().all(|n| n.kind.as_deref() == Some("image"));
+        let all_images = curr_window
+            .iter()
+            .all(|n| n.kind.as_deref() == Some("image"));
         if all_images {
             continue;
         }
@@ -231,7 +239,10 @@ pub fn relocate(items: &[Bubble], current: &[Bubble]) -> Vec<Bubble> {
     result
 }
 
-pub fn merge_pages(pages: &[Vec<Bubble>], step: Option<i64>) -> std::result::Result<Vec<Bubble>, ContinuityError> {
+pub fn merge_pages(
+    pages: &[Vec<Bubble>],
+    step: Option<i64>,
+) -> std::result::Result<Vec<Bubble>, ContinuityError> {
     let step = step.unwrap_or(SCROLL_STEP_POINTS);
     let mut placed: Vec<(i64, Bubble)> = Vec::new();
     let mut offset: i64 = 0;
@@ -263,7 +274,9 @@ pub fn merge_pages(pages: &[Vec<Bubble>], step: Option<i64>) -> std::result::Res
 
         for bubble in page {
             let pos = bubble.y.unwrap_or(0) - offset;
-            let twin = placed.iter().find(|(p, b)| b.direction == bubble.direction && (p - pos).abs() <= 8);
+            let twin = placed
+                .iter()
+                .find(|(p, b)| b.direction == bubble.direction && (p - pos).abs() <= 8);
             match twin {
                 None => placed.push((pos, bubble.clone())),
                 Some((_, twin_b)) => {
@@ -279,7 +292,10 @@ pub fn merge_pages(pages: &[Vec<Bubble>], step: Option<i64>) -> std::result::Res
     Ok(placed.into_iter().map(|(_, b)| b).collect())
 }
 
-pub fn stitch(cursor: &[Bubble], pages: &[Vec<Bubble>]) -> std::result::Result<Vec<Bubble>, ContinuityError> {
+pub fn stitch(
+    cursor: &[Bubble],
+    pages: &[Vec<Bubble>],
+) -> std::result::Result<Vec<Bubble>, ContinuityError> {
     for (index, page) in pages.iter().enumerate() {
         let mut changes = match new_bubbles(cursor, page) {
             Ok(c) => c,
@@ -341,7 +357,11 @@ pub fn is_invisible(c: char) -> bool {
 }
 
 pub fn clean_title(raw: &str) -> String {
-    raw.chars().filter(|&c| !is_invisible(c)).collect::<String>().trim().to_string()
+    raw.chars()
+        .filter(|&c| !is_invisible(c))
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 pub fn validate_reply(value: &str) -> std::result::Result<String, PolicyError> {
@@ -365,9 +385,7 @@ pub fn validate_reply(value: &str) -> std::result::Result<String, PolicyError> {
 /// (device 2026-11-08: unrecognised echoes were the right bubble with 1–2 misread characters). Short replies
 /// stay exact because one character can change their meaning.
 pub fn echo_matches(observed: &str, expected: &str) -> bool {
-    let compact = |s: &str| -> Vec<char> {
-        s.nfkc().filter(|c| !c.is_whitespace()).collect()
-    };
+    let compact = |s: &str| -> Vec<char> { s.nfkc().filter(|c| !c.is_whitespace()).collect() };
     let (seen, want) = (compact(observed), compact(expected));
     if seen == want {
         return true;
@@ -437,7 +455,12 @@ fn format_fp(fp: &Fingerprint) -> String {
     }
 }
 
-fn format_identity_json(account: &str, recipient: &str, baseline: &[Fingerprint], candidate: &Fingerprint) -> String {
+fn format_identity_json(
+    account: &str,
+    recipient: &str,
+    baseline: &[Fingerprint],
+    candidate: &Fingerprint,
+) -> String {
     let mut baseline_strs = Vec::new();
     for b in baseline {
         baseline_strs.push(format_fp(b));
@@ -474,7 +497,8 @@ impl Policy {
         let trigger = trigger.into();
         if account.is_empty() || recipient.is_empty() || trigger.is_empty() {
             return Err(PolicyError::ValidationError(
-                "explicit account, exact private-chat allowlist and test trigger required".to_string(),
+                "explicit account, exact private-chat allowlist and test trigger required"
+                    .to_string(),
             ));
         }
         let raw_names = names.unwrap_or_else(|| vec![recipient.clone()]);
@@ -496,21 +520,27 @@ impl Policy {
             _ => false,
         };
         if !valid_profile || !valid_scale {
-            return Err(PolicyError::InvalidFrame("uncalibrated visual profile".to_string()));
+            return Err(PolicyError::InvalidFrame(
+                "uncalibrated visual profile".to_string(),
+            ));
         }
         if frame.clipped_bubble == Some(true) {
             return Err(PolicyError::InvalidFrame(
                 "incomplete bottom bubble; no automatic reply".to_string(),
             ));
         }
-        let titles: Vec<String> = frame.title_lines.iter().map(|x| {
-            let cleaned = clean_title(x);
-            if self.group {
-                strip_member_count(&cleaned)
-            } else {
-                cleaned
-            }
-        }).collect();
+        let titles: Vec<String> = frame
+            .title_lines
+            .iter()
+            .map(|x| {
+                let cleaned = clean_title(x);
+                if self.group {
+                    strip_member_count(&cleaned)
+                } else {
+                    cleaned
+                }
+            })
+            .collect();
 
         if titles.len() != 1 || !self.accepted.contains(&titles[0]) {
             return Err(PolicyError::InvalidFrame(
@@ -555,10 +585,15 @@ impl Policy {
     pub fn key(&self, baseline: &Frame, candidate: &Bubble) -> String {
         let baseline_fps: Vec<Fingerprint> = baseline.bubbles.iter().map(fingerprint).collect();
         let cand_fp = fingerprint(candidate);
-        let identity_json = format_identity_json(&self.account, &self.recipient, &baseline_fps, &cand_fp);
+        let identity_json =
+            format_identity_json(&self.account, &self.recipient, &baseline_fps, &cand_fp);
         let mut hasher = Sha256::new();
         hasher.update(identity_json.as_bytes());
-        let hash: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+        let hash: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
         format!("bot-{}", hash)
     }
 }
@@ -568,7 +603,11 @@ pub trait CaptureFrames {
 }
 
 pub trait PolicyToolClient {
-    fn call_tool(&mut self, name: &str, args: serde_json::Value) -> impl std::future::Future<Output = Result<serde_json::Value>> + Send;
+    fn call_tool(
+        &mut self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> impl std::future::Future<Output = Result<serde_json::Value>> + Send;
 }
 
 pub async fn run_bounded_bot<C, T, G, Fut>(
@@ -586,7 +625,9 @@ where
     Fut: std::future::Future<Output = Result<String>>,
 {
     let baseline = capture.next_frame().await?;
-    policy.check_frame(&baseline).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    policy
+        .check_frame(&baseline)
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     std::fs::create_dir_all(root)?;
     write_private(&root.join("baseline.json"), &baseline)?;
 
@@ -595,7 +636,9 @@ where
 
     while std::time::Instant::now() < deadline {
         let frame = capture.next_frame().await?;
-        policy.check_frame(&frame).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        policy
+            .check_frame(&frame)
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
         let fp_base: Vec<_> = current_baseline.bubbles.iter().map(fingerprint).collect();
         let fp_cur: Vec<_> = frame.bubbles.iter().map(fingerprint).collect();
@@ -604,7 +647,8 @@ where
         }
 
         let confirmed = capture.next_frame().await?;
-        let candidate = policy.candidate(&current_baseline, &frame, &confirmed)
+        let candidate = policy
+            .candidate(&current_baseline, &frame, &confirmed)
             .map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
         let Some(candidate) = candidate else {
@@ -636,7 +680,9 @@ where
         write_private(&journal, &record)?;
 
         let latest = capture.next_frame().await?;
-        policy.check_frame(&latest).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        policy
+            .check_frame(&latest)
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
         let fp_latest: Vec<_> = latest.bubbles.iter().map(fingerprint).collect();
         let fp_conf: Vec<_> = confirmed.bubbles.iter().map(fingerprint).collect();
@@ -649,15 +695,25 @@ where
         record["status"] = serde_json::json!("attempting");
         write_private(&journal, &record)?;
 
-        let result = client.call_tool("send_message", serde_json::json!({
-            "recipient": policy.recipient,
-            "message": reply,
-            "idempotency_key": key,
-        })).await?;
+        let result = client
+            .call_tool(
+                "send_message",
+                serde_json::json!({
+                    "recipient": policy.recipient,
+                    "message": reply,
+                    "idempotency_key": key,
+                }),
+            )
+            .await?;
 
-        let durable = client.call_tool("get_send_status", serde_json::json!({
-            "idempotency_key": key,
-        })).await?;
+        let durable = client
+            .call_tool(
+                "get_send_status",
+                serde_json::json!({
+                    "idempotency_key": key,
+                }),
+            )
+            .await?;
 
         record["status"] = serde_json::json!("send_returned");
         record["send_result"] = result;
@@ -665,11 +721,14 @@ where
         write_private(&journal, &record)?;
 
         let after = capture.next_frame().await?;
-        policy.check_frame(&after).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        policy
+            .check_frame(&after)
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
-        let echoed = after.bubbles.iter().any(|x| {
-            x.direction == "outbound_visual" && echo_matches(&x.text, &reply)
-        });
+        let echoed = after
+            .bubbles
+            .iter()
+            .any(|x| x.direction == "outbound_visual" && echo_matches(&x.text, &reply));
 
         record["client_echo_observed"] = serde_json::json!(echoed);
         record["delivery"] = serde_json::json!("unknown");
@@ -708,7 +767,9 @@ mod tests {
 
     fn make_image(phash: &str, digest: Option<&str>, media_id: Option<&str>) -> Bubble {
         let digest = digest.unwrap_or("image:50:40").to_string();
-        let mid = media_id.map(|s| s.to_string()).unwrap_or_else(|| phash.repeat(4));
+        let mid = media_id
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| phash.repeat(4));
         Bubble {
             text: "[图片]".to_string(),
             digest,
@@ -761,7 +822,9 @@ mod tests {
         let policy = Policy::new("fixture", "示例联系人甲", "Bot验证1104", None, false).unwrap();
         for title in ["其他人", "示例联系人甲群", "示例联系人甲 (3)", "示例联系人甲2"] {
             let res = policy.check_frame(&make_frame(vec![], Some(title)));
-            assert!(matches!(res, Err(PolicyError::InvalidFrame(ref msg)) if msg.contains("allowlisted title")));
+            assert!(
+                matches!(res, Err(PolicyError::InvalidFrame(ref msg)) if msg.contains("allowlisted title"))
+            );
         }
     }
 
@@ -796,19 +859,41 @@ mod tests {
     fn policy_test_two_frames_must_agree() {
         let policy = Policy::new("fixture", "示例联系人甲", "Bot验证1104", None, false).unwrap();
         let baseline = make_frame(vec![make_bubble("old", None, None)], None);
-        let current = make_frame(vec![make_bubble("old", None, None), make_bubble("Bot验证1104", None, None)], None);
-        let changed = make_frame(vec![make_bubble("old", None, None), make_bubble("other", None, None)], None);
+        let current = make_frame(
+            vec![
+                make_bubble("old", None, None),
+                make_bubble("Bot验证1104", None, None),
+            ],
+            None,
+        );
+        let changed = make_frame(
+            vec![
+                make_bubble("old", None, None),
+                make_bubble("other", None, None),
+            ],
+            None,
+        );
         let err = policy.candidate(&baseline, &current, &changed).unwrap_err();
-        assert!(matches!(err, PolicyError::ValidationError(ref msg) if msg.contains("changed during confirmation")));
+        assert!(
+            matches!(err, PolicyError::ValidationError(ref msg) if msg.contains("changed during confirmation"))
+        );
     }
 
     #[test]
     fn policy_test_gap_and_repeated_anchor_stop() {
-        let err1 = new_bubbles(&[make_bubble("old", None, None)], &[make_bubble("new", None, None)]).unwrap_err();
+        let err1 = new_bubbles(
+            &[make_bubble("old", None, None)],
+            &[make_bubble("new", None, None)],
+        )
+        .unwrap_err();
         assert_eq!(err1, ContinuityError::ContinuityGap);
 
         let same = make_bubble("same", None, None);
-        let err2 = new_bubbles(&[same.clone(), same.clone()], &[same.clone(), same.clone(), make_bubble("extra", None, None)]).unwrap_err();
+        let err2 = new_bubbles(
+            &[same.clone(), same.clone()],
+            &[same.clone(), same.clone(), make_bubble("extra", None, None)],
+        )
+        .unwrap_err();
         assert!(matches!(err2, ContinuityError::AmbiguousAnchor { .. }));
     }
 
@@ -833,20 +918,31 @@ mod tests {
         let same = make_bubble("same", None, None);
         let err1 = new_bubbles(&[same.clone()], &[same.clone(), same.clone()]).unwrap_err();
         match err1 {
-            ContinuityError::AmbiguousAnchor { certain } => assert_eq!(certain, Vec::<Bubble>::new()),
+            ContinuityError::AmbiguousAnchor { certain } => {
+                assert_eq!(certain, Vec::<Bubble>::new())
+            }
             _ => panic!("expected AmbiguousAnchor"),
         }
 
-        let err2 = new_bubbles(&[same.clone(), same.clone()], &[same.clone(), same.clone(), make_bubble("next", None, None)]).unwrap_err();
+        let err2 = new_bubbles(
+            &[same.clone(), same.clone()],
+            &[same.clone(), same.clone(), make_bubble("next", None, None)],
+        )
+        .unwrap_err();
         match err2 {
-            ContinuityError::AmbiguousAnchor { certain } => assert_eq!(certain, vec![make_bubble("next", None, None)]),
+            ContinuityError::AmbiguousAnchor { certain } => {
+                assert_eq!(certain, vec![make_bubble("next", None, None)])
+            }
             _ => panic!("expected AmbiguousAnchor"),
         }
     }
 
     #[test]
     fn policy_test_periodic_repeated_context_is_still_ambiguous() {
-        let old: Vec<Bubble> = ["a", "b", "a", "b"].iter().map(|x| make_bubble(x, None, None)).collect();
+        let old: Vec<Bubble> = ["a", "b", "a", "b"]
+            .iter()
+            .map(|x| make_bubble(x, None, None))
+            .collect();
         let mut new1 = old.clone();
         new1.push(make_bubble("next", None, None));
         let err = new_bubbles(&old, &new1).unwrap_err();
@@ -857,21 +953,30 @@ mod tests {
     fn policy_test_multiple_new_messages_are_not_replied_to_as_one() {
         let policy = Policy::new("fixture", "示例联系人甲", "Bot验证1104", None, false).unwrap();
         let baseline = make_frame(vec![make_bubble("old", None, None)], None);
-        let current = make_frame(vec![
-            make_bubble("old", None, None),
-            make_bubble("Bot验证1104", None, None),
-            make_bubble("second", None, None),
-        ], None);
+        let current = make_frame(
+            vec![
+                make_bubble("old", None, None),
+                make_bubble("Bot验证1104", None, None),
+                make_bubble("second", None, None),
+            ],
+            None,
+        );
         let res = policy.candidate(&baseline, &current, &current).unwrap();
         assert_eq!(res, None);
     }
 
     #[test]
     fn policy_test_same_body_different_occurrences_remain_distinct() {
-        let old = vec![make_bubble("anchor", None, None), make_bubble("same", None, None)];
+        let old = vec![
+            make_bubble("anchor", None, None),
+            make_bubble("same", None, None),
+        ];
         let mut current = old.clone();
         current.push(make_bubble("same", None, None));
-        assert_eq!(new_bubbles(&old, &current).unwrap(), vec![make_bubble("same", None, None)]);
+        assert_eq!(
+            new_bubbles(&old, &current).unwrap(),
+            vec![make_bubble("same", None, None)]
+        );
     }
 
     #[test]
@@ -881,19 +986,55 @@ mod tests {
         let message = make_bubble("Bot验证1104", None, None);
         let key = policy.key(&baseline, &message);
         assert_eq!(key, policy.key(&baseline.clone(), &message.clone()));
-        assert_ne!(key, Policy::new("other", "示例联系人甲", "Bot验证1104", None, false).unwrap().key(&baseline, &message));
-        assert_ne!(key, Policy::new("fixture", "其他人", "Bot验证1104", None, false).unwrap().key(&baseline, &message));
+        assert_ne!(
+            key,
+            Policy::new("other", "示例联系人甲", "Bot验证1104", None, false)
+                .unwrap()
+                .key(&baseline, &message)
+        );
+        assert_ne!(
+            key,
+            Policy::new("fixture", "其他人", "Bot验证1104", None, false)
+                .unwrap()
+                .key(&baseline, &message)
+        );
         assert!(key.starts_with("bot-"));
         assert_eq!(key.len(), 4 + 64);
     }
 
     #[test]
     fn policy_test_policy_accepts_alias_titles_only() {
-        let policy = Policy::new("fixture", "🍓示例联系人甲", "service", Some(vec!["🍓示例联系人甲".to_string(), "示例联系人甲".to_string()]), false).unwrap();
-        assert!(policy.check_frame(&make_frame(vec![make_bubble("x", None, None)], Some("示例联系人甲"))).is_ok());
-        assert!(policy.check_frame(&make_frame(vec![make_bubble("x", None, None)], Some("\u{200b}🍓示例联系人甲 "))).is_ok());
-        let res = policy.check_frame(&make_frame(vec![make_bubble("x", None, None)], Some("别人")));
-        assert!(matches!(res, Err(PolicyError::InvalidFrame(ref msg)) if msg.contains("allowlisted title")));
+        let policy = Policy::new(
+            "fixture",
+            "🍓示例联系人甲",
+            "service",
+            Some(vec!["🍓示例联系人甲".to_string(), "示例联系人甲".to_string()]),
+            false,
+        )
+        .unwrap();
+        assert!(
+            policy
+                .check_frame(&make_frame(
+                    vec![make_bubble("x", None, None)],
+                    Some("示例联系人甲")
+                ))
+                .is_ok()
+        );
+        assert!(
+            policy
+                .check_frame(&make_frame(
+                    vec![make_bubble("x", None, None)],
+                    Some("\u{200b}🍓示例联系人甲 ")
+                ))
+                .is_ok()
+        );
+        let res = policy.check_frame(&make_frame(
+            vec![make_bubble("x", None, None)],
+            Some("别人"),
+        ));
+        assert!(
+            matches!(res, Err(PolicyError::InvalidFrame(ref msg)) if msg.contains("allowlisted title"))
+        );
     }
 
     #[test]
@@ -910,7 +1051,9 @@ mod tests {
             f.profile = profile.map(|s| s.to_string());
             f.scale = scale;
             let res = policy.check_frame(&f);
-            assert!(matches!(res, Err(PolicyError::InvalidFrame(ref msg)) if msg.contains("uncalibrated")));
+            assert!(
+                matches!(res, Err(PolicyError::InvalidFrame(ref msg)) if msg.contains("uncalibrated"))
+            );
         }
     }
 
@@ -931,15 +1074,26 @@ mod tests {
     fn policy_test_incomplete_latest_bubble_blocks_auto_reply() {
         let policy = Policy::new("fixture", "示例联系人甲", "Bot验证1104", None, false).unwrap();
         let baseline = make_frame(vec![make_bubble("old", None, None)], None);
-        let mut partial = make_frame(vec![make_bubble("old", None, None), make_bubble("Bot验证1104", None, None)], None);
+        let mut partial = make_frame(
+            vec![
+                make_bubble("old", None, None),
+                make_bubble("Bot验证1104", None, None),
+            ],
+            None,
+        );
         partial.clipped_bubble = Some(true);
         let res = policy.candidate(&baseline, &partial, &partial);
-        assert!(matches!(res, Err(PolicyError::InvalidFrame(ref msg)) if msg.contains("incomplete bottom bubble")));
+        assert!(
+            matches!(res, Err(PolicyError::InvalidFrame(ref msg)) if msg.contains("incomplete bottom bubble"))
+        );
     }
 
     #[test]
     fn policy_test_reply_bounds() {
-        assert_eq!(validate_reply("你好，这是自动回复测试。").unwrap(), "你好，这是自动回复测试。");
+        assert_eq!(
+            validate_reply("你好，这是自动回复测试。").unwrap(),
+            "你好，这是自动回复测试。"
+        );
         for body in ["", "  ", &"x".repeat(201), "你好\x00"] {
             assert!(validate_reply(body).is_err());
         }
@@ -947,8 +1101,14 @@ mod tests {
 
     #[test]
     fn policy_test_loading_image_reconciles_to_same_fingerprint() {
-        let prev = vec![make_bubble("hi", None, None), make_image("0f0f0f0f0f0f0f0f", None, None)];
-        let cur = vec![make_bubble("hi", None, None), make_image("0f0f0f0f0f0f0f00", None, None)];
+        let prev = vec![
+            make_bubble("hi", None, None),
+            make_image("0f0f0f0f0f0f0f0f", None, None),
+        ];
+        let cur = vec![
+            make_bubble("hi", None, None),
+            make_image("0f0f0f0f0f0f0f00", None, None),
+        ];
         let fixed = reconcile(&prev, &cur);
         assert_eq!(fingerprint(&fixed[1]), fingerprint(&prev[1]));
         assert_eq!(fixed[1].media_id, cur[1].media_id);
@@ -961,14 +1121,20 @@ mod tests {
         let a = make_image("0000000000000000", None, None);
         let b = make_image("ffffffff00000000", None, None);
         let c = make_image("00000000ffffffff", None, None);
-        assert_eq!(new_bubbles(&[a.clone(), b.clone()], &[a, b, c.clone()]).unwrap(), vec![c]);
+        assert_eq!(
+            new_bubbles(&[a.clone(), b.clone()], &[a, b, c.clone()]).unwrap(),
+            vec![c]
+        );
     }
 
     #[test]
     fn policy_test_far_phash_is_not_reconciled() {
         let prev = vec![make_image("0000000000000000", None, None)];
         let cur = vec![make_image("00000000000fffff", None, None)];
-        assert_eq!(reconcile(&prev, &cur)[0].phash.as_deref(), Some("00000000000fffff"));
+        assert_eq!(
+            reconcile(&prev, &cur)[0].phash.as_deref(),
+            Some("00000000000fffff")
+        );
     }
 
     #[test]
@@ -978,14 +1144,24 @@ mod tests {
         let c = make_bubble("c", None, None);
         let d = make_bubble("D", None, None);
         assert_eq!(
-            stitch(&[a.clone(), b.clone()], &[vec![a, b, c.clone()], vec![c.clone(), d.clone()]]).unwrap(),
+            stitch(
+                &[a.clone(), b.clone()],
+                &[vec![a, b, c.clone()], vec![c.clone(), d.clone()]]
+            )
+            .unwrap(),
             vec![c, d]
         );
     }
 
     #[test]
     fn policy_test_stitch_without_overlap_raises() {
-        let res = stitch(&[make_bubble("a", None, None)], &[vec![make_bubble("x", None, None)], vec![make_bubble("y", None, None)]]);
+        let res = stitch(
+            &[make_bubble("a", None, None)],
+            &[
+                vec![make_bubble("x", None, None)],
+                vec![make_bubble("y", None, None)],
+            ],
+        );
         assert_eq!(res, Err(ContinuityError::ContinuityGap));
     }
 
@@ -1005,9 +1181,19 @@ mod tests {
 
     #[test]
     fn policy_test_loading_image_beside_text_still_reconciles() {
-        let prev = vec![make_bubble("x", None, None), make_image("0000000000000000", None, None)];
-        let cur = vec![make_bubble("x", None, None), make_image("0000000000000fff", None, None), make_bubble("y", None, None)];
-        assert_eq!(new_bubbles(&prev, &reconcile(&prev, &cur)).unwrap(), vec![cur[2].clone()]);
+        let prev = vec![
+            make_bubble("x", None, None),
+            make_image("0000000000000000", None, None),
+        ];
+        let cur = vec![
+            make_bubble("x", None, None),
+            make_image("0000000000000fff", None, None),
+            make_bubble("y", None, None),
+        ];
+        assert_eq!(
+            new_bubbles(&prev, &reconcile(&prev, &cur)).unwrap(),
+            vec![cur[2].clone()]
+        );
     }
 
     #[test]
@@ -1021,17 +1207,32 @@ mod tests {
             vec![at_y(i2.clone(), 113, Some(247))],
             vec![],
             vec![at_y(i1.clone(), 26, Some(247))],
-            vec![at_y(a.clone(), 40, None), at_y(b.clone(), 100, None), at_y(i1.clone(), 116, Some(247))],
+            vec![
+                at_y(a.clone(), 40, None),
+                at_y(b.clone(), 100, None),
+                at_y(i1.clone(), 116, Some(247)),
+            ],
         ];
         let merged = merge_pages(&pages, Some(90)).unwrap();
-        let keys: Vec<String> = merged.into_iter().map(|m| {
-            if m.kind.as_deref() == Some("image") {
-                m.phash.unwrap()
-            } else {
-                m.text
-            }
-        }).collect();
-        assert_eq!(keys, vec!["a", "b", i1.phash.unwrap().as_str(), i2.phash.unwrap().as_str()]);
+        let keys: Vec<String> = merged
+            .into_iter()
+            .map(|m| {
+                if m.kind.as_deref() == Some("image") {
+                    m.phash.unwrap()
+                } else {
+                    m.text
+                }
+            })
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                "a",
+                "b",
+                i1.phash.unwrap().as_str(),
+                i2.phash.unwrap().as_str()
+            ]
+        );
     }
 
     #[test]
@@ -1066,10 +1267,16 @@ mod tests {
     #[test]
     fn policy_test_private_title_with_parentheses_is_not_stripped() {
         let p1 = Policy::new("fixture", "张三", "service", None, false).unwrap();
-        assert!(p1.check_frame(&make_frame(vec![], Some("张三 (3)"))).is_err());
+        assert!(
+            p1.check_frame(&make_frame(vec![], Some("张三 (3)")))
+                .is_err()
+        );
 
         let p2 = Policy::new("fixture", "示例群", "service", None, true).unwrap();
-        assert!(p2.check_frame(&make_frame(vec![], Some("示例群 (3)"))).is_ok());
+        assert!(
+            p2.check_frame(&make_frame(vec![], Some("示例群 (3)")))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1111,16 +1318,22 @@ mod tests {
     #[test]
     fn test_echo_matches_tolerates_ocr_misreads_on_long_replies() {
         // Device 2026-11-08: most unrecognised echoes were the right bubble with 1–2 characters misread by OCR.
-        let reply = "您好，我是AI客服助手，请问有什么可以帮您？订单问题请提供订单号，我们会尽快为您处理。";
+        let reply =
+            "您好，我是AI客服助手，请问有什么可以帮您？订单问题请提供订单号，我们会尽快为您处理。";
         let one_off = reply.replacen("订单号", "订单弓", 1);
-        let two_off = one_off.replacen("尽快", "尽快", 1).replacen("处理", "处埋", 1);
+        let two_off = one_off
+            .replacen("尽快", "尽快", 1)
+            .replacen("处理", "处埋", 1);
         assert!(echo_matches(&one_off, reply));
         assert!(echo_matches(&two_off, reply));
         // Too many differences, or a clearly different message, is not our echo.
         // 43 characters allow 2 edits; three differ here.
         let many = reply.replace("订单", "汀单").replacen("客服", "客眼", 1);
         assert!(!echo_matches(&many, reply));
-        assert!(!echo_matches("今天天气很好，适合出去走走，记得带伞以防下雨，路上注意安全哦。", reply));
+        assert!(!echo_matches(
+            "今天天气很好，适合出去走走，记得带伞以防下雨，路上注意安全哦。",
+            reply
+        ));
         // Short replies stay exact: one character changes the meaning.
         assert!(!echo_matches("好的谢谢", "好吧谢谢"));
         assert!(!echo_matches("金额100", "金额100.00"));
@@ -1136,19 +1349,45 @@ mod tests {
             b
         }
         let cases: Vec<(&str, &str, Vec<Bubble>, Bubble, &str)> = vec![
-            ("test-desktop", "示例群", vec![fp("inbound_visual", "你好", None)], fp("inbound_visual", "在吗", None),
-             "bot-ab507730f719356627784f02651896ad60d40a37fe49425f5be84558b67ca4ee"),
-            ("acc", "示例联系人甲☕", vec![fp("outbound_visual", "引\"号\\反斜杠", Some("00ff00ff00ff00ff"))],
-             fp("inbound_visual", "换行\n制表\t控制\u{1}\u{7f}末尾 😀", Some("0123456789abcdef")),
-             "bot-b80fe1c960d3bcc0891c7f19043572e29054fff7136a435e925cb9b3b11bb994"),
-            ("a", "b", vec![], fp("inbound_visual", "\u{2028}\u{e9}", None),
-             "bot-fe2f1fa9b5c4bb4fde22f14dcf0fd69cc54e1d809218e6efb009b7ca16266f63"),
+            (
+                "test-desktop",
+                "示例群",
+                vec![fp("inbound_visual", "你好", None)],
+                fp("inbound_visual", "在吗", None),
+                "bot-ab507730f719356627784f02651896ad60d40a37fe49425f5be84558b67ca4ee",
+            ),
+            (
+                "acc",
+                "示例联系人甲☕",
+                vec![fp(
+                    "outbound_visual",
+                    "引\"号\\反斜杠",
+                    Some("00ff00ff00ff00ff"),
+                )],
+                fp(
+                    "inbound_visual",
+                    "换行\n制表\t控制\u{1}\u{7f}末尾 😀",
+                    Some("0123456789abcdef"),
+                ),
+                "bot-b80fe1c960d3bcc0891c7f19043572e29054fff7136a435e925cb9b3b11bb994",
+            ),
+            (
+                "a",
+                "b",
+                vec![],
+                fp("inbound_visual", "\u{2028}\u{e9}", None),
+                "bot-fe2f1fa9b5c4bb4fde22f14dcf0fd69cc54e1d809218e6efb009b7ca16266f63",
+            ),
         ];
         for (account, recipient, baseline, candidate, expected) in cases {
             let policy = Policy::new(account, recipient, "t", None, false).unwrap();
             let mut frame: Frame = serde_json::from_value(json!({"bubbles": []})).unwrap();
             frame.bubbles = baseline;
-            assert_eq!(policy.key(&frame, &candidate), expected, "{account}/{recipient}");
+            assert_eq!(
+                policy.key(&frame, &candidate),
+                expected,
+                "{account}/{recipient}"
+            );
         }
     }
 
@@ -1199,7 +1438,10 @@ mod tests {
 
     impl MockClient {
         fn new(send_error: bool) -> Self {
-            Self { calls: Vec::new(), send_error }
+            Self {
+                calls: Vec::new(),
+                send_error,
+            }
         }
     }
 
@@ -1218,12 +1460,28 @@ mod tests {
         let td = TestDir::new();
         let policy = Policy::new("fixture", "示例联系人甲", "Bot验证1104", None, false).unwrap();
         let old = make_frame(vec![make_bubble("old", None, None)], None);
-        let new_frame = make_frame(vec![make_bubble("old", None, None), make_bubble("Bot验证1104 你好", None, None)], None);
+        let new_frame = make_frame(
+            vec![
+                make_bubble("old", None, None),
+                make_bubble("Bot验证1104 你好", None, None),
+            ],
+            None,
+        );
         let mut after_bubbles = new_frame.bubbles.clone();
-        after_bubbles.push(make_bubble("你好，这是自动回复测试。", Some("outbound_visual"), None));
+        after_bubbles.push(make_bubble(
+            "你好，这是自动回复测试。",
+            Some("outbound_visual"),
+            None,
+        ));
         let after = make_frame(after_bubbles, None);
 
-        let mut capture = MockCapture::new(vec![old, new_frame.clone(), new_frame.clone(), new_frame, after]);
+        let mut capture = MockCapture::new(vec![
+            old,
+            new_frame.clone(),
+            new_frame.clone(),
+            new_frame,
+            after,
+        ]);
         let mut client = MockClient::new(false);
         let gen_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let gen_count_clone = gen_count.clone();
@@ -1238,13 +1496,24 @@ mod tests {
                 async { Ok("你好，这是自动回复测试。".to_string()) }
             },
             Duration::from_secs(10),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
-        let sent: Vec<_> = client.calls.iter().filter(|(n, _)| n == "send_message").collect();
+        let sent: Vec<_> = client
+            .calls
+            .iter()
+            .filter(|(n, _)| n == "send_message")
+            .collect();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].1["recipient"], "示例联系人甲");
         assert_eq!(sent[0].1["message"], "你好，这是自动回复测试。");
-        assert!(sent[0].1["idempotency_key"].as_str().unwrap().starts_with("bot-"));
+        assert!(
+            sent[0].1["idempotency_key"]
+                .as_str()
+                .unwrap()
+                .starts_with("bot-")
+        );
 
         let mut found_record = None;
         for entry in std::fs::read_dir(td.path()).unwrap() {
@@ -1268,7 +1537,13 @@ mod tests {
         let td = TestDir::new();
         let policy = Policy::new("fixture", "示例联系人甲", "Bot验证1104", None, false).unwrap();
         let old = make_frame(vec![make_bubble("old", None, None)], None);
-        let new_frame = make_frame(vec![make_bubble("old", None, None), make_bubble("Bot验证1104 你好", None, None)], None);
+        let new_frame = make_frame(
+            vec![
+                make_bubble("old", None, None),
+                make_bubble("Bot验证1104 你好", None, None),
+            ],
+            None,
+        );
         let mut changed_bubbles = new_frame.bubbles.clone();
         changed_bubbles.push(make_bubble("another", None, None));
         let changed = make_frame(changed_bubbles, None);
@@ -1283,9 +1558,15 @@ mod tests {
             &mut capture,
             |_| async { Ok("你好，这是自动回复测试。".to_string()) },
             Duration::from_secs(10),
-        ).await.unwrap_err();
+        )
+        .await
+        .unwrap_err();
 
-        assert!(err.to_string().contains("changed before sending"), "got err: {}", err);
+        assert!(
+            err.to_string().contains("changed before sending"),
+            "got err: {}",
+            err
+        );
         assert!(!client.calls.iter().any(|(n, _)| n == "send_message"));
     }
 
@@ -1310,9 +1591,15 @@ mod tests {
                 async { Ok("reply".to_string()) }
             },
             Duration::from_secs(10),
-        ).await.unwrap_err();
+        )
+        .await
+        .unwrap_err();
 
-        assert!(err.to_string().contains("allowlisted title"), "got err: {}", err);
+        assert!(
+            err.to_string().contains("allowlisted title"),
+            "got err: {}",
+            err
+        );
         assert!(!gen_called.load(std::sync::atomic::Ordering::SeqCst));
         assert!(!client.calls.iter().any(|(n, _)| n == "send_message"));
     }
@@ -1322,9 +1609,20 @@ mod tests {
         let td = TestDir::new();
         let policy = Policy::new("fixture", "示例联系人甲", "Bot验证1104", None, false).unwrap();
         let old = make_frame(vec![make_bubble("old", None, None)], None);
-        let new_frame = make_frame(vec![make_bubble("old", None, None), make_bubble("Bot验证1104 你好", None, None)], None);
+        let new_frame = make_frame(
+            vec![
+                make_bubble("old", None, None),
+                make_bubble("Bot验证1104 你好", None, None),
+            ],
+            None,
+        );
 
-        let mut capture1 = MockCapture::new(vec![old.clone(), new_frame.clone(), new_frame.clone(), new_frame.clone()]);
+        let mut capture1 = MockCapture::new(vec![
+            old.clone(),
+            new_frame.clone(),
+            new_frame.clone(),
+            new_frame.clone(),
+        ]);
         let mut client1 = MockClient::new(true); // send_error = true
         let gen_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
@@ -1339,7 +1637,9 @@ mod tests {
                 async { Ok("你好，这是自动回复测试。".to_string()) }
             },
             Duration::from_secs(10),
-        ).await.unwrap_err();
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("send outcome unknown"));
 
         // Restart with the same state directory
@@ -1357,10 +1657,20 @@ mod tests {
                 async { Ok("你好，这是自动回复测试。".to_string()) }
             },
             Duration::from_secs(10),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
-        let total_sends = client1.calls.iter().filter(|(n, _)| n == "send_message").count()
-            + client2.calls.iter().filter(|(n, _)| n == "send_message").count();
+        let total_sends = client1
+            .calls
+            .iter()
+            .filter(|(n, _)| n == "send_message")
+            .count()
+            + client2
+                .calls
+                .iter()
+                .filter(|(n, _)| n == "send_message")
+                .count();
         assert_eq!(total_sends, 1);
         assert_eq!(gen_count.load(std::sync::atomic::Ordering::SeqCst), 1);
     }

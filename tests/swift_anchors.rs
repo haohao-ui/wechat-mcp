@@ -5,8 +5,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
@@ -61,9 +61,13 @@ fn anchors_selftest_bin() -> Option<&'static PathBuf> {
 
         let sources = [
             root.join("native").join("common").join("Geometry.swift"),
-            root.join("native").join("common").join("WechatLayout.swift"),
+            root.join("native")
+                .join("common")
+                .join("WechatLayout.swift"),
             root.join("native").join("eyes").join("Anchors.swift"),
-            root.join("tests").join("eyes_selftest").join("anchors_main.swift"),
+            root.join("tests")
+                .join("eyes_selftest")
+                .join("anchors_main.swift"),
         ];
 
         let mut cmd = Command::new("swiftc");
@@ -92,7 +96,10 @@ fn frames_dir() -> PathBuf {
 }
 
 fn layout_path() -> PathBuf {
-    repo_root().join("native").join("layout").join("wechat-4.1.15.json")
+    repo_root()
+        .join("native")
+        .join("layout")
+        .join("wechat-4.1.15.json")
 }
 
 fn run_anchors(frame_name: &str, extra_args: Option<&[&str]>) -> Option<Value> {
@@ -125,8 +132,8 @@ fn run_anchors(frame_name: &str, extra_args: Option<&[&str]>) -> Option<Value> {
         String::from_utf8_lossy(&output.stderr),
         String::from_utf8_lossy(&output.stdout)
     );
-    let val: Value = serde_json::from_slice(&output.stdout)
-        .expect("invalid json output from anchors_selftest");
+    let val: Value =
+        serde_json::from_slice(&output.stdout).expect("invalid json output from anchors_selftest");
     Some(val)
 }
 
@@ -150,13 +157,19 @@ fn test_measure_finds_real_edges_far_from_a_wrong_map() {
         None => return,
     };
     let layout_file = layout_path();
-    let mut layout: Value = serde_json::from_str(&std::fs::read_to_string(&layout_file).unwrap()).unwrap();
+    let mut layout: Value =
+        serde_json::from_str(&std::fs::read_to_string(&layout_file).unwrap()).unwrap();
 
-    layout["regions"]["chat"]["h"] = serde_json::json!(layout["regions"]["chat"]["h"].as_i64().unwrap() - 30);
-    layout["regions"]["chat_content"]["h"] = serde_json::json!(layout["regions"]["chat_content"]["h"].as_i64().unwrap() - 30);
-    layout["regions"]["input"]["y"] = serde_json::json!(layout["regions"]["input"]["y"].as_i64().unwrap() - 30);
-    layout["regions"]["input"]["h"] = serde_json::json!(layout["regions"]["input"]["h"].as_i64().unwrap() + 30);
-    layout["regions"]["session_list"]["w"] = serde_json::json!(layout["regions"]["session_list"]["w"].as_i64().unwrap() - 40);
+    layout["regions"]["chat"]["h"] =
+        serde_json::json!(layout["regions"]["chat"]["h"].as_i64().unwrap() - 30);
+    layout["regions"]["chat_content"]["h"] =
+        serde_json::json!(layout["regions"]["chat_content"]["h"].as_i64().unwrap() - 30);
+    layout["regions"]["input"]["y"] =
+        serde_json::json!(layout["regions"]["input"]["y"].as_i64().unwrap() - 30);
+    layout["regions"]["input"]["h"] =
+        serde_json::json!(layout["regions"]["input"]["h"].as_i64().unwrap() + 30);
+    layout["regions"]["session_list"]["w"] =
+        serde_json::json!(layout["regions"]["session_list"]["w"].as_i64().unwrap() - 40);
 
     let temp = TempDir::new("wrong_layout");
     let wrong_path = temp.path.join("wrong.json");
@@ -177,7 +190,13 @@ fn test_measure_finds_real_edges_far_from_a_wrong_map() {
                 .args([png_path.to_str().unwrap(), path, "--measure"])
                 .output()
                 .expect("run measure");
-            assert!(output.status.success(), "measure failed for {} with {}: {}", name, path, String::from_utf8_lossy(&output.stderr));
+            assert!(
+                output.status.success(),
+                "measure failed for {} with {}: {}",
+                name,
+                path,
+                String::from_utf8_lossy(&output.stderr)
+            );
             let out: Value = serde_json::from_slice(&output.stdout).unwrap();
             let input_divider = out["measured"]["input_divider"].as_f64().unwrap();
             let list_border = out["measured"]["list_border"].as_f64().unwrap();
@@ -270,7 +289,11 @@ fn test_shifted_frame_fails() {
     };
     assert_eq!(res_v["passed"], false);
     let failures_v = res_v["failures"].as_array().unwrap();
-    assert!(failures_v.iter().any(|v| v.as_str() == Some("input_divider")));
+    assert!(
+        failures_v
+            .iter()
+            .any(|v| v.as_str() == Some("input_divider"))
+    );
 
     let res_h = run_anchors("r1-dark-top", Some(&["--shift", "30,0"])).unwrap();
     assert_eq!(res_h["passed"], false);

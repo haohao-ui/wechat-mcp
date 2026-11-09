@@ -1,9 +1,13 @@
+use crate::core::model::Frame;
 use anyhow::Result;
 use serde_json::Value;
-use crate::core::model::Frame;
 
 pub trait ToolClient: Send + Sync {
-    fn tool(&self, name: &str, args: Value) -> impl std::future::Future<Output = Result<Value>> + Send;
+    fn tool(
+        &self,
+        name: &str,
+        args: Value,
+    ) -> impl std::future::Future<Output = Result<Value>> + Send;
 }
 
 pub fn is_not_sent(err_msg: Option<&str>, receipt: Option<&Value>) -> bool {

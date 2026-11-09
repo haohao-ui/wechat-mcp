@@ -1,15 +1,13 @@
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
-use sha2::{Digest, Sha256};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::info;
 
-use crate::core::contacts::parse::{
-    parse_group_headers, parse_profile, OcrLine,
-};
+use crate::core::contacts::parse::{OcrLine, parse_group_headers, parse_profile};
 use crate::core::history::store::{HistoryStore, ProfileInput, UpsertOutcome};
 use crate::core::scheduler::CoordinatorCapture;
 use crate::core::state::write_private;
@@ -36,18 +34,31 @@ pub struct SyncReport {
 async fn collapse_all_groups(capture: &mut dyn CoordinatorCapture) -> Result<Vec<OcrLine>> {
     let mut lines: Vec<OcrLine> = Vec::new();
     for _ in 0..5 {
-        let _ = capture.call("contacts_scroll_list", json!({"direction": "up", "ticks": 20})).await;
+        let _ = capture
+            .call(
+                "contacts_scroll_list",
+                json!({"direction": "up", "ticks": 20}),
+            )
+            .await;
         let v = capture.call("contacts_headers", json!({})).await?;
-        lines = v.get("lines").and_then(|l| serde_json::from_value(l.clone()).ok()).unwrap_or_default();
+        lines = v
+            .get("lines")
+            .and_then(|l| serde_json::from_value(l.clone()).ok())
+            .unwrap_or_default();
         let headers: Vec<f64> = lines
             .iter()
             .filter(|l| l.x < 115.0 && GROUP_TITLES_CJK.contains(&cjk_only(&l.text).as_str()))
             .map(|l| l.y)
             .collect();
-        let expanded = headers.iter().copied().find(|hy| group_expanded(&lines, *hy));
+        let expanded = headers
+            .iter()
+            .copied()
+            .find(|hy| group_expanded(&lines, *hy));
         match expanded {
             Some(hy) => {
-                let _ = capture.call("contacts_click_list", json!({"x": 180.0, "y": hy})).await?;
+                let _ = capture
+                    .call("contacts_click_list", json!({"x": 180.0, "y": hy}))
+                    .await?;
             }
             None => return Ok(lines),
         }
@@ -63,7 +74,11 @@ fn group_expanded(lines: &[OcrLine], header_y: f64) -> bool {
     // 只看到下一个分组标题为止：收起的分组下面紧挨着的是下一个分组（它若展开，字母行会落在范围内）
     let next_header = lines
         .iter()
-        .filter(|l| l.x < 115.0 && l.y > header_y + 5.0 && GROUP_TITLES_CJK.contains(&cjk_only(&l.text).as_str()))
+        .filter(|l| {
+            l.x < 115.0
+                && l.y > header_y + 5.0
+                && GROUP_TITLES_CJK.contains(&cjk_only(&l.text).as_str())
+        })
         .map(|l| l.y)
         .fold(f64::INFINITY, f64::min);
     let upper = (header_y + 110.0).min(next_header - 5.0);
@@ -95,7 +110,11 @@ fn names_match(row: &str, profile: &str) -> bool {
     if a == b {
         return true;
     }
-    let (short, long) = if a.chars().count() <= b.chars().count() { (&a, &b) } else { (&b, &a) };
+    let (short, long) = if a.chars().count() <= b.chars().count() {
+        (&a, &b)
+    } else {
+        (&b, &a)
+    };
     if short.chars().count() >= 2 && long.contains(short.as_str()) {
         return true;
     }
@@ -107,7 +126,9 @@ fn names_match(row: &str, profile: &str) -> bool {
 
 /// 只保留汉字（去掉箭头、图标、标点、数字、空白），用于识别界面固有文字
 fn cjk_only(text: &str) -> String {
-    text.chars().filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c)).collect()
+    text.chars()
+        .filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c))
+        .collect()
 }
 
 fn group_title_cjk(category: &str) -> &'static str {
@@ -122,16 +143,25 @@ fn group_title_cjk(category: &str) -> &'static str {
 
 /// 账号只进入摘要，既防止路径注入，也不在文件名泄露微信号。
 pub fn account_state_path(state_dir: &Path, account_id: &str, kind: &str) -> PathBuf {
-    let key = Sha256::digest(account_id.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let key = Sha256::digest(account_id.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
     state_dir.join(format!("contacts-sync-{kind}-{key}.json"))
 }
 
 pub fn write_sync_result(state_dir: &Path, account_id: &str, result: &Value) -> Result<()> {
     let mut result = result.clone();
     result["account_id"] = json!(account_id);
-    write_private(&account_state_path(state_dir, account_id, "result"), &result)?;
+    write_private(
+        &account_state_path(state_dir, account_id, "result"),
+        &result,
+    )?;
     if result["complete"] == true {
-        write_private(&account_state_path(state_dir, account_id, "success"), &result)?;
+        write_private(
+            &account_state_path(state_dir, account_id, "success"),
+            &result,
+        )?;
     }
     // 保留已有控制命令的响应位置，但消费者必须校验账号和请求 ID。
     write_private(&state_dir.join("contacts-sync-result.json"), &result)
@@ -143,15 +173,24 @@ fn incremental_contact<'a>(existing: &'a [Value], category: &str, name: &str) ->
     let mut matches = existing.iter().filter(|p| {
         p["category"] == category
             && ["nickname", "remark"].iter().any(|field| {
-                p[*field].as_str().is_some_and(|n| crate::core::config::name_key(n) == key)
+                p[*field]
+                    .as_str()
+                    .is_some_and(|n| crate::core::config::name_key(n) == key)
             })
     });
     let first = matches.next()?;
-    if matches.next().is_some() || first["identity"] != "strong" || !first["removed_at"].is_null() { return None; }
+    if matches.next().is_some() || first["identity"] != "strong" || !first["removed_at"].is_null() {
+        return None;
+    }
     first["contact_id"].as_str()
 }
 
-pub fn should_attempt_daily_sync(state_dir: &Path, account_id: &str, is_idle: bool, now_sec: f64) -> bool {
+pub fn should_attempt_daily_sync(
+    state_dir: &Path,
+    account_id: &str,
+    is_idle: bool,
+    now_sec: f64,
+) -> bool {
     if !is_idle {
         return false;
     }
@@ -187,7 +226,10 @@ pub fn should_attempt_daily_sync(state_dir: &Path, account_id: &str, is_idle: bo
 
 pub fn record_daily_sync_attempt(state_dir: &Path, account_id: &str, now_sec: f64) -> Result<()> {
     let attempt_file = account_state_path(state_dir, account_id, "daily-attempt");
-    write_private(&attempt_file, &json!({"account_id": account_id, "last_attempt_sec": now_sec}))
+    write_private(
+        &attempt_file,
+        &json!({"account_id": account_id, "last_attempt_sec": now_sec}),
+    )
 }
 
 pub fn clean_stale_contacts_sync_pause(state_dir: &Path) {
@@ -217,19 +259,30 @@ pub async fn run_sync(
         let _ = capture.call("contacts_lease_end", json!({})).await;
         if let Some(dir) = checkpoint.parent() {
             let _ = write_sync_result(
-                dir, account_id,
+                dir,
+                account_id,
                 &json!({"finished_at_ms": now_ms, "complete": false, "error": format!("desktop_busy: {e:#}")}),
             );
         }
         return Err(e);
     }
-    let result = run_sync_inner(capture, store, account_id, mode, checkpoint, should_yield, now_ms).await;
+    let result = run_sync_inner(
+        capture,
+        store,
+        account_id,
+        mode,
+        checkpoint,
+        should_yield,
+        now_ms,
+    )
+    .await;
     if let Err(e) = &result {
         // 出错不自动续做：清掉断点并写明错误，否则协调器每轮续做、立刻失败，形成死循环（实机 347 次，机器人停摆）
         let _ = fs::remove_file(checkpoint);
         if let Some(dir) = checkpoint.parent() {
             let _ = write_sync_result(
-                dir, account_id,
+                dir,
+                account_id,
                 &json!({"finished_at_ms": now_ms, "complete": false, "error": format!("{e:#}")}),
             );
         }
@@ -264,7 +317,10 @@ async fn run_sync_inner(
     let pause_file = state_dir.join("admin-pause.json");
     let initially_paused = pause_file.exists();
     if !initially_paused {
-        let _ = write_private(&pause_file, &json!({"paused": true, "reason": "contacts_sync", "at_ms": now_ms}));
+        let _ = write_private(
+            &pause_file,
+            &json!({"paused": true, "reason": "contacts_sync", "at_ms": now_ms}),
+        );
     }
     struct PauseGuard<'a> {
         pause_file: &'a Path,
@@ -277,13 +333,20 @@ async fn run_sync_inner(
             }
         }
     }
-    let _pause_guard = PauseGuard { pause_file: &pause_file, should_clean: !initially_paused };
+    let _pause_guard = PauseGuard {
+        pause_file: &pause_file,
+        should_clean: !initially_paused,
+    };
 
     anyhow::ensure!(!should_yield(), "contacts_sync_interrupted");
     capture.call("contacts_enter", json!({})).await?;
     let top = collapse_all_groups(capture).await?;
     let groups = parse_group_headers(&top);
-    info!(lines = top.len(), headers = groups.len(), "contacts_sync_headers");
+    info!(
+        lines = top.len(),
+        headers = groups.len(),
+        "contacts_sync_headers"
+    );
     let existing = store.list_profiles(account_id, None)?;
 
     let mut per_category = Vec::new();
@@ -299,9 +362,23 @@ async fn run_sync_inner(
             stopped = true;
             break;
         }
-        let mut r = sync_group(capture, store, account_id, cat, mode, &existing, should_yield, now_ms).await?;
+        let mut r = sync_group(
+            capture,
+            store,
+            account_id,
+            cat,
+            mode,
+            &existing,
+            should_yield,
+            now_ms,
+        )
+        .await?;
         r.stopped |= should_yield();
-        if !r.stopped && r.unreadable == 0 && r.needs_review == 0 && r.ids.len() == *expected as usize {
+        if !r.stopped
+            && r.unreadable == 0
+            && r.needs_review == 0
+            && r.ids.len() == *expected as usize
+        {
             store.mark_missing(account_id, cat, &r.ids, now_ms)?;
         }
         let synced = r.ids.len() as u32;
@@ -322,9 +399,16 @@ async fn run_sync_inner(
         && per_category.iter().all(|(_, e, s)| e == s)
         && unreadable == 0
         && needs_review == 0;
-    let report = SyncReport { per_category: per_category.clone(), unreadable_rows: unreadable, needs_review, yielded: stopped, complete };
+    let report = SyncReport {
+        per_category: per_category.clone(),
+        unreadable_rows: unreadable,
+        needs_review,
+        yielded: stopped,
+        complete,
+    };
     write_sync_result(
-        state_dir, account_id,
+        state_dir,
+        account_id,
         &json!({
             "finished_at_ms": now_ms,
             "complete": complete,
@@ -372,20 +456,25 @@ fn line_center(l: &OcrLine) -> f64 {
 /// 只取本分组标题下方、下一个分组标题上方的头像；返回 (头像 y, 同一高度识别出的名字) 和下一个分组标题是否在本屏。
 fn group_rows(screen: &Screen, category: &str) -> (Vec<(f64, Option<String>)>, bool) {
     let own = group_title_cjk(category);
-    let is_header = |l: &OcrLine| l.x < 115.0 && GROUP_TITLES_CJK.contains(&cjk_only(&l.text).as_str());
+    let is_header =
+        |l: &OcrLine| l.x < 115.0 && GROUP_TITLES_CJK.contains(&cjk_only(&l.text).as_str());
     let own_header = screen
         .lines
         .iter()
         .filter(|l| is_header(l) && cjk_only(&l.text) == own)
         .map(line_center)
-        .fold(None, |acc: Option<f64>, y| Some(acc.map_or(y, |a: f64| a.max(y))));
+        .fold(None, |acc: Option<f64>, y| {
+            Some(acc.map_or(y, |a: f64| a.max(y)))
+        });
     let next_header = screen
         .lines
         .iter()
         .filter(|l| is_header(l) && cjk_only(&l.text) != own)
         .map(line_center)
         .filter(|y| own_header.map_or(true, |h| *y > h))
-        .fold(None, |acc: Option<f64>, y| Some(acc.map_or(y, |a: f64| a.min(y))));
+        .fold(None, |acc: Option<f64>, y| {
+            Some(acc.map_or(y, |a: f64| a.min(y)))
+        });
     let mut rows: Vec<(f64, Option<String>)> = screen
         .avatars
         .iter()
@@ -409,17 +498,32 @@ fn group_rows(screen: &Screen, category: &str) -> (Vec<(f64, Option<String>)>, b
 }
 
 fn lines_of(v: &serde_json::Value) -> Vec<OcrLine> {
-    v.get("lines").and_then(|l| serde_json::from_value(l.clone()).ok()).unwrap_or_default()
+    v.get("lines")
+        .and_then(|l| serde_json::from_value(l.clone()).ok())
+        .unwrap_or_default()
 }
 
 /// 滚动后新屏相对旧屏移动了多少：
 /// 1. 用旧屏上识别出名字的行，在新屏找同名行；
 /// 2. 找不到时用头像位置对齐（旧屏头像整体平移 d 后与新屏头像重合最多的 d）；
 /// 3. 两屏完全一样 → 0（到底）。都不行返回 None（跟丢了）。
-fn measure_shift(prev: &[(f64, Option<String>)], prev_screen: &Screen, next: &Screen, expect: f64) -> Option<f64> {
+fn measure_shift(
+    prev: &[(f64, Option<String>)],
+    prev_screen: &Screen,
+    next: &Screen,
+    expect: f64,
+) -> Option<f64> {
     let same = prev_screen.avatars == next.avatars
-        && prev_screen.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>()
-            == next.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>();
+        && prev_screen
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            == next
+                .lines
+                .iter()
+                .map(|l| l.text.as_str())
+                .collect::<Vec<_>>();
     if same {
         return Some(0.0);
     }
@@ -431,7 +535,12 @@ fn measure_shift(prev: &[(f64, Option<String>)], prev_screen: &Screen, next: &Sc
             .filter(|l| l.x >= 115.0 && names_match(name, &l.text))
             .map(|l| py - line_center(l))
             .filter(|d| *d >= -2.0)
-            .min_by(|a, b| (a - expect).abs().partial_cmp(&(b - expect).abs()).unwrap_or(std::cmp::Ordering::Equal));
+            .min_by(|a, b| {
+                (a - expect)
+                    .abs()
+                    .partial_cmp(&(b - expect).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
         if let Some(d) = cand {
             return Some(d.max(0.0));
         }
@@ -448,7 +557,11 @@ fn measure_shift(prev: &[(f64, Option<String>)], prev_screen: &Screen, next: &Sc
                 .iter()
                 .filter(|p| next.avatars.iter().any(|n| (*p - d - n).abs() < 3.0))
                 .count();
-            if hits >= 2 && best.map_or(true, |(h, bd)| hits > h || (hits == h && (d - expect).abs() < (bd - expect).abs())) {
+            if hits >= 2
+                && best.map_or(true, |(h, bd)| {
+                    hits > h || (hits == h && (d - expect).abs() < (bd - expect).abs())
+                })
+            {
                 best = Some((hits, d));
             }
         }
@@ -469,15 +582,24 @@ fn is_subsequence(key: &[char], long: &[char]) -> bool {
 ///    按 @ 拆开：资料卡上有"@企业"行时，企业名必须对上（截断时按开头），名字要是资料卡名字的开头、允许差 1 字；
 ///    资料卡上没有"@企业"行时，名字是资料卡名字的开头即可（≥2 字）。
 fn row_matches_profile(row: &str, prof: &[OcrLine], nickname: &str, remark: Option<&str>) -> bool {
-    let names: Vec<&str> = std::iter::once(nickname).chain(remark).filter(|n| !n.trim().is_empty()).collect();
+    let names: Vec<&str> = std::iter::once(nickname)
+        .chain(remark)
+        .filter(|n| !n.trim().is_empty())
+        .collect();
     if names.iter().any(|n| names_match(row, n)) {
         return true;
     }
     let rk: Vec<char> = name_key_for_match(row).chars().collect();
-    if rk.len() >= 4 && names.iter().any(|n| is_subsequence(&rk, &name_key_for_match(n).chars().collect::<Vec<_>>())) {
+    if rk.len() >= 4
+        && names
+            .iter()
+            .any(|n| is_subsequence(&rk, &name_key_for_match(n).chars().collect::<Vec<_>>()))
+    {
         return true;
     }
-    let Some(at) = row.find(['@', '＠']) else { return false };
+    let Some(at) = row.find(['@', '＠']) else {
+        return false;
+    };
     let name_part: Vec<char> = name_key_for_match(&row[..at]).chars().collect();
     let company_row = name_key_for_match(&row[at..]);
     if name_part.is_empty() {
@@ -489,7 +611,10 @@ fn row_matches_profile(row: &str, prof: &[OcrLine], nickname: &str, remark: Opti
         .find(|t| t.starts_with('@') || t.starts_with('＠'))
         .map(name_key_for_match);
     let company_ok = match &company_card {
-        Some(card) => !company_row.is_empty() && (card.starts_with(&company_row) || company_row.starts_with(card.as_str())),
+        Some(card) => {
+            !company_row.is_empty()
+                && (card.starts_with(&company_row) || company_row.starts_with(card.as_str()))
+        }
         None => false,
     };
     names.iter().any(|n| {
@@ -508,13 +633,31 @@ fn row_matches_profile(row: &str, prof: &[OcrLine], nickname: &str, remark: Opti
 /// 资料卡一行的结构（只用于日志）：界面固有文字原样保留，其余汉字记 c、字母数字记 a、空格记 _，符号原样
 fn card_line_shape(text: &str) -> String {
     const UI_WORDS: [&str; 16] = [
-        "企业", "实名", "来源", "备注", "添加备注名", "朋友圈", "视频号", "更多信息", "地区", "微信号",
-        "共同群聊", "添加时间", "发消息", "语音聊天", "视频聊天", "企业微信",
+        "企业",
+        "实名",
+        "来源",
+        "备注",
+        "添加备注名",
+        "朋友圈",
+        "视频号",
+        "更多信息",
+        "地区",
+        "微信号",
+        "共同群聊",
+        "添加时间",
+        "发消息",
+        "语音聊天",
+        "视频聊天",
+        "企业微信",
     ];
     let mut out = String::new();
     let mut rest = text;
     while !rest.is_empty() {
-        if let Some(w) = UI_WORDS.iter().filter(|w| rest.starts_with(**w)).max_by_key(|w| w.len()) {
+        if let Some(w) = UI_WORDS
+            .iter()
+            .filter(|w| rest.starts_with(**w))
+            .max_by_key(|w| w.len())
+        {
             out.push('[');
             out.push_str(w);
             out.push(']');
@@ -539,7 +682,11 @@ fn card_line_shape(text: &str) -> String {
 /// 文字的短指纹（只用于日志比对两张资料卡是否相同，不含文字本身）
 fn short_fp(text: &str) -> String {
     use sha2::{Digest, Sha256};
-    Sha256::digest(text.as_bytes()).iter().take(3).map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .take(3)
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// 字形结构（只用于日志，不含文字本身）：在 other 里出现的字记 "="，其余汉字记 "c"、字母数字记 "a"，
@@ -603,7 +750,12 @@ async fn sync_group(
 ) -> Result<GroupResult> {
     // 每格滚多少点事先不知道（实机 5 格就超过一屏、把人跳过去了）：先滚 1 格量出来，之后按实测算格数
     let mut px_per_tick: Option<f64> = None;
-    let mut r = GroupResult { ids: Vec::new(), unreadable: 0, needs_review: 0, stopped: false };
+    let mut r = GroupResult {
+        ids: Vec::new(),
+        unreadable: 0,
+        needs_review: 0,
+        stopped: false,
+    };
 
     // 1. 收起所有分组、回到顶部，找到本分组标题并展开（按标题下方内容确认，最多点两次）
     let top = collapse_all_groups(capture).await?;
@@ -615,12 +767,19 @@ async fn sync_group(
         info!(category, "contacts_sync_group_header_missing");
         return Ok(r);
     };
-    let mut screen = Screen { lines: top, avatars: Vec::new() };
+    let mut screen = Screen {
+        lines: top,
+        avatars: Vec::new(),
+    };
     for _ in 0..2 {
         if group_expanded(&screen.lines, hy) {
             break;
         }
-        screen = screen_of(&capture.call("contacts_click_list", json!({"x": 180.0, "y": hy})).await?);
+        screen = screen_of(
+            &capture
+                .call("contacts_click_list", json!({"x": 180.0, "y": hy}))
+                .await?,
+        );
     }
     if screen.avatars.is_empty() {
         // 已展开但还没有头像数据（例如展开前就是展开状态）：重新取一次本屏
@@ -648,10 +807,19 @@ async fn sync_group(
 
             if mode == SyncMode::Incremental {
                 if let Some(name) = name {
-                    let unique_on_screen = rows.iter().filter(|(_, other)| {
-                        other.as_deref().is_some_and(|other| crate::core::config::name_key(other) == crate::core::config::name_key(name))
-                    }).count() == 1;
-                    if let Some(cid) = incremental_contact(existing, category, name).filter(|_| unique_on_screen) {
+                    let unique_on_screen = rows
+                        .iter()
+                        .filter(|(_, other)| {
+                            other.as_deref().is_some_and(|other| {
+                                crate::core::config::name_key(other)
+                                    == crate::core::config::name_key(name)
+                            })
+                        })
+                        .count()
+                        == 1;
+                    if let Some(cid) =
+                        incremental_contact(existing, category, name).filter(|_| unique_on_screen)
+                    {
                         if !r.ids.iter().any(|x| x == cid) {
                             r.ids.push(cid.to_string());
                             continue;
@@ -660,14 +828,20 @@ async fn sync_group(
                 }
             }
 
-            let resp = capture.call("contacts_open_row", json!({"y": y})).await.unwrap_or_default();
+            let resp = capture
+                .call("contacts_open_row", json!({"y": y}))
+                .await
+                .unwrap_or_default();
             if should_yield() {
                 r.stopped = true;
                 return Ok(r);
             }
             let prof = lines_of(&resp);
             // 资料卡画面没变：只有本行名字和资料卡对得上才算（点的正好是已显示的那个人），否则不记
-            let changed = resp.get("changed").and_then(|v| v.as_bool()).unwrap_or(true);
+            let changed = resp
+                .get("changed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             if prof.is_empty() {
                 info!(category, row_y = *y, "contacts_sync_profile_empty");
                 r.unreadable += 1;
@@ -680,7 +854,12 @@ async fn sync_group(
                     .iter()
                     .map(|l| format!("{}@{},{}", card_line_shape(&l.text), l.x as i64, l.y as i64))
                     .collect();
-                info!(category, row_y = *y, card = layout.join(" | ").as_str(), "contacts_sync_card_layout");
+                info!(
+                    category,
+                    row_y = *y,
+                    card = layout.join(" | ").as_str(),
+                    "contacts_sync_card_layout"
+                );
             }
             let matched = match name {
                 Some(name) => row_matches_profile(name, &prof, &f.nickname, f.remark.as_deref()),
@@ -692,16 +871,39 @@ async fn sync_group(
                     row_y = *y,
                     changed,
                     profile_lines = prof.len(),
-                    row_len = name.as_deref().map_or(0, |n| name_key_for_match(n).chars().count()),
+                    row_len = name
+                        .as_deref()
+                        .map_or(0, |n| name_key_for_match(n).chars().count()),
                     nickname_len = name_key_for_match(&f.nickname).chars().count(),
                     has_wechat_id = f.wechat_id.is_some(),
-                    best_line = name.as_deref().map_or(-1, |n| { let (i, _) = best_profile_line(n, &prof); if i == usize::MAX { -1 } else { i as i64 } }),
+                    best_line = name.as_deref().map_or(-1, |n| {
+                        let (i, _) = best_profile_line(n, &prof);
+                        if i == usize::MAX { -1 } else { i as i64 }
+                    }),
                     best_common = name.as_deref().map_or(0, |n| best_profile_line(n, &prof).1),
-                    nickname_common = name.as_deref().map_or(0, |n| best_profile_line(n, &[OcrLine { text: f.nickname.clone(), x: 0.0, y: 0.0, w: 0.0, h: 0.0 }]).1),
-                    row_shape = name.as_deref().map_or(String::new(), |n| shape_against(n, &f.nickname)),
-                    nick_shape = name.as_deref().map_or(String::new(), |n| shape_against(&f.nickname, n)),
-                    line0_shape = name.as_deref().map_or(String::new(), |n| prof.first().map_or(String::new(), |l| shape_against(&l.text, n))),
-                    line1_shape = name.as_deref().map_or(String::new(), |n| prof.get(1).map_or(String::new(), |l| shape_against(&l.text, n))),
+                    nickname_common = name.as_deref().map_or(0, |n| best_profile_line(
+                        n,
+                        &[OcrLine {
+                            text: f.nickname.clone(),
+                            x: 0.0,
+                            y: 0.0,
+                            w: 0.0,
+                            h: 0.0
+                        }]
+                    )
+                    .1),
+                    row_shape = name
+                        .as_deref()
+                        .map_or(String::new(), |n| shape_against(n, &f.nickname)),
+                    nick_shape = name
+                        .as_deref()
+                        .map_or(String::new(), |n| shape_against(&f.nickname, n)),
+                    line0_shape = name.as_deref().map_or(String::new(), |n| prof
+                        .first()
+                        .map_or(String::new(), |l| shape_against(&l.text, n))),
+                    line1_shape = name.as_deref().map_or(String::new(), |n| prof
+                        .get(1)
+                        .map_or(String::new(), |l| shape_against(&l.text, n))),
                     "contacts_sync_profile_name_mismatch"
                 );
                 r.unreadable += 1;
@@ -724,8 +926,12 @@ async fn sync_group(
             let outcome = store.upsert_profile(account_id, &input, now_ms);
             {
                 let (kind, cid_tail) = match &outcome {
-                    Ok(UpsertOutcome::Created(c)) => ("created", c.chars().rev().take(4).collect::<String>()),
-                    Ok(UpsertOutcome::Updated(c)) => ("updated", c.chars().rev().take(4).collect::<String>()),
+                    Ok(UpsertOutcome::Created(c)) => {
+                        ("created", c.chars().rev().take(4).collect::<String>())
+                    }
+                    Ok(UpsertOutcome::Updated(c)) => {
+                        ("updated", c.chars().rev().take(4).collect::<String>())
+                    }
                     Ok(UpsertOutcome::NeedsReview { .. }) => ("needs_review", String::new()),
                     Err(_) => ("error", String::new()),
                 };
@@ -737,8 +943,17 @@ async fn sync_group(
                     has_wechat_id = input.wechat_id.is_some(),
                     outcome = kind,
                     cid_tail = cid_tail.as_str(),
-                    row_shape = name.as_deref().map_or(String::new(), |n| shape_against(n, &input.nickname)),
-                    card_fp = short_fp(&prof.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n")).as_str(),
+                    row_shape = name
+                        .as_deref()
+                        .map_or(String::new(), |n| shape_against(n, &input.nickname)),
+                    card_fp = short_fp(
+                        &prof
+                            .iter()
+                            .map(|l| l.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    )
+                    .as_str(),
                     nick_fp = short_fp(&input.nickname).as_str(),
                     ent_fp = short_fp(input.enterprise.as_deref().unwrap_or("")).as_str(),
                     "contacts_sync_row_ok"
@@ -765,10 +980,22 @@ async fn sync_group(
             Some(px) if px > 1.0 => (((last_y - 130.0) / px).floor() as i64).max(1) as u32,
             _ => 1,
         };
-        let next = screen_of(&capture.call("contacts_scroll_list", json!({"direction": "down", "ticks": ticks})).await?);
+        let next = screen_of(
+            &capture
+                .call(
+                    "contacts_scroll_list",
+                    json!({"direction": "down", "ticks": ticks}),
+                )
+                .await?,
+        );
         let expect = px_per_tick.map_or(100.0, |px| px * ticks as f64);
         let shift = measure_shift(&rows, &screen, &next, expect);
-        info!(category, ticks, shift = shift.unwrap_or(-1.0), "contacts_sync_scrolled");
+        info!(
+            category,
+            ticks,
+            shift = shift.unwrap_or(-1.0),
+            "contacts_sync_scrolled"
+        );
         match shift {
             Some(d) if d < 1.0 => break, // 滚不动：到底
             Some(d) => {
@@ -792,20 +1019,23 @@ async fn sync_group(
 mod tests {
     use super::*;
     use crate::core::contacts::parse::ManagerRow;
+    use crate::core::model::Frame;
+    use crate::core::worker_client::OcrStatus;
+    use anyhow::bail;
+    use serde_json::Value;
     use std::future::Future;
     use std::path::PathBuf;
     use std::pin::Pin;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
-    use anyhow::bail;
-    use serde_json::Value;
-    use crate::core::model::Frame;
-    use crate::core::worker_client::OcrStatus;
 
     struct TestTempDir(PathBuf);
     impl TestTempDir {
         fn new() -> Self {
-            let p = std::env::temp_dir().join(format!("wechat-sync-test-{}", uuid::Uuid::new_v4().simple()));
+            let p = std::env::temp_dir().join(format!(
+                "wechat-sync-test-{}",
+                uuid::Uuid::new_v4().simple()
+            ));
             fs::create_dir_all(&p).unwrap();
             Self(p)
         }
@@ -844,7 +1074,10 @@ mod tests {
 
     impl VirtualGroup {
         pub fn total_contacts(&self) -> u32 {
-            self.letter_sections.iter().map(|(_, items)| items.len() as u32).sum()
+            self.letter_sections
+                .iter()
+                .map(|(_, items)| items.len() as u32)
+                .sum()
         }
     }
 
@@ -961,7 +1194,10 @@ mod tests {
                     for (letter, items) in &g.letter_sections {
                         // 字母索引行高 36（实测）
                         let letter_center_y = cur_y + 18.0 - self.scroll_offset;
-                        if letter_center_y >= 40.0 && letter_center_y <= 640.0 && !self.letters_unread {
+                        if letter_center_y >= 40.0
+                            && letter_center_y <= 640.0
+                            && !self.letters_unread
+                        {
                             lines.push(OcrLine {
                                 text: letter.clone(),
                                 x: 95.0,
@@ -1017,7 +1253,10 @@ mod tests {
             cur_y
         }
 
-        fn find_item_at_virtual_y(&self, vy: f64) -> Option<(&VirtualGroup, Option<&VirtualContactItem>, bool, bool)> {
+        fn find_item_at_virtual_y(
+            &self,
+            vy: f64,
+        ) -> Option<(&VirtualGroup, Option<&VirtualContactItem>, bool, bool)> {
             // 返回 (group, Option<item>, is_header, is_letter)
             let mut cur_y = 90.0;
             for g in &self.groups {
@@ -1056,15 +1295,27 @@ mod tests {
         fn frame<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<Frame>> + Send + 'a>> {
             Box::pin(async { bail!("not implemented") })
         }
-        fn scroll<'a>(&'a mut self, _direction: &'a str, _amount: u32) -> Pin<Box<dyn Future<Output = Result<Frame>> + Send + 'a>> {
+        fn scroll<'a>(
+            &'a mut self,
+            _direction: &'a str,
+            _amount: u32,
+        ) -> Pin<Box<dyn Future<Output = Result<Frame>> + Send + 'a>> {
             Box::pin(async { bail!("not implemented") })
         }
-        fn call<'a>(&'a mut self, op: &'a str, params: Value) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>> {
+        fn call<'a>(
+            &'a mut self,
+            op: &'a str,
+            params: Value,
+        ) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>> {
             let calls = self.calls.clone();
             calls.lock().unwrap().push((op.to_string(), params.clone()));
 
             if self.fail_op.as_deref() == Some(op) {
-                return Box::pin(async { bail!("private visual operation failed: invalid(\"layout_mismatch:input_divider\")") });
+                return Box::pin(async {
+                    bail!(
+                        "private visual operation failed: invalid(\"layout_mismatch:input_divider\")"
+                    )
+                });
             }
             if op == "contacts_enter" {
                 self.scroll_offset = 0.0;
@@ -1078,12 +1329,16 @@ mod tests {
                 return Box::pin(async move { Ok(json!({"lines": lines, "avatars": avatars})) });
             }
             if op == "contacts_scroll_list" {
-                let dir = params.get("direction").and_then(|v| v.as_str()).unwrap_or("down");
+                let dir = params
+                    .get("direction")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("down");
                 let ticks = params.get("ticks").and_then(|v| v.as_u64()).unwrap_or(1) as f64;
                 if dir == "down" {
                     // 与真机一致：滚到底就停住
                     let max_offset = (self.content_height() - 600.0).max(0.0);
-                    self.scroll_offset = (self.scroll_offset + ticks * self.tick_px).min(max_offset);
+                    self.scroll_offset =
+                        (self.scroll_offset + ticks * self.tick_px).min(max_offset);
                 } else {
                     self.scroll_offset = (self.scroll_offset - ticks * self.tick_px).max(0.0);
                 }
@@ -1100,9 +1355,14 @@ mod tests {
                 let vy = y + self.scroll_offset;
                 if (vy - 59.0).abs() <= 15.0 {
                     self.manager_open = true;
-                    self.calls.lock().unwrap().push(("contacts_manager_opened_by_click".to_string(), json!({"y": y})));
+                    self.calls.lock().unwrap().push((
+                        "contacts_manager_opened_by_click".to_string(),
+                        json!({"y": y}),
+                    ));
                     let (lines, avatars) = self.render_list();
-                    return Box::pin(async move { Ok(json!({"lines": lines, "avatars": avatars})) });
+                    return Box::pin(
+                        async move { Ok(json!({"lines": lines, "avatars": avatars})) },
+                    );
                 }
                 let mut cur_y = 90.0;
                 for g in &mut self.groups {
@@ -1131,7 +1391,10 @@ mod tests {
                 if (vy - 59.0).abs() <= 15.0 {
                     // 点到「通讯录管理」按钮：真机会打开管理窗口
                     self.manager_open = true;
-                    self.calls.lock().unwrap().push(("contacts_manager_opened_by_click".to_string(), json!({"y": y})));
+                    self.calls.lock().unwrap().push((
+                        "contacts_manager_opened_by_click".to_string(),
+                        json!({"y": y}),
+                    ));
                     return Box::pin(async { Ok(json!({"lines": []})) });
                 }
                 let found = self.find_item_at_virtual_y(vy);
@@ -1139,7 +1402,9 @@ mod tests {
                     let changed = self.shown_profile.as_deref() != Some(item.name.as_str());
                     if let Some(ref mis) = item.misaligned_profile {
                         let lines = mis.clone();
-                        return Box::pin(async move { Ok(json!({"lines": lines, "changed": true})) });
+                        return Box::pin(
+                            async move { Ok(json!({"lines": lines, "changed": true})) },
+                        );
                     }
                     let item_name = item.name.clone();
                     let mut lines = Vec::new();
@@ -1158,7 +1423,9 @@ mod tests {
                         lines.push(line(&format!("实名{}", rn), 520.0, 210.0));
                     }
                     self.shown_profile = Some(item_name);
-                    return Box::pin(async move { Ok(json!({"lines": lines, "changed": changed})) });
+                    return Box::pin(
+                        async move { Ok(json!({"lines": lines, "changed": changed})) },
+                    );
                 }
                 // 点到分组标题：真机上会切换展开/收起（危险点击）
                 if let Some((_g, None, true, false)) = found {
@@ -1195,7 +1462,10 @@ mod tests {
                 self.manager_open = false;
                 return Box::pin(async { Ok(json!({"closed": true})) });
             }
-            if op == "contacts_manager_page" || op == "contacts_manager_scroll" || op == "contacts_manager_filter" {
+            if op == "contacts_manager_page"
+                || op == "contacts_manager_scroll"
+                || op == "contacts_manager_filter"
+            {
                 if !self.manager_open {
                     return Box::pin(async { bail!("contacts_manager_missing") });
                 }
@@ -1213,7 +1483,11 @@ mod tests {
                     let kind = params.get("kind").and_then(|v| v.as_str()).unwrap_or("all");
                     if kind == "tag" {
                         let y = params.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                        if let Some((tag, _)) = self.manager_tags.iter().find(|(_, ty)| (ty - y).abs() < 10.0) {
+                        if let Some((tag, _)) = self
+                            .manager_tags
+                            .iter()
+                            .find(|(_, ty)| (ty - y).abs() < 10.0)
+                        {
                             self.current_filter_tag = Some(tag.clone());
                         } else {
                             return Box::pin(async { bail!("contacts_filter_position_invalid") });
@@ -1223,15 +1497,22 @@ mod tests {
                     }
                     self.manager_scroll_row = 0;
                 } else if op == "contacts_manager_scroll" {
-                    let dir = params.get("direction").and_then(|v| v.as_str()).unwrap_or("down");
+                    let dir = params
+                        .get("direction")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("down");
                     let ticks = params.get("ticks").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
-                    let filtered_rows: Vec<_> = self.manager_rows.iter().filter(|r| {
-                        if let Some(ref tag) = self.current_filter_tag {
-                            r.tags.contains(tag)
-                        } else {
-                            true
-                        }
-                    }).collect();
+                    let filtered_rows: Vec<_> = self
+                        .manager_rows
+                        .iter()
+                        .filter(|r| {
+                            if let Some(ref tag) = self.current_filter_tag {
+                                r.tags.contains(tag)
+                            } else {
+                                true
+                            }
+                        })
+                        .collect();
                     let max_start = filtered_rows.len().saturating_sub(10);
                     if dir == "down" {
                         self.manager_scroll_row = (self.manager_scroll_row + ticks).min(max_start);
@@ -1240,13 +1521,17 @@ mod tests {
                     }
                 }
 
-                let filtered_rows: Vec<_> = self.manager_rows.iter().filter(|r| {
-                    if let Some(ref tag) = self.current_filter_tag {
-                        r.tags.contains(tag)
-                    } else {
-                        true
-                    }
-                }).collect();
+                let filtered_rows: Vec<_> = self
+                    .manager_rows
+                    .iter()
+                    .filter(|r| {
+                        if let Some(ref tag) = self.current_filter_tag {
+                            r.tags.contains(tag)
+                        } else {
+                            true
+                        }
+                    })
+                    .collect();
 
                 let mut lines = Vec::new();
                 lines.push(line("全部", 40.0, 52.0));
@@ -1282,18 +1567,39 @@ mod tests {
 
             Box::pin(async { Ok(json!({})) })
         }
-        fn retarget<'a>(&'a mut self, _recipient: &'a str, _directory: &'a Path, _names: &'a [String], _group: bool) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        fn retarget<'a>(
+            &'a mut self,
+            _recipient: &'a str,
+            _directory: &'a Path,
+            _names: &'a [String],
+            _group: bool,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
             Box::pin(async { Ok(()) })
         }
-        fn sessions<'a>(&'a mut self, _names: &'a [String]) -> Pin<Box<dyn Future<Output = Result<Vec<crate::core::scheduler::SessionRow>>> + Send + 'a>> {
+        fn sessions<'a>(
+            &'a mut self,
+            _names: &'a [String],
+        ) -> Pin<
+            Box<dyn Future<Output = Result<Vec<crate::core::scheduler::SessionRow>>> + Send + 'a>,
+        > {
             Box::pin(async { Ok(vec![]) })
         }
-        fn download<'a>(&'a mut self, _media_id: &'a str, _kind: &'a str) -> Pin<Box<dyn Future<Output = Result<PathBuf>> + Send + 'a>> {
+        fn download<'a>(
+            &'a mut self,
+            _media_id: &'a str,
+            _kind: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<PathBuf>> + Send + 'a>> {
             Box::pin(async { bail!("not implemented") })
         }
-        fn last_switch(&self) -> Option<Value> { None }
-        fn ocr_status(&self) -> Option<OcrStatus> { None }
-        fn is_connected(&self) -> bool { true }
+        fn last_switch(&self) -> Option<Value> {
+            None
+        }
+        fn ocr_status(&self) -> Option<OcrStatus> {
+            None
+        }
+        fn is_connected(&self) -> bool {
+            true
+        }
     }
 
     fn line(text: &str, x: f64, y: f64) -> OcrLine {
@@ -1314,25 +1620,108 @@ mod tests {
         let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
 
         let p_items = vec![
-            VirtualContactItem { name: "张三".to_string(), remark: None, wechat_id: Some("wxid_p1".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
-            VirtualContactItem { name: "李四".to_string(), remark: None, wechat_id: Some("wxid_p2".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
-            VirtualContactItem { name: "王五".to_string(), remark: None, wechat_id: Some("wxid_p3".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
+            VirtualContactItem {
+                name: "张三".to_string(),
+                remark: None,
+                wechat_id: Some("wxid_p1".to_string()),
+                enterprise: None,
+                real_name: None,
+                tags: vec![],
+                friend_permission: None,
+                unreadable: false,
+                misaligned_profile: None,
+            },
+            VirtualContactItem {
+                name: "李四".to_string(),
+                remark: None,
+                wechat_id: Some("wxid_p2".to_string()),
+                enterprise: None,
+                real_name: None,
+                tags: vec![],
+                friend_permission: None,
+                unreadable: false,
+                misaligned_profile: None,
+            },
+            VirtualContactItem {
+                name: "王五".to_string(),
+                remark: None,
+                wechat_id: Some("wxid_p3".to_string()),
+                enterprise: None,
+                real_name: None,
+                tags: vec![],
+                friend_permission: None,
+                unreadable: false,
+                misaligned_profile: None,
+            },
         ];
-        let w_items = vec![
-            VirtualContactItem { name: "企微员工赵".to_string(), remark: None, wechat_id: None, enterprise: Some("某某公司".to_string()), real_name: Some("赵六".to_string()), tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
-        ];
+        let w_items = vec![VirtualContactItem {
+            name: "企微员工赵".to_string(),
+            remark: None,
+            wechat_id: None,
+            enterprise: Some("某某公司".to_string()),
+            real_name: Some("赵六".to_string()),
+            tags: vec![],
+            friend_permission: None,
+            unreadable: false,
+            misaligned_profile: None,
+        }];
         let o_items = vec![
-            VirtualContactItem { name: "公众号一".to_string(), remark: None, wechat_id: Some("gh_off1".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
-            VirtualContactItem { name: "公众号二".to_string(), remark: None, wechat_id: Some("gh_off2".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
+            VirtualContactItem {
+                name: "公众号一".to_string(),
+                remark: None,
+                wechat_id: Some("gh_off1".to_string()),
+                enterprise: None,
+                real_name: None,
+                tags: vec![],
+                friend_permission: None,
+                unreadable: false,
+                misaligned_profile: None,
+            },
+            VirtualContactItem {
+                name: "公众号二".to_string(),
+                remark: None,
+                wechat_id: Some("gh_off2".to_string()),
+                enterprise: None,
+                real_name: None,
+                tags: vec![],
+                friend_permission: None,
+                unreadable: false,
+                misaligned_profile: None,
+            },
         ];
 
-        let g_personal = VirtualGroup { category: "personal".to_string(), title: "联系人".to_string(), letter_sections: vec![("P".to_string(), p_items)], expanded: false };
-        let g_work = VirtualGroup { category: "work".to_string(), title: "企业微信联系人".to_string(), letter_sections: vec![("W".to_string(), w_items)], expanded: false };
-        let g_official = VirtualGroup { category: "official".to_string(), title: "公众号、服务号".to_string(), letter_sections: vec![("O".to_string(), o_items)], expanded: false };
+        let g_personal = VirtualGroup {
+            category: "personal".to_string(),
+            title: "联系人".to_string(),
+            letter_sections: vec![("P".to_string(), p_items)],
+            expanded: false,
+        };
+        let g_work = VirtualGroup {
+            category: "work".to_string(),
+            title: "企业微信联系人".to_string(),
+            letter_sections: vec![("W".to_string(), w_items)],
+            expanded: false,
+        };
+        let g_official = VirtualGroup {
+            category: "official".to_string(),
+            title: "公众号、服务号".to_string(),
+            letter_sections: vec![("O".to_string(), o_items)],
+            expanded: false,
+        };
 
         let mut ui = VirtualContactsUi::new(vec![g_personal, g_work, g_official]);
         let no_yield = || false;
-        let report = run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+        let report = run_sync(
+            &mut ui,
+            &store,
+            "test_acct",
+            SyncMode::Full,
+            &checkpoint,
+            &no_yield,
+            1000,
+        )
+        .await
+        .unwrap();
 
         assert!(report.complete, "report: {report:?}");
         assert!(!report.yielded);
@@ -1340,7 +1729,10 @@ mod tests {
         let profiles = store.list_profiles("test_acct", None).unwrap();
         // 公众号不采集（用户 2026-11-08）：只有 3 个联系人 + 1 个企业微信联系人
         assert_eq!(profiles.len(), 4);
-        assert!(profiles.iter().all(|p| p["category"] != "official"), "{profiles:?}");
+        assert!(
+            profiles.iter().all(|p| p["category"] != "official"),
+            "{profiles:?}"
+        );
         assert!(report.per_category.iter().all(|(c, _, _)| c != "official"));
     }
 
@@ -1352,15 +1744,50 @@ mod tests {
         let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
 
         let p_items = vec![
-            VirtualContactItem { name: "张三".to_string(), remark: None, wechat_id: Some("wxid_p1".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
+            VirtualContactItem {
+                name: "张三".to_string(),
+                remark: None,
+                wechat_id: Some("wxid_p1".to_string()),
+                enterprise: None,
+                real_name: None,
+                tags: vec![],
+                friend_permission: None,
+                unreadable: false,
+                misaligned_profile: None,
+            },
             // 资料卡读不出任何文字
-            VirtualContactItem { name: "李四".to_string(), remark: None, wechat_id: Some("wxid_p2".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: Some(vec![]) },
+            VirtualContactItem {
+                name: "李四".to_string(),
+                remark: None,
+                wechat_id: Some("wxid_p2".to_string()),
+                enterprise: None,
+                real_name: None,
+                tags: vec![],
+                friend_permission: None,
+                unreadable: false,
+                misaligned_profile: Some(vec![]),
+            },
         ];
-        let g_personal = VirtualGroup { category: "personal".to_string(), title: "联系人".to_string(), letter_sections: vec![("P".to_string(), p_items)], expanded: false };
+        let g_personal = VirtualGroup {
+            category: "personal".to_string(),
+            title: "联系人".to_string(),
+            letter_sections: vec![("P".to_string(), p_items)],
+            expanded: false,
+        };
 
         let mut ui = VirtualContactsUi::new(vec![g_personal]);
         let no_yield = || false;
-        let report = run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+        let report = run_sync(
+            &mut ui,
+            &store,
+            "test_acct",
+            SyncMode::Full,
+            &checkpoint,
+            &no_yield,
+            1000,
+        )
+        .await
+        .unwrap();
         assert!(!report.complete);
         assert_eq!(report.unreadable_rows, 1);
         let res_file = state_dir.join("contacts-sync-result.json");
@@ -1394,33 +1821,61 @@ mod tests {
             store.upsert_profile("test_acct", &p, 500).unwrap();
         }
 
-        let p_items = (1..=4).map(|i| VirtualContactItem {
-            name: format!("用户{i}"),
-            remark: None,
-            wechat_id: Some(format!("wxid_p{i}")),
-            enterprise: None,
-            real_name: None,
-            tags: vec![],
-            friend_permission: None,
-            unreadable: false,
-            misaligned_profile: None,
-        }).collect();
-        let g_personal = VirtualGroup { category: "personal".to_string(), title: "联系人".to_string(), letter_sections: vec![("U".to_string(), p_items)], expanded: false };
+        let p_items = (1..=4)
+            .map(|i| VirtualContactItem {
+                name: format!("用户{i}"),
+                remark: None,
+                wechat_id: Some(format!("wxid_p{i}")),
+                enterprise: None,
+                real_name: None,
+                tags: vec![],
+                friend_permission: None,
+                unreadable: false,
+                misaligned_profile: None,
+            })
+            .collect();
+        let g_personal = VirtualGroup {
+            category: "personal".to_string(),
+            title: "联系人".to_string(),
+            letter_sections: vec![("U".to_string(), p_items)],
+            expanded: false,
+        };
 
         let mut ui = VirtualContactsUi::new(vec![g_personal]);
-        ui.manager_rows = (1..=4).map(|i| ManagerRow {
-            row_y: 96.0 + 48.0 * ((i - 1) as f64),
-            name: Some(format!("用户{i}")),
-            remark: None,
-            tags: vec![],
-            permission: None,
-        }).collect();
+        ui.manager_rows = (1..=4)
+            .map(|i| ManagerRow {
+                row_y: 96.0 + 48.0 * ((i - 1) as f64),
+                name: Some(format!("用户{i}")),
+                remark: None,
+                tags: vec![],
+                permission: None,
+            })
+            .collect();
 
         let no_yield = || false;
-        let report = run_sync(&mut ui, &store, "test_acct", SyncMode::Incremental, &checkpoint, &no_yield, 1000).await.unwrap();
+        let report = run_sync(
+            &mut ui,
+            &store,
+            "test_acct",
+            SyncMode::Incremental,
+            &checkpoint,
+            &no_yield,
+            1000,
+        )
+        .await
+        .unwrap();
         assert!(report.complete);
-        let open_row_calls = ui.calls.lock().unwrap().iter().filter(|(op, _)| op == "contacts_open_row").count();
-        assert_eq!(open_row_calls, 1, "Only the 4th new user should trigger contacts_open_row");
+        let open_row_calls = ui
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(op, _)| op == "contacts_open_row")
+            .count();
+        assert_eq!(
+            open_row_calls, 1,
+            "Only the 4th new user should trigger contacts_open_row"
+        );
     }
 
     #[tokio::test]
@@ -1430,14 +1885,37 @@ mod tests {
         let store = HistoryStore::open(&state_dir).unwrap();
         let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
 
-        let p_items = vec![
-            VirtualContactItem { name: "张三".to_string(), remark: None, wechat_id: Some("wxid_p1".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
-        ];
-        let g = VirtualGroup { category: "personal".to_string(), title: "联系人".to_string(), letter_sections: vec![("Z".to_string(), p_items)], expanded: false };
+        let p_items = vec![VirtualContactItem {
+            name: "张三".to_string(),
+            remark: None,
+            wechat_id: Some("wxid_p1".to_string()),
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+            unreadable: false,
+            misaligned_profile: None,
+        }];
+        let g = VirtualGroup {
+            category: "personal".to_string(),
+            title: "联系人".to_string(),
+            letter_sections: vec![("Z".to_string(), p_items)],
+            expanded: false,
+        };
 
         let mut ui = VirtualContactsUi::new(vec![g]);
         let no_yield = || false;
-        run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+        run_sync(
+            &mut ui,
+            &store,
+            "test_acct",
+            SyncMode::Full,
+            &checkpoint,
+            &no_yield,
+            1000,
+        )
+        .await
+        .unwrap();
 
         let calls = ui.calls.lock().unwrap();
         for (op, params) in calls.iter() {
@@ -1458,22 +1936,55 @@ mod tests {
         let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
         let pause_file = state_dir.join("admin-pause.json");
 
-        let p_items = vec![
-            VirtualContactItem { name: "张三".to_string(), remark: None, wechat_id: Some("wxid_p1".to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
-        ];
-        let g = VirtualGroup { category: "personal".to_string(), title: "联系人".to_string(), letter_sections: vec![("Z".to_string(), p_items)], expanded: false };
+        let p_items = vec![VirtualContactItem {
+            name: "张三".to_string(),
+            remark: None,
+            wechat_id: Some("wxid_p1".to_string()),
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+            unreadable: false,
+            misaligned_profile: None,
+        }];
+        let g = VirtualGroup {
+            category: "personal".to_string(),
+            title: "联系人".to_string(),
+            letter_sections: vec![("Z".to_string(), p_items)],
+            expanded: false,
+        };
 
         let mut ui = VirtualContactsUi::new(vec![g]);
 
         // Case A: pause_file did not exist initially -> removed after sync
         assert!(!pause_file.exists());
         let no_yield = || false;
-        run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+        run_sync(
+            &mut ui,
+            &store,
+            "test_acct",
+            SyncMode::Full,
+            &checkpoint,
+            &no_yield,
+            1000,
+        )
+        .await
+        .unwrap();
         assert!(!pause_file.exists());
 
         // Case B: pause_file existed initially -> remains after sync
         fs::write(&pause_file, b"{\"paused\":true}").unwrap();
-        run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 2000).await.unwrap();
+        run_sync(
+            &mut ui,
+            &store,
+            "test_acct",
+            SyncMode::Full,
+            &checkpoint,
+            &no_yield,
+            2000,
+        )
+        .await
+        .unwrap();
         assert!(pause_file.exists());
     }
 
@@ -1486,10 +1997,23 @@ mod tests {
 
         let secret_name = "秘密联系人甲";
         let secret_wxid = "wxid_secret_999";
-        let p_items = vec![
-            VirtualContactItem { name: secret_name.to_string(), remark: None, wechat_id: Some(secret_wxid.to_string()), enterprise: None, real_name: None, tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None },
-        ];
-        let g = VirtualGroup { category: "personal".to_string(), title: "联系人".to_string(), letter_sections: vec![("M".to_string(), p_items)], expanded: false };
+        let p_items = vec![VirtualContactItem {
+            name: secret_name.to_string(),
+            remark: None,
+            wechat_id: Some(secret_wxid.to_string()),
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+            unreadable: false,
+            misaligned_profile: None,
+        }];
+        let g = VirtualGroup {
+            category: "personal".to_string(),
+            title: "联系人".to_string(),
+            letter_sections: vec![("M".to_string(), p_items)],
+            expanded: false,
+        };
 
         let mut ui = VirtualContactsUi::new(vec![g]);
 
@@ -1513,12 +2037,30 @@ mod tests {
 
         let no_yield = || false;
         let _guard = tracing::subscriber::set_default(subscriber);
-        run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+        run_sync(
+            &mut ui,
+            &store,
+            "test_acct",
+            SyncMode::Full,
+            &checkpoint,
+            &no_yield,
+            1000,
+        )
+        .await
+        .unwrap();
         drop(_guard);
 
         let logs = String::from_utf8(log_buffer.lock().unwrap().clone()).unwrap();
-        assert!(!logs.contains(secret_name), "Logs leaked secret name: {}", logs);
-        assert!(!logs.contains(secret_wxid), "Logs leaked secret wxid: {}", logs);
+        assert!(
+            !logs.contains(secret_name),
+            "Logs leaked secret name: {}",
+            logs
+        );
+        assert!(
+            !logs.contains(secret_wxid),
+            "Logs leaked secret wxid: {}",
+            logs
+        );
     }
 
     #[tokio::test]
@@ -1567,7 +2109,17 @@ mod tests {
 
         let mut ui = VirtualContactsUi::new(vec![group]);
         let no_yield = || false;
-        let report = run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+        let report = run_sync(
+            &mut ui,
+            &store,
+            "test_acct",
+            SyncMode::Full,
+            &checkpoint,
+            &no_yield,
+            1000,
+        )
+        .await
+        .unwrap();
 
         assert!(report.complete, "report should be complete: {report:?}");
         assert_eq!(report.per_category, vec![("personal".to_string(), 22, 22)]);
@@ -1594,8 +2146,9 @@ mod tests {
         let g1 = VirtualGroup {
             category: "official".to_string(),
             title: "公众号、服务号".to_string(),
-            letter_sections: vec![
-                ("G".to_string(), vec![VirtualContactItem {
+            letter_sections: vec![(
+                "G".to_string(),
+                vec![VirtualContactItem {
                     name: "公众号甲".to_string(),
                     remark: None,
                     wechat_id: Some("gh_111".to_string()),
@@ -1605,15 +2158,16 @@ mod tests {
                     friend_permission: None,
                     unreadable: false,
                     misaligned_profile: None,
-                }]),
-            ],
+                }],
+            )],
             expanded: false,
         };
         let g2 = VirtualGroup {
             category: "personal".to_string(),
             title: "联系人".to_string(),
-            letter_sections: vec![
-                ("Z".to_string(), vec![VirtualContactItem {
+            letter_sections: vec![(
+                "Z".to_string(),
+                vec![VirtualContactItem {
                     name: "张三".to_string(),
                     remark: None,
                     wechat_id: Some("wxid_zs".to_string()),
@@ -1623,22 +2177,38 @@ mod tests {
                     friend_permission: None,
                     unreadable: false,
                     misaligned_profile: None,
-                }]),
-            ],
+                }],
+            )],
             expanded: false,
         };
 
         let mut ui = VirtualContactsUi::new(vec![g1, g2]);
         let no_yield = || false;
-        run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+        run_sync(
+            &mut ui,
+            &store,
+            "test_acct",
+            SyncMode::Full,
+            &checkpoint,
+            &no_yield,
+            1000,
+        )
+        .await
+        .unwrap();
 
         // 检查所有 open_row 点击的 y，不得落在 header 或字母行
         for &y in &ui.row_open_clicks {
             let vy = y + ui.scroll_offset;
             let found = ui.find_item_at_virtual_y(vy);
             if let Some((_, _, is_header, is_letter)) = found {
-                assert!(!is_header, "contacts_open_row clicked on group header at y={y}");
-                assert!(!is_letter, "contacts_open_row clicked on letter row at y={y}");
+                assert!(
+                    !is_header,
+                    "contacts_open_row clicked on group header at y={y}"
+                );
+                assert!(
+                    !is_letter,
+                    "contacts_open_row clicked on letter row at y={y}"
+                );
             }
         }
     }
@@ -1659,8 +2229,9 @@ mod tests {
         let g = VirtualGroup {
             category: "personal".to_string(),
             title: "联系人".to_string(),
-            letter_sections: vec![
-                ("Z".to_string(), vec![VirtualContactItem {
+            letter_sections: vec![(
+                "Z".to_string(),
+                vec![VirtualContactItem {
                     name: "张三".to_string(),
                     remark: None,
                     wechat_id: Some("wxid_zhangsan".to_string()),
@@ -1670,20 +2241,37 @@ mod tests {
                     friend_permission: None,
                     unreadable: false,
                     misaligned_profile: Some(misaligned_lines),
-                }]),
-            ],
+                }],
+            )],
             expanded: false,
         };
 
         let mut ui = VirtualContactsUi::new(vec![g]);
         let no_yield = || false;
-        let report = run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+        let report = run_sync(
+            &mut ui,
+            &store,
+            "test_acct",
+            SyncMode::Full,
+            &checkpoint,
+            &no_yield,
+            1000,
+        )
+        .await
+        .unwrap();
 
         assert!(!report.complete);
         assert_eq!(report.unreadable_rows, 1);
-        assert!(ui.row_open_clicks.len() >= 1, "Must have opened the row to detect misalignment");
+        assert!(
+            ui.row_open_clicks.len() >= 1,
+            "Must have opened the row to detect misalignment"
+        );
         let profiles = store.list_profiles("test_acct", None).unwrap();
-        assert_eq!(profiles.len(), 0, "Misaligned profile must not be written to db");
+        assert_eq!(
+            profiles.len(),
+            0,
+            "Misaligned profile must not be written to db"
+        );
     }
 
     #[tokio::test]
@@ -1696,8 +2284,9 @@ mod tests {
         let g = VirtualGroup {
             category: "personal".to_string(),
             title: "联系人".to_string(),
-            letter_sections: vec![
-                ("A".to_string(), vec![
+            letter_sections: vec![(
+                "A".to_string(),
+                vec![
                     VirtualContactItem {
                         name: "用户A".to_string(),
                         remark: None,
@@ -1731,22 +2320,38 @@ mod tests {
                         unreadable: false,
                         misaligned_profile: None,
                     },
-                ]),
-            ],
+                ],
+            )],
             expanded: false,
         };
 
         let mut ui = VirtualContactsUi::new(vec![g]);
         let no_yield = || false;
-        let report = run_sync(&mut ui, &store, "test_acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+        let report = run_sync(
+            &mut ui,
+            &store,
+            "test_acct",
+            SyncMode::Full,
+            &checkpoint,
+            &no_yield,
+            1000,
+        )
+        .await
+        .unwrap();
 
         // 列表上认不出名字的行仍按头像点开，资料卡换成了新的人就记下；三个人的微信号各归各位
         assert!(report.complete, "{report:?}");
         let profiles = store.list_profiles("test_acct", None).unwrap();
         assert_eq!(profiles.len(), 3);
-        for (nick, wid) in [("用户A", "wxid_a"), ("用户B", "wxid_b"), ("用户C", "wxid_c")] {
+        for (nick, wid) in [
+            ("用户A", "wxid_a"),
+            ("用户B", "wxid_b"),
+            ("用户C", "wxid_c"),
+        ] {
             assert!(
-                profiles.iter().any(|p| p["nickname"] == nick && p["wechat_id"] == wid),
+                profiles
+                    .iter()
+                    .any(|p| p["nickname"] == nick && p["wechat_id"] == wid),
                 "{nick} 应对应 {wid}: {profiles:?}"
             );
         }
@@ -1761,18 +2366,33 @@ mod tests {
         let _attempt_path = state_dir.join("contacts-sync-daily-attempt.json");
 
         // 写入一次不完整同步结果
-        fs::write(&res_path, serde_json::to_string(&json!({
-            "finished_at_ms": 1000000000000_i64,
-            "complete": false,
-        })).unwrap()).unwrap();
+        fs::write(
+            &res_path,
+            serde_json::to_string(&json!({
+                "finished_at_ms": 1000000000000_i64,
+                "complete": false,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
 
         // 检查在同一天（未跨天且未满20小时）是否会再次触发
         let now_sec = 1000000000.0 + 3600.0; // 1小时后
-        assert!(!should_attempt_daily_sync(&state_dir, "test_acct", true, now_sec));
+        assert!(!should_attempt_daily_sync(
+            &state_dir,
+            "test_acct",
+            true,
+            now_sec
+        ));
 
         // 记录当天 attempt
         record_daily_sync_attempt(&state_dir, "test_acct", now_sec).unwrap();
-        assert!(!should_attempt_daily_sync(&state_dir, "test_acct", true, now_sec + 3600.0));
+        assert!(!should_attempt_daily_sync(
+            &state_dir,
+            "test_acct",
+            true,
+            now_sec + 3600.0
+        ));
     }
 
     #[test]
@@ -1783,22 +2403,40 @@ mod tests {
         let pause_file = state_dir.join("admin-pause.json");
 
         // Case 1: reason == contacts_sync -> 清理
-        fs::write(&pause_file, serde_json::to_string(&json!({
-            "paused": true,
-            "reason": "contacts_sync"
-        })).unwrap()).unwrap();
+        fs::write(
+            &pause_file,
+            serde_json::to_string(&json!({
+                "paused": true,
+                "reason": "contacts_sync"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         clean_stale_contacts_sync_pause(&state_dir);
-        assert!(!pause_file.exists(), "Stale contacts_sync pause must be removed");
+        assert!(
+            !pause_file.exists(),
+            "Stale contacts_sync pause must be removed"
+        );
 
         // Case 2: reason == manual -> 不清理
-        fs::write(&pause_file, serde_json::to_string(&json!({
-            "paused": true,
-            "reason": "manual_admin"
-        })).unwrap()).unwrap();
+        fs::write(
+            &pause_file,
+            serde_json::to_string(&json!({
+                "paused": true,
+                "reason": "manual_admin"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         clean_stale_contacts_sync_pause(&state_dir);
         assert!(pause_file.exists(), "User manual pause must NOT be removed");
     }
-    fn letter_group(category: &str, title: &str, prefix: &str, sections: &[(&str, usize)]) -> VirtualGroup {
+    fn letter_group(
+        category: &str,
+        title: &str,
+        prefix: &str,
+        sections: &[(&str, usize)],
+    ) -> VirtualGroup {
         let mut n = 0;
         let letter_sections = sections
             .iter()
@@ -1822,7 +2460,12 @@ mod tests {
                 (letter.to_string(), items)
             })
             .collect();
-        VirtualGroup { category: category.to_string(), title: title.to_string(), letter_sections, expanded: false }
+        VirtualGroup {
+            category: category.to_string(),
+            title: title.to_string(),
+            letter_sections,
+            expanded: false,
+        }
     }
 
     /// 真机识别出的分组标题带箭头（"> 公众号、服务号"、展开后 "∨ 联系人"），不能被当成联系人去"打开资料卡"
@@ -1839,7 +2482,17 @@ mod tests {
         ui.header_arrows = true;
 
         let no_yield = || false;
-        let report = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+        let report = run_sync(
+            &mut ui,
+            &store,
+            "acct",
+            SyncMode::Full,
+            &checkpoint,
+            &no_yield,
+            1000,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(ui.header_open_clicks, 0, "不得用打开资料卡点分组标题");
         assert!(report.complete, "{report:?}");
@@ -1859,12 +2512,36 @@ mod tests {
         ui.fail_op = Some("contacts_headers".to_string());
 
         let no_yield = || false;
-        let res = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await;
+        let res = run_sync(
+            &mut ui,
+            &store,
+            "acct",
+            SyncMode::Full,
+            &checkpoint,
+            &no_yield,
+            1000,
+        )
+        .await;
         assert!(res.is_err(), "读分组失败应当返回错误");
-        let ops: Vec<String> = ui.calls.lock().unwrap().iter().map(|(op, _)| op.clone()).collect();
-        let enter = ops.iter().position(|o| o == "contacts_enter").expect("entered");
-        assert!(ops[enter..].iter().any(|o| o == "contacts_leave"), "进过通讯录就必须离开: {ops:?}");
-        assert!(!state_dir.join("admin-pause.json").exists(), "同步写的暂停标记必须清除");
+        let ops: Vec<String> = ui
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(op, _)| op.clone())
+            .collect();
+        let enter = ops
+            .iter()
+            .position(|o| o == "contacts_enter")
+            .expect("entered");
+        assert!(
+            ops[enter..].iter().any(|o| o == "contacts_leave"),
+            "进过通讯录就必须离开: {ops:?}"
+        );
+        assert!(
+            !state_dir.join("admin-pause.json").exists(),
+            "同步写的暂停标记必须清除"
+        );
     }
 
     /// 用户要求（2026-11-08）：初始化通讯录不打开「通讯录管理」（那里没有每个人的详细资料），
@@ -1880,11 +2557,22 @@ mod tests {
         let mut ui = VirtualContactsUi::new(vec![official, personal]);
         let no_yield = || false;
         for mode in [SyncMode::Full, SyncMode::Incremental] {
-            let report = run_sync(&mut ui, &store, "acct", mode, &checkpoint, &no_yield, 1000).await.unwrap();
+            let report = run_sync(&mut ui, &store, "acct", mode, &checkpoint, &no_yield, 1000)
+                .await
+                .unwrap();
             assert!(report.complete, "{mode:?}: {report:?}");
         }
-        let ops: Vec<String> = ui.calls.lock().unwrap().iter().map(|(op, _)| op.clone()).collect();
-        assert!(!ops.iter().any(|o| o.starts_with("contacts_manager_")), "不得打开通讯录管理: {ops:?}");
+        let ops: Vec<String> = ui
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(op, _)| op.clone())
+            .collect();
+        assert!(
+            !ops.iter().any(|o| o.starts_with("contacts_manager_")),
+            "不得打开通讯录管理: {ops:?}"
+        );
     }
 
     /// 实机：断点续做时每一轮都立刻失败，断点还在，下一轮又续做——每秒一次的死循环（347 次），机器人停摆。
@@ -1901,12 +2589,35 @@ mod tests {
         fs::write(&checkpoint, "{}").unwrap(); // 旧版本留下的断点
         ui.fail_op = Some("contacts_scroll_list".to_string());
         let no_yield = || false;
-        assert!(run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &no_yield, 2000).await.is_err());
-        assert!(!checkpoint.exists(), "出错后必须清掉断点，否则协调器会每轮续做、陷入循环");
-        let result: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(state_dir.join("contacts-sync-result.json")).unwrap()).unwrap();
+        assert!(
+            run_sync(
+                &mut ui,
+                &store,
+                "acct",
+                SyncMode::Full,
+                &checkpoint,
+                &no_yield,
+                2000
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            !checkpoint.exists(),
+            "出错后必须清掉断点，否则协调器会每轮续做、陷入循环"
+        );
+        let result: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(state_dir.join("contacts-sync-result.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(result["complete"], false);
-        assert!(result["error"].as_str().unwrap_or("").contains("layout_mismatch"), "{result}");
+        assert!(
+            result["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("layout_mismatch"),
+            "{result}"
+        );
     }
 
     /// 中途停下不做断点续做：下次从头按固定流程再走一遍，按微信号更新，不重复记录
@@ -1921,11 +2632,31 @@ mod tests {
         let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let n2 = n.clone();
         let stop_soon = move || n2.fetch_add(1, Ordering::SeqCst) >= 4;
-        let first = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &stop_soon, 1000).await.unwrap();
+        let first = run_sync(
+            &mut ui,
+            &store,
+            "acct",
+            SyncMode::Full,
+            &checkpoint,
+            &stop_soon,
+            1000,
+        )
+        .await
+        .unwrap();
         assert!(first.yielded && !first.complete, "{first:?}");
         assert!(!checkpoint.exists());
         let no_yield = || false;
-        let second = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &no_yield, 2000).await.unwrap();
+        let second = run_sync(
+            &mut ui,
+            &store,
+            "acct",
+            SyncMode::Full,
+            &checkpoint,
+            &no_yield,
+            2000,
+        )
+        .await
+        .unwrap();
         assert!(second.complete, "{second:?}");
         assert_eq!(store.list_profiles("acct", None).unwrap().len(), 10);
     }
@@ -1938,24 +2669,60 @@ mod tests {
         let state_dir = temp.path().join("state");
         let store = HistoryStore::open(&state_dir).unwrap();
         let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
-        let work = letter_group("work", "企业微信联系人", "企", &[("A", 3), ("C", 1), ("D", 2), ("L", 4), ("Z", 4)]);
-        let personal = letter_group("personal", "联系人", "人", &[("K", 1), ("L", 1), ("M", 2), ("N", 1), ("W", 6), ("X", 11)]);
+        let work = letter_group(
+            "work",
+            "企业微信联系人",
+            "企",
+            &[("A", 3), ("C", 1), ("D", 2), ("L", 4), ("Z", 4)],
+        );
+        let personal = letter_group(
+            "personal",
+            "联系人",
+            "人",
+            &[("K", 1), ("L", 1), ("M", 2), ("N", 1), ("W", 6), ("X", 11)],
+        );
         let mut ui = VirtualContactsUi::new(vec![work, personal]);
         ui.letters_unread = true;
         ui.counts_always = true;
         ui.header_arrows = true;
         let no_yield = || false;
-        let report = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+        let report = run_sync(
+            &mut ui,
+            &store,
+            "acct",
+            SyncMode::Full,
+            &checkpoint,
+            &no_yield,
+            1000,
+        )
+        .await
+        .unwrap();
         assert!(report.complete, "{report:?}");
-        assert_eq!(report.per_category, vec![("work".to_string(), 14, 14), ("personal".to_string(), 22, 22)]);
+        assert_eq!(
+            report.per_category,
+            vec![
+                ("work".to_string(), 14, 14),
+                ("personal".to_string(), 22, 22)
+            ]
+        );
         let profiles = store.list_profiles("acct", None).unwrap();
         assert_eq!(profiles.len(), 36);
         for p in &profiles {
             let nick = p["nickname"].as_str().unwrap();
-            let want = if p["category"] == "work" { "企" } else { "人" };
+            let want = if p["category"] == "work" {
+                "企"
+            } else {
+                "人"
+            };
             assert!(nick.starts_with(want), "分类记错: {p:?}");
         }
-        let opens = ui.calls.lock().unwrap().iter().filter(|(op, _)| op == "contacts_open_row").count();
+        let opens = ui
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(op, _)| op == "contacts_open_row")
+            .count();
         assert_eq!(opens, 36, "每个人只点一次");
     }
 
@@ -1971,17 +2738,35 @@ mod tests {
         let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
         let mut personal = letter_group("personal", "联系人", "人", &[("A", 2), ("W", 1)]);
         let sys = |name: &str, id: &str| VirtualContactItem {
-            name: name.to_string(), remark: None, wechat_id: Some(id.to_string()), enterprise: None, real_name: None,
-            tags: vec![], friend_permission: None, unreadable: false, misaligned_profile: None,
+            name: name.to_string(),
+            remark: None,
+            wechat_id: Some(id.to_string()),
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+            unreadable: false,
+            misaligned_profile: None,
         };
-        personal.letter_sections.push(("W".to_string(), vec![sys("微信团队", "weixin")]));
-        personal.letter_sections.insert(1, ("F".to_string(), vec![sys("文件传输助手", "filehelper")]));
+        personal
+            .letter_sections
+            .push(("W".to_string(), vec![sys("微信团队", "weixin")]));
+        personal.letter_sections.insert(
+            1,
+            ("F".to_string(), vec![sys("文件传输助手", "filehelper")]),
+        );
         let mut ui = VirtualContactsUi::new(vec![personal]);
         let no_yield = || false;
         for (mode, now) in [(SyncMode::Full, 1000), (SyncMode::Incremental, 2000)] {
-            let report = run_sync(&mut ui, &store, "acct", mode, &checkpoint, &no_yield, now).await.unwrap();
+            let report = run_sync(&mut ui, &store, "acct", mode, &checkpoint, &no_yield, now)
+                .await
+                .unwrap();
             assert!(report.complete, "{mode:?}: {report:?}");
-            assert_eq!(report.per_category, vec![("personal".to_string(), 5, 5)], "{mode:?}");
+            assert_eq!(
+                report.per_category,
+                vec![("personal".to_string(), 5, 5)],
+                "{mode:?}"
+            );
         }
         let profiles = store.list_profiles("acct", None).unwrap();
         assert_eq!(profiles.len(), 5);
@@ -1999,14 +2784,35 @@ mod tests {
             let state_dir = temp.path().join("state");
             let store = HistoryStore::open(&state_dir).unwrap();
             let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
-            let personal = letter_group("personal", "联系人", "人", &[("A", 2), ("K", 1), ("L", 1), ("M", 2), ("W", 6), ("X", 10)]);
+            let personal = letter_group(
+                "personal",
+                "联系人",
+                "人",
+                &[("A", 2), ("K", 1), ("L", 1), ("M", 2), ("W", 6), ("X", 10)],
+            );
             let mut ui = VirtualContactsUi::new(vec![personal]);
             ui.letters_unread = true;
             ui.tick_px = tick_px;
             let no_yield = || false;
-            let report = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+            let report = run_sync(
+                &mut ui,
+                &store,
+                "acct",
+                SyncMode::Full,
+                &checkpoint,
+                &no_yield,
+                1000,
+            )
+            .await
+            .unwrap();
             assert!(report.complete, "tick_px={tick_px}: {report:?}");
-            let opens = ui.calls.lock().unwrap().iter().filter(|(op, _)| op == "contacts_open_row").count();
+            let opens = ui
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(op, _)| op == "contacts_open_row")
+                .count();
             assert_eq!(opens, 22, "tick_px={tick_px}: 每人只点一次");
         }
     }
@@ -2017,29 +2823,80 @@ mod tests {
     /// 资料卡第一行是完整名字，下一行单独是"@企业"。按 @ 拆开分别核对。
     #[test]
     fn test_work_row_matches_card_by_name_prefix_and_company_line() {
-        let card = |nick: &str, company: &str| vec![line(nick, 520.0, 60.0), line(company, 520.0, 90.0), line("备注", 430.0, 200.0)];
+        let card = |nick: &str, company: &str| {
+            vec![
+                line(nick, 520.0, 60.0),
+                line(company, 520.0, 90.0),
+                line("备注", 430.0, 200.0),
+            ]
+        };
         // 名字截断
-        assert!(row_matches_profile("王小明…@腾讯科技", &card("王小明明白", "@腾讯科技"), "王小明明白", None));
+        assert!(row_matches_profile(
+            "王小明…@腾讯科技",
+            &card("王小明明白", "@腾讯科技"),
+            "王小明明白",
+            None
+        ));
         // 企业名也被截断
-        assert!(row_matches_profile("王小明..@腾讯科", &card("王小明明白", "@腾讯科技有限公司"), "王小明明白", None));
+        assert!(row_matches_profile(
+            "王小明..@腾讯科",
+            &card("王小明明白", "@腾讯科技有限公司"),
+            "王小明明白",
+            None
+        ));
         // 名字有 1 个字识别不同，企业对得上
-        assert!(row_matches_profile("李西@某某公司", &card("李四", "@某某公司"), "李四", None));
-        assert!(row_matches_profile("季小 @某某公司", &card("李小", "@某某公司"), "李小", None));
+        assert!(row_matches_profile(
+            "李西@某某公司",
+            &card("李四", "@某某公司"),
+            "李四",
+            None
+        ));
+        assert!(row_matches_profile(
+            "季小 @某某公司",
+            &card("李小", "@某某公司"),
+            "李小",
+            None
+        ));
         // 企业对不上：不是同一人
-        assert!(!row_matches_profile("李西@某某公司", &card("李四", "@另一家公司"), "李四", None));
+        assert!(!row_matches_profile(
+            "李西@某某公司",
+            &card("李四", "@另一家公司"),
+            "李四",
+            None
+        ));
         // 名字差太多：不是同一人
-        assert!(!row_matches_profile("张大山@某某公司", &card("李四光", "@某某公司"), "李四光", None));
+        assert!(!row_matches_profile(
+            "张大山@某某公司",
+            &card("李四光", "@某某公司"),
+            "李四光",
+            None
+        ));
     }
 
     /// 实机：名字里的英文字母在列表上被识别成 "@"，列表名字的字按顺序都在资料卡名字里（≥4 字）也算同一人
     #[test]
     fn test_row_chars_in_order_within_profile_name_match() {
         let card = vec![line("春a夏秋冬东南西北xyz", 520.0, 60.0)];
-        assert!(row_matches_profile("春@夏秋冬东南…", &card, "春a夏秋冬东南西北xyz", None));
+        assert!(row_matches_profile(
+            "春@夏秋冬东南…",
+            &card,
+            "春a夏秋冬东南西北xyz",
+            None
+        ));
         // 少于 4 个字不按此规则
-        assert!(!row_matches_profile("春冬", &card, "春a夏秋冬东南西北xyz", None));
+        assert!(!row_matches_profile(
+            "春冬",
+            &card,
+            "春a夏秋冬东南西北xyz",
+            None
+        ));
         // 顺序不对不算
-        assert!(!row_matches_profile("冬秋夏春", &card, "春a夏秋冬东南西北xyz", None));
+        assert!(!row_matches_profile(
+            "冬秋夏春",
+            &card,
+            "春a夏秋冬东南西北xyz",
+            None
+        ));
     }
 
     #[test]
@@ -2079,12 +2936,32 @@ mod tests {
         let state_dir = temp.path().join("state");
         let store = HistoryStore::open(&state_dir).unwrap();
         let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
-        let personal = letter_group("personal", "联系人", "人", &[("A", 4), ("B", 5), ("C", 4), ("D", 5), ("E", 4)]);
+        let personal = letter_group(
+            "personal",
+            "联系人",
+            "人",
+            &[("A", 4), ("B", 5), ("C", 4), ("D", 5), ("E", 4)],
+        );
         let mut ui = VirtualContactsUi::new(vec![personal]);
         let no_yield = || false;
-        let report = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+        let report = run_sync(
+            &mut ui,
+            &store,
+            "acct",
+            SyncMode::Full,
+            &checkpoint,
+            &no_yield,
+            1000,
+        )
+        .await
+        .unwrap();
         assert!(report.complete, "{report:?}");
-        assert_eq!(ui.row_open_clicks.len(), 22, "每人只点开一次，实际 {} 次", ui.row_open_clicks.len());
+        assert_eq!(
+            ui.row_open_clicks.len(),
+            22,
+            "每人只点开一次，实际 {} 次",
+            ui.row_open_clicks.len()
+        );
         let downs: Vec<u64> = ui
             .calls
             .lock()
@@ -2095,8 +2972,14 @@ mod tests {
             .collect();
         // 第一次滚 1 格量出每格距离，之后每次把本屏最后一人滚到列表上部（一屏一滚）
         assert_eq!(downs.first(), Some(&1), "{downs:?}");
-        assert!(downs.iter().skip(1).all(|t| *t >= 3), "之后应按整屏滚动: {downs:?}");
-        assert!(downs.len() <= 6, "22 人约 3 屏，滚动次数不应过多: {downs:?}");
+        assert!(
+            downs.iter().skip(1).all(|t| *t >= 3),
+            "之后应按整屏滚动: {downs:?}"
+        );
+        assert!(
+            downs.len() <= 6,
+            "22 人约 3 屏，滚动次数不应过多: {downs:?}"
+        );
     }
 
     /// 实机：开始时"企业微信联系人"处于展开状态（之前操作遗留），把"联系人"标题挤出第一屏，
@@ -2114,7 +2997,17 @@ mod tests {
         let mut ui = VirtualContactsUi::new(vec![official, work, personal]);
         ui.header_arrows = true;
         let no_yield = || false;
-        let report = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+        let report = run_sync(
+            &mut ui,
+            &store,
+            "acct",
+            SyncMode::Full,
+            &checkpoint,
+            &no_yield,
+            1000,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             report.per_category,
             vec![("work".to_string(), 10, 10), ("personal".to_string(), 8, 8)],
@@ -2140,7 +3033,17 @@ mod tests {
         ui.header_arrows = true;
         ui.counts_always = true;
         let no_yield = || false;
-        let report = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await.unwrap();
+        let report = run_sync(
+            &mut ui,
+            &store,
+            "acct",
+            SyncMode::Full,
+            &checkpoint,
+            &no_yield,
+            1000,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             report.per_category,
             vec![("work".to_string(), 5, 5), ("personal".to_string(), 8, 8)],
@@ -2162,19 +3065,61 @@ mod tests {
         for fail in [None, Some("contacts_headers".to_string())] {
             let mut ui = VirtualContactsUi::new(vec![personal.clone()]);
             ui.fail_op = fail.clone();
-            let _ = run_sync(&mut ui, &store, "acct", SyncMode::Full, &checkpoint, &no_yield, 1000).await;
-            let ops: Vec<String> = ui.calls.lock().unwrap().iter().map(|(op, _)| op.clone()).collect();
-            assert_eq!(ops.first().map(String::as_str), Some("contacts_lease_begin"), "{fail:?}: {ops:?}");
-            assert_eq!(ops.last().map(String::as_str), Some("contacts_lease_end"), "{fail:?}: {ops:?}");
-            let leave = ops.iter().rposition(|o| o == "contacts_leave").expect("leave");
+            let _ = run_sync(
+                &mut ui,
+                &store,
+                "acct",
+                SyncMode::Full,
+                &checkpoint,
+                &no_yield,
+                1000,
+            )
+            .await;
+            let ops: Vec<String> = ui
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(op, _)| op.clone())
+                .collect();
+            assert_eq!(
+                ops.first().map(String::as_str),
+                Some("contacts_lease_begin"),
+                "{fail:?}: {ops:?}"
+            );
+            assert_eq!(
+                ops.last().map(String::as_str),
+                Some("contacts_lease_end"),
+                "{fail:?}: {ops:?}"
+            );
+            let leave = ops
+                .iter()
+                .rposition(|o| o == "contacts_leave")
+                .expect("leave");
             assert!(leave < ops.len() - 1, "先离开通讯录再释放租约");
         }
     }
 
-    fn fixture_profile(category: &str, name: &str, wid: Option<&str>, enterprise: Option<&str>) -> ProfileInput {
-        ProfileInput { category: category.into(), wechat_id: wid.map(str::to_string), nickname: name.into(),
-            remark: None, region: None, source: None, added_on: None, common_groups: None,
-            enterprise: enterprise.map(str::to_string), real_name: None, tags: vec![], friend_permission: None }
+    fn fixture_profile(
+        category: &str,
+        name: &str,
+        wid: Option<&str>,
+        enterprise: Option<&str>,
+    ) -> ProfileInput {
+        ProfileInput {
+            category: category.into(),
+            wechat_id: wid.map(str::to_string),
+            nickname: name.into(),
+            remark: None,
+            region: None,
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: enterprise.map(str::to_string),
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+        }
     }
 
     #[test]
@@ -2183,30 +3128,69 @@ mod tests {
             json!({"contact_id":"personal", "category":"personal", "nickname":"同名客户", "identity":"strong"}),
             json!({"contact_id":"work", "category":"work", "nickname":"同名客户", "identity":"weak"}),
         ];
-        assert_eq!(incremental_contact(&profiles, "personal", "同名客户"), Some("personal"));
+        assert_eq!(
+            incremental_contact(&profiles, "personal", "同名客户"),
+            Some("personal")
+        );
         assert_eq!(incremental_contact(&profiles, "work", "同名客户"), None);
         assert_eq!(incremental_contact(&profiles, "personal", "同名"), None);
         let mut duplicates = profiles.clone();
         duplicates.push(profiles[0].clone());
-        assert_eq!(incremental_contact(&duplicates, "personal", "同名客户"), None);
-        let removed = vec![json!({"contact_id":"removed", "category":"personal", "nickname":"同名客户", "identity":"strong", "removed_at":1})];
+        assert_eq!(
+            incremental_contact(&duplicates, "personal", "同名客户"),
+            None
+        );
+        let removed = vec![
+            json!({"contact_id":"removed", "category":"personal", "nickname":"同名客户", "identity":"strong", "removed_at":1}),
+        ];
         assert_eq!(incremental_contact(&removed, "personal", "同名客户"), None);
     }
 
     #[test]
     fn test_sync_state_and_daily_attempt_are_account_scoped() {
         let temp = TestTempDir::new();
-        write_sync_result(temp.path(), "account-a", &json!({"complete":true,"finished_at_ms":1000000})).unwrap();
+        write_sync_result(
+            temp.path(),
+            "account-a",
+            &json!({"complete":true,"finished_at_ms":1000000}),
+        )
+        .unwrap();
         record_daily_sync_attempt(temp.path(), "account-a", 1000.0).unwrap();
-        assert!(!should_attempt_daily_sync(temp.path(), "account-a", true, 1001.0));
-        assert!(should_attempt_daily_sync(temp.path(), "account-b", true, 1001.0));
-        write_sync_result(temp.path(), "account-b", &json!({"complete":false,"finished_at_ms":1001000})).unwrap();
-        write_sync_result(temp.path(), "account-a", &json!({"complete":false,"finished_at_ms":1002000})).unwrap();
-        let success: Value = serde_json::from_slice(&fs::read(account_state_path(temp.path(), "account-a", "success")).unwrap()).unwrap();
+        assert!(!should_attempt_daily_sync(
+            temp.path(),
+            "account-a",
+            true,
+            1001.0
+        ));
+        assert!(should_attempt_daily_sync(
+            temp.path(),
+            "account-b",
+            true,
+            1001.0
+        ));
+        write_sync_result(
+            temp.path(),
+            "account-b",
+            &json!({"complete":false,"finished_at_ms":1001000}),
+        )
+        .unwrap();
+        write_sync_result(
+            temp.path(),
+            "account-a",
+            &json!({"complete":false,"finished_at_ms":1002000}),
+        )
+        .unwrap();
+        let success: Value = serde_json::from_slice(
+            &fs::read(account_state_path(temp.path(), "account-a", "success")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(success["finished_at_ms"], 1000000);
         assert_eq!(success["account_id"], "account-a");
         assert!(!account_state_path(temp.path(), "account-b", "success").exists());
-        assert_eq!(account_state_path(temp.path(), "../account-a", "result").parent(), Some(temp.path()));
+        assert_eq!(
+            account_state_path(temp.path(), "../account-a", "result").parent(),
+            Some(temp.path())
+        );
     }
 
     #[tokio::test]
@@ -2216,16 +3200,37 @@ mod tests {
         let p = fixture_profile("personal", "未读客户", Some("wxid_unread"), None);
         store.upsert_profile("account-a", &p, 1).unwrap();
         store.upsert_profile("account-b", &p, 1).unwrap();
-        let item = VirtualContactItem { name: p.nickname, remark: None, wechat_id: p.wechat_id,
-            enterprise: None, real_name: None, tags: vec![], friend_permission: None,
-            unreadable: false, misaligned_profile: Some(vec![]) };
-        let mut ui = VirtualContactsUi::new(vec![VirtualGroup { category:"personal".into(), title:"联系人".into(),
-            letter_sections:vec![("A".into(),vec![item])], expanded:false }]);
-        let report = run_sync(&mut ui, &store, "account-a", SyncMode::Full,
-            &temp.path().join("contacts-sync-checkpoint.json"), &||false, 2000).await.unwrap();
+        let item = VirtualContactItem {
+            name: p.nickname,
+            remark: None,
+            wechat_id: p.wechat_id,
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+            unreadable: false,
+            misaligned_profile: Some(vec![]),
+        };
+        let mut ui = VirtualContactsUi::new(vec![VirtualGroup {
+            category: "personal".into(),
+            title: "联系人".into(),
+            letter_sections: vec![("A".into(), vec![item])],
+            expanded: false,
+        }]);
+        let report = run_sync(
+            &mut ui,
+            &store,
+            "account-a",
+            SyncMode::Full,
+            &temp.path().join("contacts-sync-checkpoint.json"),
+            &|| false,
+            2000,
+        )
+        .await
+        .unwrap();
         assert!(!report.complete);
         for account in ["account-a", "account-b"] {
-            assert!(store.list_profiles(account,None).unwrap()[0]["removed_at"].is_null());
+            assert!(store.list_profiles(account, None).unwrap()[0]["removed_at"].is_null());
         }
     }
 
@@ -2236,17 +3241,45 @@ mod tests {
         let p = fixture_profile("personal", "返回客户", Some("wxid_returned"), None);
         store.upsert_profile("account-a", &p, 1).unwrap();
         store.mark_missing("account-a", "personal", &[], 2).unwrap();
-        let item = VirtualContactItem { name:p.nickname, remark:None, wechat_id:p.wechat_id,
-            enterprise:None, real_name:None, tags:vec![], friend_permission:None, unreadable:false, misaligned_profile:None };
-        let mut ui = VirtualContactsUi::new(vec![VirtualGroup { category:"personal".into(), title:"联系人".into(),
-            letter_sections:vec![("A".into(),vec![item])], expanded:false }]);
-        let report = run_sync(&mut ui, &store, "account-a", SyncMode::Incremental,
-            &temp.path().join("contacts-sync-checkpoint.json"), &||false, 2000).await.unwrap();
+        let item = VirtualContactItem {
+            name: p.nickname,
+            remark: None,
+            wechat_id: p.wechat_id,
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+            unreadable: false,
+            misaligned_profile: None,
+        };
+        let mut ui = VirtualContactsUi::new(vec![VirtualGroup {
+            category: "personal".into(),
+            title: "联系人".into(),
+            letter_sections: vec![("A".into(), vec![item])],
+            expanded: false,
+        }]);
+        let report = run_sync(
+            &mut ui,
+            &store,
+            "account-a",
+            SyncMode::Incremental,
+            &temp.path().join("contacts-sync-checkpoint.json"),
+            &|| false,
+            2000,
+        )
+        .await
+        .unwrap();
         assert!(report.complete, "{report:?}");
-        let profiles = store.list_profiles("account-a",None).unwrap();
-        assert_eq!(profiles.len(),1);
+        let profiles = store.list_profiles("account-a", None).unwrap();
+        assert_eq!(profiles.len(), 1);
         assert!(profiles[0]["removed_at"].is_null());
-        assert!(ui.calls.lock().unwrap().iter().any(|(op,_)|op=="contacts_open_row"));
+        assert!(
+            ui.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(op, _)| op == "contacts_open_row")
+        );
     }
 
     #[tokio::test]
@@ -2255,14 +3288,42 @@ mod tests {
         let store = HistoryStore::open(temp.path()).unwrap();
         let p = fixture_profile("personal", "切换测试", Some("wxid_change"), None);
         store.upsert_profile("account-a", &p, 1).unwrap();
-        let item = VirtualContactItem { name:p.nickname, remark:None, wechat_id:p.wechat_id,
-            enterprise:None, real_name:None, tags:vec![], friend_permission:None, unreadable:false, misaligned_profile:None };
-        let mut ui = VirtualContactsUi::new(vec![VirtualGroup { category:"personal".into(), title:"联系人".into(),
-            letter_sections:vec![("A".into(),vec![item])], expanded:false }]);
+        let item = VirtualContactItem {
+            name: p.nickname,
+            remark: None,
+            wechat_id: p.wechat_id,
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+            unreadable: false,
+            misaligned_profile: None,
+        };
+        let mut ui = VirtualContactsUi::new(vec![VirtualGroup {
+            category: "personal".into(),
+            title: "联系人".into(),
+            letter_sections: vec![("A".into(), vec![item])],
+            expanded: false,
+        }]);
         let calls = ui.calls.clone();
-        let account_changed = move || calls.lock().unwrap().iter().any(|(op,_)|op=="contacts_open_row");
-        let report = run_sync(&mut ui, &store, "account-a", SyncMode::Full,
-            &temp.path().join("contacts-sync-checkpoint.json"), &account_changed, 2000).await.unwrap();
+        let account_changed = move || {
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(op, _)| op == "contacts_open_row")
+        };
+        let report = run_sync(
+            &mut ui,
+            &store,
+            "account-a",
+            SyncMode::Full,
+            &temp.path().join("contacts-sync-checkpoint.json"),
+            &account_changed,
+            2000,
+        )
+        .await
+        .unwrap();
         assert!(!report.complete);
         assert!(report.yielded);
         let profiles = store.list_profiles("account-a", None).unwrap();
@@ -2279,18 +3340,44 @@ mod tests {
         for ent in ["测试企业甲", "测试企业乙"] {
             let p = fixture_profile("work", "同名员工", None, Some(ent));
             store.upsert_profile("account-a", &p, 1).unwrap();
-            items.push(VirtualContactItem { name:p.nickname,remark:None,wechat_id:None,
-                enterprise:p.enterprise,real_name:None,tags:vec![],friend_permission:None,unreadable:false,misaligned_profile:None });
+            items.push(VirtualContactItem {
+                name: p.nickname,
+                remark: None,
+                wechat_id: None,
+                enterprise: p.enterprise,
+                real_name: None,
+                tags: vec![],
+                friend_permission: None,
+                unreadable: false,
+                misaligned_profile: None,
+            });
         }
-        let mut ui = VirtualContactsUi::new(vec![VirtualGroup { category:"work".into(), title:"企业微信联系人".into(),
-            letter_sections:vec![("A".into(),items)], expanded:false }]);
-        let report = run_sync(&mut ui, &store, "account-a", SyncMode::Incremental,
-            &temp.path().join("contacts-sync-checkpoint.json"), &||false, 2000).await.unwrap();
+        let mut ui = VirtualContactsUi::new(vec![VirtualGroup {
+            category: "work".into(),
+            title: "企业微信联系人".into(),
+            letter_sections: vec![("A".into(), items)],
+            expanded: false,
+        }]);
+        let report = run_sync(
+            &mut ui,
+            &store,
+            "account-a",
+            SyncMode::Incremental,
+            &temp.path().join("contacts-sync-checkpoint.json"),
+            &|| false,
+            2000,
+        )
+        .await
+        .unwrap();
         assert!(report.complete, "{report:?}");
-        assert_eq!(report.per_category, vec![("work".into(),2,2)]);
-        let profiles = store.list_profiles("account-a",None).unwrap();
-        assert_eq!(profiles.len(),2);
-        assert!(profiles.iter().all(|p|p["removed_at"].is_null() && p["last_synced_at"]==2000));
+        assert_eq!(report.per_category, vec![("work".into(), 2, 2)]);
+        let profiles = store.list_profiles("account-a", None).unwrap();
+        assert_eq!(profiles.len(), 2);
+        assert!(
+            profiles
+                .iter()
+                .all(|p| p["removed_at"].is_null() && p["last_synced_at"] == 2000)
+        );
     }
 
     #[tokio::test]
@@ -2299,19 +3386,40 @@ mod tests {
         let store = HistoryStore::open(temp.path()).unwrap();
         let p = fixture_profile("personal", "跨号客户", Some("wxid_shared"), None);
         store.upsert_profile("account-a", &p, 1).unwrap();
-        let item = VirtualContactItem { name:p.nickname,remark:None,wechat_id:p.wechat_id,
-            enterprise:None,real_name:None,tags:vec![],friend_permission:None,unreadable:false,misaligned_profile:None };
-        let mut ui = VirtualContactsUi::new(vec![VirtualGroup { category:"personal".into(), title:"联系人".into(),
-            letter_sections:vec![("A".into(),vec![item])], expanded:false }]);
-        let report = run_sync(&mut ui, &store, "account-b", SyncMode::Incremental,
-            &temp.path().join("contacts-sync-checkpoint.json"), &||false, 2000).await.unwrap();
+        let item = VirtualContactItem {
+            name: p.nickname,
+            remark: None,
+            wechat_id: p.wechat_id,
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
+            unreadable: false,
+            misaligned_profile: None,
+        };
+        let mut ui = VirtualContactsUi::new(vec![VirtualGroup {
+            category: "personal".into(),
+            title: "联系人".into(),
+            letter_sections: vec![("A".into(), vec![item])],
+            expanded: false,
+        }]);
+        let report = run_sync(
+            &mut ui,
+            &store,
+            "account-b",
+            SyncMode::Incremental,
+            &temp.path().join("contacts-sync-checkpoint.json"),
+            &|| false,
+            2000,
+        )
+        .await
+        .unwrap();
         assert!(report.complete, "{report:?}");
-        let a = store.list_profiles("account-a",None).unwrap();
-        let b = store.list_profiles("account-b",None).unwrap();
-        assert_eq!(a[0]["last_synced_at"],1);
-        assert_eq!(b.len(),1);
-        assert_eq!(b[0]["last_synced_at"],2000);
-        assert_ne!(a[0]["contact_id"],b[0]["contact_id"]);
+        let a = store.list_profiles("account-a", None).unwrap();
+        let b = store.list_profiles("account-b", None).unwrap();
+        assert_eq!(a[0]["last_synced_at"], 1);
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0]["last_synced_at"], 2000);
+        assert_ne!(a[0]["contact_id"], b[0]["contact_id"]);
     }
-
 }

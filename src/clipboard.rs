@@ -7,7 +7,9 @@ use tokio::process::Command;
 /// no LANG, they fall back to MacRoman and Chinese turns into garbage, so UTF-8 is always set here.
 fn pasteboard_command(program: &str) -> std::process::Command {
     let mut command = std::process::Command::new(program);
-    command.env("LANG", "en_US.UTF-8").env("LC_ALL", "en_US.UTF-8");
+    command
+        .env("LANG", "en_US.UTF-8")
+        .env("LC_ALL", "en_US.UTF-8");
     command
 }
 
@@ -129,7 +131,12 @@ mod tests {
             let command = pasteboard_command(program);
             let envs: Vec<(String, String)> = command
                 .get_envs()
-                .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v.and_then(|v| v.to_str())?.to_string())))
+                .filter_map(|(k, v)| {
+                    Some((
+                        k.to_str()?.to_string(),
+                        v.and_then(|v| v.to_str())?.to_string(),
+                    ))
+                })
                 .collect();
             for key in ["LANG", "LC_ALL"] {
                 assert!(

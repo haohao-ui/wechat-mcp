@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 fn wechat_mcp_binary() -> PathBuf {
@@ -53,11 +53,7 @@ struct McpProcess {
 }
 
 impl McpProcess {
-    fn spawn(
-        binary: &Path,
-        cwd: &Path,
-        env: &HashMap<String, String>,
-    ) -> Self {
+    fn spawn(binary: &Path, cwd: &Path, env: &HashMap<String, String>) -> Self {
         let mut cmd = Command::new(binary);
         cmd.current_dir(cwd);
         for (k, v) in env {
@@ -131,12 +127,8 @@ impl Drop for McpProcess {
     }
 }
 
-fn check_peer_lock<F>(
-    binary: &Path,
-    directory: &Path,
-    env: &HashMap<String, String>,
-    release: F,
-) where
+fn check_peer_lock<F>(binary: &Path, directory: &Path, env: &HashMap<String, String>, release: F)
+where
     F: FnOnce(),
 {
     let mut peer = McpProcess::spawn(binary, directory, env);
@@ -178,7 +170,9 @@ fn check_peer_lock<F>(
 
     release();
 
-    let resp2 = peer.receive(Duration::from_secs(3)).expect("peer resp 2 after release");
+    let resp2 = peer
+        .receive(Duration::from_secs(3))
+        .expect("peer resp 2 after release");
     assert_eq!(resp2["id"], 2);
     assert_eq!(resp2["result"]["isError"], false, "{:?}", resp2);
 
@@ -192,7 +186,11 @@ fn setup_test_directory(directory: &Path) {
     fs::create_dir_all(&bin_dir).unwrap();
 
     let osascript = directory.join("osascript");
-    fs::write(&osascript, "#!/bin/sh\n/bin/cat >/dev/null\nprintf \"true\\n\"\n").unwrap();
+    fs::write(
+        &osascript,
+        "#!/bin/sh\n/bin/cat >/dev/null\nprintf \"true\\n\"\n",
+    )
+    .unwrap();
     let mut perms = fs::metadata(&osascript).unwrap().permissions();
     perms.set_mode(0o700);
     fs::set_permissions(&osascript, perms).unwrap();
@@ -237,7 +235,11 @@ fi
             "adapter": "wechat_desktop"
         }]
     });
-    fs::write(&accounts_json, serde_json::to_string(&accounts_content).unwrap()).unwrap();
+    fs::write(
+        &accounts_json,
+        serde_json::to_string(&accounts_content).unwrap(),
+    )
+    .unwrap();
 }
 
 fn run_protocol_smoke_case(version: &str) {
@@ -248,7 +250,10 @@ fn run_protocol_smoke_case(version: &str) {
 
     let mut env: HashMap<String, String> = std::env::vars().collect();
     let hold_path = directory.join(format!("hold-{}", version));
-    env.insert("MESSAGE_TEST_HOLD".into(), hold_path.to_str().unwrap().into());
+    env.insert(
+        "MESSAGE_TEST_HOLD".into(),
+        hold_path.to_str().unwrap().into(),
+    );
     let old_path = env.get("PATH").cloned().unwrap_or_default();
     env.insert(
         "PATH".into(),
@@ -294,7 +299,10 @@ fn run_protocol_smoke_case(version: &str) {
     }));
     let resp2 = process.receive(Duration::from_secs(2)).expect("receive 2");
     let res2 = &resp2["result"];
-    assert_eq!(res2.get("structuredContent").is_some(), version == "2025-06-18");
+    assert_eq!(
+        res2.get("structuredContent").is_some(),
+        version == "2025-06-18"
+    );
     let data_str = res2["content"][0]["text"].as_str().expect("text");
     let data: Value = serde_json::from_str(data_str).expect("parse accounts data");
     assert_eq!(
@@ -381,7 +389,9 @@ fn run_protocol_smoke_case(version: &str) {
 
     // parse error
     process.send_raw("{\n");
-    let resp_parse = process.receive(Duration::from_secs(2)).expect("receive parse error");
+    let resp_parse = process
+        .receive(Duration::from_secs(2))
+        .expect("receive parse error");
     assert_eq!(resp_parse["error"]["code"], -32700);
 
     // 8. wait_for_events, then close stdin

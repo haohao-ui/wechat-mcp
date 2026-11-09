@@ -17,7 +17,12 @@ pub struct FileToSend {
 impl FileToSend {
     /// What the outbox stores as the "message": the same key with a different or changed file is refused.
     pub fn outbox_text(&self) -> String {
-        format!("[文件] {} ({} 字节, 修改于 {})", self.path.display(), self.size, self.modified)
+        format!(
+            "[文件] {} ({} 字节, 修改于 {})",
+            self.path.display(),
+            self.size,
+            self.modified
+        )
     }
 }
 
@@ -26,7 +31,10 @@ pub fn default_send_roots() -> Vec<PathBuf> {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return Vec::new();
     };
-    ["Desktop", "Documents", "Downloads"].iter().map(|dir| home.join(dir)).collect()
+    ["Desktop", "Documents", "Downloads"]
+        .iter()
+        .map(|dir| home.join(dir))
+        .collect()
 }
 
 /// Checks a requested path before anything touches the desktop.
@@ -65,7 +73,12 @@ pub fn prepare_send_file(raw: &str, roots: &[PathBuf]) -> Result<FileToSend> {
         .context("文件名无效")?
         .to_string_lossy()
         .into_owned();
-    Ok(FileToSend { path, name, size, modified })
+    Ok(FileToSend {
+        path,
+        name,
+        size,
+        modified,
+    })
 }
 
 /// Where `upload_file` stores files sent from another machine (inside Documents, so send_file accepts them).
@@ -80,7 +93,9 @@ pub fn store_upload(name: &str, content_base64: &str, root: &Path) -> Result<Pat
     let valid_name = !name.is_empty()
         && name.len() <= 255
         && !name.starts_with('.')
-        && !name.chars().any(|c| c == '/' || c == '\\' || c.is_control());
+        && !name
+            .chars()
+            .any(|c| c == '/' || c == '\\' || c.is_control());
     if !valid_name {
         bail!("name 必须是不含路径的文件名（不能以 . 开头、不含 / \\ 或控制字符，≤255 字节）");
     }
@@ -142,7 +157,11 @@ pub fn decode_base64(text: &str) -> Result<Vec<u8>> {
 /// True when OCR of the chat input shows the pasted file card for `name`.
 /// WeChat may shorten long names with an ellipsis, so a 6+ character prefix before it also counts.
 pub fn input_shows_file(lines: &[String], name: &str) -> bool {
-    let compact = |text: &str| text.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    let compact = |text: &str| {
+        text.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+    };
     let name = compact(name);
     lines.iter().map(|line| compact(line)).any(|line| {
         if line.contains(&name) {
@@ -162,9 +181,17 @@ pub fn input_shows_file(lines: &[String], name: &str) -> bool {
 fn middle_elided(shown: &str, name: &str) -> bool {
     let shown: Vec<char> = shown.chars().collect();
     let full: Vec<char> = name.chars().collect();
-    let extension = name.rsplit_once('.').map(|(_, ext)| ext.chars().count() + 1).unwrap_or(0);
+    let extension = name
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.chars().count() + 1)
+        .unwrap_or(0);
     let prefix = shown.iter().zip(&full).take_while(|(a, b)| a == b).count();
-    let suffix = shown.iter().rev().zip(full.iter().rev()).take_while(|(a, b)| a == b).count();
+    let suffix = shown
+        .iter()
+        .rev()
+        .zip(full.iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
     if prefix < 4 || extension == 0 || suffix < extension + 1 || prefix + suffix > full.len() {
         return false;
     }
@@ -211,7 +238,10 @@ mod tests {
         std::fs::write(&empty, b"").unwrap();
         assert!(prepare_send_file(empty.to_str().unwrap(), &[root.clone()]).is_err());
         let big = root.join("big.pdf");
-        std::fs::File::create(&big).unwrap().set_len(MAX_SEND_FILE_BYTES + 1).unwrap();
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(MAX_SEND_FILE_BYTES + 1)
+            .unwrap();
         assert!(prepare_send_file(big.to_str().unwrap(), &[root.clone()]).is_err());
         assert!(prepare_send_file(root.to_str().unwrap(), &[root.clone()]).is_err());
         std::fs::remove_dir_all(root).unwrap();
@@ -231,25 +261,39 @@ mod tests {
         assert_eq!(std::fs::read(&first).unwrap(), b"%PDF-1.4 test");
         assert_eq!(std::fs::read(&second).unwrap(), b"hi");
         // The stored file passes the send_file checks.
-        assert_eq!(prepare_send_file(second.to_str().unwrap(), &[root.clone()]).unwrap().name, "报价单 v2.pdf");
+        assert_eq!(
+            prepare_send_file(second.to_str().unwrap(), &[root.clone()])
+                .unwrap()
+                .name,
+            "报价单 v2.pdf"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn upload_refuses_bad_names_bad_base64_and_bad_sizes() {
         let root = scratch();
-        for name in ["", ".", "..", "../x.pdf", "a/b.pdf", ".hidden", "a\\b.pdf", "x\0.pdf"] {
+        for name in [
+            "", ".", "..", "../x.pdf", "a/b.pdf", ".hidden", "a\\b.pdf", "x\0.pdf",
+        ] {
             assert!(store_upload(name, "aGk=", &root).is_err(), "name {name:?}");
         }
         for content in ["", "a", "aGk", "aG=k", "a*k=", "aGk==="] {
-            assert!(store_upload("a.txt", content, &root).is_err(), "content {content:?}");
+            assert!(
+                store_upload("a.txt", content, &root).is_err(),
+                "content {content:?}"
+            );
         }
         assert_eq!(decode_base64("aGk=\n").unwrap(), b"hi");
         assert_eq!(decode_base64("aGVsbG8gd29ybGQ=").unwrap(), b"hello world");
         assert_eq!(decode_base64("/+8=").unwrap(), vec![0xff, 0xef]);
         let too_big = "A".repeat(((MAX_SEND_FILE_BYTES as usize + 3) / 3 + 1) * 4);
         assert!(store_upload("big.bin", &too_big, &root).is_err());
-        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0, "nothing left behind");
+        assert_eq!(
+            std::fs::read_dir(&root).unwrap().count(),
+            0,
+            "nothing left behind"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -261,13 +305,34 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         assert!(input_shows_file(&lines, "岗位信息更新2.13.pdf"));
-        assert!(input_shows_file(&["岗位信息更新…".to_string()], "岗位信息更新2.13.pdf"));
-        assert!(!input_shows_file(&["发送".to_string()], "岗位信息更新2.13.pdf"));
-        assert!(!input_shows_file(&["报价…".to_string()], "岗位信息更新2.13.pdf"));
+        assert!(input_shows_file(
+            &["岗位信息更新…".to_string()],
+            "岗位信息更新2.13.pdf"
+        ));
+        assert!(!input_shows_file(
+            &["发送".to_string()],
+            "岗位信息更新2.13.pdf"
+        ));
+        assert!(!input_shows_file(
+            &["报价…".to_string()],
+            "岗位信息更新2.13.pdf"
+        ));
         // Long names are shortened in the middle; OCR read the card as below (2026-11-05, mp4).
-        assert!(input_shows_file(&["桃桃是在偷藏__v2.mp4".to_string(), "4.1M".to_string()], "桃桃是在偷藏_轻字幕版_v2.mp4"));
-        assert!(input_shows_file(&["桃桃是在偷藏…_v2.mp4".to_string()], "桃桃是在偷藏_轻字幕版_v2.mp4"));
-        assert!(!input_shows_file(&["别的视频__v2.mp4".to_string()], "桃桃是在偷藏_轻字幕版_v2.mp4"));
-        assert!(!input_shows_file(&["桃桃是在偷藏__v3.mp4".to_string()], "桃桃是在偷藏_轻字幕版_v2.mp4"));
+        assert!(input_shows_file(
+            &["桃桃是在偷藏__v2.mp4".to_string(), "4.1M".to_string()],
+            "桃桃是在偷藏_轻字幕版_v2.mp4"
+        ));
+        assert!(input_shows_file(
+            &["桃桃是在偷藏…_v2.mp4".to_string()],
+            "桃桃是在偷藏_轻字幕版_v2.mp4"
+        ));
+        assert!(!input_shows_file(
+            &["别的视频__v2.mp4".to_string()],
+            "桃桃是在偷藏_轻字幕版_v2.mp4"
+        ));
+        assert!(!input_shows_file(
+            &["桃桃是在偷藏__v3.mp4".to_string()],
+            "桃桃是在偷藏_轻字幕版_v2.mp4"
+        ));
     }
 }

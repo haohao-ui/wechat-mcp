@@ -73,12 +73,19 @@ impl Gateway {
         match self.execute(name, args).await {
             Ok(mut data) => {
                 let screenshot = if crate::interaction::is_tool(name) {
-                    data.as_object_mut().and_then(|obj|obj.remove("screenshot_base64")).and_then(|v|v.as_str().map(str::to_owned))
-                } else { None };
+                    data.as_object_mut()
+                        .and_then(|obj| obj.remove("screenshot_base64"))
+                        .and_then(|v| v.as_str().map(str::to_owned))
+                } else {
+                    None
+                };
                 let mut result = make_tool_result(&data.to_string(), false);
                 result["structuredContent"] = data;
                 if let Some(png) = screenshot {
-                    result["content"].as_array_mut().unwrap().push(json!({"type":"image","mimeType":"image/png","data":png}));
+                    result["content"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"type":"image","mimeType":"image/png","data":png}));
                 }
                 result
             }
@@ -107,7 +114,8 @@ impl Gateway {
             }
             let file_name = required_string(&args, "name")?;
             let content = required_string(&args, "content_base64")?;
-            let root = crate::wechat::files::default_upload_root().context("需要 HOME 才能保存上传文件")?;
+            let root = crate::wechat::files::default_upload_root()
+                .context("需要 HOME 才能保存上传文件")?;
             let path = crate::wechat::files::store_upload(file_name, content, &root)?;
             let size = std::fs::metadata(&path)?.len();
             return Ok(json!({"path": path, "name": file_name, "size": size}));
@@ -243,8 +251,12 @@ impl Gateway {
             _ => unreachable!("static operation mapping"),
         };
         let outbox = match &operation {
-            Operation::SendMessage { recipient, message } => Some((recipient.clone(), message.clone())),
-            Operation::SendFile { recipient, file } => Some((recipient.clone(), file.outbox_text())),
+            Operation::SendMessage { recipient, message } => {
+                Some((recipient.clone(), message.clone()))
+            }
+            Operation::SendFile { recipient, file } => {
+                Some((recipient.clone(), file.outbox_text()))
+            }
             _ => None,
         };
         if let Some((recipient, message)) = outbox {
@@ -306,13 +318,17 @@ impl Gateway {
                     return Ok(json!({"account":key,"data":receipt}));
                 }
                 Err(error) => {
-                    let is_not_sent = if let Some(send_err) = error.downcast_ref::<crate::wechat::SendError>() {
-                        matches!(send_err, crate::wechat::SendError::NotSent(_))
-                    } else if let Some(send_err) = error.root_cause().downcast_ref::<crate::wechat::SendError>() {
-                        matches!(send_err, crate::wechat::SendError::NotSent(_))
-                    } else {
-                        format!("{error:#}").contains("未触发发送")
-                    };
+                    let is_not_sent =
+                        if let Some(send_err) = error.downcast_ref::<crate::wechat::SendError>() {
+                            matches!(send_err, crate::wechat::SendError::NotSent(_))
+                        } else if let Some(send_err) = error
+                            .root_cause()
+                            .downcast_ref::<crate::wechat::SendError>()
+                        {
+                            matches!(send_err, crate::wechat::SendError::NotSent(_))
+                        } else {
+                            format!("{error:#}").contains("未触发发送")
+                        };
 
                     if is_not_sent {
                         let err_text = format!("{error:#}");
@@ -548,8 +564,24 @@ mod tests {
         }
         assert_eq!(adapter.calls.load(Ordering::SeqCst), 0);
         let tools = crate::tools::list_tools_with_legacy(false);
-        let tool = tools["tools"].as_array().or(tools.as_array()).unwrap().iter().find(|t| t["name"] == "send_file").expect("send_file listed").clone();
-        assert_eq!(tool["inputSchema"]["required"], json!(["platform","account_id","recipient","path","idempotency_key"]));
+        let tool = tools["tools"]
+            .as_array()
+            .or(tools.as_array())
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "send_file")
+            .expect("send_file listed")
+            .clone();
+        assert_eq!(
+            tool["inputSchema"]["required"],
+            json!([
+                "platform",
+                "account_id",
+                "recipient",
+                "path",
+                "idempotency_key"
+            ])
+        );
     }
 
     #[tokio::test]
@@ -570,8 +602,17 @@ mod tests {
             assert_eq!(gateway.call("upload_file", args).await["isError"], true);
         }
         let tools = crate::tools::list_tools_with_legacy(false);
-        let tool = tools["tools"].as_array().unwrap().iter().find(|t| t["name"] == "upload_file").expect("upload_file listed").clone();
-        assert_eq!(tool["inputSchema"]["required"], json!(["name","content_base64"]));
+        let tool = tools["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "upload_file")
+            .expect("upload_file listed")
+            .clone();
+        assert_eq!(
+            tool["inputSchema"]["required"],
+            json!(["name", "content_base64"])
+        );
     }
 
     #[tokio::test]
@@ -689,7 +730,9 @@ mod tests {
         };
 
         crate::wechat::with_test_send_fault(
-            crate::wechat::SendFault::Click(Some("accessibility_permission_missing_for_executing_process")),
+            crate::wechat::SendFault::Click(Some(
+                "accessibility_permission_missing_for_executing_process",
+            )),
             async {
                 let response = gateway
                     .call(
@@ -709,7 +752,9 @@ mod tests {
                     err_text.contains("未触发发送"),
                     "error text must contain marker: {err_text}"
                 );
-                assert!(err_text.contains("accessibility_permission_missing_for_executing_process"));
+                assert!(
+                    err_text.contains("accessibility_permission_missing_for_executing_process")
+                );
 
                 let check = gateway
                     .call(
@@ -755,7 +800,9 @@ mod tests {
         };
 
         crate::wechat::with_test_send_fault(
-            crate::wechat::SendFault::Click(Some("accessibility_permission_missing_for_executing_process")),
+            crate::wechat::SendFault::Click(Some(
+                "accessibility_permission_missing_for_executing_process",
+            )),
             async {
                 let response = gateway
                     .call(
@@ -859,7 +906,11 @@ mod tests {
     }
 
     impl SequenceAdapter {
-        fn new(platform: &str, account_id: &str, responses: Vec<Result<Value, String>>) -> Arc<Self> {
+        fn new(
+            platform: &str,
+            account_id: &str,
+            responses: Vec<Result<Value, String>>,
+        ) -> Arc<Self> {
             Arc::new(Self {
                 account: AccountDescriptor {
                     key: AccountKey {
@@ -902,7 +953,10 @@ mod tests {
                         Ok(v) => Ok(v),
                         Err(err_msg) => {
                             if err_msg.contains("未触发发送") {
-                                Err(crate::wechat::SendError::NotSent(anyhow::anyhow!("{err_msg}")).into())
+                                Err(
+                                    crate::wechat::SendError::NotSent(anyhow::anyhow!("{err_msg}"))
+                                        .into(),
+                                )
                             } else {
                                 Err(anyhow::anyhow!("{err_msg}"))
                             }
@@ -921,7 +975,9 @@ mod tests {
             "work",
             vec![
                 Err("未触发发送: click failed".into()),
-                Ok(json!({"account": {"platform": "wechat", "account_id": "work"}, "data": {"status": "triggered"}})),
+                Ok(
+                    json!({"account": {"platform": "wechat", "account_id": "work"}, "data": {"status": "triggered"}}),
+                ),
             ],
         );
         let mut accounts = AccountRegistry::default();
@@ -972,11 +1028,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_without_not_sent_delivery_then_same_key_again_replays() {
         let store = Store::memory();
-        let adapter = SequenceAdapter::new(
-            "wechat",
-            "work",
-            vec![Err("timeout error".into())],
-        );
+        let adapter = SequenceAdapter::new("wechat", "work", vec![Err("timeout error".into())]);
         let mut accounts = AccountRegistry::default();
         accounts.register(adapter.clone()).unwrap();
         let gateway = Gateway {
@@ -1027,7 +1079,9 @@ mod tests {
         let adapter = SequenceAdapter::new(
             "wechat",
             "work",
-            vec![Ok(json!({"account": {"platform": "wechat", "account_id": "work"}, "data": {"status": "triggered"}}))],
+            vec![Ok(
+                json!({"account": {"platform": "wechat", "account_id": "work"}, "data": {"status": "triggered"}}),
+            )],
         );
         let mut accounts = AccountRegistry::default();
         accounts.register(adapter.clone()).unwrap();
@@ -1073,7 +1127,6 @@ mod tests {
         assert_eq!(resp2["structuredContent"]["data"]["replayed"], true);
     }
 
-
     #[tokio::test]
     async fn brain_tools_dispatched_via_gateway() {
         let _guard = crate::core::env_lock();
@@ -1093,9 +1146,7 @@ mod tests {
             desktop_tools: crate::interaction::DesktopTools::default(),
         };
 
-        let resp = gateway
-            .call("next_turn", json!({"wait_seconds": 0}))
-            .await;
+        let resp = gateway.call("next_turn", json!({"wait_seconds": 0})).await;
         // 未接入网关时会返回 "未知工具: next_turn"
         // 接入网关后由于 core.sock 未启动应返回 "core_not_running"
         let err_text = resp["content"][0]["text"].as_str().unwrap_or("");
@@ -1109,20 +1160,31 @@ mod tests {
         );
 
         if let Some(prev) = prev_env {
-            unsafe { std::env::set_var("WECHAT_CORE_SOCK", prev); }
+            unsafe {
+                std::env::set_var("WECHAT_CORE_SOCK", prev);
+            }
         } else {
-            unsafe { std::env::remove_var("WECHAT_CORE_SOCK"); }
+            unsafe {
+                std::env::remove_var("WECHAT_CORE_SOCK");
+            }
         }
     }
 
-    async fn mcp_handle_request(gateway: &Gateway, request: Value, structured_content: bool) -> Value {
+    async fn mcp_handle_request(
+        gateway: &Gateway,
+        request: Value,
+        structured_content: bool,
+    ) -> Value {
         let id = request.get("id").cloned();
         let method = request.get("method").and_then(Value::as_str).unwrap_or("");
         let result = match method {
             "tools/call" => {
                 let params = request.get("params").and_then(Value::as_object).unwrap();
                 let name = params.get("name").and_then(Value::as_str).unwrap();
-                let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+                let args = params
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
                 let mut res = gateway.call(name, args).await;
                 if !structured_content {
                     if let Some(obj) = res.as_object_mut() {
@@ -1231,9 +1293,7 @@ mod tests {
             media_refs: Vec::new(),
         };
 
-        let brain_handle = tokio::spawn(async move {
-            b_fn(&sample_turn).await
-        });
+        let brain_handle = tokio::spawn(async move { b_fn(&sample_turn).await });
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -1253,7 +1313,10 @@ mod tests {
         assert_eq!(turn_data["turn_id"], "turn-gw-1");
         assert_eq!(turn_data["contact"]["name"], "示例联系人甲");
         assert_eq!(turn_data["text"], "来自客户的问题");
-        let claim_token = turn_data["claim_token"].as_str().expect("必须包含 claim_token").to_string();
+        let claim_token = turn_data["claim_token"]
+            .as_str()
+            .expect("必须包含 claim_token")
+            .to_string();
         assert!(!claim_token.is_empty());
         assert!(turn_data["deadline_at"].as_u64().is_some());
 
@@ -1292,7 +1355,12 @@ mod tests {
         });
         let resp_fake = mcp_handle_request(&gateway, fake_reply_req, true).await;
         assert_eq!(resp_fake["result"]["isError"], true);
-        assert!(resp_fake["result"]["content"][0]["text"].as_str().unwrap().contains("invalid_claim_token"));
+        assert!(
+            resp_fake["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("invalid_claim_token")
+        );
 
         // 4. 客户端 1：用正确的 claim_token 通过 MCP handle_request 经 Gateway 回复
         let reply_req = json!({
@@ -1316,21 +1384,29 @@ mod tests {
         // 检查后台 ExternalBrain 收到的回复与元数据
         let brain_reply = brain_handle.await.unwrap().unwrap();
         assert_eq!(brain_reply.reply, "网关契约测试成功回复");
-        assert_eq!(brain_reply.metadata.get("action").and_then(Value::as_str), Some("send"));
+        assert_eq!(
+            brain_reply.metadata.get("action").and_then(Value::as_str),
+            Some("send")
+        );
 
         // 5. 再次 reply 应该被拒绝（已回答）
-        let dup_reply = mcp_handle_request(&gateway, json!({
-            "jsonrpc": "2.0",
-            "id": 5,
-            "method": "tools/call",
-            "params": {
-                "name": "reply",
-                "arguments": {
-                    "turn_id": "turn-gw-1",
-                    "action": "skip"
+        let dup_reply = mcp_handle_request(
+            &gateway,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {
+                    "name": "reply",
+                    "arguments": {
+                        "turn_id": "turn-gw-1",
+                        "action": "skip"
+                    }
                 }
-            }
-        }), true).await;
+            }),
+            true,
+        )
+        .await;
         assert_eq!(dup_reply["result"]["isError"], true);
 
         // 6. 测试 resume_session 工具通过 Gateway 正常执行
@@ -1353,16 +1429,26 @@ mod tests {
         });
         let resp_resume = mcp_handle_request(&gateway, resume_req, true).await;
         assert_eq!(resp_resume["result"]["isError"], false);
-        assert_eq!(resp_resume["result"]["structuredContent"]["resumed"], "示例联系人甲");
-        assert!(!handoff_file.exists(), "handoff.json 必须已被清理以恢复自动回复");
+        assert_eq!(
+            resp_resume["result"]["structuredContent"]["resumed"],
+            "示例联系人甲"
+        );
+        assert!(
+            !handoff_file.exists(),
+            "handoff.json 必须已被清理以恢复自动回复"
+        );
 
         // 清理资源
         let _ = stop_tx.send(true);
         server_handle.abort();
         if let Some(prev) = prev_env {
-            unsafe { std::env::set_var("WECHAT_CORE_SOCK", prev); }
+            unsafe {
+                std::env::set_var("WECHAT_CORE_SOCK", prev);
+            }
         } else {
-            unsafe { std::env::remove_var("WECHAT_CORE_SOCK"); }
+            unsafe {
+                std::env::remove_var("WECHAT_CORE_SOCK");
+            }
         }
         let _ = std::fs::remove_dir_all(&td);
     }

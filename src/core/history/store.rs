@@ -5,12 +5,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, bail};
+use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::{Value, json};
 
-use crate::core::model::Bubble;
 use super::names::{candidate_names, name_key};
+use crate::core::model::Bubble;
 
 use crate::core::policy;
 
@@ -36,7 +36,11 @@ pub fn now_ms() -> i64 {
 }
 
 pub fn new_id(prefix: &str) -> String {
-    format!("{}{}", prefix, uuid::Uuid::new_v4().simple().to_string()[..16].to_lowercase())
+    format!(
+        "{}{}",
+        prefix,
+        uuid::Uuid::new_v4().simple().to_string()[..16].to_lowercase()
+    )
 }
 
 pub fn ensure_private_dir(path: impl AsRef<Path>) -> Result<PathBuf> {
@@ -48,18 +52,20 @@ pub fn ensure_private_dir(path: impl AsRef<Path>) -> Result<PathBuf> {
 
 pub fn sha256_hex(data: &[u8]) -> String {
     let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
     ];
     let k: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
     ];
     let bit_len = (data.len() as u64) * 8;
     let mut msg = data.to_vec();
@@ -77,7 +83,10 @@ pub fn sha256_hex(data: &[u8]) -> String {
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
             let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
         }
         let mut a = h[0];
         let mut b = h[1];
@@ -91,7 +100,11 @@ pub fn sha256_hex(data: &[u8]) -> String {
         for i in 0..64 {
             let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
             let ch = (e & f) ^ ((!e) & g);
-            let temp1 = h_val.wrapping_add(s1).wrapping_add(ch).wrapping_add(k[i]).wrapping_add(w[i]);
+            let temp1 = h_val
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(k[i])
+                .wrapping_add(w[i]);
             let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
             let maj = (a & b) ^ (a & c) ^ (b & c);
             let temp2 = s0.wrapping_add(maj);
@@ -114,7 +127,9 @@ pub fn sha256_hex(data: &[u8]) -> String {
         h[6] = h[6].wrapping_add(g);
         h[7] = h[7].wrapping_add(h_val);
     }
-    h.iter().map(|val| format!("{:08x}", val)).collect::<String>()
+    h.iter()
+        .map(|val| format!("{:08x}", val))
+        .collect::<String>()
 }
 
 pub struct HistoryStore {
@@ -349,7 +364,9 @@ fn _owners_conn(
         params_vec.push(s);
     }
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(params_vec), |r| r.get::<_, String>(0))?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params_vec), |r| {
+        r.get::<_, String>(0)
+    })?;
     let mut raw_owners = HashSet::new();
     for r in rows {
         raw_owners.insert(r?);
@@ -393,7 +410,11 @@ fn _name_with_conn(
             "addressbook" => 1,
             _ => 0, // observed
         };
-        let keep = if rank(source) > rank(&existing_source) { source.to_string() } else { existing_source };
+        let keep = if rank(source) > rank(&existing_source) {
+            source.to_string()
+        } else {
+            existing_source
+        };
         conn.execute(
             "UPDATE contact_names SET source=?, last_seen_at=? WHERE contact_id=? AND raw_name=?",
             params![keep, stamp, contact_id, raw],
@@ -485,21 +506,41 @@ impl HistoryStore {
         canonical_conn(&conn, contact_id)
     }
 
-    pub fn ensure_contact(&self, account_id: &str, entry: &Value, follow_merge: bool) -> Result<String> {
+    pub fn ensure_contact(
+        &self,
+        account_id: &str,
+        entry: &Value,
+        follow_merge: bool,
+    ) -> Result<String> {
         let names = candidate_names(entry);
         let recipient = entry
             .get("recipient")
             .and_then(|v| v.as_str())
             .context("missing recipient in entry")?;
-        let kind = entry.get("kind").and_then(|v| v.as_str()).unwrap_or("private");
+        let kind = entry
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("private");
 
         let conn = self.conn.lock().unwrap();
         let mut owners = HashSet::new();
         for n in &names {
-            let set = _owners_conn(&conn, account_id, &name_key(n), &["config", "alias"], follow_merge)?;
+            let set = _owners_conn(
+                &conn,
+                account_id,
+                &name_key(n),
+                &["config", "alias"],
+                follow_merge,
+            )?;
             for cid in set {
-                let same_kind: bool = conn.query_row("SELECT kind=? FROM contacts WHERE contact_id=?", params![kind, cid], |r| r.get(0))?;
-                if same_kind { owners.insert(cid); }
+                let same_kind: bool = conn.query_row(
+                    "SELECT kind=? FROM contacts WHERE contact_id=?",
+                    params![kind, cid],
+                    |r| r.get(0),
+                )?;
+                if same_kind {
+                    owners.insert(cid);
+                }
             }
         }
         // 通讯录先建档时没有 config/alias；仅复用同种会话且仍有效的唯一身份。
@@ -510,7 +551,9 @@ impl HistoryStore {
                         "SELECT EXISTS(SELECT 1 FROM contacts c JOIN contact_profiles p ON p.contact_id=c.contact_id WHERE c.contact_id=? AND c.kind=? AND p.removed_at IS NULL AND p.category!='official')",
                         params![cid, kind], |r| r.get(0),
                     )?;
-                    if eligible { owners.insert(cid); }
+                    if eligible {
+                        owners.insert(cid);
+                    }
                 }
             }
         }
@@ -553,7 +596,13 @@ impl HistoryStore {
 
     pub fn resolve(&self, account_id: &str, raw_name: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
-        let owners = _owners_conn(&conn, account_id, &name_key(raw_name), &["config", "alias", "addressbook"], true)?;
+        let owners = _owners_conn(
+            &conn,
+            account_id,
+            &name_key(raw_name),
+            &["config", "alias", "addressbook"],
+            true,
+        )?;
         if owners.len() == 1 {
             Ok(owners.into_iter().next())
         } else {
@@ -640,12 +689,15 @@ impl HistoryStore {
         capture: Option<&str>,
     ) -> Result<String> {
         let guard = self.conn.lock().unwrap();
-        let conn = rusqlite::Transaction::new_unchecked(&guard, rusqlite::TransactionBehavior::Immediate)?;
-        let saved: Option<(String, String)> = conn.query_row(
-            "SELECT contact_id, reply_text FROM sends WHERE send_key=?",
-            params![send_key],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        ).optional()?;
+        let conn =
+            rusqlite::Transaction::new_unchecked(&guard, rusqlite::TransactionBehavior::Immediate)?;
+        let saved: Option<(String, String)> = conn
+            .query_row(
+                "SELECT contact_id, reply_text FROM sends WHERE send_key=?",
+                params![send_key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
         let stamp = now_ms();
         let reply = if let Some((saved_contact, saved_reply)) = saved {
             if saved_contact != contact_id {
@@ -657,14 +709,26 @@ impl HistoryStore {
             let inputs_json = serde_json::to_string(input_message_ids)?;
             conn.execute(
                 "INSERT INTO sends VALUES(?,?,?,?,?,0,?,?,?)",
-                params![send_key, contact_id, status, reply_text, model_json, inputs_json, stamp, stamp],
+                params![
+                    send_key,
+                    contact_id,
+                    status,
+                    reply_text,
+                    model_json,
+                    inputs_json,
+                    stamp,
+                    stamp
+                ],
             )?;
             reply_text.to_string()
         };
-        let existing: Option<String> = conn.query_row(
-            "SELECT message_id FROM messages WHERE send_key=? AND sender='bot'",
-            params![send_key], |r| r.get(0),
-        ).optional()?;
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT message_id FROM messages WHERE send_key=? AND sender='bot'",
+                params![send_key],
+                |r| r.get(0),
+            )
+            .optional()?;
         if let Some(mid) = existing {
             conn.commit()?;
             return Ok(mid);
@@ -785,11 +849,23 @@ impl HistoryStore {
             return Ok(false);
         }
         let conn = self.conn.lock().unwrap();
-        let marks = message_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql_max = format!("SELECT MAX(seq) FROM messages WHERE message_id IN ({})", marks);
-        let params_ids: Vec<&dyn rusqlite::ToSql> = message_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let marks = message_ids
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql_max = format!(
+            "SELECT MAX(seq) FROM messages WHERE message_id IN ({})",
+            marks
+        );
+        let params_ids: Vec<&dyn rusqlite::ToSql> = message_ids
+            .iter()
+            .map(|s| s as &dyn rusqlite::ToSql)
+            .collect();
         let last: Option<i64> = conn
-            .query_row(&sql_max, rusqlite::params_from_iter(params_ids), |r| r.get(0))
+            .query_row(&sql_max, rusqlite::params_from_iter(params_ids), |r| {
+                r.get(0)
+            })
             .optional()?
             .flatten();
 
@@ -798,7 +874,11 @@ impl HistoryStore {
             None => return Ok(false),
         };
 
-        let exc_marks = EXCLUDED_SEND.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let exc_marks = EXCLUDED_SEND
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
         let sql = format!(
             "SELECT 1 FROM messages m LEFT JOIN sends s ON s.send_key=m.send_key
              WHERE m.contact_id=? AND m.seq>? AND m.direction='outbound'
@@ -837,7 +917,11 @@ impl HistoryStore {
         let conn = self.conn.lock().unwrap();
         let family = family_conn(&conn, contact_id)?;
         let family_marks = family.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let exc_marks = EXCLUDED_SEND.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let exc_marks = EXCLUDED_SEND
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
         let sql = format!(
             "SELECT m.message_id, m.sender, m.text, d.kind, d.filename, d.understanding, d.path
              FROM messages m
@@ -872,13 +956,23 @@ impl HistoryStore {
             let understanding: Option<String> = row.get(5)?;
             let path: Option<String> = row.get(6)?;
 
-            let role = if sender == "customer" { "user" } else { "assistant" };
+            let role = if sender == "customer" {
+                "user"
+            } else {
+                "assistant"
+            };
             let mut item = json!({
                 "role": role,
                 "text": text,
             });
             if let Some(k) = kind {
-                let abs_path = path.map(|p| self.root.join("media").join(p).to_string_lossy().to_string());
+                let abs_path = path.map(|p| {
+                    self.root
+                        .join("media")
+                        .join(p)
+                        .to_string_lossy()
+                        .to_string()
+                });
                 item["media"] = json!({
                     "kind": k,
                     "filename": filename,
@@ -944,7 +1038,11 @@ impl HistoryStore {
         let sub_dir = ensure_private_dir(media_root.join(&digest[..2]))?;
         let target = sub_dir.join(format!("{}.{}", digest, extension));
         if !target.exists() {
-            let tmp_name = format!("{}.{}.tmp", target.file_name().unwrap().to_string_lossy(), uuid::Uuid::new_v4().simple());
+            let tmp_name = format!(
+                "{}.{}.tmp",
+                target.file_name().unwrap().to_string_lossy(),
+                uuid::Uuid::new_v4().simple()
+            );
             let tmp_path = sub_dir.join(tmp_name);
             let mut file = OpenOptions::new()
                 .create_new(true)
@@ -1002,7 +1100,12 @@ impl HistoryStore {
         Ok(None)
     }
 
-    pub fn finish_media_job(&self, message_id: &str, status: &str, error: Option<&str>) -> Result<()> {
+    pub fn finish_media_job(
+        &self,
+        message_id: &str,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<()> {
         if !matches!(status, "done" | "failed" | "gone") {
             bail!("invalid media job status");
         }
@@ -1032,7 +1135,11 @@ impl HistoryStore {
     pub fn has_pending_media(&self) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let found: Option<i64> = conn
-            .query_row("SELECT 1 FROM media_jobs WHERE status='pending' LIMIT 1", [], |r| r.get(0))
+            .query_row(
+                "SELECT 1 FROM media_jobs WHERE status='pending' LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
             .optional()?;
         Ok(found.is_some())
     }
@@ -1051,7 +1158,8 @@ impl HistoryStore {
             .get("bubbles")
             .and_then(|v| v.as_array())
             .context("frame missing bubbles")?;
-        let current_bubbles: Vec<Bubble> = serde_json::from_value(Value::Array(raw_bubbles.clone()))?;
+        let current_bubbles: Vec<Bubble> =
+            serde_json::from_value(Value::Array(raw_bubbles.clone()))?;
 
         let guard = self.conn.lock().unwrap();
         let conn = guard.unchecked_transaction()?;
@@ -1069,9 +1177,13 @@ impl HistoryStore {
         }
 
         if let Some(ref stored) = stored_fps {
-            if stored.iter().any(|x| x.as_array().map(|a| a.len() == 2).unwrap_or(false)) {
+            if stored
+                .iter()
+                .any(|x| x.as_array().map(|a| a.len() == 2).unwrap_or(false))
+            {
                 // v1 fingerprint reset
-                let current_fps: Vec<policy::Fingerprint> = current_bubbles.iter().map(policy::fingerprint).collect();
+                let current_fps: Vec<policy::Fingerprint> =
+                    current_bubbles.iter().map(policy::fingerprint).collect();
                 let fps_json = serde_json::to_string(&current_fps)?;
                 conn.execute(
                     "UPDATE contact_cursor SET frame_fingerprints=?, updated_at=? WHERE contact_id=?",
@@ -1087,14 +1199,25 @@ impl HistoryStore {
 
         if stored_fps.is_none() {
             let meta = baseline_meta.cloned().unwrap_or(json!({}));
-            plan = current_bubbles.into_iter().map(|b| (b, "baseline", meta.clone())).collect();
+            plan = current_bubbles
+                .into_iter()
+                .map(|b| (b, "baseline", meta.clone()))
+                .collect();
         } else {
             let stored = stored_fps.unwrap();
             let mut previous: Vec<Bubble> = Vec::new();
             for item in &stored {
                 if let Some(arr) = item.as_array() {
-                    let dir = arr.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let dig = arr.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let dir = arr
+                        .get(0)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let dig = arr
+                        .get(1)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let ph = arr.get(2).and_then(|v| v.as_str()).map(|s| s.to_string());
                     previous.push(Bubble {
                         text: "".to_string(),
@@ -1116,7 +1239,8 @@ impl HistoryStore {
                 }
             }
             current_reconciled = policy::reconcile(&previous, &current_bubbles);
-            let seen: Vec<policy::Fingerprint> = current_reconciled.iter().map(policy::fingerprint).collect();
+            let seen: Vec<policy::Fingerprint> =
+                current_reconciled.iter().map(policy::fingerprint).collect();
 
             match policy::new_bubbles(&previous, &current_reconciled) {
                 Ok(new_b) => {
@@ -1131,7 +1255,8 @@ impl HistoryStore {
                     }
                     unstable_guard.remove(contact_id);
 
-                    let old_fps: Vec<policy::Fingerprint> = previous.iter().map(policy::fingerprint).collect();
+                    let old_fps: Vec<policy::Fingerprint> =
+                        previous.iter().map(policy::fingerprint).collect();
                     let mut max_k = 1;
                     for k in 1..=old_fps.len().min(seen.len()) {
                         if old_fps[old_fps.len() - k..] == seen[..k] {
@@ -1142,7 +1267,11 @@ impl HistoryStore {
                     let mut p = Vec::new();
                     if max_k <= end && end <= current_reconciled.len() {
                         for b in &current_reconciled[max_k..end] {
-                            p.push((b.clone(), "ambiguous", json!({"note": "repeat count uncertain"})));
+                            p.push((
+                                b.clone(),
+                                "ambiguous",
+                                json!({"note": "repeat count uncertain"}),
+                            ));
                         }
                     }
                     for b in certain {
@@ -1167,12 +1296,21 @@ impl HistoryStore {
 
         let mut rows = Vec::new();
         for (bubble, capture, meta) in plan {
-            if let Some(row) = self._append(&conn, contact_id, &bubble, capture, meta, batch_key, pair_imported)? {
+            if let Some(row) = self._append(
+                &conn,
+                contact_id,
+                &bubble,
+                capture,
+                meta,
+                batch_key,
+                pair_imported,
+            )? {
                 rows.push(row);
             }
         }
 
-        let final_fps: Vec<policy::Fingerprint> = current_reconciled.iter().map(policy::fingerprint).collect();
+        let final_fps: Vec<policy::Fingerprint> =
+            current_reconciled.iter().map(policy::fingerprint).collect();
         let fps_json = serde_json::to_string(&final_fps)?;
         let stamp = now_ms();
         conn.execute(
@@ -1268,7 +1406,10 @@ impl HistoryStore {
         let (window_clause, cutoff): (&str, i64) = if pair_imported {
             ("(m.capture='imported')", 0)
         } else {
-            ("(m.capture != 'imported' AND s.created_at >= ?)", now_ms() - ECHO_WINDOW_MS)
+            (
+                "(m.capture != 'imported' AND s.created_at >= ?)",
+                now_ms() - ECHO_WINDOW_MS,
+            )
         };
         let sql = format!(
             "SELECT m.message_id, s.send_key, s.reply_text FROM messages m JOIN sends s ON s.send_key=m.send_key
@@ -1281,14 +1422,22 @@ impl HistoryStore {
         let mut rows: Vec<(String, String, String)> = Vec::new();
         if pair_imported {
             let mapped = stmt.query_map(params![contact_id], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
             })?;
             for r in mapped {
                 rows.push(r?);
             }
         } else {
             let mapped = stmt.query_map(params![contact_id, cutoff], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
             })?;
             for r in mapped {
                 rows.push(r?);
@@ -1297,7 +1446,9 @@ impl HistoryStore {
         drop(stmt);
 
         for (index, (message_id, send_key, reply)) in rows.into_iter().enumerate() {
-            if policy::echo_matches(&bubble.text, &reply) || (index == 0 && similar(&bubble.text, &reply, 0.85)) {
+            if policy::echo_matches(&bubble.text, &reply)
+                || (index == 0 && similar(&bubble.text, &reply, 0.85))
+            {
                 conn.execute(
                     "UPDATE messages SET bubble_digest=? WHERE message_id=?",
                     params![bubble.digest, message_id],
@@ -1355,7 +1506,12 @@ impl HistoryStore {
         Ok(found)
     }
 
-    pub fn upsert_profile(&self, account_id: &str, p: &ProfileInput, now_ms: i64) -> Result<UpsertOutcome> {
+    pub fn upsert_profile(
+        &self,
+        account_id: &str,
+        p: &ProfileInput,
+        now_ms: i64,
+    ) -> Result<UpsertOutcome> {
         let guard = self.conn.lock().unwrap();
         let transaction = guard.unchecked_transaction()?;
         let outcome = Self::upsert_profile_with_conn(&transaction, account_id, p, now_ms)?;
@@ -1363,15 +1519,36 @@ impl HistoryStore {
         Ok(outcome)
     }
 
-    fn upsert_profile_with_conn(conn: &Connection, account_id: &str, p: &ProfileInput, now_ms: i64) -> Result<UpsertOutcome> {
-        let clean_wechat_id = p.wechat_id.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty());
+    fn upsert_profile_with_conn(
+        conn: &Connection,
+        account_id: &str,
+        p: &ProfileInput,
+        now_ms: i64,
+    ) -> Result<UpsertOutcome> {
+        let clean_wechat_id = p
+            .wechat_id
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty());
         let clean_nickname = p.nickname.trim();
-        let clean_remark = p.remark.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty());
+        let clean_remark = p
+            .remark
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty());
         let category = &p.category;
-        let identity = if clean_wechat_id.is_some() { "strong" } else { "weak" };
+        let identity = if clean_wechat_id.is_some() {
+            "strong"
+        } else {
+            "weak"
+        };
         let tags_json = serde_json::to_string(&p.tags).unwrap_or_else(|_| "[]".to_string());
         let disp_name = clean_remark.unwrap_or(clean_nickname);
-        let kind = if category == "group" { "group" } else { "private" };
+        let kind = if category == "group" {
+            "group"
+        } else {
+            "private"
+        };
 
         let record_review = |reason: &str, candidates: &[String]| -> Result<()> {
             let cand_json = serde_json::to_string(candidates).unwrap_or_else(|_| "[]".to_string());
@@ -1396,7 +1573,14 @@ impl HistoryStore {
         };
 
         let write_names = |target_cid: &str| -> Result<()> {
-            _name_with_conn(&conn, target_cid, account_id, clean_nickname, "addressbook", now_ms)?;
+            _name_with_conn(
+                &conn,
+                target_cid,
+                account_id,
+                clean_nickname,
+                "addressbook",
+                now_ms,
+            )?;
             if let Some(r) = clean_remark {
                 if r != clean_nickname {
                     _name_with_conn(&conn, target_cid, account_id, r, "addressbook", now_ms)?;
@@ -1496,10 +1680,18 @@ impl HistoryStore {
 
             let mut candidate_cids = HashSet::new();
             for name in [Some(clean_nickname), clean_remark].into_iter().flatten() {
-                let owners = _owners_conn(&conn, account_id, &name_key(name), &["config", "alias", "observed", "addressbook"], true)?;
+                let owners = _owners_conn(
+                    &conn,
+                    account_id,
+                    &name_key(name),
+                    &["config", "alias", "observed", "addressbook"],
+                    true,
+                )?;
                 for cid in owners {
                     let same_kind: bool = conn.query_row("SELECT c.kind=? AND NOT EXISTS(SELECT 1 FROM contact_profiles p WHERE p.contact_id=c.contact_id AND p.category!=?) FROM contacts c WHERE c.contact_id=?", params![kind, category, cid], |r| r.get(0))?;
-                    if same_kind { candidate_cids.insert(cid); }
+                    if same_kind {
+                        candidate_cids.insert(cid);
+                    }
                 }
             }
             let mut candidates: Vec<String> = candidate_cids.into_iter().collect();
@@ -1529,16 +1721,26 @@ impl HistoryStore {
 
             if !near.is_empty() {
                 record_review("wechat_id_conflict", &near)?;
-                return Ok(UpsertOutcome::NeedsReview { reason: "wechat_id_conflict".to_string(), candidates: near });
+                return Ok(UpsertOutcome::NeedsReview {
+                    reason: "wechat_id_conflict".to_string(),
+                    candidates: near,
+                });
             }
             if unprofiled.len() > 1 || (unprofiled.len() == 1 && distinct > 0) {
                 // 聊天记录该归谁说不清：不自动归属
                 record_review("ambiguous_name", &candidates)?;
-                return Ok(UpsertOutcome::NeedsReview { reason: "ambiguous_name".to_string(), candidates });
+                return Ok(UpsertOutcome::NeedsReview {
+                    reason: "ambiguous_name".to_string(),
+                    candidates,
+                });
             }
             if let Some(target_cid) = unprofiled.into_iter().next() {
                 let has_profile: bool = conn
-                    .query_row("SELECT 1 FROM contact_profiles WHERE contact_id=?", params![&target_cid], |_| Ok(true))
+                    .query_row(
+                        "SELECT 1 FROM contact_profiles WHERE contact_id=?",
+                        params![&target_cid],
+                        |_| Ok(true),
+                    )
                     .optional()?
                     .unwrap_or(false);
                 if has_profile {
@@ -1557,16 +1759,31 @@ impl HistoryStore {
             let mut stmt = conn.prepare(
                 "SELECT contact_id, enterprise FROM contact_profiles WHERE account_id=? AND category=? AND nickname=? AND (wechat_id IS NULL OR wechat_id='') ORDER BY removed_at IS NOT NULL, last_synced_at DESC"
             )?;
-            let weak_rows = stmt.query_map(params![account_id, category, clean_nickname], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
-            })?.filter_map(Result::ok).collect::<Vec<_>>();
+            let weak_rows = stmt
+                .query_map(params![account_id, category, clean_nickname], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+                })?
+                .filter_map(Result::ok)
+                .collect::<Vec<_>>();
             drop(stmt);
 
             // 企业名比较只看汉字、字母、数字（实机：两次识别只差末尾一个标点）
-            let ent_key = |e: &str| -> String { e.chars().filter(|c| c.is_alphanumeric()).flat_map(|c| c.to_lowercase()).collect() };
-            let input_ent = p.enterprise.as_deref().map(ent_key).filter(|k| !k.is_empty());
+            let ent_key = |e: &str| -> String {
+                e.chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .flat_map(|c| c.to_lowercase())
+                    .collect()
+            };
+            let input_ent = p
+                .enterprise
+                .as_deref()
+                .map(ent_key)
+                .filter(|k| !k.is_empty());
             let matched_weak = weak_rows.into_iter().find(|(_, ent)| {
-                match (&input_ent, ent.as_deref().map(ent_key).filter(|k| !k.is_empty())) {
+                match (
+                    &input_ent,
+                    ent.as_deref().map(ent_key).filter(|k| !k.is_empty()),
+                ) {
                     (Some(e1), Some(e2)) => *e1 == e2,
                     (None, None) => true,
                     _ => false,
@@ -1580,17 +1797,29 @@ impl HistoryStore {
 
             let mut candidate_cids = HashSet::new();
             for name in [Some(clean_nickname), clean_remark].into_iter().flatten() {
-                let owners = _owners_conn(&conn, account_id, &name_key(name), &["config", "alias", "observed", "addressbook"], true)?;
+                let owners = _owners_conn(
+                    &conn,
+                    account_id,
+                    &name_key(name),
+                    &["config", "alias", "observed", "addressbook"],
+                    true,
+                )?;
                 for cid in owners {
                     let same_kind: bool = conn.query_row("SELECT c.kind=? AND NOT EXISTS(SELECT 1 FROM contact_profiles p WHERE p.contact_id=c.contact_id AND p.category!=?) FROM contacts c WHERE c.contact_id=?", params![kind, category, cid], |r| r.get(0))?;
-                    if same_kind { candidate_cids.insert(cid); }
+                    if same_kind {
+                        candidate_cids.insert(cid);
+                    }
                 }
             }
             // 没有微信号时按名字只能认"还没有通讯录资料"的联系人（如聊天里出现过的人）。已有资料的同名者
             // 上面按"同名同企业"没对上，就是另一个人（实机：两个同名不同企业的企业微信联系人被并成一条）。
             candidate_cids.retain(|cid| {
                 !conn
-                    .query_row("SELECT 1 FROM contact_profiles WHERE contact_id=?", params![cid], |_| Ok(true))
+                    .query_row(
+                        "SELECT 1 FROM contact_profiles WHERE contact_id=?",
+                        params![cid],
+                        |_| Ok(true),
+                    )
                     .optional()
                     .ok()
                     .flatten()
@@ -1632,7 +1861,13 @@ impl HistoryStore {
         }
     }
 
-    pub fn mark_missing(&self, account_id: &str, category: &str, seen_contact_ids: &[String], now_ms: i64) -> Result<usize> {
+    pub fn mark_missing(
+        &self,
+        account_id: &str,
+        category: &str,
+        seen_contact_ids: &[String],
+        now_ms: i64,
+    ) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
         if seen_contact_ids.is_empty() {
             let count = conn.execute(
@@ -1641,7 +1876,11 @@ impl HistoryStore {
             )?;
             return Ok(count);
         }
-        let marks = seen_contact_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let marks = seen_contact_ids
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
         let sql = format!(
             "UPDATE contact_profiles SET removed_at=? WHERE account_id=? AND category=? AND removed_at IS NULL AND contact_id NOT IN ({})",
             marks
@@ -1745,7 +1984,11 @@ pub fn similar(observed: &str, expected: &str, threshold: f64) -> bool {
     if (a.len() as f64) < 0.6 * (b.len() as f64) {
         return false;
     }
-    let b_prefix: &[char] = if a.len() < b.len() { &b[..a.len()] } else { &b[..] };
+    let b_prefix: &[char] = if a.len() < b.len() {
+        &b[..a.len()]
+    } else {
+        &b[..]
+    };
     let r1 = sequence_matcher_ratio(&a, &b);
     let r2 = sequence_matcher_ratio(&a, b_prefix);
     r1.max(r2) >= threshold
@@ -1756,7 +1999,14 @@ fn sequence_matcher_ratio(a: &[char], b: &[char]) -> f64 {
     if total == 0 {
         return 1.0;
     }
-    fn find_blocks(a: &[char], a_lo: usize, a_hi: usize, b: &[char], b_lo: usize, b_hi: usize) -> usize {
+    fn find_blocks(
+        a: &[char],
+        a_lo: usize,
+        a_hi: usize,
+        b: &[char],
+        b_lo: usize,
+        b_hi: usize,
+    ) -> usize {
         let mut best_i = a_lo;
         let mut best_j = b_lo;
         let mut best_size = 0;
@@ -1818,7 +2068,10 @@ mod tests {
     struct TestTempDir(PathBuf);
     impl TestTempDir {
         fn new() -> Self {
-            let p = std::env::temp_dir().join(format!("wechat-store-test-{}", uuid::Uuid::new_v4().simple()));
+            let p = std::env::temp_dir().join(format!(
+                "wechat-store-test-{}",
+                uuid::Uuid::new_v4().simple()
+            ));
             fs::create_dir_all(&p).unwrap();
             Self(p)
         }
@@ -1870,7 +2123,11 @@ mod tests {
         let state = temp.path().join("state");
         let store = HistoryStore::open(&state).unwrap();
         let c = store
-            .ensure_contact("acct", &json!({"recipient": "客户", "kind": "private"}), true)
+            .ensure_contact(
+                "acct",
+                &json!({"recipient": "客户", "kind": "private"}),
+                true,
+            )
             .unwrap();
         StoreFixture {
             _temp: temp,
@@ -1881,7 +2138,10 @@ mod tests {
     }
 
     fn rows(f: &StoreFixture, col: &str) -> Vec<String> {
-        let sql = format!("SELECT {} FROM messages WHERE contact_id=? ORDER BY seq", col);
+        let sql = format!(
+            "SELECT {} FROM messages WHERE contact_id=? ORDER BY seq",
+            col
+        );
         let conn = f.store.connection();
         let guard = conn.lock().unwrap();
         let mut stmt = guard.prepare(&sql).unwrap();
@@ -1889,24 +2149,59 @@ mod tests {
         mapped.filter_map(Result::ok).collect()
     }
 
-    fn texts(f: &StoreFixture) -> Vec<String> { rows(f, "text") }
-    fn captures(f: &StoreFixture) -> Vec<String> { rows(f, "capture") }
-    fn senders(f: &StoreFixture) -> Vec<String> { rows(f, "sender") }
+    fn texts(f: &StoreFixture) -> Vec<String> {
+        rows(f, "text")
+    }
+    fn captures(f: &StoreFixture) -> Vec<String> {
+        rows(f, "capture")
+    }
+    fn senders(f: &StoreFixture) -> Vec<String> {
+        rows(f, "sender")
+    }
 
     #[test]
     fn record_frame_is_atomic() {
         let f = setup_fixture();
-        let frame = fr(vec![bub("first", "inbound_visual", "text"), bub("second", "inbound_visual", "text")]);
+        let frame = fr(vec![
+            bub("first", "inbound_visual", "text"),
+            bub("second", "inbound_visual", "text"),
+        ]);
         f.store.connection().lock().unwrap().execute_batch(
             "CREATE TRIGGER reject_second BEFORE INSERT ON messages WHEN NEW.text='second' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;"
         ).unwrap();
-        assert!(f.store.record_frame(&f.c, &frame, None, None, false).is_err());
+        assert!(
+            f.store
+                .record_frame(&f.c, &frame, None, None, false)
+                .is_err()
+        );
         assert_eq!(texts(&f), Vec::<String>::new());
-        let cursors: i64 = f.store.connection().lock().unwrap().query_row("SELECT COUNT(*) FROM contact_cursor", [], |r| r.get(0)).unwrap();
+        let cursors: i64 = f
+            .store
+            .connection()
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM contact_cursor", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(cursors, 0);
-        f.store.connection().lock().unwrap().execute_batch("DROP TRIGGER reject_second").unwrap();
-        assert_eq!(f.store.record_frame(&f.c, &frame, None, None, false).unwrap().len(), 2);
-        assert!(f.store.record_frame(&f.c, &frame, None, None, false).unwrap().is_empty());
+        f.store
+            .connection()
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_second")
+            .unwrap();
+        assert_eq!(
+            f.store
+                .record_frame(&f.c, &frame, None, None, false)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            f.store
+                .record_frame(&f.c, &frame, None, None, false)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(texts(&f), vec!["first", "second"]);
     }
 
@@ -1916,27 +2211,102 @@ mod tests {
         f.store.connection().lock().unwrap().execute_batch(
             "CREATE TRIGGER reject_reply BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'injected failure'); END;"
         ).unwrap();
-        assert!(f.store.record_bot_reply(&f.c, "atomic", "reply", "triggered", &json!({}), &[], None, None).is_err());
+        assert!(
+            f.store
+                .record_bot_reply(
+                    &f.c,
+                    "atomic",
+                    "reply",
+                    "triggered",
+                    &json!({}),
+                    &[],
+                    None,
+                    None
+                )
+                .is_err()
+        );
         assert!(f.store.send("atomic").unwrap().is_none());
         assert!(texts(&f).is_empty());
-        f.store.connection().lock().unwrap().execute_batch("DROP TRIGGER reject_reply").unwrap();
-        f.store.record_bot_reply(&f.c, "atomic", "reply", "triggered", &json!({}), &[], None, None).unwrap();
+        f.store
+            .connection()
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_reply")
+            .unwrap();
+        f.store
+            .record_bot_reply(
+                &f.c,
+                "atomic",
+                "reply",
+                "triggered",
+                &json!({}),
+                &[],
+                None,
+                None,
+            )
+            .unwrap();
         assert_eq!(texts(&f), vec!["reply"]);
     }
 
     #[test]
     fn record_bot_reply_recovers_half_written() {
         let f = setup_fixture();
-        f.store.connection().lock().unwrap().execute(
-            "INSERT INTO sends VALUES(?,?,?,?,?,0,?,?,?)",
-            params!["half", f.c, "triggered", "original reply", "{}", "[]", 10, 10],
-        ).unwrap();
-        let mid = f.store.record_bot_reply(&f.c, "half", "changed retry reply", "triggered", &json!({}), &[], Some(10), None).unwrap();
-        assert_eq!(f.store.record_bot_reply(&f.c, "half", "original reply", "triggered", &json!({}), &[], Some(10), None).unwrap(), mid);
+        f.store
+            .connection()
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO sends VALUES(?,?,?,?,?,0,?,?,?)",
+                params![
+                    "half",
+                    f.c,
+                    "triggered",
+                    "original reply",
+                    "{}",
+                    "[]",
+                    10,
+                    10
+                ],
+            )
+            .unwrap();
+        let mid = f
+            .store
+            .record_bot_reply(
+                &f.c,
+                "half",
+                "changed retry reply",
+                "triggered",
+                &json!({}),
+                &[],
+                Some(10),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            f.store
+                .record_bot_reply(
+                    &f.c,
+                    "half",
+                    "original reply",
+                    "triggered",
+                    &json!({}),
+                    &[],
+                    Some(10),
+                    None
+                )
+                .unwrap(),
+            mid
+        );
         assert_eq!(texts(&f), vec!["original reply"]);
         let conn = f.store.connection();
         let conn = conn.lock().unwrap();
-        let counts: (i64, i64) = conn.query_row("SELECT (SELECT COUNT(*) FROM sends), (SELECT COUNT(*) FROM messages)", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        let counts: (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM sends), (SELECT COUNT(*) FROM messages)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(counts, (1, 1));
     }
 
@@ -1950,7 +2320,12 @@ mod tests {
                 let mut errors = Vec::new();
                 for i in 0..50 {
                     barrier.wait();
-                    if let Err(e) = store.import_message(&f.c, &bub(&format!("{prefix}-{i}"), "inbound_visual", "text"), i, prefix) {
+                    if let Err(e) = store.import_message(
+                        &f.c,
+                        &bub(&format!("{prefix}-{i}"), "inbound_visual", "text"),
+                        i,
+                        prefix,
+                    ) {
                         errors.push(e.to_string());
                     }
                 }
@@ -1966,27 +2341,57 @@ mod tests {
         });
         let conn = f.store.connection();
         let conn = conn.lock().unwrap();
-        let counts: (i64, i64, i64, i64) = conn.query_row("SELECT COUNT(*), COUNT(DISTINCT seq), MIN(seq), MAX(seq) FROM messages", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
+        let counts: (i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), COUNT(DISTINCT seq), MIN(seq), MAX(seq) FROM messages",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
         assert_eq!(counts, (100, 100, 1, 100));
-        assert_eq!(conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0)).unwrap(), "ok");
+        assert_eq!(
+            conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
     }
 
     #[test]
     fn test_store_legacy_history_cursor_resets_without_duplicates() {
         let f = setup_fixture();
-        let frame = fr(vec![bub("a", "inbound_visual", "text"), bub("b", "inbound_visual", "text"), bub("c", "inbound_visual", "text")]);
-        f.store.connection().lock().unwrap().execute(
-            "INSERT INTO contact_cursor VALUES(?,?,?)",
-            params![f.c, json!([["inbound_visual", "a"], ["inbound_visual", "b"]]).to_string(), 0],
-        ).unwrap();
-        let res = f.store.record_frame(&f.c, &frame, None, None, false).unwrap();
+        let frame = fr(vec![
+            bub("a", "inbound_visual", "text"),
+            bub("b", "inbound_visual", "text"),
+            bub("c", "inbound_visual", "text"),
+        ]);
+        f.store
+            .connection()
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO contact_cursor VALUES(?,?,?)",
+                params![
+                    f.c,
+                    json!([["inbound_visual", "a"], ["inbound_visual", "b"]]).to_string(),
+                    0
+                ],
+            )
+            .unwrap();
+        let res = f
+            .store
+            .record_frame(&f.c, &frame, None, None, false)
+            .unwrap();
         assert_eq!(res.len(), 0);
         assert_eq!(texts(&f).len(), 0);
-        let stored_str: String = f.store.connection().lock().unwrap().query_row(
-            "SELECT frame_fingerprints FROM contact_cursor",
-            [],
-            |r| r.get(0),
-        ).unwrap();
+        let stored_str: String = f
+            .store
+            .connection()
+            .lock()
+            .unwrap()
+            .query_row("SELECT frame_fingerprints FROM contact_cursor", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
         let stored: Vec<Value> = serde_json::from_str(&stored_str).unwrap();
         assert_eq!(stored[0].as_array().unwrap().len(), 3);
     }
@@ -2011,10 +2416,43 @@ mod tests {
             height: None,
             extra: serde_json::Map::new(),
         };
-        f.store.record_frame(&f.c, &fr(vec![bub("a", "inbound_visual", "text")]), None, None, false).unwrap();
-        let old = f.store.record_frame(&f.c, &fr(vec![bub("a", "inbound_visual", "text"), img("0000000000000000")]), None, None, false).unwrap()[0]["message_id"].as_str().unwrap().to_string();
-        assert_eq!(f.store.match_recent_inbound(&f.c, &[img("ffffffffffffffff")]).unwrap(), Vec::<String>::new());
-        assert_eq!(f.store.match_recent_inbound(&f.c, &[img("000000000000000f")]).unwrap(), vec![old]);
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("a", "inbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        let old = f
+            .store
+            .record_frame(
+                &f.c,
+                &fr(vec![
+                    bub("a", "inbound_visual", "text"),
+                    img("0000000000000000"),
+                ]),
+                None,
+                None,
+                false,
+            )
+            .unwrap()[0]["message_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            f.store
+                .match_recent_inbound(&f.c, &[img("ffffffffffffffff")])
+                .unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            f.store
+                .match_recent_inbound(&f.c, &[img("000000000000000f")])
+                .unwrap(),
+            vec![old]
+        );
     }
 
     #[test]
@@ -2037,9 +2475,39 @@ mod tests {
             height: None,
             extra: serde_json::Map::new(),
         };
-        f.store.record_frame(&f.c, &fr(vec![bub("a", "inbound_visual", "text")]), None, None, false).unwrap();
-        f.store.record_frame(&f.c, &fr(vec![bub("a", "inbound_visual", "text"), img("0f0f0f0f0f0f0f0f")]), None, None, false).unwrap();
-        f.store.record_frame(&f.c, &fr(vec![bub("a", "inbound_visual", "text"), img("0f0f0f0f0f0f0f00")]), None, None, false).unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("a", "inbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![
+                    bub("a", "inbound_visual", "text"),
+                    img("0f0f0f0f0f0f0f0f"),
+                ]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![
+                    bub("a", "inbound_visual", "text"),
+                    img("0f0f0f0f0f0f0f00"),
+                ]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         assert_eq!(texts(&f), vec!["a", "[图片]"]);
     }
 
@@ -2049,7 +2517,11 @@ mod tests {
         let conn = f.store.connection();
         let guard = conn.lock().unwrap();
         let mut stmt = guard.prepare("PRAGMA table_info(media)").unwrap();
-        let cols: HashSet<String> = stmt.query_map([], |r| r.get::<_, String>(1)).unwrap().filter_map(Result::ok).collect();
+        let cols: HashSet<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
         assert!(cols.contains("understanding"));
         assert!(cols.contains("understood_at"));
     }
@@ -2057,7 +2529,15 @@ mod tests {
     #[test]
     fn test_store_recent_context_includes_media_understanding() {
         let f = setup_fixture();
-        f.store.record_frame(&f.c, &fr(vec![bub("在吗", "inbound_visual", "text")]), None, None, false).unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("在吗", "inbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         let img = Bubble {
             text: "[图片]".to_string(),
             digest: "image:1:1".to_string(),
@@ -2075,11 +2555,23 @@ mod tests {
             height: None,
             extra: serde_json::Map::new(),
         };
-        let rows = f.store.record_frame(&f.c, &fr(vec![bub("在吗", "inbound_visual", "text"), img]), None, None, false).unwrap();
+        let rows = f
+            .store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("在吗", "inbound_visual", "text"), img]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         let source = f._temp.path().join("a.png");
         fs::write(&source, b"\x89PNG\r\n\x1a\nx").unwrap();
         let mid = rows[0]["message_id"].as_str().unwrap();
-        let media_id = f.store.attach_media(mid, &source, "image", None, "original", None).unwrap();
+        let media_id = f
+            .store
+            .attach_media(mid, &source, "image", None, "original", None)
+            .unwrap();
 
         let context = f.store.recent_context(&f.c, 5, &HashSet::new()).unwrap();
         let last_media = &context.last().unwrap()["media"];
@@ -2090,7 +2582,9 @@ mod tests {
         let long_text = "一张快递单".repeat(300);
         f.store.set_understanding(&media_id, &long_text).unwrap();
         let context2 = f.store.recent_context(&f.c, 5, &HashSet::new()).unwrap();
-        let understanding = context2.last().unwrap()["media"]["understanding"].as_str().unwrap();
+        let understanding = context2.last().unwrap()["media"]["understanding"]
+            .as_str()
+            .unwrap();
         assert_eq!(understanding.chars().count(), 1000);
         assert!(context2[0].get("media").is_none());
     }
@@ -2104,14 +2598,35 @@ mod tests {
         let dir_meta = fs::metadata(f.state.join("history")).unwrap();
         assert_eq!(dir_meta.permissions().mode() & 0o777, 0o700);
 
-        let journal_mode: String = f.store.connection().lock().unwrap().query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+        let journal_mode: String = f
+            .store
+            .connection()
+            .lock()
+            .unwrap()
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(journal_mode.to_lowercase(), "wal");
 
         let conn = f.store.connection();
         let guard = conn.lock().unwrap();
         let mut stmt = guard.prepare("SELECT name FROM sqlite_master").unwrap();
-        let tables: HashSet<String> = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap().filter_map(Result::ok).collect();
-        for t in &["contacts", "contact_names", "messages", "sends", "media", "media_jobs", "contact_cursor", "merges", "schema_migrations", "messages_fts"] {
+        let tables: HashSet<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        for t in &[
+            "contacts",
+            "contact_names",
+            "messages",
+            "sends",
+            "media",
+            "media_jobs",
+            "contact_cursor",
+            "merges",
+            "schema_migrations",
+            "messages_fts",
+        ] {
             assert!(tables.contains(*t), "missing table {}", t);
         }
     }
@@ -2127,9 +2642,25 @@ mod tests {
     #[test]
     fn test_store_ensure_contact_is_stable_and_alias_aware() {
         let f = setup_fixture();
-        let a = f.store.ensure_contact("acct", &json!({"recipient": "🍓小美", "kind": "private", "aliases": ["@小美"]}), true).unwrap();
+        let a = f
+            .store
+            .ensure_contact(
+                "acct",
+                &json!({"recipient": "🍓小美", "kind": "private", "aliases": ["@小美"]}),
+                true,
+            )
+            .unwrap();
         assert!(a.starts_with("c_") && a.len() == 18);
-        assert_eq!(f.store.ensure_contact("acct", &json!({"recipient": "🍓小美", "kind": "private"}), true).unwrap(), a);
+        assert_eq!(
+            f.store
+                .ensure_contact(
+                    "acct",
+                    &json!({"recipient": "🍓小美", "kind": "private"}),
+                    true
+                )
+                .unwrap(),
+            a
+        );
         assert_eq!(f.store.resolve("acct", "小美").unwrap(), Some(a.clone()));
         assert_eq!(f.store.resolve("acct", "@小美").unwrap(), Some(a.clone()));
         assert_eq!(f.store.resolve("other-acct", "小美").unwrap(), None);
@@ -2138,18 +2669,50 @@ mod tests {
     #[test]
     fn test_store_rename_keeps_contact_when_old_name_is_alias() {
         let f = setup_fixture();
-        let a = f.store.ensure_contact("acct", &json!({"recipient": "旧名", "kind": "private"}), true).unwrap();
-        assert_eq!(f.store.ensure_contact("acct", &json!({"recipient": "新名", "kind": "private", "aliases": ["旧名"]}), true).unwrap(), a);
+        let a = f
+            .store
+            .ensure_contact(
+                "acct",
+                &json!({"recipient": "旧名", "kind": "private"}),
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            f.store
+                .ensure_contact(
+                    "acct",
+                    &json!({"recipient": "新名", "kind": "private", "aliases": ["旧名"]}),
+                    true
+                )
+                .unwrap(),
+            a
+        );
         assert_eq!(f.store.resolve("acct", "新名").unwrap(), Some(a.clone()));
-        let display: String = f.store.connection().lock().unwrap().query_row("SELECT display_name FROM contacts WHERE contact_id=?", [&a], |r| r.get(0)).unwrap();
+        let display: String = f
+            .store
+            .connection()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT display_name FROM contacts WHERE contact_id=?",
+                [&a],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(display, "新名");
     }
 
     #[test]
     fn test_store_merge_follows_and_unmerge_restores() {
         let f = setup_fixture();
-        let a = f.store.ensure_contact("acct", &json!({"recipient": "甲", "kind": "private"}), true).unwrap();
-        let b = f.store.ensure_contact("acct", &json!({"recipient": "乙", "kind": "private"}), true).unwrap();
+        let a = f
+            .store
+            .ensure_contact("acct", &json!({"recipient": "甲", "kind": "private"}), true)
+            .unwrap();
+        let b = f
+            .store
+            .ensure_contact("acct", &json!({"recipient": "乙", "kind": "private"}), true)
+            .unwrap();
         let mid = f.store.merge(&b, &a, "改名").unwrap();
         assert_eq!(f.store.resolve("acct", "乙").unwrap(), Some(a.clone()));
         assert_eq!(f.store.canonical(b.clone()).unwrap(), a);
@@ -2160,9 +2723,25 @@ mod tests {
     #[test]
     fn test_store_conflicting_name_key_rejected() {
         let f = setup_fixture();
-        f.store.ensure_contact("acct", &json!({"recipient": "小美", "kind": "private"}), true).unwrap();
-        f.store.ensure_contact("acct", &json!({"recipient": "别人", "kind": "private"}), true).unwrap();
-        let res = f.store.ensure_contact("acct", &json!({"recipient": "别人", "kind": "private", "aliases": ["🍓小美"]}), true);
+        f.store
+            .ensure_contact(
+                "acct",
+                &json!({"recipient": "小美", "kind": "private"}),
+                true,
+            )
+            .unwrap();
+        f.store
+            .ensure_contact(
+                "acct",
+                &json!({"recipient": "别人", "kind": "private"}),
+                true,
+            )
+            .unwrap();
+        let res = f.store.ensure_contact(
+            "acct",
+            &json!({"recipient": "别人", "kind": "private", "aliases": ["🍓小美"]}),
+            true,
+        );
         assert!(res.is_err());
     }
 
@@ -2171,15 +2750,49 @@ mod tests {
         let f = setup_fixture();
         assert_eq!(f.store.observe_name(&f.c, "客户").unwrap(), true);
         assert_eq!(f.store.observe_name(&f.c, "客户✨新").unwrap(), false);
-        let src: String = f.store.connection().lock().unwrap().query_row("SELECT source FROM contact_names WHERE raw_name='客户✨新'", [], |r| r.get(0)).unwrap();
+        let src: String = f
+            .store
+            .connection()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT source FROM contact_names WHERE raw_name='客户✨新'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(src, "observed");
     }
 
     #[test]
     fn test_store_first_frame_is_baseline_then_live_increment() {
         let f = setup_fixture();
-        f.store.record_frame(&f.c, &fr(vec![bub("a", "inbound_visual", "text"), bub("b", "outbound_visual", "text")]), None, None, false).unwrap();
-        let rows = f.store.record_frame(&f.c, &fr(vec![bub("a", "inbound_visual", "text"), bub("b", "outbound_visual", "text"), bub("c", "inbound_visual", "text")]), None, None, false).unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![
+                    bub("a", "inbound_visual", "text"),
+                    bub("b", "outbound_visual", "text"),
+                ]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        let rows = f
+            .store
+            .record_frame(
+                &f.c,
+                &fr(vec![
+                    bub("a", "inbound_visual", "text"),
+                    bub("b", "outbound_visual", "text"),
+                    bub("c", "inbound_visual", "text"),
+                ]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["text"].as_str().unwrap(), "c");
         assert_eq!(rows[0]["capture"].as_str().unwrap(), "live");
@@ -2191,18 +2804,54 @@ mod tests {
     #[test]
     fn test_store_identical_repeats_are_two_messages() {
         let f = setup_fixture();
-        f.store.record_frame(&f.c, &fr(vec![bub("x", "inbound_visual", "text")]), None, None, false).unwrap();
-        f.store.record_frame(&f.c, &fr(vec![bub("x", "inbound_visual", "text"), bub("好", "inbound_visual", "text"), bub("好", "inbound_visual", "text")]), None, None, false).unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("x", "inbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![
+                    bub("x", "inbound_visual", "text"),
+                    bub("好", "inbound_visual", "text"),
+                    bub("好", "inbound_visual", "text"),
+                ]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         assert_eq!(texts(&f), vec!["x", "好", "好"]);
     }
 
     #[test]
     fn test_store_replaying_same_frame_after_crash_writes_nothing() {
         let f = setup_fixture();
-        f.store.record_frame(&f.c, &fr(vec![bub("x", "inbound_visual", "text")]), None, None, false).unwrap();
-        let frame = fr(vec![bub("x", "inbound_visual", "text"), bub("y", "inbound_visual", "text")]);
-        f.store.record_frame(&f.c, &frame, None, None, false).unwrap();
-        let empty = f.store.record_frame(&f.c, &frame, None, None, false).unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("x", "inbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        let frame = fr(vec![
+            bub("x", "inbound_visual", "text"),
+            bub("y", "inbound_visual", "text"),
+        ]);
+        f.store
+            .record_frame(&f.c, &frame, None, None, false)
+            .unwrap();
+        let empty = f
+            .store
+            .record_frame(&f.c, &frame, None, None, false)
+            .unwrap();
         assert_eq!(empty.len(), 0);
         assert_eq!(texts(&f), vec!["x", "y"]);
     }
@@ -2210,13 +2859,40 @@ mod tests {
     #[test]
     fn test_store_ambiguous_and_gap_are_kept_and_marked() {
         let f = setup_fixture();
-        f.store.record_frame(&f.c, &fr(vec![bub("A", "inbound_visual", "text")]), None, None, false).unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("A", "inbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         for _ in 0..2 {
-            f.store.record_frame(&f.c, &fr(vec![bub("A", "inbound_visual", "text"), bub("A", "inbound_visual", "text")]), None, None, false).unwrap();
+            f.store
+                .record_frame(
+                    &f.c,
+                    &fr(vec![
+                        bub("A", "inbound_visual", "text"),
+                        bub("A", "inbound_visual", "text"),
+                    ]),
+                    None,
+                    None,
+                    false,
+                )
+                .unwrap();
         }
         assert_eq!(captures(&f).last().unwrap(), "ambiguous");
         for _ in 0..2 {
-            f.store.record_frame(&f.c, &fr(vec![bub("完全不同", "inbound_visual", "text")]), None, None, false).unwrap();
+            f.store
+                .record_frame(
+                    &f.c,
+                    &fr(vec![bub("完全不同", "inbound_visual", "text")]),
+                    None,
+                    None,
+                    false,
+                )
+                .unwrap();
         }
         assert_eq!(captures(&f).last().unwrap(), "rebaseline_gap");
         assert_eq!(texts(&f), vec!["A", "A", "完全不同"]);
@@ -2225,10 +2901,42 @@ mod tests {
     #[test]
     fn test_store_single_jittery_gap_frame_writes_nothing() {
         let f = setup_fixture();
-        f.store.record_frame(&f.c, &fr(vec![bub("x", "inbound_visual", "text"), bub("y", "inbound_visual", "text")]), None, None, false).unwrap();
-        let res = f.store.record_frame(&f.c, &fr(vec![bub("滚动中", "inbound_visual", "text")]), None, None, false).unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![
+                    bub("x", "inbound_visual", "text"),
+                    bub("y", "inbound_visual", "text"),
+                ]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        let res = f
+            .store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("滚动中", "inbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         assert_eq!(res.len(), 0);
-        f.store.record_frame(&f.c, &fr(vec![bub("x", "inbound_visual", "text"), bub("y", "inbound_visual", "text"), bub("z", "inbound_visual", "text")]), None, None, false).unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![
+                    bub("x", "inbound_visual", "text"),
+                    bub("y", "inbound_visual", "text"),
+                    bub("z", "inbound_visual", "text"),
+                ]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         assert_eq!(texts(&f), vec!["x", "y", "z"]);
         assert_eq!(captures(&f), vec!["baseline", "baseline", "live"]);
     }
@@ -2236,9 +2944,32 @@ mod tests {
     #[test]
     fn test_store_ambiguous_certain_tail_is_live() {
         let f = setup_fixture();
-        f.store.record_frame(&f.c, &fr(vec![bub("A", "inbound_visual", "text"), bub("A", "inbound_visual", "text")]), None, None, false).unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![
+                    bub("A", "inbound_visual", "text"),
+                    bub("A", "inbound_visual", "text"),
+                ]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         for _ in 0..2 {
-            f.store.record_frame(&f.c, &fr(vec![bub("A", "inbound_visual", "text"), bub("A", "inbound_visual", "text"), bub("next", "inbound_visual", "text")]), None, None, false).unwrap();
+            f.store
+                .record_frame(
+                    &f.c,
+                    &fr(vec![
+                        bub("A", "inbound_visual", "text"),
+                        bub("A", "inbound_visual", "text"),
+                        bub("next", "inbound_visual", "text"),
+                    ]),
+                    None,
+                    None,
+                    false,
+                )
+                .unwrap();
         }
         assert_eq!(captures(&f).last().unwrap(), "live");
         assert_eq!(texts(&f).last().unwrap(), "next");
@@ -2247,61 +2978,206 @@ mod tests {
     #[test]
     fn test_store_bot_reply_echo_is_paired_not_duplicated() {
         let f = setup_fixture();
-        f.store.record_frame(&f.c, &fr(vec![bub("问", "inbound_visual", "text")]), None, None, false).unwrap();
-        f.store.record_bot_reply(&f.c, "bot-service-k", "你好～", "attempting", &json!({}), &[], None, None).unwrap();
-        f.store.update_send("bot-service-k", "triggered", None).unwrap();
-        f.store.record_frame(&f.c, &fr(vec![bub("问", "inbound_visual", "text"), bub("你好~", "outbound_visual", "text")]), None, None, false).unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("问", "inbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        f.store
+            .record_bot_reply(
+                &f.c,
+                "bot-service-k",
+                "你好～",
+                "attempting",
+                &json!({}),
+                &[],
+                None,
+                None,
+            )
+            .unwrap();
+        f.store
+            .update_send("bot-service-k", "triggered", None)
+            .unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![
+                    bub("问", "inbound_visual", "text"),
+                    bub("你好~", "outbound_visual", "text"),
+                ]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         assert_eq!(senders(&f), vec!["customer", "bot"]);
-        assert_eq!(f.store.send("bot-service-k").unwrap().unwrap()["echo_observed"].as_bool().unwrap(), true);
+        assert_eq!(
+            f.store.send("bot-service-k").unwrap().unwrap()["echo_observed"]
+                .as_bool()
+                .unwrap(),
+            true
+        );
     }
 
     #[test]
     fn test_store_bot_reply_is_idempotent() {
         let f = setup_fixture();
-        let a = f.store.record_bot_reply(&f.c, "k", "回复", "attempting", &json!({}), &[], None, None).unwrap();
-        assert_eq!(f.store.record_bot_reply(&f.c, "k", "回复", "attempting", &json!({}), &[], None, None).unwrap(), a);
+        let a = f
+            .store
+            .record_bot_reply(&f.c, "k", "回复", "attempting", &json!({}), &[], None, None)
+            .unwrap();
+        assert_eq!(
+            f.store
+                .record_bot_reply(&f.c, "k", "回复", "attempting", &json!({}), &[], None, None)
+                .unwrap(),
+            a
+        );
         assert_eq!(senders(&f), vec!["bot"]);
     }
 
     #[test]
     fn test_store_ocr_noisy_echo_still_pairs() {
         let f = setup_fixture();
-        f.store.record_frame(&f.c, &fr(vec![bub("在吗", "inbound_visual", "text")]), None, None, false).unwrap();
-        f.store.record_bot_reply(&f.c, "k", "在的，我是AI客服助手。有什么可以帮您？我这边暂时没有订单信息。", "attempting", &json!({}), &[], None, None).unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("在吗", "inbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        f.store
+            .record_bot_reply(
+                &f.c,
+                "k",
+                "在的，我是AI客服助手。有什么可以帮您？我这边暂时没有订单信息。",
+                "attempting",
+                &json!({}),
+                &[],
+                None,
+                None,
+            )
+            .unwrap();
         f.store.update_send("k", "triggered", None).unwrap();
-        f.store.record_frame(&f.c, &fr(vec![
-            bub("在吗", "inbound_visual", "text"),
-            bub("在的，我是 Al客服助手。有什么可以帮您？我这边暂\n时没有订单信息", "outbound_visual", "text")
-        ]), None, None, false).unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![
+                    bub("在吗", "inbound_visual", "text"),
+                    bub(
+                        "在的，我是 Al客服助手。有什么可以帮您？我这边暂\n时没有订单信息",
+                        "outbound_visual",
+                        "text",
+                    ),
+                ]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         assert_eq!(senders(&f), vec!["customer", "bot"]);
-        assert_eq!(f.store.send("k").unwrap().unwrap()["echo_observed"].as_bool().unwrap(), true);
+        assert_eq!(
+            f.store.send("k").unwrap().unwrap()["echo_observed"]
+                .as_bool()
+                .unwrap(),
+            true
+        );
     }
 
     #[test]
     fn test_store_different_outbound_after_bot_reply_is_self_other() {
         let f = setup_fixture();
-        f.store.record_frame(&f.c, &fr(vec![bub("在吗", "inbound_visual", "text")]), None, None, false).unwrap();
-        f.store.record_bot_reply(&f.c, "k", "在的，我是AI客服助手。", "attempting", &json!({}), &[], None, None).unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("在吗", "inbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        f.store
+            .record_bot_reply(
+                &f.c,
+                "k",
+                "在的，我是AI客服助手。",
+                "attempting",
+                &json!({}),
+                &[],
+                None,
+                None,
+            )
+            .unwrap();
         f.store.update_send("k", "triggered", None).unwrap();
-        f.store.record_frame(&f.c, &fr(vec![
-            bub("在吗", "inbound_visual", "text"),
-            bub("人工：订单已经发顺丰了", "outbound_visual", "text")
-        ]), None, None, false).unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![
+                    bub("在吗", "inbound_visual", "text"),
+                    bub("人工：订单已经发顺丰了", "outbound_visual", "text"),
+                ]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         assert_eq!(senders(&f), vec!["customer", "bot", "self_other"]);
     }
 
     #[test]
     fn test_store_replied_after_sees_manual_reply() {
         let f = setup_fixture();
-        f.store.record_frame(&f.c, &fr(vec![bub("在吗", "inbound_visual", "text")]), None, None, false).unwrap();
-        f.store.record_frame(&f.c, &fr(vec![bub("在吗", "inbound_visual", "text"), bub("图片呢", "inbound_visual", "text")]), None, None, false).unwrap();
-        let ids: Vec<String> = f.store.connection().lock().unwrap().prepare("SELECT message_id FROM messages WHERE text='图片呢'").unwrap().query_map([], |r| r.get(0)).unwrap().filter_map(Result::ok).collect();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("在吗", "inbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![
+                    bub("在吗", "inbound_visual", "text"),
+                    bub("图片呢", "inbound_visual", "text"),
+                ]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        let ids: Vec<String> = f
+            .store
+            .connection()
+            .lock()
+            .unwrap()
+            .prepare("SELECT message_id FROM messages WHERE text='图片呢'")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
         assert_eq!(f.store.replied_after(&f.c, &ids, None).unwrap(), false);
-        f.store.record_frame(&f.c, &fr(vec![
-            bub("在吗", "inbound_visual", "text"),
-            bub("图片呢", "inbound_visual", "text"),
-            bub("人工：收到", "outbound_visual", "text"),
-        ]), None, None, false).unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![
+                    bub("在吗", "inbound_visual", "text"),
+                    bub("图片呢", "inbound_visual", "text"),
+                    bub("人工：收到", "outbound_visual", "text"),
+                ]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         assert_eq!(f.store.replied_after(&f.c, &ids, None).unwrap(), true);
         assert_eq!(f.store.replied_after(&f.c, &[], None).unwrap(), false);
     }
@@ -2309,10 +3185,41 @@ mod tests {
     #[test]
     fn test_store_replied_after_ignores_failed_bot_send() {
         let f = setup_fixture();
-        f.store.record_frame(&f.c, &fr(vec![bub("在吗", "inbound_visual", "text")]), None, None, false).unwrap();
-        f.store.record_frame(&f.c, &fr(vec![bub("在吗", "inbound_visual", "text"), bub("图片呢", "inbound_visual", "text")]), None, None, false).unwrap();
-        let ids: Vec<String> = f.store.connection().lock().unwrap().prepare("SELECT message_id FROM messages WHERE text='图片呢'").unwrap().query_map([], |r| r.get(0)).unwrap().filter_map(Result::ok).collect();
-        f.store.record_bot_reply(&f.c, "k", "在的", "generated", &json!({}), &ids, None, None).unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("在吗", "inbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![
+                    bub("在吗", "inbound_visual", "text"),
+                    bub("图片呢", "inbound_visual", "text"),
+                ]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        let ids: Vec<String> = f
+            .store
+            .connection()
+            .lock()
+            .unwrap()
+            .prepare("SELECT message_id FROM messages WHERE text='图片呢'")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        f.store
+            .record_bot_reply(&f.c, "k", "在的", "generated", &json!({}), &ids, None, None)
+            .unwrap();
         assert_eq!(f.store.replied_after(&f.c, &ids, None).unwrap(), false);
         f.store.update_send("k", "triggered", None).unwrap();
         assert_eq!(f.store.replied_after(&f.c, &ids, None).unwrap(), true);
@@ -2321,9 +3228,29 @@ mod tests {
     #[test]
     fn test_store_replied_after_ignores_own_send_and_not_sent() {
         let f = setup_fixture();
-        f.store.record_frame(&f.c, &fr(vec![bub("在吗", "inbound_visual", "text")]), None, None, false).unwrap();
-        let ids: Vec<String> = f.store.connection().lock().unwrap().prepare("SELECT message_id FROM messages WHERE text='在吗'").unwrap().query_map([], |r| r.get(0)).unwrap().filter_map(Result::ok).collect();
-        f.store.record_bot_reply(&f.c, "k", "在的", "generated", &json!({}), &ids, None, None).unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("在吗", "inbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        let ids: Vec<String> = f
+            .store
+            .connection()
+            .lock()
+            .unwrap()
+            .prepare("SELECT message_id FROM messages WHERE text='在吗'")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        f.store
+            .record_bot_reply(&f.c, "k", "在的", "generated", &json!({}), &ids, None, None)
+            .unwrap();
         f.store.update_send("k", "attempting", None).unwrap();
         assert_eq!(f.store.replied_after(&f.c, &ids, None).unwrap(), true);
         assert_eq!(f.store.replied_after(&f.c, &ids, Some("k")).unwrap(), false);
@@ -2334,42 +3261,137 @@ mod tests {
     #[test]
     fn test_store_old_or_imported_reply_is_not_echo_target() {
         let f = setup_fixture();
-        f.store.record_frame(&f.c, &fr(vec![bub("问", "inbound_visual", "text")]), None, None, false).unwrap();
-        f.store.record_bot_reply(&f.c, "old", "好的，稍等", "triggered", &json!({}), &[], None, None).unwrap();
-        f.store.connection().lock().unwrap().execute("UPDATE sends SET created_at=created_at-11*60*1000 WHERE send_key=?", ["old"]).unwrap();
-        f.store.record_bot_reply(&f.c, "imp", "已发货", "triggered", &json!({}), &[], None, Some("imported")).unwrap();
-        f.store.record_frame(&f.c, &fr(vec![
-            bub("问", "inbound_visual", "text"),
-            bub("好的，稍等", "outbound_visual", "text"),
-            bub("已发货", "outbound_visual", "text")
-        ]), None, None, false).unwrap();
-        assert_eq!(senders(&f), vec!["customer", "bot", "bot", "self_other", "self_other"]);
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("问", "inbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        f.store
+            .record_bot_reply(
+                &f.c,
+                "old",
+                "好的，稍等",
+                "triggered",
+                &json!({}),
+                &[],
+                None,
+                None,
+            )
+            .unwrap();
+        f.store
+            .connection()
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE sends SET created_at=created_at-11*60*1000 WHERE send_key=?",
+                ["old"],
+            )
+            .unwrap();
+        f.store
+            .record_bot_reply(
+                &f.c,
+                "imp",
+                "已发货",
+                "triggered",
+                &json!({}),
+                &[],
+                None,
+                Some("imported"),
+            )
+            .unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![
+                    bub("问", "inbound_visual", "text"),
+                    bub("好的，稍等", "outbound_visual", "text"),
+                    bub("已发货", "outbound_visual", "text"),
+                ]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            senders(&f),
+            vec!["customer", "bot", "bot", "self_other", "self_other"]
+        );
     }
 
     #[test]
     fn test_store_unpaired_outbound_is_self_other() {
         let f = setup_fixture();
-        f.store.record_frame(&f.c, &fr(vec![bub("问", "inbound_visual", "text")]), None, None, false).unwrap();
-        f.store.record_frame(&f.c, &fr(vec![bub("问", "inbound_visual", "text"), bub("人工回复", "outbound_visual", "text")]), None, None, false).unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("问", "inbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![
+                    bub("问", "inbound_visual", "text"),
+                    bub("人工回复", "outbound_visual", "text"),
+                ]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         assert_eq!(senders(&f).last().unwrap(), "self_other");
     }
 
     #[test]
     fn test_store_superseded_reply_is_not_echo_target() {
         let f = setup_fixture();
-        f.store.record_frame(&f.c, &fr(vec![bub("问", "inbound_visual", "text")]), None, None, false).unwrap();
-        f.store.record_bot_reply(&f.c, "k", "好的", "generated", &json!({}), &[], None, None).unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("问", "inbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        f.store
+            .record_bot_reply(&f.c, "k", "好的", "generated", &json!({}), &[], None, None)
+            .unwrap();
         f.store.update_send("k", "superseded", None).unwrap();
-        f.store.record_frame(&f.c, &fr(vec![bub("问", "inbound_visual", "text"), bub("好的", "outbound_visual", "text")]), None, None, false).unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![
+                    bub("问", "inbound_visual", "text"),
+                    bub("好的", "outbound_visual", "text"),
+                ]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         assert_eq!(senders(&f), vec!["customer", "bot", "self_other"]);
     }
 
     #[test]
     fn test_store_recent_context_limit_order_and_exclusions() {
         let f = setup_fixture();
-        let bubbles: Vec<Bubble> = (0..8).map(|i| bub(&i.to_string(), "inbound_visual", "text")).collect();
-        f.store.record_frame(&f.c, &fr(bubbles), None, None, false).unwrap();
-        f.store.record_bot_reply(&f.c, "k1", "作废", "generated", &json!({}), &[], None, None).unwrap();
+        let bubbles: Vec<Bubble> = (0..8)
+            .map(|i| bub(&i.to_string(), "inbound_visual", "text"))
+            .collect();
+        f.store
+            .record_frame(&f.c, &fr(bubbles), None, None, false)
+            .unwrap();
+        f.store
+            .record_bot_reply(&f.c, "k1", "作废", "generated", &json!({}), &[], None, None)
+            .unwrap();
         f.store.update_send("k1", "superseded", None).unwrap();
         let ctx = f.store.recent_context(&f.c, 5, &HashSet::new()).unwrap();
         let txts: Vec<&str> = ctx.iter().map(|x| x["text"].as_str().unwrap()).collect();
@@ -2380,27 +3402,92 @@ mod tests {
     #[test]
     fn test_store_recent_context_roles_exclude_ids_and_merged() {
         let f = setup_fixture();
-        let other = f.store.ensure_contact("acct", &json!({"recipient": "旧号", "kind": "private"}), true).unwrap();
-        f.store.record_frame(&other, &fr(vec![bub("旧问题", "inbound_visual", "text")]), None, None, false).unwrap();
+        let other = f
+            .store
+            .ensure_contact(
+                "acct",
+                &json!({"recipient": "旧号", "kind": "private"}),
+                true,
+            )
+            .unwrap();
+        f.store
+            .record_frame(
+                &other,
+                &fr(vec![bub("旧问题", "inbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         f.store.merge(&other, &f.c, "").unwrap();
-        let rows = f.store.record_frame(&f.c, &fr(vec![
-            bub("问", "inbound_visual", "text"),
-            bub("答", "outbound_visual", "text"),
-            bub("新", "inbound_visual", "text"),
-        ]), None, None, false).unwrap();
+        let rows = f
+            .store
+            .record_frame(
+                &f.c,
+                &fr(vec![
+                    bub("问", "inbound_visual", "text"),
+                    bub("答", "outbound_visual", "text"),
+                    bub("新", "inbound_visual", "text"),
+                ]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         let mut excluded = HashSet::new();
-        excluded.insert(rows.last().unwrap()["message_id"].as_str().unwrap().to_string());
+        excluded.insert(
+            rows.last().unwrap()["message_id"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
         let ctx = f.store.recent_context(&f.c, 10, &excluded).unwrap();
-        let roles_texts: Vec<(&str, &str)> = ctx.iter().map(|x| (x["role"].as_str().unwrap(), x["text"].as_str().unwrap())).collect();
-        assert_eq!(roles_texts, vec![("user", "旧问题"), ("user", "问"), ("assistant", "答")]);
+        let roles_texts: Vec<(&str, &str)> = ctx
+            .iter()
+            .map(|x| (x["role"].as_str().unwrap(), x["text"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            roles_texts,
+            vec![("user", "旧问题"), ("user", "问"), ("assistant", "答")]
+        );
     }
 
     #[test]
     fn test_store_recent_context_excludes_never_attempted_reply() {
         let f = setup_fixture();
-        f.store.record_frame(&f.c, &fr(vec![bub("问", "inbound_visual", "text")]), None, None, false).unwrap();
-        f.store.record_bot_reply(&f.c, "g", "未发出", "generated", &json!({}), &[], None, None).unwrap();
-        f.store.record_bot_reply(&f.c, "u", "可能已发出", "unknown", &json!({}), &[], None, None).unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("问", "inbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        f.store
+            .record_bot_reply(
+                &f.c,
+                "g",
+                "未发出",
+                "generated",
+                &json!({}),
+                &[],
+                None,
+                None,
+            )
+            .unwrap();
+        f.store
+            .record_bot_reply(
+                &f.c,
+                "u",
+                "可能已发出",
+                "unknown",
+                &json!({}),
+                &[],
+                None,
+                None,
+            )
+            .unwrap();
         let ctx = f.store.recent_context(&f.c, 5, &HashSet::new()).unwrap();
         let txts: Vec<&str> = ctx.iter().map(|x| x["text"].as_str().unwrap()).collect();
         assert_eq!(txts, vec!["问", "可能已发出"]);
@@ -2412,75 +3499,201 @@ mod tests {
         let conn = f.store.connection();
         let guard = conn.lock().unwrap();
         let mut stmt = guard.prepare("PRAGMA index_list('messages')").unwrap();
-        let names: HashSet<String> = stmt.query_map([], |r| r.get::<_, String>(1)).unwrap().filter_map(Result::ok).collect();
+        let names: HashSet<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
         assert!(names.contains("messages_contact_time"));
     }
 
     #[test]
     fn test_store_fts_trigger_indexes_text() {
         let f = setup_fixture();
-        f.store.record_frame(&f.c, &fr(vec![bub("还是上次那个款", "inbound_visual", "text")]), None, None, false).unwrap();
-        let hit: i64 = f.store.connection().lock().unwrap().query_row(
-            "SELECT count(*) FROM messages_fts WHERE messages_fts match ?",
-            ["\"上次那\""],
-            |r| r.get(0),
-        ).unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("还是上次那个款", "inbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        let hit: i64 = f
+            .store
+            .connection()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM messages_fts WHERE messages_fts match ?",
+                ["\"上次那\""],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(hit, 1);
     }
 
     #[test]
     fn test_store_attach_media_content_addressed_and_private() {
         let f = setup_fixture();
-        let rows = f.store.record_frame(&f.c, &fr(vec![bub("[图片]", "inbound_visual", "image")]), None, None, false).unwrap();
+        let rows = f
+            .store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("[图片]", "inbound_visual", "image")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         let row = &rows[0];
         let src = f._temp.path().join("x.png");
         fs::write(&src, b"png").unwrap();
-        let mid = f.store.attach_media(row["message_id"].as_str().unwrap(), &src, "image", None, "chat_thumbnail", None).unwrap();
-        let path = f.state.join("history").join("media").join(&mid[..2]).join(format!("{}.png", mid));
+        let mid = f
+            .store
+            .attach_media(
+                row["message_id"].as_str().unwrap(),
+                &src,
+                "image",
+                None,
+                "chat_thumbnail",
+                None,
+            )
+            .unwrap();
+        let path = f
+            .state
+            .join("history")
+            .join("media")
+            .join(&mid[..2])
+            .join(format!("{}.png", mid));
         assert_eq!(fs::read(&path).unwrap(), b"png");
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-        let linked: String = f.store.connection().lock().unwrap().query_row("SELECT media_id FROM messages WHERE message_id=?", [row["message_id"].as_str().unwrap()], |r| r.get(0)).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let linked: String = f
+            .store
+            .connection()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT media_id FROM messages WHERE message_id=?",
+                [row["message_id"].as_str().unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(linked, mid);
     }
 
     #[test]
     fn test_store_oversized_media_rejected() {
         let f = setup_fixture();
-        let rows = f.store.record_frame(&f.c, &fr(vec![bub("big.pdf", "inbound_visual", "file")]), None, None, false).unwrap();
+        let rows = f
+            .store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("big.pdf", "inbound_visual", "file")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         let row = &rows[0];
         let src = f._temp.path().join("big.pdf");
         fs::write(&src, vec![b'0'; 10 * 1024 * 1024 + 1]).unwrap();
-        let res = f.store.attach_media(row["message_id"].as_str().unwrap(), &src, "file", Some("big.pdf"), "original", Some(10 * 1024 * 1024));
+        let res = f.store.attach_media(
+            row["message_id"].as_str().unwrap(),
+            &src,
+            "file",
+            Some("big.pdf"),
+            "original",
+            Some(10 * 1024 * 1024),
+        );
         assert!(res.is_err());
     }
 
     #[test]
     fn test_store_attach_media_follows_configurable_limit_and_names_it() {
         let f = setup_fixture();
-        let rows = f.store.record_frame(&f.c, &fr(vec![bub("file.bin", "inbound_visual", "file")]), None, None, false).unwrap();
+        let rows = f
+            .store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("file.bin", "inbound_visual", "file")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         let row = &rows[0];
         let message_id = row["message_id"].as_str().unwrap();
 
         let src = f._temp.path().join("file.bin");
         fs::write(&src, vec![b'x'; 200]).unwrap();
 
-        let err100 = f.store.attach_media(message_id, &src, "file", Some("file.bin"), "original", Some(100)).unwrap_err();
-        assert!(err100.to_string().contains("media larger than 100 bytes"), "expected 'media larger than 100 bytes', got: {}", err100);
+        let err100 = f
+            .store
+            .attach_media(
+                message_id,
+                &src,
+                "file",
+                Some("file.bin"),
+                "original",
+                Some(100),
+            )
+            .unwrap_err();
+        assert!(
+            err100.to_string().contains("media larger than 100 bytes"),
+            "expected 'media larger than 100 bytes', got: {}",
+            err100
+        );
 
         let src_big = f._temp.path().join("big.bin");
         fs::write(&src_big, vec![b'0'; 50 * 1024 * 1024 + 1]).unwrap();
-        let err50mb = f.store.attach_media(message_id, &src_big, "file", Some("big.bin"), "original", Some(50 * 1024 * 1024)).unwrap_err();
-        assert!(err50mb.to_string().contains("media larger than 50MB"), "expected 'media larger than 50MB', got: {}", err50mb);
+        let err50mb = f
+            .store
+            .attach_media(
+                message_id,
+                &src_big,
+                "file",
+                Some("big.bin"),
+                "original",
+                Some(50 * 1024 * 1024),
+            )
+            .unwrap_err();
+        assert!(
+            err50mb.to_string().contains("media larger than 50MB"),
+            "expected 'media larger than 50MB', got: {}",
+            err50mb
+        );
     }
 
     #[test]
     fn test_store_file_messages_queue_download_with_backoff() {
         let f = setup_fixture();
-        let rows = f.store.record_frame(&f.c, &fr(vec![bub("报价.pdf", "inbound_visual", "file")]), None, None, false).unwrap();
+        let rows = f
+            .store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("报价.pdf", "inbound_visual", "file")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         let row = &rows[0];
         let job = f.store.next_media_job(&f.c).unwrap().unwrap();
-        assert_eq!(job["message_id"].as_str().unwrap(), row["message_id"].as_str().unwrap());
-        f.store.finish_media_job(row["message_id"].as_str().unwrap(), "failed", Some("timeout")).unwrap();
+        assert_eq!(
+            job["message_id"].as_str().unwrap(),
+            row["message_id"].as_str().unwrap()
+        );
+        f.store
+            .finish_media_job(
+                row["message_id"].as_str().unwrap(),
+                "failed",
+                Some("timeout"),
+            )
+            .unwrap();
         assert!(f.store.next_media_job(&f.c).unwrap().is_none());
         assert_eq!(f.store.has_pending_media().unwrap(), true);
     }
@@ -2488,22 +3701,55 @@ mod tests {
     #[test]
     fn test_store_image_messages_are_not_queued() {
         let f = setup_fixture();
-        f.store.record_frame(&f.c, &fr(vec![bub("[图片]", "inbound_visual", "image")]), None, None, false).unwrap();
+        f.store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("[图片]", "inbound_visual", "image")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         assert_eq!(f.store.has_pending_media().unwrap(), false);
     }
 
     #[test]
     fn test_store_failed_three_times_is_terminal_and_gone_is_terminal() {
         let f = setup_fixture();
-        let rows = f.store.record_frame(&f.c, &fr(vec![bub("a.pdf", "inbound_visual", "file")]), None, None, false).unwrap();
+        let rows = f
+            .store
+            .record_frame(
+                &f.c,
+                &fr(vec![bub("a.pdf", "inbound_visual", "file")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         let row = &rows[0];
         for _ in 0..3 {
-            f.store.finish_media_job(row["message_id"].as_str().unwrap(), "failed", Some("x")).unwrap();
+            f.store
+                .finish_media_job(row["message_id"].as_str().unwrap(), "failed", Some("x"))
+                .unwrap();
         }
         assert_eq!(f.store.has_pending_media().unwrap(), false);
-        let rows2 = f.store.record_frame(&f.c, &fr(vec![bub("a.pdf", "inbound_visual", "file"), bub("b.pdf", "inbound_visual", "file")]), None, None, false).unwrap();
+        let rows2 = f
+            .store
+            .record_frame(
+                &f.c,
+                &fr(vec![
+                    bub("a.pdf", "inbound_visual", "file"),
+                    bub("b.pdf", "inbound_visual", "file"),
+                ]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
         let other = &rows2[0];
-        f.store.finish_media_job(other["message_id"].as_str().unwrap(), "gone", None).unwrap();
+        f.store
+            .finish_media_job(other["message_id"].as_str().unwrap(), "gone", None)
+            .unwrap();
         assert_eq!(f.store.has_pending_media().unwrap(), false);
     }
 
@@ -2515,19 +3761,48 @@ mod tests {
         let temp = TestTempDir::new();
         let state = temp.path().join("state");
         let store = HistoryStore::open(&state).unwrap();
-        let cid = store.ensure_contact("acct", &json!({
-            "recipient": "测试互通", "kind": "private", "aliases": ["别名"]
-        }), true).unwrap();
-        store.record_frame(&cid, &fr(vec![bub("Python写入的消息", "inbound_visual", "text")]), None, None, false).unwrap();
-        store.record_bot_reply(&cid, "send_key_1", "Rust回复的消息", "triggered", &json!({}), &[], None, None).unwrap();
+        let cid = store
+            .ensure_contact(
+                "acct",
+                &json!({
+                    "recipient": "测试互通", "kind": "private", "aliases": ["别名"]
+                }),
+                true,
+            )
+            .unwrap();
+        store
+            .record_frame(
+                &cid,
+                &fr(vec![bub("Python写入的消息", "inbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        store
+            .record_bot_reply(
+                &cid,
+                "send_key_1",
+                "Rust回复的消息",
+                "triggered",
+                &json!({}),
+                &[],
+                None,
+                None,
+            )
+            .unwrap();
         drop(store);
 
         // Use the legacy reader's actual joins, projection and descending order.
         // Opening a fresh connection also checks the persisted schema and fields.
         let conn = Connection::open(state.join("history/history.sqlite3")).unwrap();
-        let resolved: String = conn.query_row(
-            "SELECT contact_id FROM contact_names WHERE account_id='acct' AND raw_name='别名'",
-            [], |r| r.get(0)).unwrap();
+        let resolved: String = conn
+            .query_row(
+                "SELECT contact_id FROM contact_names WHERE account_id='acct' AND raw_name='别名'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(resolved, cid);
         let mut stmt = conn.prepare(
             "SELECT m.message_id, m.sender, m.text, d.kind, d.filename, d.understanding, d.path FROM messages m \
@@ -2541,11 +3816,20 @@ mod tests {
             Ok(json!({"role": if sender == "customer" {"user"} else {"assistant"}, "text": text}))
         }).unwrap().map(|row| row.unwrap()).collect();
         rows.reverse();
-        assert_eq!(rows, vec![json!({"role":"user","text":"Python写入的消息"}),
-            json!({"role":"assistant","text":"Rust回复的消息"})]);
-        let send: (String, String) = conn.query_row(
-            "SELECT reply_text, status FROM sends WHERE send_key='send_key_1'", [],
-            |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                json!({"role":"user","text":"Python写入的消息"}),
+                json!({"role":"assistant","text":"Rust回复的消息"})
+            ]
+        );
+        let send: (String, String) = conn
+            .query_row(
+                "SELECT reply_text, status FROM sends WHERE send_key='send_key_1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(send, ("Rust回复的消息".into(), "triggered".into()));
     }
 
@@ -2603,7 +3887,10 @@ mod tests {
         let outcome = f.store.upsert_profile("acct", &input, 1000).unwrap();
         match outcome {
             UpsertOutcome::Created(cid) => {
-                assert_eq!(f.store.resolve("acct", "甲备注").unwrap(), Some(cid.clone()));
+                assert_eq!(
+                    f.store.resolve("acct", "甲备注").unwrap(),
+                    Some(cid.clone())
+                );
                 assert_eq!(f.store.resolve("acct", "测试甲").unwrap(), Some(cid));
             }
             other => panic!("expected Created, got {:?}", other),
@@ -2655,10 +3942,34 @@ mod tests {
     fn test_upsert_matches_existing_history_contact_by_unique_name() {
         let f = setup_fixture();
         // 已有聊过天的联系人"测试乙"（无资料）
-        let orig_cid = f.store.ensure_contact("acct", &json!({"recipient": "测试乙", "kind": "private"}), true).unwrap();
-        f.store.record_frame(&orig_cid, &fr(vec![bub("你好测试乙", "inbound_visual", "text")]), None, None, false).unwrap();
-        let msg_count_before: i64 = f.store.connection().lock().unwrap()
-            .query_row("SELECT COUNT(*) FROM messages WHERE contact_id=?", [&orig_cid], |r| r.get(0)).unwrap();
+        let orig_cid = f
+            .store
+            .ensure_contact(
+                "acct",
+                &json!({"recipient": "测试乙", "kind": "private"}),
+                true,
+            )
+            .unwrap();
+        f.store
+            .record_frame(
+                &orig_cid,
+                &fr(vec![bub("你好测试乙", "inbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        let msg_count_before: i64 = f
+            .store
+            .connection()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE contact_id=?",
+                [&orig_cid],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(msg_count_before, 1);
 
         let input = ProfileInput {
@@ -2678,8 +3989,17 @@ mod tests {
         let outcome = f.store.upsert_profile("acct", &input, 3000).unwrap();
         assert_eq!(outcome, UpsertOutcome::Updated(orig_cid.clone()));
 
-        let msg_count_after: i64 = f.store.connection().lock().unwrap()
-            .query_row("SELECT COUNT(*) FROM messages WHERE contact_id=?", [&orig_cid], |r| r.get(0)).unwrap();
+        let msg_count_after: i64 = f
+            .store
+            .connection()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE contact_id=?",
+                [&orig_cid],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(msg_count_after, 1, "messages count must remain unchanged");
     }
 
@@ -2687,8 +4007,22 @@ mod tests {
     fn test_upsert_ambiguous_name_needs_review() {
         let f = setup_fixture();
         // 创建两个不同联系人，都叫"重名丙"
-        let c1 = f.store.ensure_contact("acct", &json!({"recipient": "c1_display", "kind": "private"}), true).unwrap();
-        let c2 = f.store.ensure_contact("acct", &json!({"recipient": "c2_display", "kind": "private"}), true).unwrap();
+        let c1 = f
+            .store
+            .ensure_contact(
+                "acct",
+                &json!({"recipient": "c1_display", "kind": "private"}),
+                true,
+            )
+            .unwrap();
+        let c2 = f
+            .store
+            .ensure_contact(
+                "acct",
+                &json!({"recipient": "c2_display", "kind": "private"}),
+                true,
+            )
+            .unwrap();
         f.store.observe_name(&c1, "重名丙").unwrap();
         f.store.observe_name(&c2, "重名丙").unwrap();
 
@@ -2708,8 +4042,15 @@ mod tests {
         };
         let outcome = f.store.upsert_profile("acct", &input, 4000).unwrap();
         match outcome {
-            UpsertOutcome::NeedsReview { reason, mut candidates } => {
-                assert!(reason.contains("ambiguous") || reason.contains("conflict") || !reason.is_empty());
+            UpsertOutcome::NeedsReview {
+                reason,
+                mut candidates,
+            } => {
+                assert!(
+                    reason.contains("ambiguous")
+                        || reason.contains("conflict")
+                        || !reason.is_empty()
+                );
                 candidates.sort();
                 let mut expected = vec![c1, c2];
                 expected.sort();
@@ -2719,7 +4060,10 @@ mod tests {
         }
 
         let reviews = f.store.pending_reviews("acct").unwrap();
-        assert!(!reviews.is_empty(), "pending_reviews must list ambiguous profile review");
+        assert!(
+            !reviews.is_empty(),
+            "pending_reviews must list ambiguous profile review"
+        );
     }
 
     #[test]
@@ -2764,7 +4108,11 @@ mod tests {
         let outcome_b = f.store.upsert_profile("acct", &input_b, 2000).unwrap();
         match outcome_b {
             UpsertOutcome::NeedsReview { reason, candidates } => {
-                assert!(reason.contains("wechat_id") || reason.contains("conflict") || !reason.is_empty());
+                assert!(
+                    reason.contains("wechat_id")
+                        || reason.contains("conflict")
+                        || !reason.is_empty()
+                );
                 assert!(candidates.contains(&cid_a));
             }
             other => panic!("expected NeedsReview, got {:?}", other),
@@ -2797,10 +4145,19 @@ mod tests {
     #[test]
     fn test_same_name_distinct_wechat_ids_are_two_people() {
         let f = setup_fixture();
-        let a = f.store.upsert_profile("acct", &personal("wxid_alpha001", "同名戊"), 1000).unwrap();
+        let a = f
+            .store
+            .upsert_profile("acct", &personal("wxid_alpha001", "同名戊"), 1000)
+            .unwrap();
         assert!(matches!(a, UpsertOutcome::Created(_)), "{a:?}");
-        let b = f.store.upsert_profile("acct", &personal("wxid_zeta9999", "同名戊"), 2000).unwrap();
-        assert!(matches!(b, UpsertOutcome::Created(_)), "明显不同的微信号应当是另一个人: {b:?}");
+        let b = f
+            .store
+            .upsert_profile("acct", &personal("wxid_zeta9999", "同名戊"), 2000)
+            .unwrap();
+        assert!(
+            matches!(b, UpsertOutcome::Created(_)),
+            "明显不同的微信号应当是另一个人: {b:?}"
+        );
         assert_eq!(f.store.list_profiles("acct", None).unwrap().len(), 2);
         assert!(f.store.pending_reviews("acct").unwrap().is_empty());
     }
@@ -2809,9 +4166,14 @@ mod tests {
     #[test]
     fn test_repeated_review_is_not_duplicated() {
         let f = setup_fixture();
-        f.store.upsert_profile("acct", &personal("wxid_t1abc", "复读己"), 1000).unwrap();
+        f.store
+            .upsert_profile("acct", &personal("wxid_t1abc", "复读己"), 1000)
+            .unwrap();
         for t in [2000, 3000, 4000] {
-            let r = f.store.upsert_profile("acct", &personal("wxid_t1abd", "复读己"), t).unwrap();
+            let r = f
+                .store
+                .upsert_profile("acct", &personal("wxid_t1abd", "复读己"), t)
+                .unwrap();
             assert!(matches!(r, UpsertOutcome::NeedsReview { .. }), "{r:?}");
         }
         assert_eq!(f.store.pending_reviews("acct").unwrap().len(), 1);
@@ -2823,9 +4185,18 @@ mod tests {
     fn test_weak_same_name_different_enterprise_are_two_people() {
         let f = setup_fixture();
         let mk = |ent: &str| ProfileInput {
-            category: "work".to_string(), wechat_id: None, nickname: "同名员工".to_string(), remark: None,
-            region: None, source: None, added_on: None, common_groups: None,
-            enterprise: Some(ent.to_string()), real_name: None, tags: vec![], friend_permission: None,
+            category: "work".to_string(),
+            wechat_id: None,
+            nickname: "同名员工".to_string(),
+            remark: None,
+            region: None,
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: Some(ent.to_string()),
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
         };
         let a = match f.store.upsert_profile("acct", &mk("甲企业"), 1000).unwrap() {
             UpsertOutcome::Created(c) => c,
@@ -2837,8 +4208,12 @@ mod tests {
         };
         assert_ne!(a, b);
         // 再同步一遍：各自更新，不互相覆盖
-        assert!(matches!(f.store.upsert_profile("acct", &mk("甲企业"), 2000).unwrap(), UpsertOutcome::Updated(ref c) if *c == a));
-        assert!(matches!(f.store.upsert_profile("acct", &mk("乙企业"), 2000).unwrap(), UpsertOutcome::Updated(ref c) if *c == b));
+        assert!(
+            matches!(f.store.upsert_profile("acct", &mk("甲企业"), 2000).unwrap(), UpsertOutcome::Updated(ref c) if *c == a)
+        );
+        assert!(
+            matches!(f.store.upsert_profile("acct", &mk("乙企业"), 2000).unwrap(), UpsertOutcome::Updated(ref c) if *c == b)
+        );
         let profiles = f.store.list_profiles("acct", Some("work")).unwrap();
         assert_eq!(profiles.len(), 2);
     }
@@ -2849,21 +4224,41 @@ mod tests {
     fn test_weak_match_ignores_enterprise_punctuation() {
         let f = setup_fixture();
         let mk = |ent: &str| ProfileInput {
-            category: "work".to_string(), wechat_id: None, nickname: "员工己".to_string(), remark: None,
-            region: None, source: None, added_on: None, common_groups: None,
-            enterprise: Some(ent.to_string()), real_name: None, tags: vec![], friend_permission: None,
+            category: "work".to_string(),
+            wechat_id: None,
+            nickname: "员工己".to_string(),
+            remark: None,
+            region: None,
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: Some(ent.to_string()),
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
         };
-        let a = match f.store.upsert_profile("acct", &mk("某某科技有限公司"), 1000).unwrap() {
+        let a = match f
+            .store
+            .upsert_profile("acct", &mk("某某科技有限公司"), 1000)
+            .unwrap()
+        {
             UpsertOutcome::Created(c) => c,
             o => panic!("{o:?}"),
         };
-        for ent in ["某某科技有限公司。", "某某科技 有限公司", "某某科技有限公司…"] {
+        for ent in [
+            "某某科技有限公司。",
+            "某某科技 有限公司",
+            "某某科技有限公司…",
+        ] {
             assert!(
                 matches!(f.store.upsert_profile("acct", &mk(ent), 2000).unwrap(), UpsertOutcome::Updated(ref c) if *c == a),
                 "{ent}"
             );
         }
-        assert_eq!(f.store.list_profiles("acct", Some("work")).unwrap().len(), 1);
+        assert_eq!(
+            f.store.list_profiles("acct", Some("work")).unwrap().len(),
+            1
+        );
     }
 
     /// 实机 2026-11-08：允许名单里的私聊（聊天联系人）同步到带微信号的通讯录资料后没接上，列表里多出一条、
@@ -2871,14 +4266,33 @@ mod tests {
     #[test]
     fn test_strong_profile_attaches_to_allowlisted_chat_contact() {
         let f = setup_fixture();
-        let chat = f.store.ensure_contact("acct", &json!({"recipient": "示例客户甲", "kind": "private"}), false).unwrap();
+        let chat = f
+            .store
+            .ensure_contact(
+                "acct",
+                &json!({"recipient": "示例客户甲", "kind": "private"}),
+                false,
+            )
+            .unwrap();
         let p = ProfileInput {
-            category: "personal".to_string(), wechat_id: Some("wxid_example_a".to_string()), nickname: "示例客户甲".to_string(),
-            remark: None, region: None, source: None, added_on: None, common_groups: None,
-            enterprise: None, real_name: None, tags: vec![], friend_permission: None,
+            category: "personal".to_string(),
+            wechat_id: Some("wxid_example_a".to_string()),
+            nickname: "示例客户甲".to_string(),
+            remark: None,
+            region: None,
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
         };
         let out = f.store.upsert_profile("acct", &p, 1000).unwrap();
-        assert!(matches!(out, UpsertOutcome::Updated(ref c) if *c == chat), "{out:?}");
+        assert!(
+            matches!(out, UpsertOutcome::Updated(ref c) if *c == chat),
+            "{out:?}"
+        );
     }
 
     /// 实机 2026-11-08：允许名单联系人接上通讯录资料后，同名的通讯录名字把"允许名单"来源覆盖掉；核心重启时
@@ -2889,48 +4303,95 @@ mod tests {
         let entry = json!({"recipient": "示例客户乙", "kind": "private"});
         let chat = f.store.ensure_contact("acct", &entry, false).unwrap();
         let p = ProfileInput {
-            category: "personal".to_string(), wechat_id: Some("wxid_example_b".to_string()), nickname: "示例客户乙".to_string(),
-            remark: None, region: None, source: None, added_on: None, common_groups: None,
-            enterprise: None, real_name: None, tags: vec![], friend_permission: None,
+            category: "personal".to_string(),
+            wechat_id: Some("wxid_example_b".to_string()),
+            nickname: "示例客户乙".to_string(),
+            remark: None,
+            region: None,
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
         };
-        assert!(matches!(f.store.upsert_profile("acct", &p, 1000).unwrap(), UpsertOutcome::Updated(ref c) if *c == chat));
+        assert!(
+            matches!(f.store.upsert_profile("acct", &p, 1000).unwrap(), UpsertOutcome::Updated(ref c) if *c == chat)
+        );
         // 核心重启后再按允许名单找：必须还是同一个联系人
         assert_eq!(f.store.ensure_contact("acct", &entry, false).unwrap(), chat);
         // 再同步一次也一样
-        assert!(matches!(f.store.upsert_profile("acct", &p, 2000).unwrap(), UpsertOutcome::Updated(ref c) if *c == chat));
+        assert!(
+            matches!(f.store.upsert_profile("acct", &p, 2000).unwrap(), UpsertOutcome::Updated(ref c) if *c == chat)
+        );
         assert_eq!(f.store.ensure_contact("acct", &entry, false).unwrap(), chat);
     }
 
     #[test]
     fn test_profile_does_not_attach_to_same_name_group() {
         let f = setup_fixture();
-        let group = f.store.ensure_contact("acct", &json!({"recipient":"分类测试","kind":"group"}), false).unwrap();
+        let group = f
+            .store
+            .ensure_contact(
+                "acct",
+                &json!({"recipient":"分类测试","kind":"group"}),
+                false,
+            )
+            .unwrap();
         let p = ProfileInput {
-            category:"personal".into(), wechat_id:Some("wxid_kind".into()), nickname:"分类测试".into(),
-            remark:None,region:None,source:None,added_on:None,common_groups:None,
-            enterprise:None,real_name:None,tags:vec![],friend_permission:None,
+            category: "personal".into(),
+            wechat_id: Some("wxid_kind".into()),
+            nickname: "分类测试".into(),
+            remark: None,
+            region: None,
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
         };
         let cid = match f.store.upsert_profile("acct", &p, 1).unwrap() {
-            UpsertOutcome::Created(cid) => cid, other => panic!("{other:?}"),
+            UpsertOutcome::Created(cid) => cid,
+            other => panic!("{other:?}"),
         };
-        assert_ne!(cid,group);
+        assert_ne!(cid, group);
     }
 
     #[test]
     fn test_allowlisting_addressbook_contact_reuses_identity_and_kind() {
         let f = setup_fixture();
         let p = ProfileInput {
-            category: "personal".into(), wechat_id: Some("wxid_fixture".into()), nickname: "同名测试".into(),
-            remark: None, region: None, source: None, added_on: None, common_groups: None,
-            enterprise: None, real_name: None, tags: vec![], friend_permission: None,
+            category: "personal".into(),
+            wechat_id: Some("wxid_fixture".into()),
+            nickname: "同名测试".into(),
+            remark: None,
+            region: None,
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
         };
         let cid = match f.store.upsert_profile("acct", &p, 1000).unwrap() {
-            UpsertOutcome::Created(cid) => cid, other => panic!("{other:?}"),
+            UpsertOutcome::Created(cid) => cid,
+            other => panic!("{other:?}"),
         };
         let entry = json!({"recipient": p.nickname, "kind": "private"});
         assert_eq!(f.store.ensure_contact("acct", &entry, false).unwrap(), cid);
         assert_eq!(f.store.ensure_contact("acct", &entry, false).unwrap(), cid);
-        let group = f.store.ensure_contact("acct", &json!({"recipient": p.nickname, "kind": "group"}), false).unwrap();
+        let group = f
+            .store
+            .ensure_contact(
+                "acct",
+                &json!({"recipient": p.nickname, "kind": "group"}),
+                false,
+            )
+            .unwrap();
         assert_ne!(group, cid);
         assert_ne!(f.store.ensure_contact("other", &entry, false).unwrap(), cid);
     }
@@ -2939,13 +4400,36 @@ mod tests {
     fn test_allowlisting_ambiguous_addressbook_name_does_not_create_contact() {
         let f = setup_fixture();
         for ent in ["企业甲", "企业乙"] {
-            f.store.upsert_profile("acct", &ProfileInput {
-                category: "work".into(), wechat_id: None, nickname: "重名测试".into(),
-                remark: None, region: None, source: None, added_on: None, common_groups: None,
-                enterprise: Some(ent.into()), real_name: None, tags: vec![], friend_permission: None,
-            }, 1000).unwrap();
+            f.store
+                .upsert_profile(
+                    "acct",
+                    &ProfileInput {
+                        category: "work".into(),
+                        wechat_id: None,
+                        nickname: "重名测试".into(),
+                        remark: None,
+                        region: None,
+                        source: None,
+                        added_on: None,
+                        common_groups: None,
+                        enterprise: Some(ent.into()),
+                        real_name: None,
+                        tags: vec![],
+                        friend_permission: None,
+                    },
+                    1000,
+                )
+                .unwrap();
         }
-        assert!(f.store.ensure_contact("acct", &json!({"recipient":"重名测试","kind":"private"}), false).is_err());
+        assert!(
+            f.store
+                .ensure_contact(
+                    "acct",
+                    &json!({"recipient":"重名测试","kind":"private"}),
+                    false
+                )
+                .is_err()
+        );
         assert_eq!(f.store.list_profiles("acct", None).unwrap().len(), 2);
     }
 
@@ -2956,14 +4440,31 @@ mod tests {
             "CREATE TRIGGER fail_name BEFORE INSERT ON contact_names BEGIN SELECT RAISE(ABORT, 'injected failure'); END;"
         ).unwrap();
         let p = ProfileInput {
-            category: "personal".into(), wechat_id: Some("wxid_atomic".into()), nickname: "事务测试".into(),
-            remark: None, region: None, source: None, added_on: None, common_groups: None,
-            enterprise: None, real_name: None, tags: vec![], friend_permission: None,
+            category: "personal".into(),
+            wechat_id: Some("wxid_atomic".into()),
+            nickname: "事务测试".into(),
+            remark: None,
+            region: None,
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: None,
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
         };
         assert!(f.store.upsert_profile("atomic", &p, 1000).is_err());
-        let count: i64 = f.store.connection().lock().unwrap().query_row(
-            "SELECT count(*) FROM contacts WHERE account_id='atomic'", [], |r| r.get(0)
-        ).unwrap();
+        let count: i64 = f
+            .store
+            .connection()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM contacts WHERE account_id='atomic'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 0);
         assert!(f.store.list_profiles("atomic", None).unwrap().is_empty());
     }
@@ -2972,13 +4473,31 @@ mod tests {
     #[test]
     fn test_weak_profile_attaches_to_chat_contact_without_profile() {
         let f = setup_fixture();
-        let chat = f.store.ensure_contact("acct", &json!({"recipient": "聊过的员工", "kind": "private"}), false).unwrap();
+        let chat = f
+            .store
+            .ensure_contact(
+                "acct",
+                &json!({"recipient": "聊过的员工", "kind": "private"}),
+                false,
+            )
+            .unwrap();
         let p = ProfileInput {
-            category: "work".to_string(), wechat_id: None, nickname: "聊过的员工".to_string(), remark: None,
-            region: None, source: None, added_on: None, common_groups: None,
-            enterprise: Some("甲企业".to_string()), real_name: None, tags: vec![], friend_permission: None,
+            category: "work".to_string(),
+            wechat_id: None,
+            nickname: "聊过的员工".to_string(),
+            remark: None,
+            region: None,
+            source: None,
+            added_on: None,
+            common_groups: None,
+            enterprise: Some("甲企业".to_string()),
+            real_name: None,
+            tags: vec![],
+            friend_permission: None,
         };
-        assert!(matches!(f.store.upsert_profile("acct", &p, 1000).unwrap(), UpsertOutcome::Updated(ref c) if *c == chat));
+        assert!(
+            matches!(f.store.upsert_profile("acct", &p, 1000).unwrap(), UpsertOutcome::Updated(ref c) if *c == chat)
+        );
     }
 
     #[test]
@@ -3048,7 +4567,10 @@ mod tests {
         let officials = f.store.list_profiles("acct", Some("official")).unwrap();
         assert_eq!(officials.len(), 1);
         assert_eq!(officials[0]["category"].as_str().unwrap(), "official");
-        assert_eq!(officials[0]["wechat_id"].as_str().unwrap(), "gh_test_official");
+        assert_eq!(
+            officials[0]["wechat_id"].as_str().unwrap(),
+            "gh_test_official"
+        );
     }
 
     #[test]
@@ -3092,10 +4614,21 @@ mod tests {
         };
 
         // 记录 p1 聊天消息
-        f.store.record_frame(&cid1, &fr(vec![bub("你好p1", "inbound_visual", "text")]), None, None, false).unwrap();
+        f.store
+            .record_frame(
+                &cid1,
+                &fr(vec![bub("你好p1", "inbound_visual", "text")]),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
 
         // mark_missing: 只有 cid1 出现，cid2 缺失
-        let missing_count = f.store.mark_missing("acct", "personal", &[cid1.clone()], 2000).unwrap();
+        let missing_count = f
+            .store
+            .mark_missing("acct", "personal", &[cid1.clone()], 2000)
+            .unwrap();
         assert_eq!(missing_count, 1);
 
         // 验证 cid2 设置了 removed_at，但聊天记录和联系人未删除
@@ -3105,15 +4638,27 @@ mod tests {
         assert!(prof1["removed_at"].is_null());
         assert_eq!(prof2["removed_at"].as_i64().unwrap(), 2000);
 
-        let msg_count: i64 = f.store.connection().lock().unwrap()
-            .query_row("SELECT COUNT(*) FROM messages WHERE contact_id=?", [&cid1], |r| r.get(0)).unwrap();
+        let msg_count: i64 = f
+            .store
+            .connection()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE contact_id=?",
+                [&cid1],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(msg_count, 1);
 
         // 再次出现时清空 removed_at
         let outcome2 = f.store.upsert_profile("acct", &p2, 3000).unwrap();
         assert_eq!(outcome2, UpsertOutcome::Updated(cid2.clone()));
         let profiles_after = f.store.list_profiles("acct", Some("personal")).unwrap();
-        let prof2_after = profiles_after.iter().find(|p| p["contact_id"] == cid2).unwrap();
+        let prof2_after = profiles_after
+            .iter()
+            .find(|p| p["contact_id"] == cid2)
+            .unwrap();
         assert!(prof2_after["removed_at"].is_null());
     }
 }

@@ -77,7 +77,7 @@ mod tests {
     }
     #[test]
     fn lease_drop_unlocks_even_when_a_duplicate_descriptor_remains_open() {
-        let path = std::env::temp_dir().join(format!("gateway-lock-{}",crate::storage::new_id()));
+        let path = std::env::temp_dir().join(format!("gateway-lock-{}", crate::storage::new_id()));
         let first = ResourceLock::try_acquire(&path).unwrap().unwrap();
         let duplicate = first._file.try_clone().unwrap();
         drop(first);
@@ -87,5 +87,4 @@ mod tests {
         drop(duplicate);
         std::fs::remove_file(path).unwrap();
     }
-
 }

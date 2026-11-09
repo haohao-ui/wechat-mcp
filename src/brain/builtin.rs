@@ -1,13 +1,16 @@
-use std::collections::HashMap;
 use anyhow::Result;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 
 use super::{Brain, BrainReply, ContextItem, Turn};
 use crate::brain::model_api::{self, validate_reply};
 use crate::core::config::ModelConfig;
 
 pub fn too_large_hint(max_mb: u64) -> String {
-    format!("文件超过{}MB上限，请对方压缩、拆分或截图关键部分再发", max_mb)
+    format!(
+        "文件超过{}MB上限，请对方压缩、拆分或截图关键部分再发",
+        max_mb
+    )
 }
 
 pub fn unreadable_hints(reason: Option<&str>, max_attachment_mb: u64) -> String {
@@ -29,11 +32,17 @@ pub fn unreadable_item(item: &Value, max_attachment_mb: u64) -> Value {
         obj.clone()
     } else {
         let mut m = serde_json::Map::new();
-        m.insert("label".to_string(), json!(item.to_string().trim_matches('"')));
+        m.insert(
+            "label".to_string(),
+            json!(item.to_string().trim_matches('"')),
+        );
         m
     };
 
-    let reason = map.get("reason").and_then(|r| r.as_str()).map(|s| s.to_string());
+    let reason = map
+        .get("reason")
+        .and_then(|r| r.as_str())
+        .map(|s| s.to_string());
     let has_hint = map.get("hint").and_then(|h| h.as_str()).is_some();
 
     if !has_hint {
@@ -141,15 +150,14 @@ impl Brain for BuiltinBrain {
     }
 }
 
-pub async fn generate(
-    turn: &Turn,
-    model_config: &ModelConfig,
-) -> Result<BrainReply> {
+pub async fn generate(turn: &Turn, model_config: &ModelConfig) -> Result<BrainReply> {
     let prompt = build_prompt(turn)?;
     let mut metadata = HashMap::new();
 
     let check = |val: &Value| {
-        let s = val.as_str().ok_or_else(|| anyhow::anyhow!("reply must be a string"))?;
+        let s = val
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("reply must be a string"))?;
         let validated = validate_reply(s)?;
         Ok(Value::String(validated))
     };
@@ -181,7 +189,8 @@ mod tests {
         let failed = failed_items
             .into_iter()
             .map(|v| {
-                if let Ok(fa) = serde_json::from_value::<crate::brain::FailedAttachment>(v.clone()) {
+                if let Ok(fa) = serde_json::from_value::<crate::brain::FailedAttachment>(v.clone())
+                {
                     fa
                 } else {
                     crate::brain::FailedAttachment {
@@ -265,7 +274,9 @@ mod tests {
         let data = prompt_for(items, 50);
         let unreadable = data["unreadable"].as_array().unwrap();
         assert!(unreadable.iter().all(|item| {
-            item.get("hint").and_then(|h| h.as_str()).map_or(false, |s| !s.is_empty())
+            item.get("hint")
+                .and_then(|h| h.as_str())
+                .map_or(false, |s| !s.is_empty())
         }));
     }
 
@@ -300,7 +311,10 @@ mod tests {
         let turn = Turn {
             turn_id: "t1".to_string(),
             account_id: "acc".to_string(),
-            contact: ContactInfo { name: "用户".to_string(), kind: "private".to_string() },
+            contact: ContactInfo {
+                name: "用户".to_string(),
+                kind: "private".to_string(),
+            },
             text: "请看文件".to_string(),
             mode: "service".to_string(),
             chat_kind: "private".to_string(),
@@ -322,8 +336,14 @@ mod tests {
         };
 
         let prompt = build_prompt(&turn).unwrap();
-        assert!(!prompt.contains("/path/to/secret"), "prompt 绝对不能包含本地文件系统路径");
-        assert!(!prompt.contains("\"bubble\""), "prompt 绝对不能包含气泡坐标等视觉几何信息");
+        assert!(
+            !prompt.contains("/path/to/secret"),
+            "prompt 绝对不能包含本地文件系统路径"
+        );
+        assert!(
+            !prompt.contains("\"bubble\""),
+            "prompt 绝对不能包含气泡坐标等视觉几何信息"
+        );
         assert!(prompt.contains("机密.pdf"));
         assert!(prompt.contains("正文内容"));
     }
@@ -331,7 +351,8 @@ mod tests {
     #[tokio::test]
     async fn test_builtin_brain_reply_with_codex_exec_backend() {
         let _env_guard = crate::brain::model_api::CODEX_ENV_LOCK.lock().unwrap();
-        let temp_dir = std::env::temp_dir().join(format!("test-fake-builtin-{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("test-fake-builtin-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let script_path = temp_dir.join("fake_codex.sh");
         let script_content = r#"#!/bin/bash

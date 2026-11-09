@@ -6,7 +6,7 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::query::{HistoryQuery, QueryError};
 
@@ -195,7 +195,9 @@ pub fn resolve_config_path(override_path: Option<&Path>) -> PathBuf {
         PathBuf::from(env_path)
     } else {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-        PathBuf::from(home).join(".WeChatRPABot").join("config.json")
+        PathBuf::from(home)
+            .join(".WeChatRPABot")
+            .join("config.json")
     }
 }
 
@@ -226,9 +228,7 @@ pub fn open_query_from_config(config_path: Option<&Path>) -> Result<HistoryQuery
     let state_dir_str = val
         .get("state_dir")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            QueryError::new("config_error", "state_dir missing or invalid in config")
-        })?;
+        .ok_or_else(|| QueryError::new("config_error", "state_dir missing or invalid in config"))?;
 
     let state_dir = PathBuf::from(state_dir_str);
     let context_messages = val
@@ -255,7 +255,9 @@ pub fn open_query_from_config(config_path: Option<&Path>) -> Result<HistoryQuery
             }
             for n in names_to_check {
                 let n_key = crate::core::history::names::name_key(&n);
-                if let Ok(mut stmt) = conn.prepare("SELECT contact_id FROM contact_names WHERE name_key=?") {
+                if let Ok(mut stmt) =
+                    conn.prepare("SELECT contact_id FROM contact_names WHERE name_key=?")
+                {
                     if let Ok(rows) = stmt.query_map([&n_key], |r| r.get::<_, String>(0)) {
                         for cid in rows.flatten() {
                             allowed_cids.insert(cid);
@@ -326,12 +328,18 @@ pub fn call_tool(query: &HistoryQuery, name: &str, arguments: &Value) -> Result<
             query.get_contact(contact_id, name)
         }
         "get_recent_messages" => {
-            let contact_id = args_obj.get("contact_id").and_then(|v| v.as_str()).unwrap_or("");
+            let contact_id = args_obj
+                .get("contact_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let limit = args_obj.get("limit").and_then(|v| v.as_i64());
             query.get_recent_messages(contact_id, limit)
         }
         "get_history" => {
-            let contact_id = args_obj.get("contact_id").and_then(|v| v.as_str()).unwrap_or("");
+            let contact_id = args_obj
+                .get("contact_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let since = args_obj.get("since").and_then(|v| v.as_i64());
             let until = args_obj.get("until").and_then(|v| v.as_i64());
             let cursor = args_obj.get("cursor").and_then(|v| v.as_str());
@@ -349,13 +357,20 @@ pub fn call_tool(query: &HistoryQuery, name: &str, arguments: &Value) -> Result<
             query.search_messages(q, contact_id, since, until, cursor, limit)
         }
         "get_message" => {
-            let message_id = args_obj.get("message_id").and_then(|v| v.as_str()).unwrap_or("");
+            let message_id = args_obj
+                .get("message_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             query.get_message(message_id)
         }
         "get_media" => {
-            let media_id = args_obj.get("media_id").and_then(|v| v.as_str()).unwrap_or("");
+            let media_id = args_obj
+                .get("media_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let (info, path) = query.get_media(media_id)?;
-            let bytes = fs::read(&path).map_err(|e| QueryError::new("read_failed", e.to_string()))?;
+            let bytes =
+                fs::read(&path).map_err(|e| QueryError::new("read_failed", e.to_string()))?;
             let b64 = encode_base64(&bytes);
             Ok(json!({
                 "media": info,
@@ -409,9 +424,14 @@ pub fn handle_request_with_query(query: &HistoryQuery, request: &Value) -> Optio
         })
     } else if method == "tools/call" {
         let params = request.get("params");
-        let name = params.and_then(|p| p.get("name")).and_then(|v| v.as_str()).unwrap_or("");
+        let name = params
+            .and_then(|p| p.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let default_args = Value::Object(serde_json::Map::new());
-        let arguments = params.and_then(|p| p.get("arguments")).unwrap_or(&default_args);
+        let arguments = params
+            .and_then(|p| p.get("arguments"))
+            .unwrap_or(&default_args);
 
         match call_tool(query, name, arguments) {
             Ok(value) => {
@@ -607,7 +627,11 @@ mod tests {
 
             let store = HistoryStore::open(&state).unwrap();
             let contact_id = store
-                .ensure_contact("acct", &json!({"recipient": "🍓小美", "kind": "private"}), true)
+                .ensure_contact(
+                    "acct",
+                    &json!({"recipient": "🍓小美", "kind": "private"}),
+                    true,
+                )
                 .unwrap();
             store
                 .record_frame(
@@ -853,11 +877,17 @@ mod tests {
 
         let resp = handle_request(&req, Some(&f.config_path)).expect("response from mcp");
         assert_eq!(resp["result"]["isError"], false);
-        let parsed: Value = serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let parsed: Value =
+            serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
         let items = parsed["items"].as_array().expect("items array");
 
         // 只能有🍓小美
-        assert_eq!(items.len(), 1, "Only allowlisted contact should be returned: {:?}", items);
+        assert_eq!(
+            items.len(),
+            1,
+            "Only allowlisted contact should be returned: {:?}",
+            items
+        );
         assert_eq!(items[0]["display_name"], "🍓小美");
         assert_eq!(items[0]["profile"]["wechat_id"], "wxid_xiaomei");
         assert_eq!(items[0]["profile"]["category"], "personal");
@@ -875,7 +905,9 @@ mod tests {
             }
         });
         let get_resp = handle_request(&get_req, Some(&f.config_path)).expect("response from mcp");
-        let get_parsed: Value = serde_json::from_str(get_resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let get_parsed: Value =
+            serde_json::from_str(get_resp["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
         assert_eq!(get_parsed["profile"]["wechat_id"], "wxid_xiaomei");
     }
 }

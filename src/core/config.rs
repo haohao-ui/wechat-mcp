@@ -1,11 +1,11 @@
 pub use crate::core::open_api::http::OpenApiConfig;
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 unsafe extern "C" {
     fn getuid() -> u32;
@@ -145,7 +145,11 @@ fn is_emoji_or_symbol(c: char) -> bool {
 }
 
 pub fn clean_title(raw: &str) -> String {
-    raw.chars().filter(|c| !is_invisible(*c)).collect::<String>().trim().to_string()
+    raw.chars()
+        .filter(|c| !is_invisible(*c))
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 fn nfkc_normalize(raw: &str) -> String {
@@ -174,12 +178,11 @@ pub fn name_key(raw: &str) -> String {
         .chars()
         .filter(|c| !is_invisible(*c) && !is_variation(*c) && !c.is_whitespace())
         .collect();
-    let key: String = visible.chars().filter(|c| !is_emoji_or_symbol(*c)).collect();
-    if key.is_empty() {
-        visible
-    } else {
-        key
-    }
+    let key: String = visible
+        .chars()
+        .filter(|c| !is_emoji_or_symbol(*c))
+        .collect();
+    if key.is_empty() { visible } else { key }
 }
 
 pub fn candidate_names(entry: &AllowlistEntry) -> Vec<String> {
@@ -203,10 +206,16 @@ fn validate_rules(value: &Value) -> Result<()> {
         };
 
         let Some(entries) = entries_val.as_array() else {
-            bail!("{} must be an array of at most 200 conversations", list_name);
+            bail!(
+                "{} must be an array of at most 200 conversations",
+                list_name
+            );
         };
         if entries.len() > 200 {
-            bail!("{} must be an array of at most 200 conversations", list_name);
+            bail!(
+                "{} must be an array of at most 200 conversations",
+                list_name
+            );
         }
         if list_name == "allowlist" && entries.is_empty() {
             bail!("at least one explicitly allowlisted conversation required");
@@ -364,8 +373,9 @@ fn validate_model_config(config_val: &Value) -> Result<ModelConfig> {
         .and_then(|v| v.as_str())
         .context("model base_url requires HTTPS, or local HTTP, without credentials/query")?;
 
-    let parsed_url = reqwest::Url::parse(base_url_str)
-        .map_err(|_| anyhow::anyhow!("model base_url requires HTTPS, or local HTTP, without credentials/query"))?;
+    let parsed_url = reqwest::Url::parse(base_url_str).map_err(|_| {
+        anyhow::anyhow!("model base_url requires HTTPS, or local HTTP, without credentials/query")
+    })?;
 
     let host_str = parsed_url
         .host_str()
@@ -430,7 +440,9 @@ fn validate_model_config(config_val: &Value) -> Result<ModelConfig> {
     };
 
     let timeout_seconds = if let Some(ts) = map.get("timeout_seconds") {
-        let num = ts.as_u64().context("model timeout must be 1..180 seconds")?;
+        let num = ts
+            .as_u64()
+            .context("model timeout must be 1..180 seconds")?;
         if !(1..=180).contains(&num) {
             bail!("model timeout must be 1..180 seconds");
         }
@@ -535,7 +547,9 @@ impl BotConfig {
         let value: Value = serde_json::from_str(&content)
             .with_context(|| format!("invalid JSON in config file {}", path.display()))?;
 
-        let map = value.as_object().context("unsupported bot config schema or field")?;
+        let map = value
+            .as_object()
+            .context("unsupported bot config schema or field")?;
 
         let allowed = [
             "schema_version",
@@ -781,9 +795,15 @@ mod tests {
 
         for extra in invalid_extras {
             let mut val = base.clone();
-            val.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            val.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
             fs::write(&path, serde_json::to_string(&val).unwrap()).unwrap();
-            assert!(BotConfig::load(&path).is_err(), "Expected error for extra: {:?}", extra);
+            assert!(
+                BotConfig::load(&path).is_err(),
+                "Expected error for extra: {:?}",
+                extra
+            );
         }
         let _ = fs::remove_dir_all(td);
     }
@@ -811,9 +831,15 @@ mod tests {
 
         for extra in invalid_cases {
             let mut val = base.clone();
-            val.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            val.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
             fs::write(&path, serde_json::to_string(&val).unwrap()).unwrap();
-            assert!(BotConfig::load(&path).is_err(), "Expected error for {:?}", extra);
+            assert!(
+                BotConfig::load(&path).is_err(),
+                "Expected error for {:?}",
+                extra
+            );
         }
         let _ = fs::remove_dir_all(td);
     }
@@ -882,7 +908,11 @@ mod tests {
             let mut val = base.clone();
             val["host"] = json!(bad_host);
             fs::write(&path, serde_json::to_string(&val).unwrap()).unwrap();
-            assert!(BotConfig::load(&path).is_err(), "Expected reject for host: {}", bad_host);
+            assert!(
+                BotConfig::load(&path).is_err(),
+                "Expected reject for host: {}",
+                bad_host
+            );
         }
         let _ = fs::remove_dir_all(td);
     }
@@ -922,9 +952,16 @@ mod tests {
 
         for delta in invalid_deltas {
             let mut bad = base.clone();
-            bad["model_config"].as_object_mut().unwrap().extend(delta.as_object().unwrap().clone());
+            bad["model_config"]
+                .as_object_mut()
+                .unwrap()
+                .extend(delta.as_object().unwrap().clone());
             fs::write(&path, serde_json::to_string(&bad).unwrap()).unwrap();
-            assert!(BotConfig::load(&path).is_err(), "Expected reject for delta {:?}", delta);
+            assert!(
+                BotConfig::load(&path).is_err(),
+                "Expected reject for delta {:?}",
+                delta
+            );
         }
         let _ = fs::remove_dir_all(td);
     }
@@ -1085,7 +1122,8 @@ mod tests {
         assert!(BotConfig::load(&path).is_err());
 
         let mut unknown_ext_field = base.clone();
-        unknown_ext_field["brain"] = json!({"mode": "external", "external": {"unknown_field": true}});
+        unknown_ext_field["brain"] =
+            json!({"mode": "external", "external": {"unknown_field": true}});
         fs::write(&path, serde_json::to_string(&unknown_ext_field).unwrap()).unwrap();
         assert!(BotConfig::load(&path).is_err());
 

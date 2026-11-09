@@ -47,7 +47,10 @@ fn action_selftest_bin() -> Option<&'static PathBuf> {
             }
         }
         sources.sort();
-        let main_swift = root.join("tests").join("action_selftest").join("main.swift");
+        let main_swift = root
+            .join("tests")
+            .join("action_selftest")
+            .join("main.swift");
 
         let mut cmd = Command::new("swiftc");
         cmd.arg("-O");
@@ -83,7 +86,10 @@ fn wechat_click_bin() -> Option<&'static PathBuf> {
         let bin_path = out_dir.join("wechat_click");
 
         let mut sources = Vec::new();
-        for dir in &[root.join("native").join("click"), root.join("native").join("action")] {
+        for dir in &[
+            root.join("native").join("click"),
+            root.join("native").join("action"),
+        ] {
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for entry in entries.flatten() {
                     let p = entry.path();
@@ -220,10 +226,7 @@ fn plan_wechat_click_with_stdin(
 }
 
 fn get_press(events: &[Value]) -> &Value {
-    let kinds: Vec<&str> = events
-        .iter()
-        .map(|e| e["type"].as_str().unwrap())
-        .collect();
+    let kinds: Vec<&str> = events.iter().map(|e| e["type"].as_str().unwrap()).collect();
     assert_eq!(&kinds[kinds.len() - 2..], &["left_down", "left_up"]);
     &events[events.len() - 2]
 }
@@ -375,7 +378,10 @@ fn test_points_stay_on_screen_and_no_nan() {
             negative += 1;
         }
     }
-    assert!(negative > 0, "some samples use a screen left of the main display");
+    assert!(
+        negative > 0,
+        "some samples use a screen left of the main display"
+    );
 }
 
 #[test]
@@ -576,10 +582,7 @@ fn test_scroll_keeps_tick_size() {
         .iter()
         .filter(|e| e["type"].as_str().unwrap() == "scroll")
         .collect();
-    let lines: Vec<_> = ticks
-        .iter()
-        .map(|t| t["lines"].as_i64().unwrap())
-        .collect();
+    let lines: Vec<_> = ticks.iter().map(|t| t["lines"].as_i64().unwrap()).collect();
     assert_eq!(lines, vec![10, 10, 10]);
     for tick in &ticks {
         assert!(inside(
@@ -710,10 +713,7 @@ fn test_key_return_has_no_modifier() {
     }
     assert_eq!(
         get_keys(&["return"]),
-        vec![
-            ("key_down".into(), 36, false),
-            ("key_up".into(), 36, false),
-        ]
+        vec![("key_down".into(), 36, false), ("key_up".into(), 36, false),]
     );
 }
 
@@ -831,8 +831,7 @@ fn test_input_text_rejects_empty_or_huge_body() {
         return;
     }
     for body in &["".to_string(), "x".repeat(16385)] {
-        let (code, _, _) =
-            plan_wechat_click_with_stdin(&["input-text", "500", "600"], body, None);
+        let (code, _, _) = plan_wechat_click_with_stdin(&["input-text", "500", "600"], body, None);
         assert_eq!(code, 1, "failed on length {}", body.len());
     }
 }

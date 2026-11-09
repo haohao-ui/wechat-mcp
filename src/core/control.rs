@@ -1,10 +1,10 @@
+use anyhow::{Context, Result};
+use serde_json::{Value, json};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
-use anyhow::{Context, Result};
-use serde_json::{json, Value};
 
 use crate::core::config::BotConfig;
 use crate::core::state::write_private;
@@ -27,7 +27,9 @@ pub const REMOTE_LAYOUT_DIR: &str = ".wechat-rpa/layout";
 pub const CALIBRATE_PROBE: &str = "calibrate-probe";
 
 pub fn core_enabled_file() -> PathBuf {
-    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"));
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/"));
     home.join(".wechat-rpa/core.enabled")
 }
 
@@ -57,7 +59,10 @@ unsafe extern "C" {
 }
 
 pub fn format_timestamp_compact(time: SystemTime) -> String {
-    let secs = time.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+    let secs = time
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
     unsafe {
         let mut tm: Tm = std::mem::zeroed();
         localtime_r(&secs, &mut tm);
@@ -74,7 +79,10 @@ pub fn format_timestamp_compact(time: SystemTime) -> String {
 }
 
 pub fn shlex_quote(s: &str) -> String {
-    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '-')) {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '-'))
+    {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
@@ -82,7 +90,9 @@ pub fn shlex_quote(s: &str) -> String {
 }
 
 pub fn resolve_local_path(p: &str) -> PathBuf {
-    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"));
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/"));
     if p == "~" {
         home
     } else if let Some(stripped) = p.strip_prefix("~/") {
@@ -116,11 +126,23 @@ pub fn validate_layout_candidate(candidate: &Value) -> Result<()> {
     if obj.get("schema").and_then(Value::as_i64) != Some(1) {
         anyhow::bail!("layout_schema_unsupported");
     }
-    let window = obj.get("window").and_then(Value::as_object).context("layout_invalid_value:window")?;
-    let win_w = window.get("width").and_then(Value::as_f64).context("layout_invalid_value:window")?;
-    let win_h = window.get("height").and_then(Value::as_f64).context("layout_invalid_value:window")?;
+    let window = obj
+        .get("window")
+        .and_then(Value::as_object)
+        .context("layout_invalid_value:window")?;
+    let win_w = window
+        .get("width")
+        .and_then(Value::as_f64)
+        .context("layout_invalid_value:window")?;
+    let win_h = window
+        .get("height")
+        .and_then(Value::as_f64)
+        .context("layout_invalid_value:window")?;
 
-    let regions = obj.get("regions").and_then(Value::as_object).context("layout_unreadable")?;
+    let regions = obj
+        .get("regions")
+        .and_then(Value::as_object)
+        .context("layout_unreadable")?;
     let required_regions = ["session_list", "title", "chat", "input"];
     for req in required_regions {
         if !regions.contains_key(req) {
@@ -129,7 +151,9 @@ pub fn validate_layout_candidate(candidate: &Value) -> Result<()> {
     }
 
     for (name, rect_val) in regions {
-        let rect = rect_val.as_object().with_context(|| format!("layout_invalid_value:{}", name))?;
+        let rect = rect_val
+            .as_object()
+            .with_context(|| format!("layout_invalid_value:{}", name))?;
         let x = rect.get("x").and_then(Value::as_f64).unwrap_or(0.0);
         let y = rect.get("y").and_then(Value::as_f64).unwrap_or(0.0);
         let w = match rect.get("w").and_then(Value::as_f64) {
@@ -151,12 +175,21 @@ pub fn validate_layout_candidate(candidate: &Value) -> Result<()> {
         }
     }
 
-    let scroll = obj.get("scroll").and_then(Value::as_object).context("layout_invalid_value:scroll")?;
-    let ppt = scroll.get("points_per_tick").and_then(Value::as_f64).unwrap_or(0.0);
+    let scroll = obj
+        .get("scroll")
+        .and_then(Value::as_object)
+        .context("layout_invalid_value:scroll")?;
+    let ppt = scroll
+        .get("points_per_tick")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
     if ppt <= 0.0 {
         anyhow::bail!("layout_invalid_value:scroll.points_per_tick");
     }
-    let lpt = scroll.get("lines_per_tick").and_then(Value::as_i64).unwrap_or(0);
+    let lpt = scroll
+        .get("lines_per_tick")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
     if lpt <= 0 {
         anyhow::bail!("layout_invalid_value:scroll.lines_per_tick");
     }
@@ -164,7 +197,10 @@ pub fn validate_layout_candidate(candidate: &Value) -> Result<()> {
     Ok(())
 }
 
-pub fn derive_candidate_fields(base_layout: &Value, measured: &Value) -> (Vec<Value>, Vec<String>, Value) {
+pub fn derive_candidate_fields(
+    base_layout: &Value,
+    measured: &Value,
+) -> (Vec<Value>, Vec<String>, Value) {
     let mut candidate = base_layout.clone();
     let window_h = candidate
         .get("window")
@@ -193,7 +229,11 @@ pub fn derive_candidate_fields(base_layout: &Value, measured: &Value) -> (Vec<Va
         }
     }
 
-    if let Some(divider_val) = measured.as_object().and_then(|m| m.get("input_divider")).filter(|v| !v.is_null()) {
+    if let Some(divider_val) = measured
+        .as_object()
+        .and_then(|m| m.get("input_divider"))
+        .filter(|v| !v.is_null())
+    {
         if let Some(divider) = divider_val.as_f64() {
             if let Some(regions) = candidate.get_mut("regions").and_then(Value::as_object_mut) {
                 if let Some(chat) = regions.get_mut("chat").and_then(Value::as_object_mut) {
@@ -201,16 +241,22 @@ pub fn derive_candidate_fields(base_layout: &Value, measured: &Value) -> (Vec<Va
                     let new_chat_h = divider - chat_y;
                     let old_chat_h = chat.get("h").cloned().unwrap_or(Value::Null);
                     if chat.get("h").and_then(Value::as_f64) != Some(new_chat_h) {
-                        diffs.push(json!({"field": "chat.h", "old": old_chat_h, "new": new_chat_h}));
+                        diffs
+                            .push(json!({"field": "chat.h", "old": old_chat_h, "new": new_chat_h}));
                         chat.insert("h".to_string(), json!(new_chat_h));
                     }
                 }
-                if let Some(chat_content) = regions.get_mut("chat_content").and_then(Value::as_object_mut) {
+                if let Some(chat_content) = regions
+                    .get_mut("chat_content")
+                    .and_then(Value::as_object_mut)
+                {
                     let cc_y = chat_content.get("y").and_then(Value::as_f64).unwrap_or(0.0);
                     let new_cc_h = divider - cc_y;
                     let old_cc_h = chat_content.get("h").cloned().unwrap_or(Value::Null);
                     if chat_content.get("h").and_then(Value::as_f64) != Some(new_cc_h) {
-                        diffs.push(json!({"field": "chat_content.h", "old": old_cc_h, "new": new_cc_h}));
+                        diffs.push(
+                            json!({"field": "chat_content.h", "old": old_cc_h, "new": new_cc_h}),
+                        );
                         chat_content.insert("h".to_string(), json!(new_cc_h));
                     }
                 }
@@ -231,10 +277,17 @@ pub fn derive_candidate_fields(base_layout: &Value, measured: &Value) -> (Vec<Va
         }
     }
 
-    if let Some(border_val) = measured.as_object().and_then(|m| m.get("list_border")).filter(|v| !v.is_null()) {
+    if let Some(border_val) = measured
+        .as_object()
+        .and_then(|m| m.get("list_border"))
+        .filter(|v| !v.is_null())
+    {
         if let Some(border) = border_val.as_f64() {
             if let Some(regions) = candidate.get_mut("regions").and_then(Value::as_object_mut) {
-                if let Some(s_list) = regions.get_mut("session_list").and_then(Value::as_object_mut) {
+                if let Some(s_list) = regions
+                    .get_mut("session_list")
+                    .and_then(Value::as_object_mut)
+                {
                     let s_x = s_list.get("x").and_then(Value::as_f64).unwrap_or(0.0);
                     let new_w = border - s_x;
                     let old_w = s_list.get("w").cloned().unwrap_or(Value::Null);
@@ -292,15 +345,22 @@ pub fn run_calibrate(
         anyhow::bail!("layout_missing");
     }
 
-    let version = res.get("wechat_version").and_then(Value::as_str).unwrap_or("");
+    let version = res
+        .get("wechat_version")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     if !validate_version_string(version) {
         anyhow::bail!("layout_missing");
     }
 
-    let base_layout = res.get("layout").and_then(Value::as_object).context("layout_missing")?;
+    let base_layout = res
+        .get("layout")
+        .and_then(Value::as_object)
+        .context("layout_missing")?;
 
     let measured = res.get("measured").cloned().unwrap_or_else(|| json!({}));
-    let (diffs, missing, mut candidate) = derive_candidate_fields(&Value::Object(base_layout.clone()), &measured);
+    let (diffs, missing, mut candidate) =
+        derive_candidate_fields(&Value::Object(base_layout.clone()), &measured);
     candidate["wechat_version"] = json!(version);
 
     let cand_json_path = format!("{}/candidate-wechat-{}.json", layout_dir_str, version);
@@ -374,12 +434,18 @@ pub fn calibrate_accept(
     let Some(res) = worker_result else {
         anyhow::bail!("layout_missing");
     };
-    let running_version = res.get("wechat_version").and_then(Value::as_str).unwrap_or("");
+    let running_version = res
+        .get("wechat_version")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     if !validate_version_string(running_version) {
         anyhow::bail!("layout_missing");
     }
 
-    let cand_path_str = format!("{}/candidate-wechat-{}.json", layout_dir_str, running_version);
+    let cand_path_str = format!(
+        "{}/candidate-wechat-{}.json",
+        layout_dir_str, running_version
+    );
 
     let cand_bytes = if let Some(ref mut runner) = remote_runner {
         let cat_cmd = format!("cat {}", shlex_quote(&cand_path_str));
@@ -400,17 +466,28 @@ pub fn calibrate_accept(
         anyhow::bail!("layout_too_large");
     }
 
-    let candidate_val: Value = serde_json::from_slice(&cand_bytes).map_err(|_| anyhow::anyhow!("layout_unreadable"))?;
+    let candidate_val: Value =
+        serde_json::from_slice(&cand_bytes).map_err(|_| anyhow::anyhow!("layout_unreadable"))?;
     validate_layout_candidate(&candidate_val)?;
 
-    let cand_version = candidate_val.get("wechat_version").and_then(Value::as_str).unwrap_or("");
+    let cand_version = candidate_val
+        .get("wechat_version")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     if cand_version != running_version {
-        anyhow::bail!("version_mismatch: candidate is {}, running is {}", cand_version, running_version);
+        anyhow::bail!(
+            "version_mismatch: candidate is {}, running is {}",
+            cand_version,
+            running_version
+        );
     }
 
     let active_path_str = format!("{}/wechat-{}.json", layout_dir_str, running_version);
     let timestamp = format_timestamp_compact(SystemTime::now());
-    let backup_path_str = format!("{}/wechat-{}.json.bak-{}", layout_dir_str, running_version, timestamp);
+    let backup_path_str = format!(
+        "{}/wechat-{}.json.bak-{}",
+        layout_dir_str, running_version, timestamp
+    );
 
     let cmd_atomic = format!(
         "if [ -f {} ]; then cp {} {} && chmod 600 {}; fi && mv {} {} && chmod 600 {}",
@@ -450,7 +527,9 @@ pub fn calibrate_accept(
 }
 
 pub fn locations() -> (PathBuf, PathBuf, PathBuf) {
-    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"));
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/"));
     let base = home.join(".WeChatRPABot");
     let config = base.join("config.json");
     let plist = home.join("Library/LaunchAgents/local.wechat-rpa.bot.plist");
@@ -490,7 +569,8 @@ pub fn check_needs_recalibration(health: Option<&Value>, state_dir: Option<&Path
             if let Some(sessions) = obj.get("sessions").and_then(|v| v.as_object()) {
                 for s in sessions.values() {
                     if let Some(sobj) = s.as_object() {
-                        if sobj.get("state").and_then(|v| v.as_str()) == Some("needs_recalibration") {
+                        if sobj.get("state").and_then(|v| v.as_str()) == Some("needs_recalibration")
+                        {
                             return true;
                         }
                     }
@@ -508,7 +588,9 @@ pub fn check_needs_recalibration(health: Option<&Value>, state_dir: Option<&Path
                     if sub_health.exists() {
                         if let Ok(content) = fs::read_to_string(&sub_health) {
                             if let Ok(val) = serde_json::from_str::<Value>(&content) {
-                                if val.get("state").and_then(|v| v.as_str()) == Some("needs_recalibration") {
+                                if val.get("state").and_then(|v| v.as_str())
+                                    == Some("needs_recalibration")
+                                {
                                     return true;
                                 }
                             }
@@ -560,7 +642,10 @@ pub fn gather_stats(journal_root: &Path) -> Value {
                 if val.get("client_echo_observed").and_then(|v| v.as_bool()) == Some(true) {
                     client_echo_observed += 1;
                 }
-                if matches!(status, "generating" | "generated" | "attempting" | "unknown") {
+                if matches!(
+                    status,
+                    "generating" | "generated" | "attempting" | "unknown"
+                ) {
                     needs_review += 1;
                 }
             }
@@ -655,12 +740,19 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 }
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
                 loop {
-                    let still = if let Some(ref mut lfn) = loaded_fn { lfn() } else { loaded() };
+                    let still = if let Some(ref mut lfn) = loaded_fn {
+                        lfn()
+                    } else {
+                        loaded()
+                    };
                     if !still {
                         break;
                     }
                     if std::time::Instant::now() >= deadline {
-                        let _ = writeln!(stderr, "legacy Python service {BOT_LABEL} is still loaded; core not enabled");
+                        let _ = writeln!(
+                            stderr,
+                            "legacy Python service {BOT_LABEL} is still loaded; core not enabled"
+                        );
                         return 1;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -747,19 +839,26 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             };
 
             if final_loaded {
-                let _ = writeln!(stderr, "service is still unloading; do not start a replacement yet");
+                let _ = writeln!(
+                    stderr,
+                    "service is still unloading; do not start a replacement yet"
+                );
                 return 1;
             }
 
             // 宿主看到开关关闭后会优雅停止核心（会先完成正在处理的一轮），等待 core.sock 关闭
             let core_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-            let mut core_running = std::os::unix::net::UnixStream::connect(core_socket_file()).is_ok();
+            let mut core_running =
+                std::os::unix::net::UnixStream::connect(core_socket_file()).is_ok();
             while core_running && std::time::Instant::now() < core_deadline {
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 core_running = std::os::unix::net::UnixStream::connect(core_socket_file()).is_ok();
             }
             if core_running {
-                let _ = writeln!(stderr, "serve-core is still finishing its current turn; it will stop shortly");
+                let _ = writeln!(
+                    stderr,
+                    "serve-core is still finishing its current turn; it will stop shortly"
+                );
             }
             let _ = writeln!(
                 stdout,
@@ -901,11 +1000,18 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 Err(_) => match fs::read_to_string(&config_path)
                     .ok()
                     .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-                    .and_then(|v| v.get("state_dir").and_then(Value::as_str).map(PathBuf::from))
-                {
+                    .and_then(|v| {
+                        v.get("state_dir")
+                            .and_then(Value::as_str)
+                            .map(PathBuf::from)
+                    }) {
                     Some(dir) => dir,
                     None => {
-                        let _ = writeln!(stderr, "control resume-session: cannot read state_dir from {}", config_path.display());
+                        let _ = writeln!(
+                            stderr,
+                            "control resume-session: cannot read state_dir from {}",
+                            config_path.display()
+                        );
                         return 2;
                     }
                 },
@@ -914,11 +1020,19 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             let socket = crate::core::brain_tools::default_socket_path();
             match resume_session_with(&socket, &state_dir, &session_name) {
                 Ok(ResumeOutcome::Core) => {
-                    let _ = writeln!(stdout, "{}", json!({"ok": true, "session": session_name, "status": "resumed", "via": "core", "file_removed": false}));
+                    let _ = writeln!(
+                        stdout,
+                        "{}",
+                        json!({"ok": true, "session": session_name, "status": "resumed", "via": "core", "file_removed": false})
+                    );
                     0
                 }
                 Ok(ResumeOutcome::MarkerRemoved(n)) => {
-                    let _ = writeln!(stdout, "{}", json!({"ok": true, "session": session_name, "status": if n > 0 { "resumed" } else { "not_handed_off" }, "via": "file", "file_removed": n > 0}));
+                    let _ = writeln!(
+                        stdout,
+                        "{}",
+                        json!({"ok": true, "session": session_name, "status": if n > 0 { "resumed" } else { "not_handed_off" }, "via": "file", "file_removed": n > 0})
+                    );
                     0
                 }
                 Err(error) => {
@@ -966,7 +1080,10 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             let stats = gather_stats(&journal_root);
             let needs_recalibration = check_needs_recalibration(health.as_ref(), Some(&state_dir));
             if needs_recalibration {
-                let _ = writeln!(stderr, "界面核对连续失败，请运行 control calibrate 重新定位");
+                let _ = writeln!(
+                    stderr,
+                    "界面核对连续失败，请运行 control calibrate 重新定位"
+                );
             }
 
             let core_enabled_path = core_enabled_file();
@@ -975,7 +1092,10 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             let core_running = std::os::unix::net::UnixStream::connect(&core_sock_path).is_ok();
 
             if is_loaded && core_enabled {
-                let _ = writeln!(stderr, "警告：检测到旧 Python 服务 (local.wechat-rpa.bot) 与 core.enabled 同时存在冲突");
+                let _ = writeln!(
+                    stderr,
+                    "警告：检测到旧 Python 服务 (local.wechat-rpa.bot) 与 core.enabled 同时存在冲突"
+                );
             }
 
             let out = json!({
@@ -1157,7 +1277,11 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             };
             match crate::core::history::migrate::migrate(&config_val) {
                 Ok(res) => {
-                    let _ = writeln!(stdout, "{}", serde_json::to_string(&res).unwrap_or_default());
+                    let _ = writeln!(
+                        stdout,
+                        "{}",
+                        serde_json::to_string(&res).unwrap_or_default()
+                    );
                     0
                 }
                 Err(e) => {
@@ -1258,13 +1382,14 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                     return 2;
                 }
             };
-            let _maintenance_lock = match crate::core::serve::acquire_core_lock_for_maintenance(&cfg.state_dir) {
-                Ok(lock) => lock,
-                Err(e) => {
-                    let _ = writeln!(stderr, "{}", e);
-                    return 1;
-                }
-            };
+            let _maintenance_lock =
+                match crate::core::serve::acquire_core_lock_for_maintenance(&cfg.state_dir) {
+                    Ok(lock) => lock,
+                    Err(e) => {
+                        let _ = writeln!(stderr, "{}", e);
+                        return 1;
+                    }
+                };
             let store = match crate::core::history::store::HistoryStore::open(&cfg.state_dir) {
                 Ok(s) => s,
                 Err(e) => {
@@ -1272,14 +1397,22 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                     return 1;
                 }
             };
-            let src_cid = match crate::core::history::migrate::resolve_contact(&store, &crate::core::wechat_account::effective_account_id(&cfg.state_dir, &cfg.account_id), &src) {
+            let src_cid = match crate::core::history::migrate::resolve_contact(
+                &store,
+                &crate::core::wechat_account::effective_account_id(&cfg.state_dir, &cfg.account_id),
+                &src,
+            ) {
                 Ok(id) => id,
                 Err(_) => {
                     let _ = writeln!(stderr, "unknown contact: {}", src);
                     return 1;
                 }
             };
-            let dst_cid = match crate::core::history::migrate::resolve_contact(&store, &crate::core::wechat_account::effective_account_id(&cfg.state_dir, &cfg.account_id), &dst) {
+            let dst_cid = match crate::core::history::migrate::resolve_contact(
+                &store,
+                &crate::core::wechat_account::effective_account_id(&cfg.state_dir, &cfg.account_id),
+                &dst,
+            ) {
                 Ok(id) => id,
                 Err(_) => {
                     let _ = writeln!(stderr, "unknown contact: {}", dst);
@@ -1336,13 +1469,14 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                     return 2;
                 }
             };
-            let _maintenance_lock = match crate::core::serve::acquire_core_lock_for_maintenance(&cfg.state_dir) {
-                Ok(lock) => lock,
-                Err(e) => {
-                    let _ = writeln!(stderr, "{}", e);
-                    return 1;
-                }
-            };
+            let _maintenance_lock =
+                match crate::core::serve::acquire_core_lock_for_maintenance(&cfg.state_dir) {
+                    Ok(lock) => lock,
+                    Err(e) => {
+                        let _ = writeln!(stderr, "{}", e);
+                        return 1;
+                    }
+                };
             let store = match crate::core::history::store::HistoryStore::open(&cfg.state_dir) {
                 Ok(s) => s,
                 Err(e) => {
@@ -1409,7 +1543,11 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             };
             match crate::core::history::migrate::history_backup(&store, &target) {
                 Ok(bytes) => {
-                    let _ = writeln!(stdout, "{}", json!({"backup": target.to_string_lossy(), "bytes": bytes}));
+                    let _ = writeln!(
+                        stdout,
+                        "{}",
+                        json!({"backup": target.to_string_lossy(), "bytes": bytes})
+                    );
                     0
                 }
                 Err(e) => {
@@ -1444,7 +1582,11 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             let cfg = match BotConfig::load(&config_path) {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = writeln!(stderr, "failed to load config ({}): {e:#}", config_path.display());
+                    let _ = writeln!(
+                        stderr,
+                        "failed to load config ({}): {e:#}",
+                        config_path.display()
+                    );
                     return 2;
                 }
             };
@@ -1457,10 +1599,18 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             };
 
             // 只列当前登录微信账号的联系人（换号后各账号的联系人分别保留）
-            let account_id = crate::core::wechat_account::effective_account_id(&cfg.state_dir, &cfg.account_id);
-            let sync_file = crate::core::contacts::sync::account_state_path(&cfg.state_dir, &account_id, "result");
+            let account_id =
+                crate::core::wechat_account::effective_account_id(&cfg.state_dir, &cfg.account_id);
+            let sync_file = crate::core::contacts::sync::account_state_path(
+                &cfg.state_dir,
+                &account_id,
+                "result",
+            );
             let sync_val: Value = if sync_file.exists() {
-                match fs::read_to_string(&sync_file).ok().and_then(|c| serde_json::from_str(&c).ok()) {
+                match fs::read_to_string(&sync_file)
+                    .ok()
+                    .and_then(|c| serde_json::from_str(&c).ok())
+                {
                     Some(v) => v,
                     None => Value::Null,
                 }
@@ -1506,7 +1656,7 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                     GROUP BY contact_id
                 ) m ON c.contact_id = m.contact_id
                 WHERE c.merged_into IS NULL AND c.account_id = ?1
-                ORDER BY c.rowid"#
+                ORDER BY c.rowid"#,
             ) {
                 Ok(s) => s,
                 Err(e) => {
@@ -1537,12 +1687,28 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 let max_obs: Option<i64> = row.get(18)?;
 
                 let category = cat.unwrap_or_else(|| {
-                    if kind == "group" { "group".to_string() } else { "personal".to_string() }
+                    if kind == "group" {
+                        "group".to_string()
+                    } else {
+                        "personal".to_string()
+                    }
                 });
-                let tags: Value = tags_str.as_deref().and_then(|s| serde_json::from_str(s).ok()).unwrap_or_else(|| json!([]));
-                let ident = identity.unwrap_or_else(|| if wechat_id.is_some() { "strong".to_string() } else { "weak".to_string() });
+                let tags: Value = tags_str
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_else(|| json!([]));
+                let ident = identity.unwrap_or_else(|| {
+                    if wechat_id.is_some() {
+                        "strong".to_string()
+                    } else {
+                        "weak".to_string()
+                    }
+                });
 
-                Ok((cid, disp_name, category, wechat_id, nickname, remark, region, source, added_on, tags, enterprise, real_name, ident, removed_at, cnt, max_obs))
+                Ok((
+                    cid, disp_name, category, wechat_id, nickname, remark, region, source,
+                    added_on, tags, enterprise, real_name, ident, removed_at, cnt, max_obs,
+                ))
             });
 
             let rows: Vec<_> = match mapped {
@@ -1554,7 +1720,25 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             };
 
             let mut contacts_out = Vec::new();
-            for (cid, disp_name, category, wechat_id, nickname, remark, region, source, added_on, tags, enterprise, real_name, identity, removed_at, cnt, max_obs) in rows {
+            for (
+                cid,
+                disp_name,
+                category,
+                wechat_id,
+                nickname,
+                remark,
+                region,
+                source,
+                added_on,
+                tags,
+                enterprise,
+                real_name,
+                identity,
+                removed_at,
+                cnt,
+                max_obs,
+            ) in rows
+            {
                 if let Some(ref cf) = category_filter {
                     if &category != cf {
                         continue;
@@ -1562,8 +1746,12 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 }
 
                 let mut contact_all_names = vec![disp_name.clone()];
-                if let Some(ref nk) = nickname { contact_all_names.push(nk.clone()); }
-                if let Some(ref rm) = remark { contact_all_names.push(rm.clone()); }
+                if let Some(ref nk) = nickname {
+                    contact_all_names.push(nk.clone());
+                }
+                if let Some(ref rm) = remark {
+                    contact_all_names.push(rm.clone());
+                }
 
                 let mut is_ignored = false;
                 let mut is_allowed = false;
@@ -1619,9 +1807,12 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 let reason: String = r.get(1)?;
                 let cand_str: String = r.get(2)?;
                 let prof_str: String = r.get(3)?;
-                let candidates: Value = serde_json::from_str(&cand_str).unwrap_or_else(|_| json!([]));
+                let candidates: Value =
+                    serde_json::from_str(&cand_str).unwrap_or_else(|_| json!([]));
                 let prof: Value = serde_json::from_str(&prof_str).unwrap_or_else(|_| json!({}));
-                let name = prof.get("remark").and_then(|v| v.as_str())
+                let name = prof
+                    .get("remark")
+                    .and_then(|v| v.as_str())
                     .or_else(|| prof.get("nickname").and_then(|v| v.as_str()))
                     .unwrap_or("")
                     .to_string();
@@ -1644,7 +1835,11 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 "reviews": reviews,
             });
 
-            let _ = writeln!(stdout, "{}", serde_json::to_string_pretty(&out_obj).unwrap_or_default());
+            let _ = writeln!(
+                stdout,
+                "{}",
+                serde_json::to_string_pretty(&out_obj).unwrap_or_default()
+            );
             0
         }
         "mcp-info" => {
@@ -1665,7 +1860,11 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             let cfg = match BotConfig::load(&config_path) {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = writeln!(stderr, "failed to load config ({}): {e:#}", config_path.display());
+                    let _ = writeln!(
+                        stderr,
+                        "failed to load config ({}): {e:#}",
+                        config_path.display()
+                    );
                     return 2;
                 }
             };
@@ -1679,7 +1878,9 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 }
             });
 
-            let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"));
+            let home = std::env::var("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("/"));
             let tools_path = home.join(".wechat-rpa/bin/wechat-mcp");
             let tools_ok = tools_path.exists() && tools_path.is_file();
             let tools_val_str = if tools_path.exists() {
@@ -1697,11 +1898,15 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             let http_ok = std::net::TcpStream::connect(&http_addr).is_ok();
             let http_val_str = format!("http://{}", http_addr);
 
-            let open_api_val_str = format!("http://{}:{}/mcp", cfg.open_api.bind, cfg.open_api.port);
+            let open_api_val_str =
+                format!("http://{}:{}/mcp", cfg.open_api.bind, cfg.open_api.port);
             let (open_api_ok, open_api_detail) = if !cfg.open_api.enabled {
                 (false, "已关闭".to_string())
             } else {
-                let check = block_on(crate::core::open_api::http::self_check(&cfg.open_api, &cfg.state_dir));
+                let check = block_on(crate::core::open_api::http::self_check(
+                    &cfg.open_api,
+                    &cfg.state_dir,
+                ));
                 let ok = check["ok"].as_bool().unwrap_or(false);
                 let detail = if check["busy"].as_bool() == Some(true) {
                     "已有大脑连接中".to_string()
@@ -1747,7 +1952,11 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             let tools_list = crate::tools::list_tools_with_legacy(true);
             let mut all_tool_names: Vec<String> = tools_list["tools"]
                 .as_array()
-                .map(|arr| arr.iter().filter_map(|t| t["name"].as_str().map(|s| s.to_string())).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|t| t["name"].as_str().map(|s| s.to_string()))
+                        .collect()
+                })
                 .unwrap_or_default();
             for h in crate::core::history::mcp_tools::ALL_HISTORY_TOOLS {
                 if !all_tool_names.contains(&h.to_string()) {
@@ -1785,7 +1994,11 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 "tool_groups": tool_groups,
             });
 
-            let _ = writeln!(stdout, "{}", serde_json::to_string_pretty(&out_obj).unwrap_or_default());
+            let _ = writeln!(
+                stdout,
+                "{}",
+                serde_json::to_string_pretty(&out_obj).unwrap_or_default()
+            );
             0
         }
         "open-api-check" => {
@@ -1806,7 +2019,11 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             let cfg = match BotConfig::load(&config_path) {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = writeln!(stderr, "failed to load config ({}): {e:#}", config_path.display());
+                    let _ = writeln!(
+                        stderr,
+                        "failed to load config ({}): {e:#}",
+                        config_path.display()
+                    );
                     return 2;
                 }
             };
@@ -1819,9 +2036,16 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                     "error": "disabled"
                 })
             } else {
-                block_on(crate::core::open_api::http::self_check(&cfg.open_api, &cfg.state_dir))
+                block_on(crate::core::open_api::http::self_check(
+                    &cfg.open_api,
+                    &cfg.state_dir,
+                ))
             };
-            let _ = writeln!(stdout, "{}", serde_json::to_string_pretty(&check).unwrap_or_default());
+            let _ = writeln!(
+                stdout,
+                "{}",
+                serde_json::to_string_pretty(&check).unwrap_or_default()
+            );
             0
         }
         "open-api-token" => {
@@ -1847,7 +2071,11 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             let cfg = match BotConfig::load(&config_path) {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = writeln!(stderr, "failed to load config ({}): {e:#}", config_path.display());
+                    let _ = writeln!(
+                        stderr,
+                        "failed to load config ({}): {e:#}",
+                        config_path.display()
+                    );
                     return 2;
                 }
             };
@@ -1867,7 +2095,11 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             let out_obj = json!({
                 "token": token
             });
-            let _ = writeln!(stdout, "{}", serde_json::to_string_pretty(&out_obj).unwrap_or_default());
+            let _ = writeln!(
+                stdout,
+                "{}",
+                serde_json::to_string_pretty(&out_obj).unwrap_or_default()
+            );
             0
         }
         "contacts-sync" => {
@@ -1903,7 +2135,11 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             let cfg = match BotConfig::load(&config_path) {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = writeln!(stderr, "failed to load config ({}): {e:#}", config_path.display());
+                    let _ = writeln!(
+                        stderr,
+                        "failed to load config ({}): {e:#}",
+                        config_path.display()
+                    );
                     return 2;
                 }
             };
@@ -1915,7 +2151,8 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
 
             let req_id = format!("req_{}", uuid::Uuid::new_v4().simple());
             let mode = if full { "full" } else { "incremental" };
-            let request_account = crate::core::wechat_account::effective_account_id(&state_dir, &cfg.account_id);
+            let request_account =
+                crate::core::wechat_account::effective_account_id(&state_dir, &cfg.account_id);
             let req_val = json!({
                 "id": req_id,
                 "mode": mode,
@@ -1937,8 +2174,14 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                         if let Ok(content) = fs::read_to_string(&res_path) {
                             if let Ok(res_obj) = serde_json::from_str::<Value>(&content) {
                                 if res_obj.get("id").and_then(|v| v.as_str()) == Some(&req_id)
-                                    && res_obj.get("account_id").and_then(Value::as_str) == Some(request_account.as_str()) {
-                                    let _ = writeln!(stdout, "{}", serde_json::to_string_pretty(&res_obj).unwrap_or_default());
+                                    && res_obj.get("account_id").and_then(Value::as_str)
+                                        == Some(request_account.as_str())
+                                {
+                                    let _ = writeln!(
+                                        stdout,
+                                        "{}",
+                                        serde_json::to_string_pretty(&res_obj).unwrap_or_default()
+                                    );
                                     return 0;
                                 }
                             }
@@ -1951,7 +2194,11 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                     std::thread::sleep(std::time::Duration::from_millis(200));
                 }
             } else {
-                let _ = writeln!(stdout, "{}", json!({"status": "queued", "id": req_id, "mode": mode}));
+                let _ = writeln!(
+                    stdout,
+                    "{}",
+                    json!({"status": "queued", "id": req_id, "mode": mode})
+                );
                 0
             }
         }
@@ -1972,30 +2219,53 @@ pub enum ResumeOutcome {
 
 /// Ends a person's handoff. A running core owns the handoff state, so it is told over its socket;
 /// only when no core is listening are the marker files (sessions/*/handoff.json) removed directly.
-pub fn resume_session_with(socket: &Path, state_dir: &Path, recipient: &str) -> Result<ResumeOutcome> {
+pub fn resume_session_with(
+    socket: &Path,
+    state_dir: &Path,
+    recipient: &str,
+) -> Result<ResumeOutcome> {
     use std::io::{BufRead, BufReader, Write as _};
     match std::os::unix::net::UnixStream::connect(socket) {
         Ok(stream) => {
             stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
             let mut writer = stream.try_clone()?;
-            writeln!(writer, "{}", json!({"id": "control-resume", "op": "resume_session", "recipient": recipient}))?;
+            writeln!(
+                writer,
+                "{}",
+                json!({"id": "control-resume", "op": "resume_session", "recipient": recipient})
+            )?;
             let mut line = String::new();
             BufReader::new(stream).read_line(&mut line)?;
-            let response: Value = serde_json::from_str(line.trim()).context("core.sock 返回了无效 JSON")?;
+            let response: Value =
+                serde_json::from_str(line.trim()).context("core.sock 返回了无效 JSON")?;
             if response.get("ok").and_then(Value::as_bool) == Some(true) {
                 Ok(ResumeOutcome::Core)
             } else {
-                anyhow::bail!("core 拒绝 resume_session: {}", response.get("error").cloned().unwrap_or(Value::Null))
+                anyhow::bail!(
+                    "core 拒绝 resume_session: {}",
+                    response.get("error").cloned().unwrap_or(Value::Null)
+                )
             }
         }
-        Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) => {
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) =>
+        {
             let mut removed = 0;
             if let Ok(entries) = fs::read_dir(state_dir.join("sessions")) {
                 for entry in entries.flatten() {
                     let marker = entry.path().join("handoff.json");
-                    let Ok(text) = fs::read_to_string(&marker) else { continue };
-                    let Ok(value) = serde_json::from_str::<Value>(&text) else { continue };
-                    if value.get("recipient").and_then(Value::as_str) == Some(recipient) && fs::remove_file(&marker).is_ok() {
+                    let Ok(text) = fs::read_to_string(&marker) else {
+                        continue;
+                    };
+                    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+                        continue;
+                    };
+                    if value.get("recipient").and_then(Value::as_str) == Some(recipient)
+                        && fs::remove_file(&marker).is_ok()
+                    {
                         removed += 1;
                     }
                 }
@@ -2061,7 +2331,10 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let code = execute_control(
-            &["config-check".into(), cfg_path.to_string_lossy().to_string()],
+            &[
+                "config-check".into(),
+                cfg_path.to_string_lossy().to_string(),
+            ],
             &mut stdout,
             &mut stderr,
             Some(false),
@@ -2076,7 +2349,10 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let code = execute_control(
-            &["config-check".into(), bad_path.to_string_lossy().to_string()],
+            &[
+                "config-check".into(),
+                bad_path.to_string_lossy().to_string(),
+            ],
             &mut stdout,
             &mut stderr,
             Some(false),
@@ -2084,7 +2360,12 @@ mod tests {
         assert_eq!(code, 2);
         let out: Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(out["ok"], false);
-        assert!(out["error"].as_str().unwrap().contains("unsupported bot config schema or field"));
+        assert!(
+            out["error"]
+                .as_str()
+                .unwrap()
+                .contains("unsupported bot config schema or field")
+        );
     }
 
     #[test]
@@ -2316,7 +2597,9 @@ mod tests {
         assert_eq!(code, 0);
         let stdout_str = String::from_utf8(stdout).unwrap();
         assert!(stdout_str.contains("Differences from current layout:\n  input.y: 400.0 -> 420.0"));
-        assert!(stdout_str.contains("Missing measurements (preserved original values):\n  right_line"));
+        assert!(
+            stdout_str.contains("Missing measurements (preserved original values):\n  right_line")
+        );
 
         // 再测试 accept
         let state_dir_clone = state_dir.clone();
@@ -2380,7 +2663,10 @@ mod tests {
         let mut rust_stdout = Vec::new();
         let mut rust_stderr = Vec::new();
         let rust_code = execute_control(
-            &["config-check".into(), cfg_path.to_string_lossy().to_string()],
+            &[
+                "config-check".into(),
+                cfg_path.to_string_lossy().to_string(),
+            ],
             &mut rust_stdout,
             &mut rust_stderr,
             Some(false),
@@ -2395,7 +2681,11 @@ mod tests {
         let mut rust_pause_stdout = Vec::new();
         let mut rust_pause_stderr = Vec::new();
         let rust_pause_code = execute_control(
-            &["pause".into(), "--config".into(), cfg_path.to_string_lossy().to_string()],
+            &[
+                "pause".into(),
+                "--config".into(),
+                cfg_path.to_string_lossy().to_string(),
+            ],
             &mut rust_pause_stdout,
             &mut rust_pause_stderr,
             Some(false),
@@ -2403,7 +2693,10 @@ mod tests {
         assert_eq!(rust_pause_code, 0);
         let rust_pause_json: Value = serde_json::from_slice(&rust_pause_stdout).unwrap();
         assert_eq!(rust_pause_json["status"], "paused");
-        assert_eq!(rust_pause_json["file"], pause_file.to_string_lossy().to_string());
+        assert_eq!(
+            rust_pause_json["file"],
+            pause_file.to_string_lossy().to_string()
+        );
 
         // 3. resume 对比
         let py_resume_json = json!({"status": "resumed"});
@@ -2413,7 +2706,11 @@ mod tests {
         let mut rust_resume_stdout = Vec::new();
         let mut rust_resume_stderr = Vec::new();
         let rust_resume_code = execute_control(
-            &["resume".into(), "--config".into(), cfg_path.to_string_lossy().to_string()],
+            &[
+                "resume".into(),
+                "--config".into(),
+                cfg_path.to_string_lossy().to_string(),
+            ],
             &mut rust_resume_stdout,
             &mut rust_resume_stderr,
             Some(false),
@@ -2426,7 +2723,11 @@ mod tests {
         let mut rust_cal_stdout = Vec::new();
         let mut rust_cal_stderr = Vec::new();
         let rust_cal_code = execute_control(
-            &["calibrate".into(), "--config".into(), cfg_path.to_string_lossy().to_string()],
+            &[
+                "calibrate".into(),
+                "--config".into(),
+                cfg_path.to_string_lossy().to_string(),
+            ],
             &mut rust_cal_stdout,
             &mut rust_cal_stderr,
             Some(false),
@@ -2443,15 +2744,25 @@ mod tests {
         use std::io::{BufRead, BufReader, Write as _};
         let td = TempDir::new();
         // Unix socket paths are limited to ~104 bytes; the temp dir path is too long.
-        let sock = PathBuf::from(format!("/tmp/wcc-{}.sock", &uuid::Uuid::new_v4().simple().to_string()[..8]));
+        let sock = PathBuf::from(format!(
+            "/tmp/wcc-{}.sock",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        ));
         let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let mut line = String::new();
-            BufReader::new(stream.try_clone().unwrap()).read_line(&mut line).unwrap();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
             let request: Value = serde_json::from_str(&line).unwrap();
             let mut out = stream;
-            writeln!(out, "{}", json!({"id": request["id"], "ok": true, "result": {"resumed": true}})).unwrap();
+            writeln!(
+                out,
+                "{}",
+                json!({"id": request["id"], "ok": true, "result": {"resumed": true}})
+            )
+            .unwrap();
             request
         });
         let state_dir = td.path().join("state");
@@ -2465,7 +2776,10 @@ mod tests {
         assert_eq!(outcome, ResumeOutcome::Core);
         assert_eq!(request["op"], "resume_session");
         assert_eq!(request["recipient"], "示例群");
-        assert!(handoff.exists(), "the running core owns the marker; control must not delete it behind its back");
+        assert!(
+            handoff.exists(),
+            "the running core owns the marker; control must not delete it behind its back"
+        );
     }
 
     #[test]
@@ -2478,11 +2792,15 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, json!({"recipient": name}).to_string()).unwrap();
         }
-        let outcome = resume_session_with(Path::new("/tmp/wcc-absent-core.sock"), &state_dir, "示例群").unwrap();
+        let outcome =
+            resume_session_with(Path::new("/tmp/wcc-absent-core.sock"), &state_dir, "示例群")
+                .unwrap();
         assert_eq!(outcome, ResumeOutcome::MarkerRemoved(1));
         assert!(!mine.exists());
         assert!(other.exists());
-        let none = resume_session_with(Path::new("/tmp/wcc-absent-core.sock"), &state_dir, "示例群").unwrap();
+        let none =
+            resume_session_with(Path::new("/tmp/wcc-absent-core.sock"), &state_dir, "示例群")
+                .unwrap();
         assert_eq!(none, ResumeOutcome::MarkerRemoved(0));
     }
 
@@ -2496,7 +2814,11 @@ mod tests {
 
         let handoff_file = session_dir.join("handoff.json");
         // The marker names its recipient (written by the core on handoff); no core is listening here.
-        fs::write(&handoff_file, json!({"recipient": "test_vip", "turn_id": "t", "at": 1.0}).to_string()).unwrap();
+        fs::write(
+            &handoff_file,
+            json!({"recipient": "test_vip", "turn_id": "t", "at": 1.0}).to_string(),
+        )
+        .unwrap();
         unsafe { std::env::set_var("WECHAT_CORE_SOCK", "/tmp/wcc-absent-control-test.sock") };
         assert!(handoff_file.exists());
 
@@ -2517,7 +2839,11 @@ mod tests {
         let mut err_out = Vec::new();
         let mut err_err = Vec::new();
         let code_missing = execute_control(
-            &["resume-session".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &[
+                "resume-session".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
             &mut err_out,
             &mut err_err,
             Some(false),
@@ -2553,7 +2879,6 @@ mod tests {
 
     use std::time::Duration;
 
-
     fn load_default_layout() -> Value {
         let layout_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("native")
@@ -2569,11 +2894,18 @@ mod tests {
     fn test_no_4_1_15_fallback_in_source() {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let control_source = fs::read_to_string(manifest_dir.join("src/core/control.rs")).unwrap();
-        let worker_source = fs::read_to_string(manifest_dir.join("native/bot/Worker.swift")).unwrap();
+        let worker_source =
+            fs::read_to_string(manifest_dir.join("native/bot/Worker.swift")).unwrap();
 
         let prod_control = control_source.split("#[cfg(test)]").next().unwrap();
-        assert!(!prod_control.contains("\"4.1.15\""), "control.rs 生产代码不得硬编码 '4.1.15' fallback");
-        assert!(!worker_source.contains("\"4.1.15\""), "Worker.swift 不得硬编码 '4.1.15' fallback");
+        assert!(
+            !prod_control.contains("\"4.1.15\""),
+            "control.rs 生产代码不得硬编码 '4.1.15' fallback"
+        );
+        assert!(
+            !worker_source.contains("\"4.1.15\""),
+            "Worker.swift 不得硬编码 '4.1.15' fallback"
+        );
     }
 
     /// 2. test_version_regex_validation
@@ -2581,13 +2913,25 @@ mod tests {
     #[test]
     fn test_version_regex_validation() {
         let valid_versions = ["4.1.15", "4.0.0", "1.0", "1.2.3.4"];
-        let invalid_versions = ["4.1.15;rm -rf /", "v4.1", "beta", "", "4.", ".1", "4.1.15.1.2"];
+        let invalid_versions = [
+            "4.1.15;rm -rf /",
+            "v4.1",
+            "beta",
+            "",
+            "4.",
+            ".1",
+            "4.1.15.1.2",
+        ];
 
         for v in valid_versions {
             assert!(validate_version_string(v), "Expected {} to be valid", v);
         }
         for inv in invalid_versions {
-            assert!(!validate_version_string(inv), "Expected {} to be invalid", inv);
+            assert!(
+                !validate_version_string(inv),
+                "Expected {} to be invalid",
+                inv
+            );
         }
     }
 
@@ -2598,7 +2942,11 @@ mod tests {
         let mut commands = Vec::new();
         let mut fake_runner = |_host: &str, cmd: &str, _input: Option<&[u8]>| {
             commands.push(cmd.to_string());
-            Ok(CommandOutput { returncode: 0, stdout: vec![], stderr: vec![] })
+            Ok(CommandOutput {
+                returncode: 0,
+                stdout: vec![],
+                stderr: vec![],
+            })
         };
 
         let bad_worker = json!({
@@ -2623,11 +2971,16 @@ mod tests {
     #[test]
     fn test_worker_calibrate_response_fields_in_swift() {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let worker_swift = fs::read_to_string(manifest_dir.join("native/bot/Worker.swift")).unwrap();
+        let worker_swift =
+            fs::read_to_string(manifest_dir.join("native/bot/Worker.swift")).unwrap();
 
-        let cal_idx = worker_swift.find("operation == \"calibrate\"").expect("Worker.swift must have calibrate");
+        let cal_idx = worker_swift
+            .find("operation == \"calibrate\"")
+            .expect("Worker.swift must have calibrate");
         let branch = &worker_swift[cal_idx..];
-        let end_idx = branch.find("guard let recipient").expect("must bound calibrate branch");
+        let end_idx = branch
+            .find("guard let recipient")
+            .expect("must bound calibrate branch");
         let cal_block = &branch[..end_idx];
 
         assert!(cal_block.contains("\"wechat_version\""));
@@ -2652,13 +3005,22 @@ mod tests {
             if cmd.contains("cat > ") {
                 if let Some(pos) = cmd.find("cat > ") {
                     let rest = &cmd[pos + 6..];
-                    let path = rest.split_whitespace().next().unwrap().trim_matches('\'').trim_matches('"');
+                    let path = rest
+                        .split_whitespace()
+                        .next()
+                        .unwrap()
+                        .trim_matches('\'')
+                        .trim_matches('"');
                     if let Some(data) = input {
                         written_files.insert(path.to_string(), data.to_vec());
                     }
                 }
             }
-            Ok(CommandOutput { returncode: 0, stdout: vec![], stderr: vec![] })
+            Ok(CommandOutput {
+                returncode: 0,
+                stdout: vec![],
+                stderr: vec![],
+            })
         };
 
         let worker_res = json!({
@@ -2675,17 +3037,28 @@ mod tests {
             Some("wechat-host"),
             Some("~/.wechat-rpa/layout"),
             Some(&mut fake_runner),
-        ).unwrap();
+        )
+        .unwrap();
 
         // 1. 派生字段验证
         assert_eq!(candidate["regions"]["input"]["y"], 490.0);
-        assert!(diffs.iter().any(|d| d["field"] == "input.y" && d["new"] == 490.0));
+        assert!(
+            diffs
+                .iter()
+                .any(|d| d["field"] == "input.y" && d["new"] == 490.0)
+        );
 
         // 2. 写入文件路径验证
         let json_cand = format!("~/.wechat-rpa/layout/candidate-wechat-{}.json", version);
         let png_cand = format!("~/.wechat-rpa/layout/candidate-wechat-{}.png", version);
-        assert!(written_files.contains_key(&json_cand), "应写入 candidate json");
-        assert!(written_files.contains_key(&png_cand), "应写入 candidate png");
+        assert!(
+            written_files.contains_key(&json_cand),
+            "应写入 candidate json"
+        );
+        assert!(
+            written_files.contains_key(&png_cand),
+            "应写入 candidate png"
+        );
         assert_eq!(written_files[&png_cand], b"annotated-bytes");
 
         // 3. 校验权限与 umask
@@ -2708,9 +3081,17 @@ mod tests {
             commands.push(cmd.to_string());
             if cmd.starts_with("cat ") {
                 let json_bytes = serde_json::to_vec(&base_layout).unwrap();
-                return Ok(CommandOutput { returncode: 0, stdout: json_bytes, stderr: vec![] });
+                return Ok(CommandOutput {
+                    returncode: 0,
+                    stdout: json_bytes,
+                    stderr: vec![],
+                });
             }
-            Ok(CommandOutput { returncode: 0, stdout: vec![], stderr: vec![] })
+            Ok(CommandOutput {
+                returncode: 0,
+                stdout: vec![],
+                stderr: vec![],
+            })
         };
 
         let worker_res = json!({
@@ -2727,9 +3108,12 @@ mod tests {
         );
 
         assert!(res.is_err(), "版本不匹配必须报错");
-        let write_cmds: Vec<_> = commands.iter().filter(|c| {
-            c.contains("cp ") || c.contains("mv ") || c.contains("cat >") || c.contains("rm ")
-        }).collect();
+        let write_cmds: Vec<_> = commands
+            .iter()
+            .filter(|c| {
+                c.contains("cp ") || c.contains("mv ") || c.contains("cat >") || c.contains("rm ")
+            })
+            .collect();
         assert!(write_cmds.is_empty(), "版本不匹配时不得执行任何写入命令");
     }
 
@@ -2744,9 +3128,17 @@ mod tests {
         let mut fake_runner = |_host: &str, cmd: &str, _input: Option<&[u8]>| {
             commands.push(cmd.to_string());
             if cmd.starts_with("cat ") {
-                return Ok(CommandOutput { returncode: 0, stdout: b"{broken json".to_vec(), stderr: vec![] });
+                return Ok(CommandOutput {
+                    returncode: 0,
+                    stdout: b"{broken json".to_vec(),
+                    stderr: vec![],
+                });
             }
-            Ok(CommandOutput { returncode: 0, stdout: vec![], stderr: vec![] })
+            Ok(CommandOutput {
+                returncode: 0,
+                stdout: vec![],
+                stderr: vec![],
+            })
         };
 
         let worker_res = json!({
@@ -2763,9 +3155,12 @@ mod tests {
         );
 
         assert!(res.is_err(), "损坏的 candidate JSON 必须报错");
-        let write_cmds: Vec<_> = commands.iter().filter(|c| {
-            c.contains("cp ") || c.contains("mv ") || c.contains("cat >") || c.contains("rm ")
-        }).collect();
+        let write_cmds: Vec<_> = commands
+            .iter()
+            .filter(|c| {
+                c.contains("cp ") || c.contains("mv ") || c.contains("cat >") || c.contains("rm ")
+            })
+            .collect();
         assert!(write_cmds.is_empty(), "损坏 JSON 时不得执行任何写入命令");
     }
 
@@ -2786,9 +3181,17 @@ mod tests {
             commands.push(cmd.to_string());
             if cmd.starts_with("cat ") {
                 let json_bytes = serde_json::to_vec(&updated_layout).unwrap();
-                return Ok(CommandOutput { returncode: 0, stdout: json_bytes, stderr: vec![] });
+                return Ok(CommandOutput {
+                    returncode: 0,
+                    stdout: json_bytes,
+                    stderr: vec![],
+                });
             }
-            Ok(CommandOutput { returncode: 0, stdout: vec![], stderr: vec![] })
+            Ok(CommandOutput {
+                returncode: 0,
+                stdout: vec![],
+                stderr: vec![],
+            })
         };
 
         let worker_res = json!({
@@ -2802,11 +3205,15 @@ mod tests {
             Some("~/.wechat-rpa/layout"),
             Some(&worker_res),
             Some(&mut fake_runner),
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(res["accepted"], true);
 
-        let atomic_cmds: Vec<_> = commands.iter().filter(|c| c.contains("cp ") && c.contains("mv ")).collect();
+        let atomic_cmds: Vec<_> = commands
+            .iter()
+            .filter(|c| c.contains("cp ") && c.contains("mv "))
+            .collect();
         assert_eq!(atomic_cmds.len(), 1, "必须包含恰好一条原子 cp+mv 命令");
 
         let cmd = &atomic_cmds[0];
@@ -2870,7 +3277,13 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let code = execute_control(
-            &["calibrate".into(), "--config".into(), cfg_path.to_str().unwrap().into(), "--timeout".into(), "3".into()],
+            &[
+                "calibrate".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+                "--timeout".into(),
+                "3".into(),
+            ],
             &mut stdout,
             &mut stderr,
             Some(true),
@@ -2881,7 +3294,12 @@ mod tests {
         let out_str = String::from_utf8(stdout).unwrap();
         let last_line = out_str.lines().last().unwrap();
         let res: Value = serde_json::from_str(last_line).unwrap();
-        assert!(res["candidate_json"].as_str().unwrap().contains("candidate-wechat-4.1.15.json"));
+        assert!(
+            res["candidate_json"]
+                .as_str()
+                .unwrap()
+                .contains("candidate-wechat-4.1.15.json")
+        );
         assert_eq!(res["differences"].as_array().unwrap().len(), 4);
     }
 
@@ -2931,7 +3349,14 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let code = execute_control(
-            &["calibrate".into(), "--accept".into(), "--config".into(), cfg_path.to_str().unwrap().into(), "--timeout".into(), "3".into()],
+            &[
+                "calibrate".into(),
+                "--accept".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+                "--timeout".into(),
+                "3".into(),
+            ],
             &mut stdout,
             &mut stderr,
             Some(true),
@@ -2951,14 +3376,26 @@ mod tests {
     #[test]
     fn test_calibrate_never_clicks() {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let worker_swift = fs::read_to_string(manifest_dir.join("native/bot/Worker.swift")).unwrap();
+        let worker_swift =
+            fs::read_to_string(manifest_dir.join("native/bot/Worker.swift")).unwrap();
 
-        let cal_idx = worker_swift.find("operation == \"calibrate\"").expect("Worker.swift must have calibrate");
+        let cal_idx = worker_swift
+            .find("operation == \"calibrate\"")
+            .expect("Worker.swift must have calibrate");
         let branch = &worker_swift[cal_idx..];
-        let end_idx = branch.find("guard let recipient").expect("must bound calibrate branch");
+        let end_idx = branch
+            .find("guard let recipient")
+            .expect("must bound calibrate branch");
         let cal_block = &branch[..end_idx];
 
-        let forbidden = ["botActions", "click(", "rightClick(", "key(", "act(", "scroll("];
+        let forbidden = [
+            "botActions",
+            "click(",
+            "rightClick(",
+            "key(",
+            "act(",
+            "scroll(",
+        ];
         for term in forbidden {
             assert!(!cal_block.contains(term), "calibrate 分支不得调用 {}", term);
         }
@@ -2991,13 +3428,7 @@ mod tests {
         let orig_home = std::env::var("HOME").ok();
         unsafe { std::env::set_var("HOME", &home) };
 
-        let res = run_calibrate(
-            Some(&config),
-            Some(&worker_res),
-            None,
-            None,
-            None,
-        );
+        let res = run_calibrate(Some(&config), Some(&worker_res), None, None, None);
 
         if let Some(h) = orig_home {
             unsafe { std::env::set_var("HOME", h) };
@@ -3007,7 +3438,8 @@ mod tests {
         let cand_json = layout_dir.join(format!("candidate-wechat-{}.json", version));
         assert!(cand_json.exists(), "candidate 文件必须存在于 layout 目录");
 
-        let cand_content: Value = serde_json::from_str(&fs::read_to_string(&cand_json).unwrap()).unwrap();
+        let cand_content: Value =
+            serde_json::from_str(&fs::read_to_string(&cand_json).unwrap()).unwrap();
         assert_eq!(cand_content["regions"]["input"]["y"], 500.0);
 
         let mode = fs::metadata(&cand_json).unwrap().permissions().mode() & 0o777;
@@ -3031,7 +3463,11 @@ mod tests {
         let version = base_layout["wechat_version"].as_str().unwrap();
 
         let active_json = layout_dir.join(format!("wechat-{}.json", version));
-        fs::write(&active_json, serde_json::to_string_pretty(&base_layout).unwrap()).unwrap();
+        fs::write(
+            &active_json,
+            serde_json::to_string_pretty(&base_layout).unwrap(),
+        )
+        .unwrap();
 
         let worker_res = json!({
             "wechat_version": version,
@@ -3058,16 +3494,22 @@ mod tests {
         let acc_val = acc_res.unwrap();
         assert_eq!(acc_val["accepted"], true);
 
-        let new_active: Value = serde_json::from_str(&fs::read_to_string(&active_json).unwrap()).unwrap();
+        let new_active: Value =
+            serde_json::from_str(&fs::read_to_string(&active_json).unwrap()).unwrap();
         assert_eq!(new_active["regions"]["input"]["y"], 500.0);
 
         let backups: Vec<_> = fs::read_dir(&layout_dir)
             .unwrap()
             .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with(&format!("wechat-{}.json.bak-", version)))
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("wechat-{}.json.bak-", version))
+            })
             .collect();
         assert_eq!(backups.len(), 1, "必须恰好产生 1 个备份");
-        let backup_content: Value = serde_json::from_str(&fs::read_to_string(backups[0].path()).unwrap()).unwrap();
+        let backup_content: Value =
+            serde_json::from_str(&fs::read_to_string(backups[0].path()).unwrap()).unwrap();
         assert_eq!(backup_content["regions"]["input"]["y"], 496.0);
     }
 
@@ -3085,7 +3527,11 @@ mod tests {
         let mut commands = Vec::new();
         let mut fake_runner = |_host: &str, cmd: &str, _input: Option<&[u8]>| {
             commands.push(cmd.to_string());
-            Ok(CommandOutput { returncode: 0, stdout: vec![], stderr: vec![] })
+            Ok(CommandOutput {
+                returncode: 0,
+                stdout: vec![],
+                stderr: vec![],
+            })
         };
 
         let res = run_calibrate(
@@ -3113,7 +3559,11 @@ mod tests {
         let config = json!({"host": "wechat-mac"});
 
         let mut failing_runner = |_host: &str, _cmd: &str, _input: Option<&[u8]>| {
-            Ok(CommandOutput { returncode: 1, stdout: vec![], stderr: b"denied".to_vec() })
+            Ok(CommandOutput {
+                returncode: 1,
+                stdout: vec![],
+                stderr: b"denied".to_vec(),
+            })
         };
 
         let res = run_calibrate(
@@ -3141,7 +3591,11 @@ mod tests {
         let mut stderr = Vec::new();
 
         let code = execute_control(
-            &["calibrate".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &[
+                "calibrate".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
             &mut stdout,
             &mut stderr,
             Some(false),
@@ -3201,7 +3655,13 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let code = execute_control(
-            &["calibrate".into(), "--config".into(), cfg_path.to_str().unwrap().into(), "--timeout".into(), "3".into()],
+            &[
+                "calibrate".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+                "--timeout".into(),
+                "3".into(),
+            ],
             &mut stdout,
             &mut stderr,
             Some(true),
@@ -3212,7 +3672,12 @@ mod tests {
         let out_str = String::from_utf8(stdout).unwrap();
         let last_line = out_str.lines().last().unwrap();
         let res: Value = serde_json::from_str(last_line).unwrap();
-        assert!(res["candidate_json"].as_str().unwrap().contains("candidate-wechat-4.1.15.json"));
+        assert!(
+            res["candidate_json"]
+                .as_str()
+                .unwrap()
+                .contains("candidate-wechat-4.1.15.json")
+        );
         assert_eq!(res["differences"].as_array().unwrap().len(), 1);
     }
 
@@ -3240,7 +3705,11 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let code = execute_control(
-            &["calibrate".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &[
+                "calibrate".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
             &mut stdout,
             &mut stderr,
             Some(false),
@@ -3260,15 +3729,26 @@ mod tests {
     #[test]
     fn test_anchors_measure_the_raw_capture() {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let worker_swift = fs::read_to_string(manifest_dir.join("native/bot/Worker.swift")).unwrap();
+        let worker_swift =
+            fs::read_to_string(manifest_dir.join("native/bot/Worker.swift")).unwrap();
 
-        let cal_idx = worker_swift.find("operation == \"calibrate\"").expect("Worker.swift must have calibrate");
+        let cal_idx = worker_swift
+            .find("operation == \"calibrate\"")
+            .expect("Worker.swift must have calibrate");
         let branch = &worker_swift[cal_idx..];
-        let end_idx = branch.find("return result").expect("must bound calibrate branch");
+        let end_idx = branch
+            .find("return result")
+            .expect("must bound calibrate branch");
         let cal_block = &branch[..end_idx];
 
-        assert!(cal_block.contains("measureAnchors(rawImage, scale:"), "必须使用 rawImage 测量");
-        assert!(cal_block.contains("drawAnnotatedLayout(rawImage, scale:"), "必须在 rawImage 上绘制标注");
+        assert!(
+            cal_block.contains("measureAnchors(rawImage, scale:"),
+            "必须使用 rawImage 测量"
+        );
+        assert!(
+            cal_block.contains("drawAnnotatedLayout(rawImage, scale:"),
+            "必须在 rawImage 上绘制标注"
+        );
     }
 
     /// 20. test_text_anchors_are_not_reported_missing
@@ -3280,7 +3760,11 @@ mod tests {
             &base_layout,
             &json!({"input_divider": 496.0, "list_border": 300.0}),
         );
-        assert_eq!(missing, Vec::<String>::new(), "title_text 等非线锚点不能被算作 missing");
+        assert_eq!(
+            missing,
+            Vec::<String>::new(),
+            "title_text 等非线锚点不能被算作 missing"
+        );
     }
 
     // -------------------------------------------------------------
@@ -3306,7 +3790,10 @@ mod tests {
 
         assert_eq!(config, home.join(".WeChatRPABot/config.json"));
         assert_eq!(base, config.parent().unwrap());
-        assert_eq!(plist, home.join("Library/LaunchAgents/local.wechat-rpa.bot.plist"));
+        assert_eq!(
+            plist,
+            home.join("Library/LaunchAgents/local.wechat-rpa.bot.plist")
+        );
     }
 
     /// 22. test_status_reads_configured_state_after_config_move
@@ -3339,12 +3826,7 @@ mod tests {
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let code = execute_control(
-            &["status".into()],
-            &mut stdout,
-            &mut stderr,
-            Some(true),
-        );
+        let code = execute_control(&["status".into()], &mut stdout, &mut stderr, Some(true));
 
         if let Some(h) = orig_home {
             unsafe { std::env::set_var("HOME", h) };
@@ -3406,7 +3888,10 @@ mod tests {
     struct ShortSock(PathBuf);
     impl ShortSock {
         fn new() -> Self {
-            let p = PathBuf::from(format!("/tmp/wcc-{}.sock", &uuid::Uuid::new_v4().simple().to_string()[..12]));
+            let p = PathBuf::from(format!(
+                "/tmp/wcc-{}.sock",
+                &uuid::Uuid::new_v4().simple().to_string()[..12]
+            ));
             unsafe { std::env::set_var("WECHAT_CORE_SOCK", &p) };
             ShortSock(p)
         }
@@ -3429,7 +3914,11 @@ mod tests {
             "state_dir": state_dir.to_str().unwrap(),
             "allowlist": [{"recipient": "示例群", "kind": "group"}]
         });
-        fs::write(dir.join("config.json"), serde_json::to_string(&cfg).unwrap()).unwrap();
+        fs::write(
+            dir.join("config.json"),
+            serde_json::to_string(&cfg).unwrap(),
+        )
+        .unwrap();
     }
 
     /// 24. start 只打开 core.enabled 开关，绝不 enable/bootstrap 旧 Python 任务
@@ -3449,7 +3938,13 @@ mod tests {
         };
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let code = execute_control_full(&["start".into()], &mut stdout, &mut stderr, Some(&mut loaded_fn), Some(&mut cmd_runner));
+        let code = execute_control_full(
+            &["start".into()],
+            &mut stdout,
+            &mut stderr,
+            Some(&mut loaded_fn),
+            Some(&mut cmd_runner),
+        );
         let enabled = env.path().join(".wechat-rpa/core.enabled").exists();
         if let Some(h) = orig_home {
             unsafe { std::env::set_var("HOME", h) };
@@ -3458,7 +3953,9 @@ mod tests {
         assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
         assert!(enabled);
         assert!(
-            !run_calls.iter().any(|c| c[0] == "enable" || c[0] == "bootstrap"),
+            !run_calls
+                .iter()
+                .any(|c| c[0] == "enable" || c[0] == "bootstrap"),
             "start 不得启用或加载旧 Python 任务: {run_calls:?}"
         );
     }
@@ -3486,15 +3983,27 @@ mod tests {
         };
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let code = execute_control_full(&["start".into()], &mut stdout, &mut stderr, Some(&mut loaded_fn), Some(&mut cmd_runner));
+        let code = execute_control_full(
+            &["start".into()],
+            &mut stdout,
+            &mut stderr,
+            Some(&mut loaded_fn),
+            Some(&mut cmd_runner),
+        );
         if let Some(h) = orig_home {
             unsafe { std::env::set_var("HOME", h) };
         }
 
         assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
         let verbs: Vec<&str> = run_calls.iter().map(|c| c[0].as_str()).collect();
-        assert!(verbs.contains(&"disable") && verbs.contains(&"bootout"), "{verbs:?}");
-        assert!(!verbs.contains(&"enable") && !verbs.contains(&"bootstrap"), "{verbs:?}");
+        assert!(
+            verbs.contains(&"disable") && verbs.contains(&"bootout"),
+            "{verbs:?}"
+        );
+        assert!(
+            !verbs.contains(&"enable") && !verbs.contains(&"bootstrap"),
+            "{verbs:?}"
+        );
     }
 
     /// 配置无效：退出码 2，且不打开 core.enabled
@@ -3512,7 +4021,13 @@ mod tests {
         let mut cmd_runner = |_cmd: &str, _args: &[&str]| true;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let code = execute_control_full(&["start".into()], &mut stdout, &mut stderr, Some(&mut loaded_fn), Some(&mut cmd_runner));
+        let code = execute_control_full(
+            &["start".into()],
+            &mut stdout,
+            &mut stderr,
+            Some(&mut loaded_fn),
+            Some(&mut cmd_runner),
+        );
         let enabled = env.path().join(".wechat-rpa/core.enabled").exists();
         if let Some(h) = orig_home {
             unsafe { std::env::set_var("HOME", h) };
@@ -3533,7 +4048,13 @@ mod tests {
         let mut cmd_runner = |_cmd: &str, _args: &[&str]| true;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let code = execute_control_full(&["start".into()], &mut stdout, &mut stderr, Some(&mut loaded_fn), Some(&mut cmd_runner));
+        let code = execute_control_full(
+            &["start".into()],
+            &mut stdout,
+            &mut stderr,
+            Some(&mut loaded_fn),
+            Some(&mut cmd_runner),
+        );
         let enabled = env.path().join(".wechat-rpa/core.enabled").exists();
         if let Some(h) = orig_home {
             unsafe { std::env::set_var("HOME", h) };
@@ -3558,7 +4079,13 @@ mod tests {
         let mut cmd_runner = |_cmd: &str, _args: &[&str]| true;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let code = execute_control_full(&["calibrate".into()], &mut stdout, &mut stderr, Some(&mut loaded_fn), Some(&mut cmd_runner));
+        let code = execute_control_full(
+            &["calibrate".into()],
+            &mut stdout,
+            &mut stderr,
+            Some(&mut loaded_fn),
+            Some(&mut cmd_runner),
+        );
         if let Some(h) = orig_home {
             unsafe { std::env::set_var("HOME", h) };
         }
@@ -3588,14 +4115,23 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let began = std::time::Instant::now();
-        let code = execute_control_full(&["stop".into()], &mut stdout, &mut stderr, Some(&mut loaded_fn), Some(&mut cmd_runner));
+        let code = execute_control_full(
+            &["stop".into()],
+            &mut stdout,
+            &mut stderr,
+            Some(&mut loaded_fn),
+            Some(&mut cmd_runner),
+        );
         let waited = began.elapsed();
         closer.join().unwrap();
         if let Some(h) = orig_home {
             unsafe { std::env::set_var("HOME", h) };
         }
         assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
-        assert!(waited >= std::time::Duration::from_millis(500), "stop 没有等待核心退出: {waited:?}");
+        assert!(
+            waited >= std::time::Duration::from_millis(500),
+            "stop 没有等待核心退出: {waited:?}"
+        );
         let out: Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(out["status"], "stopped");
         assert_eq!(out["core_running"], false);
@@ -3612,14 +4148,33 @@ mod tests {
         for args in [
             vec!["migrate-history".to_string(), "--config".into(), c.clone()],
             vec!["history-status".to_string(), "--config".into(), c.clone()],
-            vec!["merge-contact".to_string(), "--source".into(), "a".into(), "--into".into(), "b".into(), "--config".into(), c.clone()],
-            vec!["unmerge-contact".to_string(), "1".into(), "--config".into(), c.clone()],
+            vec![
+                "merge-contact".to_string(),
+                "--source".into(),
+                "a".into(),
+                "--into".into(),
+                "b".into(),
+                "--config".into(),
+                c.clone(),
+            ],
+            vec![
+                "unmerge-contact".to_string(),
+                "1".into(),
+                "--config".into(),
+                c.clone(),
+            ],
             vec!["history-backup".to_string(), "--config".into(), c.clone()],
         ] {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
             let code = execute_control(&args, &mut stdout, &mut stderr, Some(false));
-            assert_eq!(code, 2, "{} 遇到无效配置应退出 2: {}", args[0], String::from_utf8_lossy(&stderr));
+            assert_eq!(
+                code,
+                2,
+                "{} 遇到无效配置应退出 2: {}",
+                args[0],
+                String::from_utf8_lossy(&stderr)
+            );
         }
     }
 
@@ -3638,12 +4193,25 @@ mod tests {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
             let code = execute_control(
-                &["contacts-sync".into(), bad.into(), "--config".into(), cfg_path.to_str().unwrap().into()],
-                &mut stdout, &mut stderr, Some(false),
+                &[
+                    "contacts-sync".into(),
+                    bad.into(),
+                    "--config".into(),
+                    cfg_path.to_str().unwrap().into(),
+                ],
+                &mut stdout,
+                &mut stderr,
+                Some(false),
             );
             assert_eq!(code, 2, "{bad}");
-            assert!(String::from_utf8_lossy(&stderr).contains("Usage"), "{bad}: 应打印用法");
-            assert!(!state_dir.join("contacts-sync-request.json").exists(), "{bad}: 不得提交同步请求");
+            assert!(
+                String::from_utf8_lossy(&stderr).contains("Usage"),
+                "{bad}: 应打印用法"
+            );
+            assert!(
+                !state_dir.join("contacts-sync-request.json").exists(),
+                "{bad}: 不得提交同步请求"
+            );
         }
     }
 
@@ -3655,12 +4223,22 @@ mod tests {
         let cfg_path = env.path().join("config.json");
         fs::write(&cfg_path, json!({"schema_version": 1, "account_id": "acct", "host": "local", "state_dir": state, "allowlist": [{"recipient": "a", "kind": "private"}]}).to_string()).unwrap();
         let store = crate::core::history::store::HistoryStore::open(&state).unwrap();
-        let a = store.ensure_contact("acct", &json!({"recipient": "a", "kind": "private"}), true).unwrap();
-        let b = store.ensure_contact("acct", &json!({"recipient": "b", "kind": "private"}), true).unwrap();
+        let a = store
+            .ensure_contact("acct", &json!({"recipient": "a", "kind": "private"}), true)
+            .unwrap();
+        let b = store
+            .ensure_contact("acct", &json!({"recipient": "b", "kind": "private"}), true)
+            .unwrap();
         let core = crate::core::serve::acquire_core_lock(&state).unwrap();
         for mut args in [
             vec!["migrate-history".to_string()],
-            vec!["merge-contact".into(), "--source".into(), a.clone(), "--into".into(), b.clone()],
+            vec![
+                "merge-contact".into(),
+                "--source".into(),
+                a.clone(),
+                "--into".into(),
+                b.clone(),
+            ],
             vec!["unmerge-contact".into(), "1".into()],
         ] {
             args.extend(["--config".into(), cfg_path.to_str().unwrap().into()]);
@@ -3673,12 +4251,21 @@ mod tests {
         let backup = env.path().join("online.sqlite3");
         for mut args in [
             vec!["history-status".to_string()],
-            vec!["history-backup".into(), "--to".into(), backup.to_str().unwrap().into()],
+            vec![
+                "history-backup".into(),
+                "--to".into(),
+                backup.to_str().unwrap().into(),
+            ],
         ] {
             args.extend(["--config".into(), cfg_path.to_str().unwrap().into()]);
             let mut out = Vec::new();
             let mut err = Vec::new();
-            assert_eq!(execute_control(&args, &mut out, &mut err, Some(false)), 0, "{}", String::from_utf8_lossy(&err));
+            assert_eq!(
+                execute_control(&args, &mut out, &mut err, Some(false)),
+                0,
+                "{}",
+                String::from_utf8_lossy(&err)
+            );
         }
         drop(core);
         assert!(!crate::core::serve::core_is_running(&state));
@@ -3705,12 +4292,21 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let code = execute_control(
-            &["migrate-history".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &[
+                "migrate-history".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
             &mut stdout,
             &mut stderr,
             None,
         );
-        assert_eq!(code, 0, "migrate-history should succeed: {}", String::from_utf8_lossy(&stderr));
+        assert_eq!(
+            code,
+            0,
+            "migrate-history should succeed: {}",
+            String::from_utf8_lossy(&stderr)
+        );
         let out: Value = serde_json::from_slice(&stdout).unwrap();
         assert!(out.is_object(), "migrate-history output should be json map");
 
@@ -3729,12 +4325,21 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let code = execute_control(
-            &["history-status".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &[
+                "history-status".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
             &mut stdout,
             &mut stderr,
             None,
         );
-        assert_eq!(code, 0, "history-status should succeed: {}", String::from_utf8_lossy(&stderr));
+        assert_eq!(
+            code,
+            0,
+            "history-status should succeed: {}",
+            String::from_utf8_lossy(&stderr)
+        );
         let status_out: Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(status_out["contacts"].as_array().unwrap().len(), 2);
 
@@ -3744,18 +4349,29 @@ mod tests {
         let code = execute_control(
             &[
                 "merge-contact".into(),
-                "--config".into(), cfg_path.to_str().unwrap().into(),
-                "--source".into(), "c_user1".into(),
-                "--into".into(), "c_user2".into(),
-                "--note".into(), "test merge".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+                "--source".into(),
+                "c_user1".into(),
+                "--into".into(),
+                "c_user2".into(),
+                "--note".into(),
+                "test merge".into(),
             ],
             &mut stdout,
             &mut stderr,
             None,
         );
-        assert_eq!(code, 0, "merge-contact should succeed: {}", String::from_utf8_lossy(&stderr));
+        assert_eq!(
+            code,
+            0,
+            "merge-contact should succeed: {}",
+            String::from_utf8_lossy(&stderr)
+        );
         let merge_out: Value = serde_json::from_slice(&stdout).unwrap();
-        let merge_id = merge_out["merge_id"].as_i64().expect("merge_id should be integer");
+        let merge_id = merge_out["merge_id"]
+            .as_i64()
+            .expect("merge_id should be integer");
 
         // 4. 测试 unmerge-contact
         let mut stdout = Vec::new();
@@ -3763,14 +4379,20 @@ mod tests {
         let code = execute_control(
             &[
                 "unmerge-contact".into(),
-                "--config".into(), cfg_path.to_str().unwrap().into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
                 merge_id.to_string(),
             ],
             &mut stdout,
             &mut stderr,
             None,
         );
-        assert_eq!(code, 0, "unmerge-contact should succeed: {}", String::from_utf8_lossy(&stderr));
+        assert_eq!(
+            code,
+            0,
+            "unmerge-contact should succeed: {}",
+            String::from_utf8_lossy(&stderr)
+        );
         let unmerge_out: Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(unmerge_out["unmerged"], merge_id);
 
@@ -3781,14 +4403,21 @@ mod tests {
         let code = execute_control(
             &[
                 "history-backup".into(),
-                "--config".into(), cfg_path.to_str().unwrap().into(),
-                "--to".into(), backup_target.to_str().unwrap().into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+                "--to".into(),
+                backup_target.to_str().unwrap().into(),
             ],
             &mut stdout,
             &mut stderr,
             None,
         );
-        assert_eq!(code, 0, "history-backup should succeed: {}", String::from_utf8_lossy(&stderr));
+        assert_eq!(
+            code,
+            0,
+            "history-backup should succeed: {}",
+            String::from_utf8_lossy(&stderr)
+        );
         assert!(backup_target.exists(), "backup destination must exist");
         let backup_out: Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(backup_out["backup"], backup_target.to_str().unwrap());
@@ -3818,7 +4447,10 @@ mod tests {
             Some(&mut cmd_runner),
         );
         assert_eq!(code, 0);
-        assert!(core_enabled_path.exists(), "control start must create core.enabled for CoreSupervisor");
+        assert!(
+            core_enabled_path.exists(),
+            "control start must create core.enabled for CoreSupervisor"
+        );
         let start_out: Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(start_out["core_enabled"], true);
 
@@ -3834,7 +4466,10 @@ mod tests {
             Some(&mut cmd_runner),
         );
         assert_eq!(code, 0);
-        assert!(!core_enabled_path.exists(), "control stop must remove core.enabled");
+        assert!(
+            !core_enabled_path.exists(),
+            "control stop must remove core.enabled"
+        );
         let stop_out: Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(stop_out["core_enabled"], false);
 
@@ -3922,7 +4557,8 @@ mod tests {
                                         "differences": [],
                                         "missing": []
                                     }
-                                }).to_string(),
+                                })
+                                .to_string(),
                             );
                             return;
                         }
@@ -3936,7 +4572,13 @@ mod tests {
         let mut stderr = Vec::new();
         let mut loaded_fn = || false; // Python 未运行
         let code = execute_control_full(
-            &["calibrate".into(), "--config".into(), cfg_path.to_str().unwrap().into(), "--timeout".into(), "3".into()],
+            &[
+                "calibrate".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+                "--timeout".into(),
+                "3".into(),
+            ],
             &mut stdout,
             &mut stderr,
             Some(&mut loaded_fn),
@@ -3949,7 +4591,12 @@ mod tests {
         }
 
         // 不应报错 "机器人未运行：请先 control start"
-        assert_eq!(code, 0, "Calibrate should succeed while serve-core is running: {}", String::from_utf8_lossy(&stderr));
+        assert_eq!(
+            code,
+            0,
+            "Calibrate should succeed while serve-core is running: {}",
+            String::from_utf8_lossy(&stderr)
+        );
     }
 
     #[test]
@@ -3985,7 +4632,9 @@ mod tests {
             tags: vec![],
             friend_permission: None,
         };
-        store.upsert_profile("test-desktop", &p_allow, 1000).unwrap();
+        store
+            .upsert_profile("test-desktop", &p_allow, 1000)
+            .unwrap();
 
         let p_ignore = crate::core::history::store::ProfileInput {
             category: "personal".to_string(),
@@ -4001,10 +4650,18 @@ mod tests {
             tags: vec![],
             friend_permission: None,
         };
-        store.upsert_profile("test-desktop", &p_ignore, 1000).unwrap();
+        store
+            .upsert_profile("test-desktop", &p_ignore, 1000)
+            .unwrap();
 
         // Contact without profile (only in chat)
-        store.ensure_contact("test-desktop", &json!({"recipient": "丙普通", "kind": "private"}), true).unwrap();
+        store
+            .ensure_contact(
+                "test-desktop",
+                &json!({"recipient": "丙普通", "kind": "private"}),
+                true,
+            )
+            .unwrap();
 
         // Sync result file
         let sync_res = json!({
@@ -4014,12 +4671,18 @@ mod tests {
             "unreadable_rows": 0,
             "needs_review": 0
         });
-        crate::core::contacts::sync::write_sync_result(&state_dir, "test-desktop", &sync_res).unwrap();
+        crate::core::contacts::sync::write_sync_result(&state_dir, "test-desktop", &sync_res)
+            .unwrap();
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let code = execute_control_full(
-            &["contacts-list".into(), "--json".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &[
+                "contacts-list".into(),
+                "--json".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
             &mut stdout,
             &mut stderr,
             None,
@@ -4035,17 +4698,26 @@ mod tests {
         let contacts = out_val["contacts"].as_array().expect("contacts array");
         assert_eq!(contacts.len(), 3);
 
-        let c_allow = contacts.iter().find(|c| c["display_name"] == "甲备注").expect("甲备注");
+        let c_allow = contacts
+            .iter()
+            .find(|c| c["display_name"] == "甲备注")
+            .expect("甲备注");
         assert_eq!(c_allow["handling"], "auto_reply");
         assert_eq!(c_allow["wechat_id"], "wxid_t1");
         assert_eq!(c_allow["identity"], "strong");
         assert_eq!(c_allow["category"], "personal");
         assert_eq!(c_allow["removed"], false);
 
-        let c_ignore = contacts.iter().find(|c| c["display_name"] == "乙备注").expect("乙备注");
+        let c_ignore = contacts
+            .iter()
+            .find(|c| c["display_name"] == "乙备注")
+            .expect("乙备注");
         assert_eq!(c_ignore["handling"], "ignored");
 
-        let c_record = contacts.iter().find(|c| c["display_name"] == "丙普通").expect("丙普通");
+        let c_record = contacts
+            .iter()
+            .find(|c| c["display_name"] == "丙普通")
+            .expect("丙普通");
         assert_eq!(c_record["handling"], "record_only");
         assert_eq!(c_record["category"], "personal");
         assert!(c_record["wechat_id"].is_null());
@@ -4067,21 +4739,51 @@ mod tests {
         });
         fs::write(&cfg_path, cfg.to_string()).unwrap();
         let store = crate::core::history::store::HistoryStore::open(&state_dir).unwrap();
-        store.ensure_contact("wxid_a", &json!({"recipient": "甲号的客户", "kind": "private"}), true).unwrap();
-        store.ensure_contact("wxid_b", &json!({"recipient": "乙号的客户", "kind": "private"}), true).unwrap();
-        crate::core::contacts::sync::write_sync_result(&state_dir, "wxid_a", &json!({"complete":true,"finished_at_ms":1000})).unwrap();
+        store
+            .ensure_contact(
+                "wxid_a",
+                &json!({"recipient": "甲号的客户", "kind": "private"}),
+                true,
+            )
+            .unwrap();
+        store
+            .ensure_contact(
+                "wxid_b",
+                &json!({"recipient": "乙号的客户", "kind": "private"}),
+                true,
+            )
+            .unwrap();
+        crate::core::contacts::sync::write_sync_result(
+            &state_dir,
+            "wxid_a",
+            &json!({"complete":true,"finished_at_ms":1000}),
+        )
+        .unwrap();
         crate::core::wechat_account::record_current_account(&state_dir, "wxid_b", 1.0).unwrap();
 
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
         let code = execute_control_full(
-            &["contacts-list".into(), "--json".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
-            &mut stdout, &mut stderr, None, None,
+            &[
+                "contacts-list".into(),
+                "--json".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
         );
         assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
         let out: Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(out["account_id"], "wxid_b");
         assert!(out["sync"].is_null(), "乙号不能显示甲号的同步成功状态");
-        let names: Vec<&str> = out["contacts"].as_array().unwrap().iter().filter_map(|c| c["display_name"].as_str()).collect();
+        let names: Vec<&str> = out["contacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c["display_name"].as_str())
+            .collect();
         assert_eq!(names, vec!["乙号的客户"]);
     }
 
@@ -4104,7 +4806,12 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let code = execute_control_full(
-            &["mcp-info".into(), "--json".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &[
+                "mcp-info".into(),
+                "--json".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
             &mut stdout,
             &mut stderr,
             None,
@@ -4127,21 +4834,56 @@ mod tests {
         assert_eq!(open_ep["ok"], false);
         assert_eq!(open_ep["detail"], "已关闭");
 
-        let tool_groups = out_val["tool_groups"].as_array().expect("tool_groups array");
+        let tool_groups = out_val["tool_groups"]
+            .as_array()
+            .expect("tool_groups array");
         assert_eq!(tool_groups.len(), 3);
-        let titles: Vec<&str> = tool_groups.iter().map(|g| g["title"].as_str().unwrap()).collect();
+        let titles: Vec<&str> = tool_groups
+            .iter()
+            .map(|g| g["title"].as_str().unwrap())
+            .collect();
         assert_eq!(titles, vec!["对外接口", "运维", "通用桌面"]);
 
-        let open_group = tool_groups.iter().find(|g| g["title"] == "对外接口").unwrap();
-        let open_tools: Vec<&str> = open_group["tools"].as_array().unwrap().iter().map(|t| t.as_str().unwrap()).collect();
+        let open_group = tool_groups
+            .iter()
+            .find(|g| g["title"] == "对外接口")
+            .unwrap();
+        let open_tools: Vec<&str> = open_group["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t.as_str().unwrap())
+            .collect();
         assert_eq!(open_tools, crate::core::open_api::http::open_tool_names());
 
-        let desktop_group = tool_groups.iter().find(|g| g["title"] == "通用桌面").unwrap();
-        let desktop_tools: Vec<&str> = desktop_group["tools"].as_array().unwrap().iter().map(|t| t.as_str().unwrap()).collect();
-        assert_eq!(desktop_tools, vec!["desktop_apps", "desktop_windows", "desktop_observe", "desktop_act", "desktop_stop"]);
+        let desktop_group = tool_groups
+            .iter()
+            .find(|g| g["title"] == "通用桌面")
+            .unwrap();
+        let desktop_tools: Vec<&str> = desktop_group["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            desktop_tools,
+            vec![
+                "desktop_apps",
+                "desktop_windows",
+                "desktop_observe",
+                "desktop_act",
+                "desktop_stop"
+            ]
+        );
 
         let ops_group = tool_groups.iter().find(|g| g["title"] == "运维").unwrap();
-        let ops_tools: Vec<&str> = ops_group["tools"].as_array().unwrap().iter().map(|t| t.as_str().unwrap()).collect();
+        let ops_tools: Vec<&str> = ops_group["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t.as_str().unwrap())
+            .collect();
         for t in &desktop_tools {
             assert!(!ops_tools.contains(t), "通用桌面工具 {t} 不应在运维组中");
         }
@@ -4170,7 +4912,12 @@ mod tests {
         let mut stdout1 = Vec::new();
         let mut stderr1 = Vec::new();
         let code1 = execute_control_full(
-            &["open-api-token".into(), "--json".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &[
+                "open-api-token".into(),
+                "--json".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
             &mut stdout1,
             &mut stderr1,
             None,
@@ -4185,7 +4932,12 @@ mod tests {
         let mut stdout2 = Vec::new();
         let mut stderr2 = Vec::new();
         let code2 = execute_control_full(
-            &["open-api-token".into(), "--json".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &[
+                "open-api-token".into(),
+                "--json".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
             &mut stdout2,
             &mut stderr2,
             None,
@@ -4200,7 +4952,13 @@ mod tests {
         let mut stdout3 = Vec::new();
         let mut stderr3 = Vec::new();
         let code3 = execute_control_full(
-            &["open-api-token".into(), "--rotate".into(), "--json".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &[
+                "open-api-token".into(),
+                "--rotate".into(),
+                "--json".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
             &mut stdout3,
             &mut stderr3,
             None,
@@ -4216,7 +4974,12 @@ mod tests {
         let mut stdout4 = Vec::new();
         let mut stderr4 = Vec::new();
         let code4 = execute_control_full(
-            &["open-api-token".into(), "--json".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &[
+                "open-api-token".into(),
+                "--json".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
             &mut stdout4,
             &mut stderr4,
             None,
@@ -4250,7 +5013,12 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let code = execute_control_full(
-            &["open-api-check".into(), "--json".into(), "--config".into(), cfg_path.to_str().unwrap().into()],
+            &[
+                "open-api-check".into(),
+                "--json".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
             &mut stdout,
             &mut stderr,
             None,

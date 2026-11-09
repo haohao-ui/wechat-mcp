@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -351,7 +351,9 @@ impl WorkerClient {
             };
             match relaunch {
                 None => bail!("stop_requested: quiet relaunch abandoned"),
-                Some(Err(error)) => tracing::warn!("quiet_relaunch_get_messages_failed: {:#}", error),
+                Some(Err(error)) => {
+                    tracing::warn!("quiet_relaunch_get_messages_failed: {:#}", error)
+                }
                 Some(Ok(_)) => {}
             }
             match self.connect(60).await {
@@ -532,7 +534,11 @@ impl WorkerClient {
         if response.get("ok").and_then(|v| v.as_bool()) != Some(true) {
             let err_msg = response
                 .get("error")
-                .map(|v| v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string()))
+                .map(|v| {
+                    v.as_str()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| v.to_string())
+                })
                 .unwrap_or_else(|| "unknown error".to_string());
             bail!("private visual operation failed: {}", err_msg);
         }
@@ -577,7 +583,11 @@ impl WorkerClient {
         serde_json::from_value(res).context("failed to deserialize Frame from operation 'capture'")
     }
 
-    pub async fn scroll(&mut self, direction: &str, pages: u32) -> Result<crate::core::model::Frame> {
+    pub async fn scroll(
+        &mut self,
+        direction: &str,
+        pages: u32,
+    ) -> Result<crate::core::model::Frame> {
         if direction != "up" && direction != "down" {
             bail!("invalid scroll request: direction must be up or down");
         }
@@ -591,7 +601,8 @@ impl WorkerClient {
             )
             .await?;
         self.dump_frame("scroll_chat", &res);
-        serde_json::from_value(res).context("failed to deserialize Frame from operation 'scroll_chat'")
+        serde_json::from_value(res)
+            .context("failed to deserialize Frame from operation 'scroll_chat'")
     }
 
     pub async fn sessions(&mut self, names: &[String], debug: bool) -> Result<Value> {
@@ -841,7 +852,10 @@ impl WorkerClient {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
-        let _ = crate::core::state::write_private(&self.folder_permission_marker(), &json!({"detail": detail, "at": at}));
+        let _ = crate::core::state::write_private(
+            &self.folder_permission_marker(),
+            &json!({"detail": detail, "at": at}),
+        );
     }
 
     /// 附件原件保存成功即说明权限已恢复，清掉提示。
@@ -907,7 +921,10 @@ impl WorkerClient {
                         let f = self.frame().await?;
                         current_frame = f;
                         if index + 1 < items.len() {
-                            let relocated = crate::core::policy::relocate(&items[index + 1..], &current_frame.bubbles);
+                            let relocated = crate::core::policy::relocate(
+                                &items[index + 1..],
+                                &current_frame.bubbles,
+                            );
                             items.splice(index + 1.., relocated);
                         }
                     }
@@ -992,7 +1009,8 @@ impl WorkerClient {
 
                 current_frame = new_frame;
                 if index + 1 < items.len() {
-                    let relocated = crate::core::policy::relocate(&items[index + 1..], &current_frame.bubbles);
+                    let relocated =
+                        crate::core::policy::relocate(&items[index + 1..], &current_frame.bubbles);
                     items.splice(index + 1.., relocated);
                 }
 
@@ -1114,23 +1132,41 @@ impl WorkerClient {
 }
 
 impl CoordinatorCapture for WorkerClient {
-    fn start<'a>(&'a mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+    fn start<'a>(
+        &'a mut self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move { self.start().await })
     }
 
-    fn close<'a>(&'a mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+    fn close<'a>(
+        &'a mut self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move { self.close().await })
     }
 
-    fn frame<'a>(&'a mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<crate::core::model::Frame>> + Send + 'a>> {
+    fn frame<'a>(
+        &'a mut self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<crate::core::model::Frame>> + Send + 'a>,
+    > {
         Box::pin(async move { self.frame().await })
     }
 
-    fn scroll<'a>(&'a mut self, direction: &'a str, amount: u32) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<crate::core::model::Frame>> + Send + 'a>> {
+    fn scroll<'a>(
+        &'a mut self,
+        direction: &'a str,
+        amount: u32,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<crate::core::model::Frame>> + Send + 'a>,
+    > {
         Box::pin(async move { self.scroll(direction, amount).await })
     }
 
-    fn call<'a>(&'a mut self, op: &'a str, params: Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
+    fn call<'a>(
+        &'a mut self,
+        op: &'a str,
+        params: Value,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
         Box::pin(async move { self.call(op, params).await })
     }
 
@@ -1141,7 +1177,13 @@ impl CoordinatorCapture for WorkerClient {
         self.directory = directory.to_path_buf();
     }
 
-    fn retarget<'a>(&'a mut self, recipient: &'a str, directory: &'a Path, names: &'a [String], group: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+    fn retarget<'a>(
+        &'a mut self,
+        recipient: &'a str,
+        directory: &'a Path,
+        names: &'a [String],
+        group: bool,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         let names_vec = names.to_vec();
         Box::pin(async move {
             self.recipient = recipient.to_string();
@@ -1152,19 +1194,29 @@ impl CoordinatorCapture for WorkerClient {
                 self.start().await?;
                 return Ok(());
             }
-            self.retarget(recipient, directory, Some(names_vec), group).await
+            self.retarget(recipient, directory, Some(names_vec), group)
+                .await
         })
     }
 
-    fn sessions<'a>(&'a mut self, names: &'a [String]) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<SessionRow>>> + Send + 'a>> {
+    fn sessions<'a>(
+        &'a mut self,
+        names: &'a [String],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<SessionRow>>> + Send + 'a>>
+    {
         Box::pin(async move {
             let res = self.sessions(names, false).await?;
             let rows_val = res.get("rows").cloned().unwrap_or(res);
-            serde_json::from_value(rows_val).context("failed to deserialize SessionRow array from sessions")
+            serde_json::from_value(rows_val)
+                .context("failed to deserialize SessionRow array from sessions")
         })
     }
 
-    fn download<'a>(&'a mut self, media_id: &'a str, kind: &'a str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<PathBuf>> + Send + 'a>> {
+    fn download<'a>(
+        &'a mut self,
+        media_id: &'a str,
+        kind: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<PathBuf>> + Send + 'a>> {
         Box::pin(async move { self.download(media_id, kind).await })
     }
 
@@ -1240,7 +1292,10 @@ mod tests {
 
     impl TestDir {
         fn new() -> Self {
-            let path = PathBuf::from(format!("/tmp/wc_{}", &uuid::Uuid::new_v4().simple().to_string()[..12]));
+            let path = PathBuf::from(format!(
+                "/tmp/wc_{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..12]
+            ));
             fs::create_dir_all(&path).unwrap();
             let mut perms = fs::metadata(&path).unwrap().permissions();
             perms.set_mode(0o700);
@@ -1437,9 +1492,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("session_row_not_unique_or_missing"));
+        assert!(
+            err.to_string()
+                .contains("session_row_not_unique_or_missing")
+        );
         assert_eq!(nav.calls.lock().await.len(), 0);
     }
 
@@ -2178,10 +2234,7 @@ mod tests {
             .await
             .unwrap();
         let calls = nav.calls.lock().await;
-        assert_eq!(
-            *calls,
-            vec![Some("🍓a".to_string()), Some("a".to_string())]
-        );
+        assert_eq!(*calls, vec![Some("🍓a".to_string()), Some("a".to_string())]);
     }
 
     #[tokio::test]
@@ -2410,7 +2463,10 @@ mod tests {
             .flatten()
             .filter(|e| e.file_name().to_string_lossy().starts_with("frames-"))
             .collect();
-        assert!(dumped_files.is_empty(), "未开启 frame-dump 时不写入任何文件");
+        assert!(
+            dumped_files.is_empty(),
+            "未开启 frame-dump 时不写入任何文件"
+        );
     }
 
     #[tokio::test]
@@ -2565,7 +2621,8 @@ mod tests {
             "direction": "inbound_visual",
             "digest": format!("{}_{}", kind, media_id),
             "text": if kind == "image" { "[图片]" } else { "[文件]" }
-        })).unwrap()
+        }))
+        .unwrap()
     }
 
     fn test_empty_frame() -> Frame {
@@ -2573,7 +2630,8 @@ mod tests {
             "snapshot_id": "snap_1",
             "bubbles": [],
             "title_lines": ["测试"]
-        })).unwrap()
+        }))
+        .unwrap()
     }
 
     #[tokio::test]
@@ -2630,7 +2688,8 @@ mod tests {
                 "ok": true,
                 "result": result,
             })
-        }).await;
+        })
+        .await;
 
         let mut client = setup_test_client(&temp, sock, None);
         client.connect(5).await.unwrap();
@@ -2640,7 +2699,10 @@ mod tests {
         let bubble_file = test_bubble_helper("file", &file_id, Some("sample.txt"));
 
         let frame = test_empty_frame();
-        let (images, files, failed) = client.attachments(&[bubble_img, bubble_file], &frame).await.unwrap();
+        let (images, files, failed) = client
+            .attachments(&[bubble_img, bubble_file], &frame)
+            .await
+            .unwrap();
 
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].label, "第1张图片");
@@ -2652,15 +2714,31 @@ mod tests {
         assert_eq!(files[0].filename, "sample.txt");
         assert_eq!(files[0].label, "sample.txt");
         assert!(files[0].original_bytes);
-        assert_eq!(files[0].content.get("text").and_then(|v| v.as_str()), Some("口令：竹叶-47"));
+        assert_eq!(
+            files[0].content.get("text").and_then(|v| v.as_str()),
+            Some("口令：竹叶-47")
+        );
         assert!(files[0].path.exists());
 
         assert!(failed.is_empty());
 
-        let recorded: Vec<String> = calls.lock().unwrap().iter()
+        let recorded: Vec<String> = calls
+            .lock()
+            .unwrap()
+            .iter()
             .map(|c| c["operation"].as_str().unwrap_or("").to_string())
             .collect();
-        assert_eq!(recorded, vec!["prepare_image", "capture", "read_media", "prepare_file", "read_media", "capture"]);
+        assert_eq!(
+            recorded,
+            vec![
+                "prepare_image",
+                "capture",
+                "read_media",
+                "prepare_file",
+                "read_media",
+                "capture"
+            ]
+        );
     }
 
     #[tokio::test]
@@ -2697,7 +2775,8 @@ mod tests {
             } else {
                 json!({"protocol_version": 1, "id": id, "ok": true, "result": {}})
             }
-        }).await;
+        })
+        .await;
 
         let mut client = setup_test_client(&temp, sock, None);
         client.connect(5).await.unwrap();
@@ -2713,8 +2792,13 @@ mod tests {
         assert!(failed.is_empty());
 
         let events = client.logged_events.lock().unwrap().clone();
-        let unavail_event = events.iter().find(|e| e["event"] == "image_original_unavailable");
-        assert!(unavail_event.is_some(), "原图不可用时应记录 image_original_unavailable 事件");
+        let unavail_event = events
+            .iter()
+            .find(|e| e["event"] == "image_original_unavailable");
+        assert!(
+            unavail_event.is_some(),
+            "原图不可用时应记录 image_original_unavailable 事件"
+        );
         let ev = unavail_event.unwrap();
         assert_eq!(ev["reason"], "download_failed");
         assert_eq!(ev["detail"], "menu_not_found");
@@ -2743,7 +2827,8 @@ mod tests {
                     "result": {}
                 })
             }
-        }).await;
+        })
+        .await;
 
         let mut client = setup_test_client(&temp, sock, None);
         client.connect(5).await.unwrap();
@@ -2751,7 +2836,10 @@ mod tests {
         let bubble_img = test_bubble_helper("image", &"1".repeat(64), None);
         let frame = test_empty_frame();
         let err = client.attachments(&[bubble_img], &frame).await.unwrap_err();
-        assert!(action_interrupted(&err.to_string()), "action_interrupted 必须向上抛出");
+        assert!(
+            action_interrupted(&err.to_string()),
+            "action_interrupted 必须向上抛出"
+        );
     }
 
     /// 停止请求必须打断等待 worker 的 connect（原来最长 60 秒不看停止标志）
@@ -2769,7 +2857,11 @@ mod tests {
         });
         let began = Instant::now();
         let err = client.connect(60).await.unwrap_err();
-        assert!(began.elapsed() < Duration::from_secs(3), "{:?}", began.elapsed());
+        assert!(
+            began.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            began.elapsed()
+        );
         assert!(err.to_string().contains("stop_requested"), "{err}");
     }
 
@@ -2778,7 +2870,8 @@ mod tests {
         fn get_messages<'a>(
             &'a self,
             _recipient: Option<&'a str>,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>>
+        {
             Box::pin(async {
                 tokio::time::sleep(Duration::from_secs(30)).await;
                 Ok(json!({}))
@@ -2802,14 +2895,27 @@ mod tests {
         let began = Instant::now();
         let res = client.start().await;
         assert!(res.is_err());
-        assert!(began.elapsed() < Duration::from_secs(5), "start 没有响应停止: {:?}", began.elapsed());
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "start 没有响应停止: {:?}",
+            began.elapsed()
+        );
     }
 
     #[test]
     fn test_folder_permission_errors_are_classified_with_folder() {
-        assert_eq!(media_reason("MCP tool failed: folder_access_blocked:Desktop"), "folder_permission");
-        assert_eq!(media_reason("invalid(\"download_completion_unknown:denied=Desktop,Documents\")"), "folder_permission");
-        assert_eq!(worker_code("folder_access_blocked:Desktop"), "folder_access_blocked:Desktop");
+        assert_eq!(
+            media_reason("MCP tool failed: folder_access_blocked:Desktop"),
+            "folder_permission"
+        );
+        assert_eq!(
+            media_reason("invalid(\"download_completion_unknown:denied=Desktop,Documents\")"),
+            "folder_permission"
+        );
+        assert_eq!(
+            worker_code("folder_access_blocked:Desktop"),
+            "folder_access_blocked:Desktop"
+        );
         assert_eq!(
             worker_code("invalid(\"download_completion_unknown:denied=Desktop\")"),
             "download_completion_unknown:denied=Desktop"
@@ -2850,12 +2956,22 @@ mod tests {
         assert!(files.is_empty());
         assert_eq!(failed.len(), 1);
         assert_eq!(failed[0].reason, "folder_permission");
-        assert_eq!(failed[0].detail.as_deref(), Some("folder_access_blocked:Desktop"));
+        assert_eq!(
+            failed[0].detail.as_deref(),
+            Some("folder_access_blocked:Desktop")
+        );
         let events = client.logged_events.lock().unwrap().clone();
-        assert!(events.iter().any(|e| e["event"] == "attachment_folder_permission"
-            && e["detail"] == "folder_access_blocked:Desktop"), "{events:?}");
+        assert!(
+            events
+                .iter()
+                .any(|e| e["event"] == "attachment_folder_permission"
+                    && e["detail"] == "folder_access_blocked:Desktop"),
+            "{events:?}"
+        );
         let marker: Value = serde_json::from_str(
-            &fs::read_to_string(client.base_dir.join("folder-permission-needed.json")).unwrap()).unwrap();
+            &fs::read_to_string(client.base_dir.join("folder-permission-needed.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(marker["detail"], "folder_access_blocked:Desktop");
     }
 
@@ -2873,8 +2989,18 @@ mod tests {
         assert_eq!(images.len(), 1, "原图拿不到时仍用聊天缩略图");
         assert_eq!(images[0].source, "chat_thumbnail");
         let events = client.logged_events.lock().unwrap().clone();
-        assert!(events.iter().any(|e| e["event"] == "attachment_folder_permission"), "{events:?}");
-        assert!(client.base_dir.join("folder-permission-needed.json").exists());
+        assert!(
+            events
+                .iter()
+                .any(|e| e["event"] == "attachment_folder_permission"),
+            "{events:?}"
+        );
+        assert!(
+            client
+                .base_dir
+                .join("folder-permission-needed.json")
+                .exists()
+        );
     }
 
     #[tokio::test]
@@ -2960,7 +3086,8 @@ mod tests {
                 "ok": true,
                 "result": result,
             })
-        }).await;
+        })
+        .await;
 
         let mut client = setup_test_client(&temp, sock, None);
         client.connect(5).await.unwrap();
@@ -2971,7 +3098,10 @@ mod tests {
         let b_good_img = test_bubble_helper("image", &good_img_id, None);
 
         let frame = test_empty_frame();
-        let (images, files, failed) = client.attachments(&[b_bad_img, b_empty_file, b_good_file, b_good_img], &frame).await.unwrap();
+        let (images, files, failed) = client
+            .attachments(&[b_bad_img, b_empty_file, b_good_file, b_good_img], &frame)
+            .await
+            .unwrap();
 
         assert_eq!(images.len(), 1, "好的图片应该成功");
         assert_eq!(images[0].label, "第2张图片");
@@ -3018,7 +3148,8 @@ mod tests {
                 "ok": true,
                 "result": result,
             })
-        }).await;
+        })
+        .await;
 
         let mut client = setup_test_client(&temp, sock, None);
         client.connect(5).await.unwrap();
@@ -3048,12 +3179,20 @@ mod tests {
             let mid = params["media_id"].as_str().unwrap_or("");
 
             let result = if op == "prepare_file" {
-                let name = if mid == "1".repeat(64) { "f1.txt" } else { "f2.txt" };
+                let name = if mid == "1".repeat(64) {
+                    "f1.txt"
+                } else {
+                    "f2.txt"
+                };
                 json!({ "filename": name, "extension": "txt" })
             } else if op == "capture" {
                 serde_json::to_value(test_sample_frame()).unwrap()
             } else if op == "read_media" {
-                let content = if mid == "1".repeat(64) { big_str_1.as_bytes() } else { big_str_2.as_bytes() };
+                let content = if mid == "1".repeat(64) {
+                    big_str_1.as_bytes()
+                } else {
+                    big_str_2.as_bytes()
+                };
                 json!({
                     "offset": 0,
                     "size": content.len(),
@@ -3072,7 +3211,8 @@ mod tests {
                 "ok": true,
                 "result": result,
             })
-        }).await;
+        })
+        .await;
 
         let mut client = setup_test_client(&temp, sock, None);
         client.connect(5).await.unwrap();
@@ -3087,7 +3227,11 @@ mod tests {
         assert_eq!(files.len(), 1, "第 1 个文件未超限成功提取");
         assert_eq!(files[0].filename, "f1.txt");
 
-        assert_eq!(failed.len(), 1, "第 2 个文件因总字数超 24000 标记 too_large");
+        assert_eq!(
+            failed.len(),
+            1,
+            "第 2 个文件因总字数超 24000 标记 too_large"
+        );
         assert_eq!(failed[0].label, "f2.txt");
         assert_eq!(failed[0].reason, "too_large");
     }
@@ -3141,7 +3285,8 @@ mod tests {
                 "ok": true,
                 "result": result,
             })
-        }).await;
+        })
+        .await;
 
         let mut client = setup_test_client(&temp, sock, None);
         client.connect(5).await.unwrap();
@@ -3152,7 +3297,10 @@ mod tests {
 
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].filename, "doc.pdf");
-        assert_eq!(files[0].content.get("text").and_then(|v| v.as_str()), Some("PDF测试提取文字"));
+        assert_eq!(
+            files[0].content.get("text").and_then(|v| v.as_str()),
+            Some("PDF测试提取文字")
+        );
 
         assert_eq!(images.len(), 2, "PDF 的两页预览应加入 images");
         assert_eq!(images[0].label, "doc.pdf第1页");

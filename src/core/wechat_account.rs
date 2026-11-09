@@ -14,7 +14,7 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::core::state::{read_json, write_private};
 
@@ -26,7 +26,9 @@ pub fn account_from_open_files(lsof_output: &str) -> Option<String> {
     let mut counts: HashMap<&str, usize> = HashMap::new();
     for line in lsof_output.lines() {
         let path = line.strip_prefix('n').unwrap_or(line);
-        let Some(idx) = path.find("/xwechat_files/") else { continue };
+        let Some(idx) = path.find("/xwechat_files/") else {
+            continue;
+        };
         let rest = &path[idx + "/xwechat_files/".len()..];
         let dir = rest.split('/').next().unwrap_or("");
         if dir.is_empty() || dir == "all_users" || dir == "Backup" || !rest.contains('/') {
@@ -34,9 +36,17 @@ pub fn account_from_open_files(lsof_output: &str) -> Option<String> {
         }
         *counts.entry(dir).or_default() += 1;
     }
-    let (dir, _) = counts.into_iter().max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(a.0)))?;
+    let (dir, _) = counts
+        .into_iter()
+        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(a.0)))?;
     let account = match dir.rsplit_once('_') {
-        Some((head, tail)) if !head.is_empty() && tail.len() == 4 && tail.chars().all(|c| c.is_ascii_hexdigit()) => head,
+        Some((head, tail))
+            if !head.is_empty()
+                && tail.len() == 4
+                && tail.chars().all(|c| c.is_ascii_hexdigit()) =>
+        {
+            head
+        }
         _ => dir,
     };
     Some(account.to_string())
@@ -44,10 +54,18 @@ pub fn account_from_open_files(lsof_output: &str) -> Option<String> {
 
 /// 读本机当前登录的微信账号；微信没运行或没登录（没有打开任何账号目录）返回 None。
 pub fn detect_logged_in_account() -> Option<String> {
-    let pids = Command::new("/usr/bin/pgrep").args(["-x", "WeChat"]).output().ok()?;
+    let pids = Command::new("/usr/bin/pgrep")
+        .args(["-x", "WeChat"])
+        .output()
+        .ok()?;
     let pids = String::from_utf8_lossy(&pids.stdout).to_string();
     for pid in pids.split_whitespace() {
-        let Ok(out) = Command::new("/usr/sbin/lsof").args(["-n", "-P", "-Fn", "-p", pid]).output() else { continue };
+        let Ok(out) = Command::new("/usr/sbin/lsof")
+            .args(["-n", "-P", "-Fn", "-p", pid])
+            .output()
+        else {
+            continue;
+        };
         if let Some(acc) = account_from_open_files(&String::from_utf8_lossy(&out.stdout)) {
             return Some(acc);
         }
@@ -57,14 +75,21 @@ pub fn detect_logged_in_account() -> Option<String> {
 
 /// 记下当前账号，供控制命令（联系人列表、合并联系人等）使用
 pub fn record_current_account(state_dir: &Path, account_id: &str, now: f64) -> Result<()> {
-    write_private(&state_dir.join(ACCOUNT_STATE_FILE), &json!({"account_id": account_id, "detected_at": now}))
+    write_private(
+        &state_dir.join(ACCOUNT_STATE_FILE),
+        &json!({"account_id": account_id, "detected_at": now}),
+    )
 }
 
 /// 控制命令用：核心记下的当前登录账号；还没有记录时用配置里的账号名
 pub fn effective_account_id(state_dir: &Path, configured: &str) -> String {
     read_json::<Value>(&state_dir.join(ACCOUNT_STATE_FILE))
         .ok()
-        .and_then(|v| v.get("account_id").and_then(|a| a.as_str()).map(str::to_string))
+        .and_then(|v| {
+            v.get("account_id")
+                .and_then(|a| a.as_str())
+                .map(str::to_string)
+        })
         .filter(|a| !a.is_empty())
         .unwrap_or_else(|| configured.to_string())
 }
@@ -80,7 +105,9 @@ pub fn start_fresh_once(state_dir: &Path, legacy: &str, account: &str, now: f64)
     }
     let hist = state_dir.join("history");
     let db = hist.join("history.sqlite3");
-    let backup_dir = state_dir.join("backups").join(format!("before-account-{}", now as i64));
+    let backup_dir = state_dir
+        .join("backups")
+        .join(format!("before-account-{}", now as i64));
     if db.exists() {
         fs::create_dir_all(&backup_dir)?;
         crate::core::backup::backup_sqlite_db(&db, &backup_dir.join("history.sqlite3"))
@@ -109,13 +136,17 @@ mod tests {
     /// 实测结构：微信同时打开公共目录和当前账号目录；另一个登录过的账号目录没有打开
     #[test]
     fn test_account_from_open_files_picks_open_account_dir() {
-        let base = "n/path/to/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files";
+        let base =
+            "n/path/to/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files";
         let out = format!(
             "p123\n{base}/all_users/login/wxid_other0x12/x\n{base}/all_users/config/global_config\n\
              {base}/wxid_abcdefa329_32ec/db_storage/message/message_0.db\n{base}/wxid_abcdefa329_32ec/db_storage/contact/contact.db\n\
              n/System/Library/Fonts/PingFang.ttc\n"
         );
-        assert_eq!(account_from_open_files(&out).as_deref(), Some("wxid_abcdefa329"));
+        assert_eq!(
+            account_from_open_files(&out).as_deref(),
+            Some("wxid_abcdefa329")
+        );
     }
 
     #[test]
@@ -138,30 +169,56 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let store = crate::core::history::store::HistoryStore::open(&dir).unwrap();
-        store.ensure_contact("test-desktop", &json!({"recipient": "张三", "kind": "private"}), false).unwrap();
+        store
+            .ensure_contact(
+                "test-desktop",
+                &json!({"recipient": "张三", "kind": "private"}),
+                false,
+            )
+            .unwrap();
         drop(store);
         fs::write(dir.join("contacts-sync-result.json"), "{}").unwrap();
 
         assert!(start_fresh_once(&dir, "test-desktop", "wxid_a", 1000.0).unwrap());
         // 备份里有原数据
-        let backup = dir.join("backups").join("before-account-1000").join("history.sqlite3");
+        let backup = dir
+            .join("backups")
+            .join("before-account-1000")
+            .join("history.sqlite3");
         let conn = rusqlite::Connection::open(&backup).unwrap();
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM contacts", [], |r| r.get(0)).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM contacts", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 1, "备份必须包含原数据");
         // 当前库是空的
         let store = crate::core::history::store::HistoryStore::open(&dir).unwrap();
         let conn = store.connection();
-        let n: i64 = conn.lock().unwrap().query_row("SELECT COUNT(*) FROM contacts", [], |r| r.get(0)).unwrap();
+        let n: i64 = conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM contacts", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 0);
         assert!(!dir.join("contacts-sync-result.json").exists());
 
         // 只做一次：之后（含换号）不再动数据
-        store.ensure_contact("wxid_a", &json!({"recipient": "李四", "kind": "private"}), false).unwrap();
+        store
+            .ensure_contact(
+                "wxid_a",
+                &json!({"recipient": "李四", "kind": "private"}),
+                false,
+            )
+            .unwrap();
         drop(conn);
         drop(store);
         assert!(!start_fresh_once(&dir, "test-desktop", "wxid_b", 2000.0).unwrap());
         let store = crate::core::history::store::HistoryStore::open(&dir).unwrap();
-        let n: i64 = store.connection().lock().unwrap().query_row("SELECT COUNT(*) FROM contacts", [], |r| r.get(0)).unwrap();
+        let n: i64 = store
+            .connection()
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM contacts", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 1);
         let _ = fs::remove_dir_all(&dir);
     }

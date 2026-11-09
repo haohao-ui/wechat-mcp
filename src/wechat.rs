@@ -12,8 +12,8 @@ use crate::desktop::{protocol::Region, runtime};
 use crate::domain::observation::Snapshot;
 use crate::messaging::reconcile::{Continuity, reconcile};
 
-mod navigation;
 pub mod files;
+mod navigation;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -68,7 +68,10 @@ async fn key_press_with(click_bin: &std::path::Path, combo: &str) -> Result<()> 
         .with_context(|| format!("执行 wechat_click key {combo} 失败"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        bail!("wechat_click key {combo} 退出状态异常: {:?}: {stderr}", output.status.code());
+        bail!(
+            "wechat_click key {combo} 退出状态异常: {:?}: {stderr}",
+            output.status.code()
+        );
     }
     Ok(())
 }
@@ -145,18 +148,21 @@ pub async fn input_text_with(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| InputError::Failed(anyhow::Error::new(e).context("启动 wechat_click input-text 失败")))?;
+        .map_err(|e| {
+            InputError::Failed(anyhow::Error::new(e).context("启动 wechat_click input-text 失败"))
+        })?;
 
     if let Some(mut stdin) = child.stdin.take() {
         tokio::io::AsyncWriteExt::write_all(&mut stdin, text.as_bytes())
             .await
-            .map_err(|e| InputError::Failed(anyhow::Error::new(e).context("向 wechat_click 写入 stdin 失败")))?;
+            .map_err(|e| {
+                InputError::Failed(anyhow::Error::new(e).context("向 wechat_click 写入 stdin 失败"))
+            })?;
     }
 
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|e| InputError::Failed(anyhow::Error::new(e).context("等待 wechat_click 执行完成失败")))?;
+    let output = child.wait_with_output().await.map_err(|e| {
+        InputError::Failed(anyhow::Error::new(e).context("等待 wechat_click 执行完成失败"))
+    })?;
 
     let status = output.status;
     let code = status.code().unwrap_or(-1);
@@ -677,7 +683,8 @@ pub async fn send_message(recipient: &str, message: &str) -> Result<(), SendErro
     if let Some(fault) = TEST_FAULT.try_with(|f| *f).ok().flatten() {
         match fault {
             SendFault::Click(msg) => {
-                let err_detail = msg.unwrap_or("accessibility_permission_missing_for_executing_process");
+                let err_detail =
+                    msg.unwrap_or("accessibility_permission_missing_for_executing_process");
                 return Err(SendError::NotSent(anyhow!(
                     "wechat_click 退出状态异常: Some(1): {err_detail}"
                 )));
@@ -690,7 +697,9 @@ pub async fn send_message(recipient: &str, message: &str) -> Result<(), SendErro
     }
 
     if !is_wechat_running().await.map_err(SendError::NotSent)? {
-        return Err(SendError::NotSent(anyhow!("微信客户端未运行，请先启动并登录微信")));
+        return Err(SendError::NotSent(anyhow!(
+            "微信客户端未运行，请先启动并登录微信"
+        )));
     }
 
     if recipient.trim().is_empty() {
@@ -709,12 +718,9 @@ pub async fn send_message(recipient: &str, message: &str) -> Result<(), SendErro
         .map_err(SendError::NotSent)?;
 
     // 2. 取窗口位置并向聊天输入框输入正文（输入前先激活微信，确保处于前台）
-    activate_wechat()
-        .await
-        .map_err(SendError::NotSent)?;
-    let (win_x, win_y, _win_w, win_h) = get_wechat_window_rect()
-        .await
-        .map_err(SendError::NotSent)?;
+    activate_wechat().await.map_err(SendError::NotSent)?;
+    let (win_x, win_y, _win_w, win_h) =
+        get_wechat_window_rect().await.map_err(SendError::NotSent)?;
     let input_x = win_x + 450.0;
     let input_y = win_y + win_h - 80.0;
     info!("向聊天输入框输入正文: ({}, {})", input_x, input_y);
@@ -735,9 +741,7 @@ pub async fn send_message(recipient: &str, message: &str) -> Result<(), SendErro
     }
 
     // 4. 回车发送，失败返回 Unknown
-    key_press("return")
-        .await
-        .map_err(SendError::Unknown)?;
+    key_press("return").await.map_err(SendError::Unknown)?;
 
     info!("已触发微信发送操作，送达状态未验证");
     Ok(())
@@ -758,20 +762,16 @@ pub async fn send_file(recipient: &str, file: &files::FileToSend) -> Result<()> 
 
     // 先保存文本剪贴板；文件引用写入后，结束时恢复原文本。
     let mut clipboard_guard =
-        clipboard::ClipboardGuard::replace(&format!("wechat-file-{}", uuid::Uuid::new_v4())).await?;
+        clipboard::ClipboardGuard::replace(&format!("wechat-file-{}", uuid::Uuid::new_v4()))
+            .await?;
     let send_result = async {
         // 输入框里残留的草稿不能和文件一起发出。
         clear_input().await?;
         set_clipboard_file(&file.path).await?;
         key_press("cmd+v").await?;
         tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-        let lines = ocr_screen_region(
-            win_x + 315.0,
-            win_y + win_h - 160.0,
-            win_w - 325.0,
-            150.0,
-        )
-        .await?;
+        let lines =
+            ocr_screen_region(win_x + 315.0, win_y + win_h - 160.0, win_w - 325.0, 150.0).await?;
         if !files::input_shows_file(&lines, &file.name) {
             let _ = clear_input().await;
             bail!("粘贴后输入框未出现文件 {}，已清空且未触发发送", file.name);
@@ -852,7 +852,10 @@ async fn ocr_screen_region(x: f64, y: f64, width: f64, height: f64) -> Result<Ve
             .await
             .context("执行输入框 OCR 失败")?;
         if !output.status.success() {
-            bail!("输入框 OCR 失败: {}", String::from_utf8_lossy(&output.stderr).trim());
+            bail!(
+                "输入框 OCR 失败: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
         }
         let items: Vec<OcrItem> =
             serde_json::from_slice(&output.stdout).context("输入框 OCR 返回不是有效 JSON")?;
@@ -869,8 +872,15 @@ fn readback_mismatch_detail(actual: &str, expected: &str, sentinel: &str) -> Str
     if actual == sentinel {
         return format!("复制未取到输入框内容，应为 {expected_len} 字");
     }
-    let contains = if actual.contains(expected) { "包含正文" } else { "不含正文" };
-    format!("读回 {} 字，应为 {expected_len} 字，{contains}", actual.chars().count())
+    let contains = if actual.contains(expected) {
+        "包含正文"
+    } else {
+        "不含正文"
+    };
+    format!(
+        "读回 {} 字，应为 {expected_len} 字，{contains}",
+        actual.chars().count()
+    )
 }
 
 fn same_input_text(actual: &str, expected: &str) -> bool {
@@ -2157,7 +2167,10 @@ mod send_safety_tests {
     fn readback_mismatch_detail_reports_shape_without_content() {
         let sentinel = "wechat-readback-1";
         let copy_missed = readback_mismatch_detail(sentinel, "你好呀", sentinel);
-        assert!(copy_missed.contains("复制未取到输入框内容"), "{copy_missed}");
+        assert!(
+            copy_missed.contains("复制未取到输入框内容"),
+            "{copy_missed}"
+        );
         assert!(!copy_missed.contains("你好呀"));
 
         let extra = readback_mismatch_detail("旧草稿你好呀", "你好呀", sentinel);
@@ -2388,8 +2401,16 @@ mod send_safety_tests {
         let log = dir.join("args.log");
         let ok = dir.join("ok.sh");
         let refuse = dir.join("refuse.sh");
-        std::fs::write(&ok, format!("#!/bin/sh\necho \"$@\" >> '{}'\n", log.display())).unwrap();
-        std::fs::write(&refuse, "#!/bin/sh\necho 'wechat_click: frontmost_not_wechat' >&2\nexit 3\n").unwrap();
+        std::fs::write(
+            &ok,
+            format!("#!/bin/sh\necho \"$@\" >> '{}'\n", log.display()),
+        )
+        .unwrap();
+        std::fs::write(
+            &refuse,
+            "#!/bin/sh\necho 'wechat_click: frontmost_not_wechat' >&2\nexit 3\n",
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -2399,8 +2420,14 @@ mod send_safety_tests {
         }
         key_press_with(&ok, "cmd+v").await.unwrap();
         key_press_with(&ok, "return").await.unwrap();
-        assert_eq!(std::fs::read_to_string(&log).unwrap(), "key cmd+v\nkey return\n");
-        let err = key_press_with(&refuse, "cmd+a").await.unwrap_err().to_string();
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap(),
+            "key cmd+v\nkey return\n"
+        );
+        let err = key_press_with(&refuse, "cmd+a")
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("frontmost_not_wechat"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2550,15 +2577,12 @@ mod send_safety_tests {
         let wechat_code = strip_tests(wechat_src);
         let nav_code = strip_tests(nav_src);
 
-        for (name, code) in [("wechat.rs", wechat_code), ("wechat/navigation.rs", nav_code)] {
-            assert!(
-                !code.contains("keystroke"),
-                "{name} 仍然包含 keystroke"
-            );
-            assert!(
-                !code.contains("key code"),
-                "{name} 仍然包含 key code"
-            );
+        for (name, code) in [
+            ("wechat.rs", wechat_code),
+            ("wechat/navigation.rs", nav_code),
+        ] {
+            assert!(!code.contains("keystroke"), "{name} 仍然包含 keystroke");
+            assert!(!code.contains("key code"), "{name} 仍然包含 key code");
         }
     }
 }
