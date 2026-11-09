@@ -15,17 +15,18 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     fs,
+    future::Future,
     io::{self, Read, Write},
     net::{IpAddr, SocketAddr},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{Mutex, watch},
+    sync::{Mutex, Semaphore, watch},
     task::JoinHandle,
 };
 
@@ -137,28 +138,9 @@ impl OpenApiServer {
             }),
             addr,
         });
-        let (stop, mut stop_rx) = watch::channel(false);
+        let (stop, stop_rx) = watch::channel(false);
         let task = tokio::spawn(async move {
-            let mut connections = tokio::task::JoinSet::new();
-            let mut cleanup = tokio::time::interval(Duration::from_secs(5));
-            loop {
-                tokio::select! {
-                    _ = stop_rx.changed() => break,
-                    _ = cleanup.tick() => { state.cleanup().await; }
-                    accepted = listener.accept() => {
-                        let Ok((stream,_)) = accepted else { break };
-                        let state = state.clone();
-                        connections.spawn(async move { serve_connection(stream,state).await; });
-                    }
-                    Some(_) = connections.join_next(), if !connections.is_empty() => {}
-                }
-            }
-            connections.abort_all();
-            while connections.join_next().await.is_some() {}
-            let mut sessions = state.sessions.lock().await;
-            if let Some(session) = sessions.end() {
-                state.brain.release_session(&session.id).await;
-            }
+            accept_connections(state, stop_rx, || listener.accept()).await;
         });
         tracing::info!(%addr, "open-api listening");
         Ok(Self {
@@ -187,6 +169,74 @@ impl State {
             self.brain.release_session(&session.id).await;
         }
     }
+}
+
+/// The accept source is injectable so recovery can be tested without exhausting
+/// the process's file descriptors or depending on an OS-specific socket failure.
+async fn accept_connections<F, Fut>(
+    state: Arc<State>,
+    mut stop_rx: watch::Receiver<bool>,
+    mut accept: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = io::Result<(TcpStream, SocketAddr)>>,
+{
+    let permits = Arc::new(Semaphore::new(64));
+    let mut connections = tokio::task::JoinSet::new();
+    let mut cleanup = tokio::time::interval(Duration::from_secs(5));
+    let mut accept_warnings = HashMap::new();
+    let mut limit_warning = None;
+    loop {
+        tokio::select! {
+            _ = stop_rx.changed() => break,
+            _ = cleanup.tick() => { state.cleanup().await; }
+            accepted = accept() => {
+                match accepted {
+                    Ok((stream, _)) => {
+                        let Ok(permit) = permits.clone().try_acquire_owned() else {
+                            // Close before reading anything from an excess connection.
+                            drop(stream);
+                            if warning_due(&mut limit_warning) {
+                                tracing::warn!(limit = 64, "open-api connection limit reached");
+                            }
+                            continue;
+                        };
+                        let state = state.clone();
+                        connections.spawn(async move {
+                            let _permit = permit;
+                            serve_connection(stream, state).await;
+                        });
+                    }
+                    Err(error) => {
+                        if warning_due(accept_warnings.entry(error.kind()).or_default()) {
+                            tracing::warn!(%error, "open-api accept failed; retrying");
+                        }
+                        // Back off persistent failures such as EMFILE, while allowing
+                        // shutdown to interrupt the backoff immediately.
+                        tokio::select! {
+                            _ = stop_rx.changed() => break,
+                            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                        }
+                    }
+                }
+            }
+            Some(_) = connections.join_next(), if !connections.is_empty() => {}
+        }
+    }
+    connections.abort_all();
+    while connections.join_next().await.is_some() {}
+    let mut sessions = state.sessions.lock().await;
+    if let Some(session) = sessions.end() {
+        state.brain.release_session(&session.id).await;
+    }
+}
+
+fn warning_due(last: &mut Option<Instant>) -> bool {
+    if last.is_some_and(|time| time.elapsed() < Duration::from_secs(60)) {
+        return false;
+    }
+    *last = Some(Instant::now());
+    true
 }
 
 struct Request {
@@ -826,6 +876,91 @@ mod tests {
             out
         }
     }
+    #[tokio::test]
+    async fn accept_error_does_not_stop_server() {
+        let mut t = TestServer::new(Duration::from_secs(90)).await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let config = t
+            .fixture
+            .config(json!([{"recipient":"允许","kind":"private"}]), json!([]));
+        let state = Arc::new(State {
+            brain: t.brain.clone(),
+            config: Arc::new(config),
+            sessions: Mutex::new(Sessions::default()),
+            addr,
+        });
+        let (stop, stop_rx) = watch::channel(false);
+        let task = tokio::spawn(async move {
+            let mut fail_next = true;
+            accept_connections(state, stop_rx, || {
+                let fail = std::mem::take(&mut fail_next);
+                let listener = &listener;
+                async move {
+                    if fail {
+                        Err(io::Error::from(io::ErrorKind::ConnectionAborted))
+                    } else {
+                        listener.accept().await
+                    }
+                }
+            })
+            .await;
+        });
+        t.server = OpenApiServer {
+            addr,
+            stop,
+            _task: task,
+        };
+        let sid = tokio::time::timeout(Duration::from_secs(1), t.init())
+            .await
+            .unwrap();
+        assert_eq!(
+            t.rpc(Some(&sid), "tools/list", json!({})).await.status(),
+            200
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_limit_rejects_excess() {
+        let t = TestServer::new(Duration::from_secs(90)).await;
+        let mut hanging = Vec::new();
+        for _ in 0..64 {
+            hanging.push(TcpStream::connect(t.server.local_addr()).await.unwrap());
+        }
+        let mut excess = TcpStream::connect(t.server.local_addr()).await.unwrap();
+        let mut byte = [0u8; 1];
+        match tokio::time::timeout(Duration::from_secs(1), excess.read(&mut byte))
+            .await
+            .unwrap()
+        {
+            Ok(0) => {}
+            Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
+            other => panic!("excess connection was not closed: {other:?}"),
+        }
+        let mut first = hanging.remove(0);
+        first
+            .write_all(
+                format!(
+                    "GET /mcp HTTP/1.1\r\nContent-Length: 0\r\nAuthorization: Bearer {}\r\n\r\n",
+                    t.token
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        first.shutdown().await.unwrap();
+        let mut response = String::new();
+        first.read_to_string(&mut response).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 405"));
+        let sid = tokio::time::timeout(Duration::from_secs(1), t.init())
+            .await
+            .unwrap();
+        assert_eq!(
+            t.rpc(Some(&sid), "tools/list", json!({})).await.status(),
+            200
+        );
+    }
+
     #[tokio::test]
     async fn rejects_missing_or_wrong_token() {
         let t = TestServer::new(Duration::from_secs(90)).await;
