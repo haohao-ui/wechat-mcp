@@ -5384,6 +5384,134 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn newer_message_during_send_still_gets_reply() {
+        let td = TestDir::new();
+        let history = Arc::new(HistoryStore::open(td.path().join("h")).unwrap());
+        history.migrate().unwrap();
+        let cid = history
+            .ensure_contact(
+                "fixture",
+                &json!({"recipient": "午夜咖啡", "kind": "private"}),
+                false,
+            )
+            .unwrap();
+        let mut svc = BotService::new(
+            fixture_config(td.path()),
+            None,
+            Some(history.clone()),
+            Some(cid.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        svc.advance(test_frame(
+            vec![test_bubble("old", "inbound_visual")],
+            "午夜咖啡",
+        ))
+        .unwrap();
+        let a = test_frame(
+            vec![
+                test_bubble("old", "inbound_visual"),
+                test_bubble("A", "inbound_visual"),
+            ],
+            "午夜咖啡",
+        );
+        let after = test_frame(
+            vec![
+                test_bubble("old", "inbound_visual"),
+                test_bubble("A", "inbound_visual"),
+                test_bubble("B", "inbound_visual"),
+                test_bubble("R_A", "outbound_visual"),
+            ],
+            "午夜咖啡",
+        );
+        let pending_history = history.clone();
+        let pending_cid = cid.clone();
+        let mut pending_frame = after.clone();
+        pending_frame.bubbles.pop();
+        svc.brain = Some(Arc::new(move |_| {
+            pending_history
+                .record_frame(
+                    &pending_cid,
+                    &serde_json::to_value(&pending_frame).unwrap(),
+                    None,
+                    None,
+                    false,
+                )
+                .unwrap();
+            Box::pin(async {
+                Ok(BrainReply {
+                    reply: "R_A".into(),
+                    metadata: HashMap::new(),
+                })
+            })
+        }));
+        let client = MockToolClient::new_default();
+        let mut cap = MockCapture::new(vec![a.clone(), a.clone(), a, after.clone()]);
+        svc.cycle(&client, &mut cap).await.unwrap();
+        // B arrived while A was being sent: preserve the observed A -> B -> R_A order.
+        history
+            .record_frame(
+                &cid,
+                &serde_json::to_value(&after).unwrap(),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        let inputs: Vec<String> = history
+            .connection()
+            .lock()
+            .unwrap()
+            .prepare("SELECT input_message_ids FROM sends ORDER BY rowid")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(inputs.len(), 1);
+        let ids: Vec<String> = serde_json::from_str(&inputs[0]).unwrap();
+        assert_eq!(ids.len(), 1, "A's reply must cover only A");
+        let texts: Vec<String> = history
+            .connection()
+            .lock()
+            .unwrap()
+            .prepare("SELECT text FROM messages WHERE text!='old' ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(texts, ["A", "B", "R_A"]);
+        svc.brain = Some(default_brain("R_B"));
+        let mut final_frame = after.clone();
+        final_frame
+            .bubbles
+            .push(test_bubble("R_B", "outbound_visual"));
+        let mut cap = MockCapture::new(vec![after.clone(), after.clone(), after, final_frame]);
+        svc.cycle(&client, &mut cap).await.unwrap();
+        for journal in fs::read_dir(&svc.root)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("send-"))
+        {
+            let rec: Value = read_json(journal.path()).unwrap();
+            assert_ne!(rec["status"], "already_replied");
+        }
+        assert_eq!(
+            client
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(n, _)| n == "send_message")
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
     async fn test_history_service_history_reply_blocks_send() {
         let td = TestDir::new();
         let cfg = fixture_config(td.path());
@@ -5424,7 +5552,10 @@ mod tests {
                 false,
             )
             .unwrap();
-        // Then record an outbound reply so replied_after returns true
+        let input_ids = history
+            .match_recent_inbound(&cid, &new_f.bubbles[1..])
+            .unwrap();
+        // A bot reply blocks this turn only when it covers the same input.
         history
             .record_bot_reply(
                 &cid,
@@ -5432,7 +5563,7 @@ mod tests {
                 "人工回答",
                 "triggered",
                 &json!({}),
-                &[],
+                &input_ids,
                 None,
                 None,
             )
