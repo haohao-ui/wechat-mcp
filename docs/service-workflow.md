@@ -84,15 +84,13 @@ flowchart TD
 
 数据库使用 SQLite WAL、外键、事务和版本迁移。同步数据库工作在线程池执行，不阻塞协议读写。未来高于当前支持版本的数据库会被拒绝打开。
 
-可在服务运行时使用 SQLite backup API 创建一致备份：
+Rust 备份入口使用配置中的数据库路径：
 
 ```bash
-python3 scripts/backup_db.py \
-  --source "$HOME/Library/Application Support/message-gateway/service.sqlite3" \
-  --output /absolute/path/service-backup.sqlite3
+wechat-mcp backup --config /absolute/path/bot.json --out /absolute/path/backup-directory
 ```
 
-输出路径必须不存在，源数据库及其目录需要可写权限以初始化 WAL 辅助文件。脚本使用 `mode=rw`，不会创建缺失的源库，也不修改业务记录。脚本验证备份完整性，禁止覆盖已有文件；不要仅复制运行中的主数据库文件而遗漏 WAL。
+旧版单库备份脚本已移除。备份目录及支持范围以当前 Rust 命令输出为准；不要仅复制运行中的主数据库文件而遗漏 WAL。
 
 恢复时停止 MCP，保留原数据，将 `MESSAGE_GATEWAY_DB` 指向备份文件或其副本后再启动。数据库从 v1 自动迁移到 v2，保留现有客户和业务记录；旧版本未保存的监听启用状态不会被猜测恢复。恢复后保留收件箱租约；未过期的租约仍属于原消费者，过期后可重新领取。所有未完成/未知发送仍不会自动重发。
 

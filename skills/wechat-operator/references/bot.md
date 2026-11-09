@@ -21,7 +21,7 @@
 
 支持暗色/浅色主题、1 倍与 Retina 2 倍像素，窗口固定 880×640（`manage_window` 默认开，自动恢复最小化并调回尺寸，要求专用挂机电脑）。未标定主题、窗口不可用时只等待不读取；图像启发式不是微信消息ID或发送者身份验证。多个精确私聊白名单可用；群聊自动回复、好友请求处理仍未启用。
 
-操作前检查`control status`及配置中的精确白名单。服务开启时占用专用GUI宿主的唯一MCP连接；不要从另一个客户端竞争同一个桌面。诊断图像与中转附件保存在测试机私有目录；附件永久保存在本机 `state_dir/history/media/`（按内容哈希命名，关联到对应消息），模型接收所选会话最近 `context_messages` 条上下文、本轮图片与文件提取内容，以及历史附件的理解要点。只读历史 MCP（`python3 -m scripts.wechat_bot.history.mcp_server`）的 `history_get_message`/`history_get_media` 返回附件来源与理解要点，`history_search_messages` 也搜索理解要点。
+操作前检查`control status`及配置中的精确白名单。服务开启时占用专用GUI宿主的唯一MCP连接；不要从另一个客户端竞争同一个桌面。诊断图像与中转附件保存在测试机私有目录；附件永久保存在本机 `state_dir/history/media/`（按内容哈希命名，关联到对应消息），模型接收所选会话最近 `context_messages` 条上下文、本轮图片与文件提取内容，以及历史附件的理解要点。只读历史 MCP（`wechat-mcp`）的 `history_get_message`/`history_get_media` 返回附件来源与理解要点，`history_search_messages` 也搜索理解要点。
 
 启动和停止影响后续自动发送，按用户已授权的范围执行。停止命令同时禁用登录自启；状态中的`watching`表示采集运行，不等于平台消息已验证或模型配额永远可用。`triggered`与客户端回显均不代表送达。
 
