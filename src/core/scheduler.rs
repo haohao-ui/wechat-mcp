@@ -1198,10 +1198,25 @@ impl BotCoordinator {
                                 "error": err.to_string().chars().take(200).collect::<String>(),
                             }),
                         );
+                        let open = self.active_name.clone();
                         if !must_wait(&err.to_string()) {
                             self.close_connection().await?;
                         }
-                        return Ok(names.iter().cloned().collect());
+                        // Without a list we know nothing new: keep the open chat and open turns,
+                        // never sweep every allowlisted chat (hundreds in production). With no
+                        // chat open, one visit re-establishes the worker connection.
+                        let mut keep: HashSet<String> = names
+                            .iter()
+                            .filter(|n| {
+                                open.as_deref() == Some(n.as_str())
+                                    || self.sessions.get(*n).is_some_and(|s| s.turn.is_some())
+                            })
+                            .cloned()
+                            .collect();
+                        if keep.is_empty() {
+                            keep.extend(names.first().cloned());
+                        }
+                        return Ok(keep);
                     }
                 }
             }
@@ -3745,7 +3760,7 @@ mod tests {
     }
 
     #[test]
-    fn test_probe_failure_falls_back_to_visiting_all() {
+    fn test_probe_failure_does_not_sweep_all_chats() {
         struct FailingProbeCapture;
         impl CoordinatorCapture for FailingProbeCapture {
             fn start<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
@@ -3815,8 +3830,16 @@ mod tests {
         coord.capture = Some(Box::new(FailingProbeCapture));
 
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let due = rt.block_on(async { coord.due_sessions(&["a".to_string()]).await.unwrap() });
-        assert!(due.contains("a"));
+        let names = ["a".to_string(), "b".to_string(), "c".to_string()];
+        let due = rt.block_on(async { coord.due_sessions(&names).await.unwrap() });
+        assert_eq!(
+            due.len(),
+            1,
+            "no chat open: one visit to reconnect, not a sweep"
+        );
+        coord.active_name = Some("b".to_string());
+        let due = rt.block_on(async { coord.due_sessions(&names).await.unwrap() });
+        assert_eq!(due, HashSet::from(["b".to_string()]), "only the open chat");
     }
 
     #[test]
