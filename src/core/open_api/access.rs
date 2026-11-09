@@ -91,6 +91,22 @@ impl BrainAccess {
             names,
         })
     }
+    #[cfg(test)]
+    pub fn for_test(account: &str, allowed: &[&str], names: &[(&str, &str, &str)]) -> Self {
+        let mut resolved: HashMap<(String, String), HashSet<String>> = HashMap::new();
+        for (name, kind, id) in names {
+            resolved
+                .entry((crate::core::history::names::name_key(name), (*kind).into()))
+                .or_default()
+                .insert((*id).into());
+        }
+        Self {
+            account: account.into(),
+            allowed: allowed.iter().map(|id| (*id).into()).collect(),
+            unresolved: Vec::new(),
+            names: resolved,
+        }
+    }
     pub fn account_id(&self) -> &str {
         &self.account
     }
