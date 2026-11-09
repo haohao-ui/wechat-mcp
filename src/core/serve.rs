@@ -1,6 +1,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::time::Duration;
 use anyhow::{Context, Result};
@@ -48,13 +48,37 @@ pub fn ensure_locale() {
     }
 }
 
+pub fn core_lock_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("core.lock")
+}
+
+/// Conservatively treat an inaccessible lock as running, so callers never
+/// perform destructive maintenance when the service state cannot be checked.
+pub fn core_is_running(state_dir: &Path) -> bool {
+    let path = core_lock_path(state_dir);
+    let file = match OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    file.try_lock_exclusive().is_err()
+}
+
+/// The returned file must remain alive for the entire maintenance operation.
+pub fn acquire_core_lock_for_maintenance(state_dir: &Path) -> Result<File> {
+    if core_is_running(state_dir) {
+        anyhow::bail!("先停止服务 (core.lock is held)");
+    }
+    acquire_core_lock(state_dir).context("先停止服务：无法获取 core.lock")
+}
+
 pub fn acquire_core_lock(state_dir: &Path) -> Result<File> {
     if !state_dir.exists() {
         fs::create_dir_all(state_dir)
             .with_context(|| format!("failed to create state dir {}", state_dir.display()))?;
         let _ = fs::set_permissions(state_dir, fs::Permissions::from_mode(0o700));
     }
-    let lock_path = state_dir.join("core.lock");
+    let lock_path = core_lock_path(state_dir);
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -515,6 +539,25 @@ mod tests {
         ensure_locale();
         assert_eq!(std::env::var("LANG").unwrap(), "en_US.UTF-8");
         assert_eq!(std::env::var("LC_ALL").unwrap(), "en_US.UTF-8");
+    }
+
+    #[test]
+    fn maintenance_holds_core_lock() {
+        let dir = TempDir::new();
+        let state = dir.path().join("state");
+        assert!(!core_is_running(&state));
+        let maintenance = acquire_core_lock_for_maintenance(&state).unwrap();
+        assert_eq!(core_lock_path(&state), state.join("core.lock"));
+        assert!(core_is_running(&state));
+        assert!(acquire_core_lock(&state).is_err());
+        assert!(acquire_core_lock_for_maintenance(&state).unwrap_err().to_string().contains("先停止服务"));
+        drop(maintenance);
+        assert!(!core_is_running(&state));
+        let core = acquire_core_lock(&state).unwrap();
+        assert!(core_is_running(&state));
+        assert!(acquire_core_lock_for_maintenance(&state).is_err());
+        drop(core);
+        assert!(acquire_core_lock_for_maintenance(&state).is_ok());
     }
 
     #[test]

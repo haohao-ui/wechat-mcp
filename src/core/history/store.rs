@@ -639,52 +639,58 @@ impl HistoryStore {
         observed_at: Option<i64>,
         capture: Option<&str>,
     ) -> Result<String> {
-        let conn = self.conn.lock().unwrap();
-        let existing: Option<String> = conn
-            .query_row(
-                "SELECT message_id FROM messages WHERE send_key=? AND sender='bot'",
-                params![send_key],
-                |r| r.get(0),
-            )
-            .optional()?;
+        let guard = self.conn.lock().unwrap();
+        let conn = rusqlite::Transaction::new_unchecked(&guard, rusqlite::TransactionBehavior::Immediate)?;
+        let saved: Option<(String, String)> = conn.query_row(
+            "SELECT contact_id, reply_text FROM sends WHERE send_key=?",
+            params![send_key],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).optional()?;
+        let stamp = now_ms();
+        let reply = if let Some((saved_contact, saved_reply)) = saved {
+            if saved_contact != contact_id {
+                bail!("send_key belongs to another contact");
+            }
+            saved_reply
+        } else {
+            let model_json = serde_json::to_string(model)?;
+            let inputs_json = serde_json::to_string(input_message_ids)?;
+            conn.execute(
+                "INSERT INTO sends VALUES(?,?,?,?,?,0,?,?,?)",
+                params![send_key, contact_id, status, reply_text, model_json, inputs_json, stamp, stamp],
+            )?;
+            reply_text.to_string()
+        };
+        let existing: Option<String> = conn.query_row(
+            "SELECT message_id FROM messages WHERE send_key=? AND sender='bot'",
+            params![send_key], |r| r.get(0),
+        ).optional()?;
         if let Some(mid) = existing {
+            conn.commit()?;
             return Ok(mid);
         }
 
-        let stamp = now_ms();
-        let model_json = serde_json::to_string(model)?;
-        let inputs_json = serde_json::to_string(input_message_ids)?;
-        conn.execute(
-            "INSERT INTO sends VALUES(?,?,?,?,?,0,?,?,?)",
-            params![send_key, contact_id, status, reply_text, model_json, inputs_json, stamp, stamp],
-        )?;
-
         let cap = capture.unwrap_or("live");
         let account_id = account_of_conn(&conn, contact_id)?;
-        let seq: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(seq),0)+1 FROM messages WHERE contact_id=?",
-            params![contact_id],
-            |r| r.get(0),
-        )?;
         let message_id = new_id("m_");
         conn.execute(
             "INSERT INTO messages(message_id,contact_id,account_id,seq,direction,sender,kind,text,observed_at,capture,send_key,meta)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+             VALUES(?1,?2,?3,(SELECT COALESCE(MAX(seq),0)+1 FROM messages WHERE contact_id=?2),?4,?5,?6,?7,?8,?9,?10,?11)",
             params![
                 message_id,
                 contact_id,
                 account_id,
-                seq,
                 "outbound",
                 "bot",
                 "text",
-                reply_text,
+                reply,
                 observed_at.unwrap_or(stamp),
                 cap,
                 send_key,
                 "{}",
             ],
         )?;
+        conn.commit()?;
         Ok(message_id)
     }
 
@@ -746,21 +752,15 @@ impl HistoryStore {
         let sender = if inbound { "customer" } else { "self_other" };
         let kind = bubble.kind.as_deref().unwrap_or("text");
         let account_id = account_of_conn(&conn, contact_id)?;
-        let seq: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(seq),0)+1 FROM messages WHERE contact_id=?",
-            params![contact_id],
-            |r| r.get(0),
-        )?;
         let message_id = new_id("m_");
         let meta_json = serde_json::to_string(&bubble.extra)?;
         conn.execute(
             "INSERT INTO messages(message_id,contact_id,account_id,seq,direction,sender,kind,text,observed_at,capture,bubble_digest,batch_key,meta)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+             VALUES(?1,?2,?3,(SELECT COALESCE(MAX(seq),0)+1 FROM messages WHERE contact_id=?2),?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             params![
                 message_id,
                 contact_id,
                 account_id,
-                seq,
                 direction,
                 sender,
                 kind,
@@ -1053,7 +1053,8 @@ impl HistoryStore {
             .context("frame missing bubbles")?;
         let current_bubbles: Vec<Bubble> = serde_json::from_value(Value::Array(raw_bubbles.clone()))?;
 
-        let conn = self.conn.lock().unwrap();
+        let guard = self.conn.lock().unwrap();
+        let conn = guard.unchecked_transaction()?;
         let cursor_row: Option<String> = conn
             .query_row(
                 "SELECT frame_fingerprints FROM contact_cursor WHERE contact_id=?",
@@ -1076,6 +1077,7 @@ impl HistoryStore {
                     "UPDATE contact_cursor SET frame_fingerprints=?, updated_at=? WHERE contact_id=?",
                     params![fps_json, now_ms(), contact_id],
                 )?;
+                conn.commit()?;
                 return Ok(vec![]);
             }
         }
@@ -1178,6 +1180,7 @@ impl HistoryStore {
              ON CONFLICT(contact_id) DO UPDATE SET frame_fingerprints=excluded.frame_fingerprints, updated_at=excluded.updated_at",
             params![contact_id, fps_json, stamp],
         )?;
+        conn.commit()?;
         Ok(rows)
     }
 
@@ -1201,11 +1204,6 @@ impl HistoryStore {
         let kind = bubble.kind.as_deref().unwrap_or("text");
 
         let account_id = account_of_conn(conn, contact_id)?;
-        let seq: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(seq),0)+1 FROM messages WHERE contact_id=?",
-            params![contact_id],
-            |r| r.get(0),
-        )?;
         let message_id = new_id("m_");
 
         let mut meta_map = match meta {
@@ -1221,14 +1219,13 @@ impl HistoryStore {
         }
         let meta_json = serde_json::to_string(&meta_map)?;
 
-        conn.execute(
+        let seq: i64 = conn.query_row(
             "INSERT INTO messages(message_id,contact_id,account_id,seq,direction,sender,kind,text,observed_at,capture,bubble_digest,batch_key,meta)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+             VALUES(?1,?2,?3,(SELECT COALESCE(MAX(seq),0)+1 FROM messages WHERE contact_id=?2),?4,?5,?6,?7,?8,?9,?10,?11,?12) RETURNING seq",
             params![
                 message_id,
                 contact_id,
                 account_id,
-                seq,
                 direction,
                 sender,
                 kind,
@@ -1239,6 +1236,7 @@ impl HistoryStore {
                 batch_key,
                 meta_json,
             ],
+            |r| r.get(0),
         )?;
 
         if kind == "file" {
@@ -1894,6 +1892,84 @@ mod tests {
     fn texts(f: &StoreFixture) -> Vec<String> { rows(f, "text") }
     fn captures(f: &StoreFixture) -> Vec<String> { rows(f, "capture") }
     fn senders(f: &StoreFixture) -> Vec<String> { rows(f, "sender") }
+
+    #[test]
+    fn record_frame_is_atomic() {
+        let f = setup_fixture();
+        let frame = fr(vec![bub("first", "inbound_visual", "text"), bub("second", "inbound_visual", "text")]);
+        f.store.connection().lock().unwrap().execute_batch(
+            "CREATE TRIGGER reject_second BEFORE INSERT ON messages WHEN NEW.text='second' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;"
+        ).unwrap();
+        assert!(f.store.record_frame(&f.c, &frame, None, None, false).is_err());
+        assert_eq!(texts(&f), Vec::<String>::new());
+        let cursors: i64 = f.store.connection().lock().unwrap().query_row("SELECT COUNT(*) FROM contact_cursor", [], |r| r.get(0)).unwrap();
+        assert_eq!(cursors, 0);
+        f.store.connection().lock().unwrap().execute_batch("DROP TRIGGER reject_second").unwrap();
+        assert_eq!(f.store.record_frame(&f.c, &frame, None, None, false).unwrap().len(), 2);
+        assert!(f.store.record_frame(&f.c, &frame, None, None, false).unwrap().is_empty());
+        assert_eq!(texts(&f), vec!["first", "second"]);
+    }
+
+    #[test]
+    fn record_bot_reply_rolls_back_send_when_message_fails() {
+        let f = setup_fixture();
+        f.store.connection().lock().unwrap().execute_batch(
+            "CREATE TRIGGER reject_reply BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'injected failure'); END;"
+        ).unwrap();
+        assert!(f.store.record_bot_reply(&f.c, "atomic", "reply", "triggered", &json!({}), &[], None, None).is_err());
+        assert!(f.store.send("atomic").unwrap().is_none());
+        assert!(texts(&f).is_empty());
+        f.store.connection().lock().unwrap().execute_batch("DROP TRIGGER reject_reply").unwrap();
+        f.store.record_bot_reply(&f.c, "atomic", "reply", "triggered", &json!({}), &[], None, None).unwrap();
+        assert_eq!(texts(&f), vec!["reply"]);
+    }
+
+    #[test]
+    fn record_bot_reply_recovers_half_written() {
+        let f = setup_fixture();
+        f.store.connection().lock().unwrap().execute(
+            "INSERT INTO sends VALUES(?,?,?,?,?,0,?,?,?)",
+            params!["half", f.c, "triggered", "original reply", "{}", "[]", 10, 10],
+        ).unwrap();
+        let mid = f.store.record_bot_reply(&f.c, "half", "changed retry reply", "triggered", &json!({}), &[], Some(10), None).unwrap();
+        assert_eq!(f.store.record_bot_reply(&f.c, "half", "original reply", "triggered", &json!({}), &[], Some(10), None).unwrap(), mid);
+        assert_eq!(texts(&f), vec!["original reply"]);
+        let conn = f.store.connection();
+        let conn = conn.lock().unwrap();
+        let counts: (i64, i64) = conn.query_row("SELECT (SELECT COUNT(*) FROM sends), (SELECT COUNT(*) FROM messages)", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(counts, (1, 1));
+    }
+
+    #[test]
+    fn concurrent_writers_keep_unique_seq() {
+        let f = setup_fixture();
+        let other = HistoryStore::open(&f.state).unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let write = |store: &HistoryStore, prefix: &str| {
+                let mut errors = Vec::new();
+                for i in 0..50 {
+                    barrier.wait();
+                    if let Err(e) = store.import_message(&f.c, &bub(&format!("{prefix}-{i}"), "inbound_visual", "text"), i, prefix) {
+                        errors.push(e.to_string());
+                    }
+                }
+                assert!(errors.is_empty(), "write failures: {errors:?}");
+            };
+            let first = &f.store;
+            let second = &other;
+            let a = scope.spawn(move || write(first, "a"));
+            let b = scope.spawn(move || write(second, "b"));
+            // Joining both workers also surfaces any write error.
+            a.join().unwrap();
+            b.join().unwrap();
+        });
+        let conn = f.store.connection();
+        let conn = conn.lock().unwrap();
+        let counts: (i64, i64, i64, i64) = conn.query_row("SELECT COUNT(*), COUNT(DISTINCT seq), MIN(seq), MAX(seq) FROM messages", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
+        assert_eq!(counts, (100, 100, 1, 100));
+        assert_eq!(conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0)).unwrap(), "ok");
+    }
 
     #[test]
     fn test_store_legacy_history_cursor_resets_without_duplicates() {

@@ -4,7 +4,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use fs2::FileExt;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 
@@ -24,20 +23,8 @@ pub fn is_legacy_dir(path: &Path) -> bool {
 }
 
 pub fn ensure_stopped(state: &Path) -> Result<()> {
-    let lock_path = state.join("service.lock");
-    if lock_path.exists() {
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&lock_path)?;
-        match file.try_lock_exclusive() {
-            Ok(_) => {
-                let _ = file.unlock();
-            }
-            Err(_) => {
-                bail!("stop the bot first (service.lock is held)");
-            }
-        }
+    if crate::core::serve::core_is_running(state) {
+        bail!("先停止服务 (core.lock is held)");
     }
     Ok(())
 }
@@ -67,6 +54,7 @@ pub fn migrate(config: &Value) -> Result<HashMap<String, usize>> {
         .context("missing state_dir")?;
     let state = Path::new(state_dir_str);
     ensure_stopped(state)?;
+    let _maintenance_lock = crate::core::serve::acquire_core_lock_for_maintenance(state)?;
 
     let account_id = config
         .get("account_id")
@@ -642,18 +630,11 @@ mod tests {
     }
 
     #[test]
-    fn test_migrate_refuses_while_service_running() {
+    fn migrate_refuses_while_core_running() {
         let f = setup_fixture();
-        let lock_file = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(f.state.join("service.lock"))
-            .unwrap();
-        lock_file.lock_exclusive().unwrap();
-
-        let res = migrate(&f.config);
-        assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("stop the bot"));
+        let _core = crate::core::serve::acquire_core_lock(&f.state).unwrap();
+        let err = migrate(&f.config).unwrap_err();
+        assert!(err.to_string().contains("先停止服务"));
     }
 
     #[test]

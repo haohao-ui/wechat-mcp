@@ -1258,6 +1258,13 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                     return 2;
                 }
             };
+            let _maintenance_lock = match crate::core::serve::acquire_core_lock_for_maintenance(&cfg.state_dir) {
+                Ok(lock) => lock,
+                Err(e) => {
+                    let _ = writeln!(stderr, "{}", e);
+                    return 1;
+                }
+            };
             let store = match crate::core::history::store::HistoryStore::open(&cfg.state_dir) {
                 Ok(s) => s,
                 Err(e) => {
@@ -1327,6 +1334,13 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 Err(e) => {
                     let _ = writeln!(stderr, "failed to load config: {}", e);
                     return 2;
+                }
+            };
+            let _maintenance_lock = match crate::core::serve::acquire_core_lock_for_maintenance(&cfg.state_dir) {
+                Ok(lock) => lock,
+                Err(e) => {
+                    let _ = writeln!(stderr, "{}", e);
+                    return 1;
                 }
             };
             let store = match crate::core::history::store::HistoryStore::open(&cfg.state_dir) {
@@ -3643,6 +3657,43 @@ mod tests {
             assert!(String::from_utf8_lossy(&stderr).contains("Usage"), "{bad}: 应打印用法");
             assert!(!state_dir.join("contacts-sync-request.json").exists(), "{bad}: 不得提交同步请求");
         }
+    }
+
+    #[test]
+    fn history_cli_running_core_rejects_writes_allows_reads() {
+        let _env_lock = crate::core::env_lock();
+        let env = TempDir::new();
+        let state = env.path().join("state");
+        let cfg_path = env.path().join("config.json");
+        fs::write(&cfg_path, json!({"schema_version": 1, "account_id": "acct", "host": "local", "state_dir": state, "allowlist": [{"recipient": "a", "kind": "private"}]}).to_string()).unwrap();
+        let store = crate::core::history::store::HistoryStore::open(&state).unwrap();
+        let a = store.ensure_contact("acct", &json!({"recipient": "a", "kind": "private"}), true).unwrap();
+        let b = store.ensure_contact("acct", &json!({"recipient": "b", "kind": "private"}), true).unwrap();
+        let core = crate::core::serve::acquire_core_lock(&state).unwrap();
+        for mut args in [
+            vec!["migrate-history".to_string()],
+            vec!["merge-contact".into(), "--source".into(), a.clone(), "--into".into(), b.clone()],
+            vec!["unmerge-contact".into(), "1".into()],
+        ] {
+            args.extend(["--config".into(), cfg_path.to_str().unwrap().into()]);
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            assert_eq!(execute_control(&args, &mut out, &mut err, Some(false)), 1);
+            assert!(String::from_utf8_lossy(&err).contains("先停止服务"));
+        }
+        assert_eq!(store.canonical(a.clone()).unwrap(), a);
+        let backup = env.path().join("online.sqlite3");
+        for mut args in [
+            vec!["history-status".to_string()],
+            vec!["history-backup".into(), "--to".into(), backup.to_str().unwrap().into()],
+        ] {
+            args.extend(["--config".into(), cfg_path.to_str().unwrap().into()]);
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            assert_eq!(execute_control(&args, &mut out, &mut err, Some(false)), 0, "{}", String::from_utf8_lossy(&err));
+        }
+        drop(core);
+        assert!(!crate::core::serve::core_is_running(&state));
     }
 
     #[test]
