@@ -76,7 +76,7 @@ impl BrainAccess {
 // src/core/open_api/contract.rs（Task 3）
 pub struct ClaimInfo { pub claim_token: String, pub lease_until: u64, pub deadline_at: u64 }
 pub trait MediaLookup { fn media_id_for_path(&self, path: &std::path::Path) -> Option<String>; }
-pub fn turn_v1(turn: &crate::core::turns::BrainTurn, claim: &ClaimInfo, contact_id: &str, media: &dyn MediaLookup) -> serde_json::Value;
+pub fn turn_v1(turn: &crate::brain::Turn, claim: &ClaimInfo, contact_id: &str, media: &dyn MediaLookup) -> serde_json::Value;
 pub fn rfc3339(secs: u64) -> String;
 
 // src/core/open_api/ledger.rs（Task 2）
@@ -90,7 +90,7 @@ impl TurnLedger {
 }
 
 // ExternalBrain 新增方法（Task 2）
-pub struct ClaimedTurn { pub turn: crate::core::turns::BrainTurn, pub contact_id: String, pub claim: ClaimInfo }
+pub struct ClaimedTurn { pub turn: crate::brain::Turn, pub contact_id: String, pub claim: ClaimInfo }
 pub struct StrictReply { pub turn_id: String, pub claim_token: String, pub action: String, pub text: Option<String> }
 pub struct ReplyOutcome { pub accepted: bool, pub duplicate: bool }
 impl ExternalBrain {
@@ -211,7 +211,7 @@ impl ExternalBrain {
 - Test: `contract.rs` 内 `#[cfg(test)]`
 
 **Interfaces:**
-- Consumes: `crate::core::turns::BrainTurn`（即 `src/brain/mod.rs:52` 的 `Turn`：`turn_id`、`account_id`、`contact: ContactInfo{name, kind}`、`text`、`chat_kind`、`context: Vec<ContextItem{role, text, media: Option<ContextMedia{kind, filename, understanding, path}>}>`、`images: Vec<PathBuf>`、`files: Vec<Value>`、`failed: Vec<FailedAttachment>`）。
+- Consumes: `crate::brain::Turn`（`src/brain/mod.rs:52`；`turns.rs` 里的 `BrainTurn` 只是私有别名，外部模块必须用 `crate::brain::Turn`：`turn_id`、`account_id`、`contact: ContactInfo{name, kind}`、`text`、`chat_kind`、`context: Vec<ContextItem{role, text, media: Option<ContextMedia{kind, filename, understanding, path}>}>`、`images: Vec<PathBuf>`、`files: Vec<Value>`、`failed: Vec<FailedAttachment>`）。
 - Produces: 共享接口中的 `ClaimInfo`、`MediaLookup`、`turn_v1`、`rfc3339`；以及 `pub struct HistoryMediaLookup<'a> { pub conn: &'a rusqlite::Connection, pub media_root: PathBuf }`，实现 `MediaLookup`。
 
 已核实的事实：
