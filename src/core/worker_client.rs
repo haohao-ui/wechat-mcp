@@ -228,6 +228,52 @@ pub struct WorkerClient {
     pub stop: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
+/// Text read out of an image or file card belongs to that media, not to a message of its own. The
+/// frame detector sometimes reports the card's text block as a separate inbound bubble (device
+/// 2026-11-10 23:49: a price caption inside an LED image reached the model as a garbled message), so
+/// drop text bubbles that sit mostly inside a media bubble of the same direction.
+fn drop_text_inside_media(frame: &mut Frame) {
+    let media: Vec<(String, i64, i64, i64, i64)> = frame
+        .bubbles
+        .iter()
+        .filter(|b| matches!(b.kind.as_deref(), Some("image" | "file")))
+        .filter_map(|b| Some((b.direction.clone(), b.x?, b.y?, b.width?, b.height?)))
+        .filter(|(_, _, _, width, height)| *width > 0 && *height > 0)
+        .collect();
+    if media.is_empty() {
+        return;
+    }
+    frame.bubbles.retain(|bubble| {
+        let textual = matches!(bubble.kind.as_deref(), None | Some("text"));
+        if !textual {
+            return true;
+        }
+        let (Some(x), Some(y), Some(width), Some(height)) =
+            (bubble.x, bubble.y, bubble.width, bubble.height)
+        else {
+            return true;
+        };
+        if width <= 0 || height <= 0 {
+            return true;
+        }
+        let area = (width as f64) * (height as f64);
+        !media.iter().any(|(direction, mx, my, mw, mh)| {
+            if *direction != bubble.direction {
+                return false;
+            }
+            let x1 = x.max(*mx);
+            let y1 = y.max(*my);
+            let x2 = (x + width).min(mx + mw);
+            let y2 = (y + height).min(my + mh);
+            if x2 <= x1 || y2 <= y1 {
+                return false;
+            }
+            let overlap = ((x2 - x1) as f64) * ((y2 - y1) as f64);
+            overlap / area >= 0.6
+        })
+    });
+}
+
 impl WorkerClient {
     pub fn new(
         base_dir: PathBuf,
@@ -579,7 +625,10 @@ impl WorkerClient {
             );
         }
         self.dump_frame("capture", &res);
-        serde_json::from_value(res).context("failed to deserialize Frame from operation 'capture'")
+        let mut frame: Frame =
+            serde_json::from_value(res).context("failed to deserialize Frame from operation 'capture'")?;
+        drop_text_inside_media(&mut frame);
+        Ok(frame)
     }
 
     pub async fn scroll(
@@ -600,8 +649,10 @@ impl WorkerClient {
             )
             .await?;
         self.dump_frame("scroll_chat", &res);
-        serde_json::from_value(res)
-            .context("failed to deserialize Frame from operation 'scroll_chat'")
+        let mut frame: Frame = serde_json::from_value(res)
+            .context("failed to deserialize Frame from operation 'scroll_chat'")?;
+        drop_text_inside_media(&mut frame);
+        Ok(frame)
     }
 
     pub async fn sessions(&mut self, names: &[String], debug: bool) -> Result<Value> {
@@ -1696,6 +1747,37 @@ mod tests {
         assert_eq!(images[0].source, "original", "the original is kept, not a thumbnail");
         assert!(files.is_empty());
         assert!(failed.is_empty());
+    }
+
+    #[test]
+    fn test_text_inside_an_image_card_is_not_a_message() {
+        // Device 2026-11-10 23:49: the LED image's price caption was reported as an inbound text
+        // bubble and reached the model as a garbled message.
+        let mut frame: Frame = serde_json::from_value(json!({
+            "title_lines": ["测试群"],
+            "bubbles": [
+                {"kind": "image", "direction": "inbound_visual", "digest": "img",
+                 "x": 50, "y": 2, "width": 300, "height": 235},
+                {"kind": "text", "direction": "inbound_visual", "digest": "caption",
+                 "text": ":155 5 我有供准脂肉街", "x": 60, "y": 50, "width": 200, "height": 180},
+                {"kind": "text", "direction": "inbound_visual", "digest": "real",
+                 "text": "真正的消息", "x": 50, "y": 300, "width": 120, "height": 37},
+                {"kind": "text", "direction": "outbound_visual", "digest": "reply",
+                 "text": "机器人回复", "x": 60, "y": 60, "width": 200, "height": 120}
+            ]
+        }))
+        .unwrap();
+
+        drop_text_inside_media(&mut frame);
+
+        assert_eq!(frame.bubbles.len(), 3, "{:?}", frame.bubbles);
+        let texts: Vec<&str> = frame
+            .bubbles
+            .iter()
+            .filter(|b| b.kind.as_deref() != Some("image"))
+            .map(|b| b.text.as_str())
+            .collect();
+        assert_eq!(texts, vec!["真正的消息", "机器人回复"], "{texts:?}");
     }
 
     // --- test_bot_documents.py ---

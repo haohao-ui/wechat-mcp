@@ -559,6 +559,7 @@ final class CaptureWorker {
                 guard !fileAttempts.contains(id) else { throw Failure.invalid("previous_download_outcome_unknown") }
                 fileAttempts.insert(id)
                 try closingDialogsOnFailure { try saveAttachment(item,window:cachedWindow,destination:destination,maxBytes:maxBytes) }
+                try ensureWechatFrontmost()
             }
             try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:destination.path)
             try checkPrivate(destination,type:.typeRegular,mode:0o600)
@@ -668,6 +669,7 @@ final class CaptureWorker {
                 guard !fileAttempts.contains(id) else { throw Failure.invalid("previous_download_outcome_unknown") }
                 fileAttempts.insert(id)
                 try closingDialogsOnFailure { try saveAttachment(item,window:cachedWindow,destination:saved,checkSize:false,maxBytes:maxBytes) }
+                try ensureWechatFrontmost()
             }
             let head=try Data(contentsOf:saved).prefix(8)
             let ext = head.starts(with:[0x89,0x50,0x4E,0x47]) ? "png" : head.starts(with:[0xFF,0xD8,0xFF]) ? "jpg" : ""
@@ -731,6 +733,24 @@ func closingDialogsOnFailure(_ body: () throws -> Void) throws {
         try? key(53);pauseUI(0.2);try? key(53);pauseUI(0.2)
         throw error
     }
+}
+
+/// A save sheet that outlives the save attempt blocks every later capture with screen_not_main
+/// (device 2026-11-10 23:51: a panel stayed two minutes after the images were saved). Bounded:
+/// press Escape a few times, then fail with a name the core can act on instead of staying stuck.
+func ensureWechatFrontmost() throws {
+    let ids = ["com.tencent.xinWeChat", "com.tencent.WeChat"]
+    func wechatFrontmost() -> Bool {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return false }
+        return ids.contains(app.bundleIdentifier ?? "")
+    }
+    if wechatFrontmost() { return }
+    for _ in 0..<3 {
+        try? key(53)
+        pauseUI(0.25)
+        if wechatFrontmost() { return }
+    }
+    throw Failure.invalid("save_panel_stuck")
 }
 
 func address(_ path: String) throws -> sockaddr_un {
