@@ -1,71 +1,76 @@
-# I6 应用更新界面与宿主集成交付审查报告 (复审修订版)
+# I6 应用更新界面与宿主集成交付审查报告 (自适应布局与指引终版)
 
 **日期**：2026-11-10  
-**任务**：I6 应用更新界面与宿主集成 (`task_f9af41a8a5ae` / Dispatch `ctx_fc8bc80ee8de`)  
+**任务**：I6 应用更新界面与宿主集成 (`task_9d11e4ed9f91` / Dispatch `ctx_3b0c0ea47435`)  
 **分支**：`work/prod-update-ui`  
 **基线**：I3 界面基线 `9fc0cdf` + 集成 I5 更新核心 `d001a4e` (`d7355e9`)  
-**前序提交**：`5e976bf` (复审未通过，已闭环修复)  
+**前序提交**：`785c02d`  
 
 ---
 
-## 1. 协调者复审意见与整改闭环
+## 1. 协调者本轮复审意见与整改闭环
 
-针对协调者在 `msg_d921c7402998` 和 `msg_b93d4e5d2ee7` 中指出的明确缺口，本轮进行了彻底重构与整改：
+针对协调者在 `task_9d11e4ed9f91` 中指出的具体问题，本轮完成了精确修正：
 
-1. **彻底移除生产假下载、假延期与模拟路径**：
-   - 移除了 `UpdatePage.handleDownloadUpdate` 中使用 `asyncAfter` 将进度 10%→65%→100% 伪造下载验签完成的代码。
-   - 移除了 `handleDeferUpdate` 中擅自修改本地内存伪造“已取消排空恢复业务”的代码。
-   - 移除了安装确认弹窗中的可执行暗示。
-   - **严格只读守卫**：所有下载、安装重启、延期控件在生产代码中始终禁用（`isEnabled = false`），按钮文案明确标注 `(本阶段未支持)`。若任何代码路径调用其 handler，统一触发只读守卫，输出 `unsupported` 提示，**绝对不修改读模型、进度条或业务状态**。
-2. **纯真反映读模型，坚决不编造健康或版本**：
-   - 当 `maintenanceActive == false` 时，界面严格显示 `“未处于维护抑制态 (运行健康度未经验证)”`，坚决不宣称“守护服务正常运行”或“健康”。
-   - 未知架构、组件未校验等状态如实展示为 `未知`、`未校验 (未知)`、`未标记 (null)`，不擅自拼接硬编码的 `macOS 12.0+` 或组件一致假象。
-   - 恢复卡片提供详实的只读指引，说明当前处于只读受控阶段，禁止通过界面清除维护标志，回退需由管理员在终端依据 journal 执行。
-3. **补充真实 Rust Control + Swift Client 隔离契约测试**：
-   - 在 `tests/swift_update_ui.rs` 中构造隔离的临时 state/config 环境，通过真实编译的 `target/debug/wechat-mcp` 二进制执行真实控制命令。
-   - 验证了 `wechat-mcp control update-status` 真实输出的解码与状态字段映射。
-   - 验证了 `wechat-mcp control update-check` 真实返回 `{"status":"unconfigured","reason":"distribution_source_not_configured"}` 的解析与无虚假候选版本断言。
-4. **重做完整高度不透明 Aqua 离屏渲染截图**：
-   - 将渲染画幅设为完整高度 `720 x 1150`，保证整个 `contentStack` 从顶部运行环境、候选说明、流水线进度、展开的故障恢复卡到底部只读禁用操作按钮完整呈现，无任何截断。
-   - 生成真实离屏 PNG 证据：
-     - `/tmp/update_ui_unconfigured_full.png` (720x1150, 126KB)
-     - `/tmp/update_ui_recovery_full.png` (720x1150, 182KB)
-   - 经 `sips` 图像分辨率与实际结构检验，元素排布清晰自适应，NSBox 随内容自动撑高。
-
----
-
-## 2. 代码变更与文件清单
-
-- `native/bootstrap/UpdatePage.swift`：严格只读更新界面实现，移除所有假模拟路径，写操作永久禁用，读模型真实求实。
-- `native/bootstrap/SettingsPage.swift`：应用更新引导跳转与版本展示。
-- `native/bootstrap/main.swift`：按 D2 规范在设置和日志之间注册应用更新页。
-- `tests/host_update_selftest/main.swift`：包含真实 Rust 契约测试、只读防御、断网、验签失败、完整高度离屏渲染等 40 项测试。
-- `tests/swift_update_ui.rs`：Rust cargo 集成测试入口，注入真实 `wechat-mcp` 环境。
+1. **720 宽与宿主最小宽 (680 宽) 自适应布局修复，彻底消除右侧裁切**：
+   - **读模型值列受限宽度换行**：将 `currentReleaseLabel`、`currentSeqLabel`、`architectureLabel`、`consistencyBadge`、`supervisorStatusLabel`、`publisherVerificationBadge`、`localSigningLabel`、`compatibilityLabel` 全部切换为 `wrappingLabelWithString`，并显式配置 `lineBreakMode = .byWordWrapping` 与 `widthAnchor.constraint(lessThanOrEqualToConstant: 460)`。维护状态等长文本自适应折行，不再将卡片右边界撑出视口。
+   - **操作按钮区分两行排布**：
+     - 第一行（状态查询类）：`checkButton`（“检查更新”）、`refreshStatusButton`（“刷新状态”），总宽约 200pt。
+     - 第二行（写入受控类，本阶段未支持）：`downloadButton`（“下载更新 (未启用)”）、`installButton`（“安装并重启 (未启用)”）、`deferButton`（“延期更新 (未启用)”），总宽约 460pt。
+     - 彻底解决了原 5 个按钮单行挤占导致最右侧“刷新状态”被裁切的问题。
+   - **严格宽度边界单测断言**：在测试套件中增加了 `subviews_within_680w_bounds` 断言，验证即使在 680pt 宿主最小宽度下，所有子视图的 `frame.maxX <= 680.0`，无任何子元素越界。
+2. **恢复指引文案求实修正**：
+   - 彻底删除了“原旧版本及客户会话未受污染”等无读模型证据的确定性保证；
+   - 准确标注：**维护标志文件已记录；实际核心进程存活状态与业务数据完整性未知**；
+   - 明确指出真实版本回退能力当前处于 unsupported 禁用状态，不诱导用户自行回退，说明需要专门受控恢复。
+3. **状态刷新异步处理与结果如实呈现**：
+   - `handleRefreshStatus()` 调整为异步调度 `client.fetchStatus()`；
+   - 成功时更新模型并呈现“状态已刷新 (只读)”，失败时保留并显示具体的错误原因，绝不误报成功。
+4. **离屏渲染全画幅证据 (720 宽与 680 宽真实双尺寸验证)**：
+   - 生成 4 张不透明 Aqua 真实离屏渲染图片（画幅高度均为 1150pt）：
+     - `/tmp/update_ui_unconfigured_full.png` (720x1150, 127KB)
+     - `/tmp/update_ui_recovery_full.png` (720x1150, 187KB)
+     - `/tmp/update_ui_unconfigured_680w.png` (680x1150, 125KB)
+     - `/tmp/update_ui_recovery_680w.png` (680x1150, 185KB)
+   - 经检查，所有按钮文字完整呈现，恢复卡片展开详尽指引，卡片流完全处于视口安全区域内。
 
 ---
 
-## 3. 测试与验证记录
+## 2. 修改文件清单
 
-1. **专项更新 UI 与契约测试**：
+- `native/bootstrap/UpdatePage.swift`：
+  - 读模型标签启用换行与受限宽度约束；
+  - 操作区按钮重构为两行排布；
+  - 异步处理刷新状态并精准反馈；
+  - 恢复指引删除伪确定性保证，真实标注维护标志记录与受控恢复说明。
+- `tests/host_update_selftest/main.swift`：
+  - 增加 720 宽与 680 宽双画幅渲染测试；
+  - 增加 `subviews_within_680w_bounds` 宽度边界不越界断言；
+  - 增加恢复指引“维护标志文件已记录”与不包含“未受污染”断言。
+- `docs/reviews/2026-11-10-production-update-ui.md`：
+  - 更新本轮审查记录与整改证据。
+
+---
+
+## 3. 测试命令与退出码
+
+1. **更新专项与真实控制契约测试**：
    - 命令：`cargo test --test swift_update_ui --locked`
-   - 退出码：`0` (PASS)
-   - 证据：`test result: ok. 1 passed; 0 failed; finished in 20.49s`，内部 40 项断言（含真实 Rust control 契约与全高度离屏 PNG）全部通过。
-2. **相关回归与硬门禁**：
-   - `cargo test --test swift_host --locked`：退出码 `0`，74 项全部 PASS。
+   - 退出码：`0` (PASS，耗时 19.63s)
+   - 证据：41 项断言全量通过，包含真实 Rust control `update-status` / `update-check` 对接、写操作只读守卫、680w/720w 双画幅离屏渲染及子视图宽度不越界验证。
+2. **专项回归验证**：
+   - `cargo test --test swift_host --locked`：退出码 `0`，74 项测试全部 PASS。
    - `cargo test --test swift_brain_ui --locked`：退出码 `0`，PASS。
    - `cargo test test_control_update_status_and_check --locked`：退出码 `0`，PASS。
    - `swiftc ... LifecycleTests.swift`：退出码 `0`，PASS。
-   - `bash scripts/test-gates.sh`：退出码 `0`，PASS。
+   - `bash scripts/test-gates.sh`：退出码 `0`，PASS（运行时与验证无 Python）。
    - `cargo fmt --check`：退出码 `0`。
-   - 产品运行时与测试脚本中均**无 Python**。
 
 ---
 
-## 4. 范围局限与未验证项声明 (Partial 范围)
+## 4. 范围局限声明 (Partial 范围)
 
-1. **原 I6 目标依然为 partial**：
-   - 本阶段仅放行只读状态界面、本地检查与隔离 fixture；
-   - 真实更新下载、安装切换（`apply`）、回退（`rollback`）、排空协调与钥匙串重签在底层保持 unsupported，未接入生产运行；
-   - 不能将真实排空、安装或 TCC 权限保持视为在 Q1 自动达成，真实安装能力须待专用机与信任根建立后另行专项开发与真机试点。
-2. **全仓并发测试缺口**：
-   - 全量 `cargo test --locked` 在外部并发环境下存在历史长耗时缺口，本次采用专项针对性测试与回归覆盖，不凭空推断全仓无关。
+- **I6 目标在限定阶段保持 partial**：
+  - 本任务严格限于只读更新状态呈现、自适应界面布局、本地检查与隔离 fixture 验证；
+  - 真实更新下载、安装切换（`apply`）、回退（`rollback`）、排空协调及专用机钥匙串重签/TCC权限保持在底层保持 unsupported 状态，未接入生产运行；
+  - 真实安装能力的落地须待专用机试点与信任公钥体系建立后专项推进。
