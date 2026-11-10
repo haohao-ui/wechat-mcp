@@ -553,20 +553,25 @@ fn test_database_auto_rollback_is_unsupported() {
     );
 }
 
+fn write_valid_bot_config(cfg_path: &PathBuf, state_dir: &PathBuf) {
+    let val = serde_json::json!({
+        "schema_version": 1,
+        "host": "local",
+        "account_id": "test-account",
+        "allowlist": [{"recipient": "午夜咖啡", "kind": "private"}],
+        "state_dir": state_dir.to_str().unwrap()
+    });
+    fs::write(cfg_path, serde_json::to_string_pretty(&val).unwrap()).unwrap();
+    fs::set_permissions(cfg_path, fs::Permissions::from_mode(0o600)).unwrap();
+}
+
 #[test]
 fn test_cli_rejects_test_pubkey_and_mutations_without_side_effects() {
     let temp = TempTestDir::new("cli_side_effects");
     let state_dir = temp.0.join("state");
     fs::create_dir_all(&state_dir).unwrap();
     let cfg_file = temp.0.join("config.json");
-    fs::write(
-        &cfg_file,
-        format!(
-            r#"{{"listen": "127.0.0.1:0", "state_dir": "{}"}}"#,
-            state_dir.display()
-        ),
-    )
-    .unwrap();
+    write_valid_bot_config(&cfg_file, &state_dir);
 
     let manifest_file = temp.0.join("manifest.json");
     let (key_pair, pub_key_bytes) = generate_test_ed25519_key();
@@ -642,4 +647,66 @@ fn test_cli_rejects_test_pubkey_and_mutations_without_side_effects() {
         assert!(!state_dir.join("core.maintenance").exists());
         assert!(!temp.0.join("current").exists());
     }
+}
+
+#[test]
+fn test_cli_rejects_invalid_or_missing_config_without_side_effects() {
+    let temp = TempTestDir::new("cli_invalid_config");
+    let exe = std::env::var("CARGO_BIN_EXE_wechat-updater")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/wechat-updater")
+        });
+
+    let entries_before: Vec<_> = fs::read_dir(&temp.0).unwrap().collect();
+
+    // 1. 配置文件不存在必须退出码 2，报 invalid_config，绝不猜测目录或显示 idle
+    let missing_cfg = temp.0.join("non_existent_config.json");
+    let out_missing = std::process::Command::new(&exe)
+        .args(["status", "--config", missing_cfg.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out_missing.status.code(), Some(2));
+    let stderr_missing = String::from_utf8_lossy(&out_missing.stderr);
+    assert!(stderr_missing.contains("invalid_config"));
+
+    // 2. 坏 JSON 格式配置必须退出码 2，报 invalid_config
+    let corrupt_cfg = temp.0.join("corrupt_config.json");
+    fs::write(&corrupt_cfg, b"{not-a-valid-json").unwrap();
+    fs::set_permissions(&corrupt_cfg, fs::Permissions::from_mode(0o600)).unwrap();
+    let out_corrupt = std::process::Command::new(&exe)
+        .args(["status", "--config", corrupt_cfg.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out_corrupt.status.code(), Some(2));
+    let stderr_corrupt = String::from_utf8_lossy(&out_corrupt.stderr);
+    assert!(stderr_corrupt.contains("invalid_config"));
+
+    // 3. 缺少必填字段（如缺少 allowlist）必须退出码 2，绝不绕过为 idle
+    let incomplete_cfg = temp.0.join("incomplete_config.json");
+    fs::write(
+        &incomplete_cfg,
+        serde_json::to_string(&serde_json::json!({
+            "schema_version": 1,
+            "host": "local",
+            "account_id": "acc-1",
+            "state_dir": temp.0.join("state").to_str().unwrap()
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(&incomplete_cfg, fs::Permissions::from_mode(0o600)).unwrap();
+    let out_incomplete = std::process::Command::new(&exe)
+        .args(["status", "--config", incomplete_cfg.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out_incomplete.status.code(), Some(2));
+    let stderr_incomplete = String::from_utf8_lossy(&out_incomplete.stderr);
+    assert!(stderr_incomplete.contains("invalid_config"));
+
+    // 验证整个过程中没有产生任何多余文件或状态写入
+    let entries_after: Vec<_> = fs::read_dir(&temp.0).unwrap().collect();
+    // 仅包含新写入的 corrupt_config.json 和 incomplete_config.json 两个输入文件
+    assert_eq!(entries_before.len() + 2, entries_after.len());
+    assert!(!temp.0.join("state").exists());
 }

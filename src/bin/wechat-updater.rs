@@ -1,24 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use wechat_mcp::core::config;
 use wechat_mcp::updater::journal::{self, TransactionStage, UpdateJournal};
 use wechat_mcp::updater::manifest;
-
-fn resolve_state_dir(cfg_path: &Path) -> Result<PathBuf, String> {
-    if let Ok(c) = config::BotConfig::load(cfg_path) {
-        return Ok(c.state_dir);
-    }
-    if let Ok(content) = std::fs::read_to_string(cfg_path) {
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(s) = val.get("state_dir").and_then(|v| v.as_str()) {
-                return Ok(PathBuf::from(s));
-            }
-        }
-    }
-    if let Some(parent) = cfg_path.parent() {
-        return Ok(parent.join("state"));
-    }
-    Err("cannot resolve state_dir from config".into())
-}
 
 fn print_usage() {
     eprintln!(
@@ -54,13 +37,17 @@ fn main() {
                 eprintln!("error: status requires --config <path>");
                 std::process::exit(2);
             };
-            let state_dir = match resolve_state_dir(&cfg_p) {
-                Ok(s) => s,
+            let cfg = match config::BotConfig::load(&cfg_p) {
+                Ok(c) => c,
                 Err(e) => {
-                    eprintln!("error loading config: {e}");
+                    eprintln!(
+                        "error: invalid_config: failed to load config from '{}': {e}",
+                        cfg_p.display()
+                    );
                     std::process::exit(2);
                 }
             };
+            let state_dir = cfg.state_dir;
 
             let journal_res = UpdateJournal::load_from_state(&state_dir);
             let (journal, journal_err) = match journal_res {
@@ -119,10 +106,13 @@ fn main() {
                 eprintln!("error: check requires --config <path> and --manifest <path>");
                 std::process::exit(2);
             };
-            let _state_dir = match resolve_state_dir(&cfg_p) {
-                Ok(s) => s,
+            let _cfg = match config::BotConfig::load(&cfg_p) {
+                Ok(c) => c,
                 Err(e) => {
-                    eprintln!("error loading config: {e}");
+                    eprintln!(
+                        "error: invalid_config: failed to load config from '{}': {e}",
+                        cfg_p.display()
+                    );
                     std::process::exit(2);
                 }
             };
