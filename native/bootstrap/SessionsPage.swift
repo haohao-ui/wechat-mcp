@@ -4,8 +4,15 @@ import AppKit
 
 public final class SessionsPageController: NSViewController {
     private let context: StatusPanelController
+    private let brainClient = BrainClient()
     private let sessionsStack = NSStackView()
     private let emptyLabel = NSTextField(labelWithString: "暂无活跃会话")
+
+    // Provenance Detail Area
+    private let provenanceBox = NSBox()
+    private let turnSearchField = NSTextField()
+    private let queryTurnButton = NSButton(title: "查询轮次", target: nil, action: nil)
+    private let detailTextView = NSTextView()
 
     public init(context: StatusPanelController) {
         self.context = context
@@ -52,6 +59,39 @@ public final class SessionsPageController: NSViewController {
 
         box.setContent(sessionsStack)
         mainStack.addArrangedSubview(box)
+
+        // 轮次追溯详情区域
+        provenanceBox.title = "对话轮次追溯 (Provenance)"
+        provenanceBox.titleFont = NSFont.systemFont(ofSize: 13, weight: .bold)
+
+        let provStack = NSStackView()
+        provStack.orientation = .vertical
+        provStack.alignment = .leading
+        provStack.spacing = 8
+        provStack.translatesAutoresizingMaskIntoConstraints = false
+
+        turnSearchField.placeholderString = "输入 turn_id 查询详细追溯"
+        turnSearchField.widthAnchor.constraint(equalToConstant: 260).isActive = true
+        queryTurnButton.target = self
+        queryTurnButton.action = #selector(handleQueryTurn)
+
+        let searchRow = NSStackView(views: [turnSearchField, queryTurnButton])
+        searchRow.orientation = .horizontal
+        searchRow.spacing = 8
+        provStack.addArrangedSubview(searchRow)
+
+        let textScroll = NSScrollView()
+        textScroll.hasVerticalScroller = true
+        detailTextView.isEditable = false
+        detailTextView.font = NSFont.userFixedPitchFont(ofSize: 11)
+        detailTextView.string = "暂无选中轮次。输入 turn_id 或点击会话行查看详细快照、角色修订与发送状态。"
+        textScroll.documentView = detailTextView
+        textScroll.heightAnchor.constraint(equalToConstant: 180).isActive = true
+        textScroll.widthAnchor.constraint(equalToConstant: 640).isActive = true
+        provStack.addArrangedSubview(textScroll)
+
+        provenanceBox.setContent(provStack)
+        mainStack.addArrangedSubview(provenanceBox)
 
         let document = FlippedView()
         document.translatesAutoresizingMaskIntoConstraints = false
@@ -107,6 +147,9 @@ public final class SessionsPageController: NSViewController {
         stateLbl.font = NSFont.systemFont(ofSize: 12)
         stateLbl.widthAnchor.constraint(equalToConstant: 240).isActive = true
 
+        let traceBtn = NSButton(title: "查轮次", target: self, action: #selector(handleTraceSession(_:)))
+        traceBtn.identifier = NSUserInterfaceItemIdentifier(name)
+
         if session.handoff == true || session.state == "handoff" {
             stateLbl.textColor = .systemOrange
             let resumeBtn = NSButton(title: "恢复自动回复", target: self, action: #selector(handleResumeHandoff(_:)))
@@ -114,17 +157,66 @@ public final class SessionsPageController: NSViewController {
             rowStack.addArrangedSubview(nameLbl)
             rowStack.addArrangedSubview(stateLbl)
             rowStack.addArrangedSubview(resumeBtn)
+            rowStack.addArrangedSubview(traceBtn)
         } else if session.state == "watching" || session.state == "listening" {
             stateLbl.textColor = .systemGreen
             rowStack.addArrangedSubview(nameLbl)
             rowStack.addArrangedSubview(stateLbl)
+            rowStack.addArrangedSubview(traceBtn)
         } else {
             stateLbl.textColor = .systemYellow
             rowStack.addArrangedSubview(nameLbl)
             rowStack.addArrangedSubview(stateLbl)
+            rowStack.addArrangedSubview(traceBtn)
         }
 
         return rowStack
+    }
+
+    @objc private func handleTraceSession(_ sender: NSButton) {
+        guard let name = sender.identifier?.rawValue else { return }
+        turnSearchField.stringValue = name
+        handleQueryTurn()
+    }
+
+    @objc private func handleQueryTurn() {
+        let query = turnSearchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return }
+        detailTextView.string = "正在查询轮次 [\(query)] 的追溯详情..."
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            do {
+                let detail = try self.brainClient.turnDetail(turnId: query)
+                DispatchQueue.main.async {
+                    self.displayTurnDetail(detail)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.detailTextView.string = "未找到轮次追溯 (旧版未记录或轮次不存在): \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func displayTurnDetail(_ detail: BrainTurnDetail) {
+        var text = "【轮次追溯详情】\n"
+        text += "Turn ID: \(detail.turnId)\n"
+        text += "联系人: \(detail.contactId)\n"
+        text += "追溯记录状态: \(detail.provenanceDisplayText)\n"
+        text += "角色修订: \(detail.roleId ?? "未记录")\n"
+        if let model = detail.model {
+            let p = model["provider"]?.value as? String ?? "-"
+            let m = model["model"]?.value as? String ?? "-"
+            text += "模型引用: \(p) / \(m)\n"
+        }
+        text += "幂等键: \(detail.sendKey ?? "-")\n"
+        text += "执行状态阶段: \(detail.phaseLabels.joined(separator: " · "))\n"
+        if let dec = detail.decision {
+            let act = dec["action"]?.value as? String ?? "-"
+            let reply = dec["text"]?.value as? String ?? ""
+            text += "大脑决策: \(act) | 回复: \(reply)\n"
+        }
+        detailTextView.string = text
     }
 
     @objc private func handleResumeHandoff(_ sender: NSButton) {

@@ -72,6 +72,7 @@ final class HostAppDelegate: NSObject, NSApplicationDelegate {
         shell.register(page: OverviewPageController(context: controller), id: "overview", title: "总览")
         shell.register(page: SessionsPageController(context: controller), id: "sessions", title: "会话")
         shell.register(page: ContactsPageController(context: controller), id: "contacts", title: "联系人")
+        shell.register(page: BrainPageController(context: controller), id: "brain", title: "大脑")
         shell.register(page: McpPageController(context: controller), id: "mcp", title: "MCP")
         shell.register(page: SettingsPageController(context: controller), id: "settings", title: "设置")
         shell.register(page: LogsPageController(context: controller), id: "logs", title: "日志")
