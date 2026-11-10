@@ -6,9 +6,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 if [[ "${1:-}" == "--staged" ]]; then
-  files=$(git diff --cached --name-only --diff-filter=ACMR)
+  files=$(git -c core.quotepath=false diff --cached --name-only --diff-filter=ACMR)
 else
-  files=$(git ls-files)
+  files=$(git -c core.quotepath=false ls-files)
 fi
 [[ -z "$files" ]] && exit 0
 
@@ -20,7 +20,7 @@ bad_files=$(printf '%s\n' "$files" | grep -E \
   | grep -vE '\.example\.' || true)
 if [[ -n "$bad_files" ]]; then
   echo "❌ 以下文件不允许提交（本地配置/数据/证书/二进制）:"
-  printf '  %s\n' $bad_files
+  printf '%s\n' "$bad_files" | sed 's/^/  /'
   fail=1
 fi
 
@@ -35,8 +35,11 @@ patterns=(
 )
 scan_files=$(printf '%s\n' "$files" | grep -vE '^(scripts/check_sensitive\.sh|Cargo\.lock)$' || true)
 for p in "${patterns[@]}"; do
-  # shellcheck disable=SC2086
-  hits=$(printf '%s\n' $scan_files | xargs -I{} sh -c '[ -f "{}" ] && grep -nIEH -- "$0" "{}" || true' "$p")
+  # One file per line, unquoted (core.quotepath=false): names with spaces or non-ASCII characters
+  # are scanned too instead of being skipped as missing files.
+  hits=$(while IFS= read -r f; do
+    if [[ -n "$f" && -f "$f" ]]; then grep -nIEH -- "$p" "$f" || true; fi
+  done <<< "$scan_files")
   if [[ -n "$hits" ]]; then
     echo "❌ 发现疑似本机/个人敏感信息（模式: ${p}）:"
     echo "$hits" | sed 's/^/  /'
