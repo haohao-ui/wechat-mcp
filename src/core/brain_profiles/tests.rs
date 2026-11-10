@@ -1,5 +1,8 @@
 use super::*;
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 struct Fixture {
     path: PathBuf,
     store: Store,
@@ -890,7 +893,41 @@ fn cas_state_root_replacement_is_rejected() {
 #[test]
 fn cas_error_releases_locks_and_file_descriptors() {
     let mut f = Fixture::new();
-    let descriptors = || fs::read_dir("/dev/fd").unwrap().count();
+    let target_dir = fs::canonicalize(&f.path).unwrap();
+    let descriptors = || {
+        let mut count = 0;
+        if let Ok(entries) = fs::read_dir("/dev/fd") {
+            for entry in entries.flatten() {
+                if let Ok(fd) = entry.file_name().to_string_lossy().parse::<i32>() {
+                    let mut buf = [0u8; 1024];
+                    let res = unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) };
+                    if res != -1 {
+                        if let Ok(s) = std::ffi::CStr::from_bytes_until_nul(&buf) {
+                            if let Ok(path_str) = s.to_str() {
+                                if Path::new(path_str).starts_with(&target_dir) {
+                                    count += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    if let Ok(target) = fs::read_link(entry.path()) {
+                        if target.starts_with(&target_dir) || target.starts_with(&f.path) {
+                            count += 1;
+                            continue;
+                        }
+                    }
+                    if let Ok(target) = fs::read_link(format!("/proc/self/fd/{fd}")) {
+                        if target.starts_with(&target_dir) || target.starts_with(&f.path) {
+                            count += 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        count
+    };
     let before = descriptors();
     let request = req(0, Mutation::SaveRole(seed(&f)));
     for _ in 0..30 {
@@ -942,6 +979,7 @@ fn cas_schema_fixture_and_boundary_quotas() {
             active: BindingSet::default(),
             draft: BindingSet::default(),
             legacy_fallback: None,
+            execution_mode: ExecutionMode::Legacy,
         })
         .collect();
     f.store.commit(&root).unwrap();
@@ -1226,4 +1264,384 @@ fn cas_concurrent_rollbacks_restore_both_bindings_once() {
     let account = account.unwrap();
     assert_eq!(account.active, target);
     assert_eq!(account.draft, target);
+}
+
+fn frozen_v1(f: &Fixture) -> Vec<u8> {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(f.path.join("brain-bindings.json")).unwrap()).unwrap();
+    value["schema_version"] = 1.into();
+    for account in value["accounts"].as_array_mut().unwrap() {
+        account.as_object_mut().unwrap().remove("execution_mode");
+    }
+    let bytes = serde_json::to_vec(&value).unwrap();
+    fs::write(f.path.join("brain-bindings.json"), &bytes).unwrap();
+    bytes
+}
+
+#[test]
+fn execution_fresh_managed_without_seed_and_repeat() {
+    let f = Fixture::new();
+    assert_eq!(
+        f.store.execution_mode(&f.ctx).unwrap(),
+        ExecutionMode::Legacy
+    );
+    assert_eq!(
+        f.store
+            .initialize(&f.ctx, Installation::Fresh, b"{}", true, 0, None)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        f.store.execution_mode(&f.ctx).unwrap(),
+        ExecutionMode::Managed
+    );
+    assert_eq!(
+        f.store
+            .resolve(&f.ctx, "c", &ChatKind::Private, &Access)
+            .unwrap_err()
+            .0,
+        "role_required"
+    );
+    let bytes = fs::read(f.path.join("brain-bindings.json")).unwrap();
+    let root: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(root["schema_version"], 2);
+    assert_eq!(root["accounts"][0]["execution_mode"], "managed");
+    assert_eq!(root["roles"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        f.store
+            .initialize(&f.ctx, Installation::Fresh, b"{}", true, 1, None)
+            .unwrap(),
+        1
+    );
+    assert_eq!(fs::read(f.path.join("brain-bindings.json")).unwrap(), bytes);
+    assert_eq!(
+        f.store
+            .execution_mode(&AccountContext::new("absent".into()).unwrap())
+            .unwrap(),
+        ExecutionMode::Legacy
+    );
+}
+
+#[test]
+fn execution_drafts_stay_legacy_activate_and_rollback_manage() {
+    let f = Fixture::new();
+    let role = seed(&f);
+    f.store
+        .write(
+            &f.ctx,
+            &req(0, Mutation::SaveRole(role.clone())),
+            &Access,
+            0,
+        )
+        .unwrap();
+    assert_eq!(
+        f.store.execution_mode(&f.ctx).unwrap(),
+        ExecutionMode::Legacy
+    );
+    f.store
+        .write(
+            &f.ctx,
+            &req(1, Mutation::SaveKnowledge(knowledge(&f.ctx))),
+            &Access,
+            0,
+        )
+        .unwrap();
+    f.store
+        .write(
+            &f.ctx,
+            &req(
+                2,
+                Mutation::SaveBindings(BindingSet {
+                    default: Some(role.reference()),
+                    overrides: vec![],
+                }),
+            ),
+            &Access,
+            0,
+        )
+        .unwrap();
+    assert_eq!(
+        f.store.execution_mode(&f.ctx).unwrap(),
+        ExecutionMode::Legacy
+    );
+    let before = fs::read(f.path.join("brain-bindings.json")).unwrap();
+    for installation in [Installation::Fresh, Installation::LegacyUpgrade] {
+        assert_eq!(
+            f.store
+                .initialize(&f.ctx, installation, b"{}", true, 0, None)
+                .unwrap_err()
+                .0,
+            "revision_conflict"
+        );
+        assert_eq!(
+            fs::read(f.path.join("brain-bindings.json")).unwrap(),
+            before
+        );
+    }
+    f.store
+        .write(&f.ctx, &req(3, Mutation::Activate), &Access, 0)
+        .unwrap();
+    assert_eq!(
+        f.store.execution_mode(&f.ctx).unwrap(),
+        ExecutionMode::Managed
+    );
+    assert_eq!(
+        f.store
+            .initialize(&f.ctx, Installation::LegacyUpgrade, b"{}", true, 0, None)
+            .unwrap_err()
+            .0,
+        "revision_conflict"
+    );
+    f.store
+        .write(
+            &f.ctx,
+            &req(4, Mutation::Rollback { generation: 4 }),
+            &Access,
+            0,
+        )
+        .unwrap();
+    assert_eq!(
+        f.store.execution_mode(&f.ctx).unwrap(),
+        ExecutionMode::Managed
+    );
+}
+
+#[test]
+fn execution_legacy_initialize_repeat_checks_source_and_reachable_objects() {
+    let f = Fixture::new();
+    let config=br#"{"brain":{"mode":"external","external":{"timeout_action":"builtin","timeout_seconds":60}},"model_config":{"backend":"mock"}}"#;
+    f.store
+        .initialize(&f.ctx, Installation::LegacyUpgrade, config, true, 0, None)
+        .unwrap();
+    assert_eq!(
+        f.store.execution_mode(&f.ctx).unwrap(),
+        ExecutionMode::Managed
+    );
+    let before = fs::read(f.path.join("brain-bindings.json")).unwrap();
+    assert_eq!(
+        f.store
+            .initialize(&f.ctx, Installation::LegacyUpgrade, b"{}", true, 1, None)
+            .unwrap_err()
+            .0,
+        "revision_conflict"
+    );
+    assert_eq!(
+        fs::read(f.path.join("brain-bindings.json")).unwrap(),
+        before
+    );
+    assert_eq!(
+        f.store
+            .initialize(&f.ctx, Installation::LegacyUpgrade, config, true, 1, None)
+            .unwrap(),
+        1
+    );
+    let role = legacy_seed(&f.ctx, true, 0).unwrap();
+    let path = f.path.join(format!(
+        "brain-profiles/roles/{}/{}.json",
+        role.role_id, role.revision_id
+    ));
+    fs::write(path, b"{}").unwrap();
+    assert!(
+        f.store
+            .initialize(&f.ctx, Installation::LegacyUpgrade, config, true, 1, None)
+            .is_err()
+    );
+    assert!(
+        f.store
+            .initialize(&f.ctx, Installation::Fresh, config, true, 1, None)
+            .is_err()
+    );
+    assert_eq!(
+        fs::read(f.path.join("brain-bindings.json")).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn execution_v1_requires_explicit_upgrade_and_preserves_other_account() {
+    let f = Fixture::new();
+    f.store
+        .migrate(&f.ctx, Installation::LegacyUpgrade, b"{}", true, 0)
+        .unwrap();
+    let original = legacy_seed(&f.ctx, true, 0).unwrap();
+    let object = f.path.join(format!(
+        "brain-profiles/roles/{}/{}.json",
+        original.role_id, original.revision_id
+    ));
+    let object_before = fs::read(&object).unwrap();
+    let before = frozen_v1(&f);
+    assert_eq!(f.store.generation().unwrap_err().0, "schema_unsupported");
+    assert_eq!(
+        f.store.execution_mode(&f.ctx).unwrap_err().0,
+        "schema_unsupported"
+    );
+    assert_eq!(
+        f.store
+            .initialize(&f.ctx, Installation::LegacyUpgrade, b"{}", true, 1, None)
+            .unwrap_err()
+            .0,
+        "schema_unsupported"
+    );
+    assert_eq!(
+        fs::read(f.path.join("brain-bindings.json")).unwrap(),
+        before
+    );
+    let other = AccountContext::new("new_account".into()).unwrap();
+    assert_eq!(
+        f.store
+            .initialize(&other, Installation::Fresh, b"{}", true, 1, Some(1))
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        f.store.execution_mode(&other).unwrap(),
+        ExecutionMode::Managed
+    );
+    assert_eq!(
+        f.store.execution_mode(&f.ctx).unwrap(),
+        ExecutionMode::Legacy
+    );
+    let mut old: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    let mut new: serde_json::Value =
+        serde_json::from_slice(&fs::read(f.path.join("brain-bindings.json")).unwrap()).unwrap();
+    new["accounts"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|a| a["account_id"] == f.ctx.account_id());
+    new["accounts"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("execution_mode");
+    old.as_object_mut().unwrap().remove("schema_version");
+    new.as_object_mut().unwrap().remove("schema_version");
+    old.as_object_mut().unwrap().remove("generation");
+    new.as_object_mut().unwrap().remove("generation");
+    assert_eq!(old, new);
+    assert_eq!(fs::read(object).unwrap(), object_before);
+}
+
+#[test]
+fn execution_v1_current_migration_upgrade_no_reseed_or_draft_loss() {
+    let f = Fixture::new();
+    f.store
+        .migrate(&f.ctx, Installation::LegacyUpgrade, b"{}", true, 0)
+        .unwrap();
+    f.store
+        .write(
+            &f.ctx,
+            &req(1, Mutation::SaveBindings(BindingSet::default())),
+            &Access,
+            0,
+        )
+        .unwrap();
+    let before = frozen_v1(&f);
+    assert_eq!(
+        f.store
+            .initialize(&f.ctx, Installation::Fresh, b"{}", true, 1, Some(1))
+            .unwrap_err()
+            .0,
+        "revision_conflict"
+    );
+    assert_eq!(
+        fs::read(f.path.join("brain-bindings.json")).unwrap(),
+        before
+    );
+    assert_eq!(
+        f.store
+            .initialize(&f.ctx, Installation::LegacyUpgrade, b"{}", true, 1, Some(1))
+            .unwrap(),
+        3
+    );
+    let (_, _, a) = f.store.list(&f.ctx).unwrap();
+    let a = a.unwrap();
+    assert!(a.active.default.is_some());
+    assert_eq!(a.draft, BindingSet::default());
+    assert_eq!(
+        f.store.execution_mode(&f.ctx).unwrap(),
+        ExecutionMode::Managed
+    );
+    let bytes = fs::read(f.path.join("brain-bindings.json")).unwrap();
+    assert_eq!(
+        f.store
+            .initialize(&f.ctx, Installation::LegacyUpgrade, b"{}", true, 2, None)
+            .unwrap(),
+        3
+    );
+    assert_eq!(fs::read(f.path.join("brain-bindings.json")).unwrap(), bytes);
+}
+
+#[test]
+fn execution_v1_rejects_unknown_closed_fields_and_corrupt_objects() {
+    for corruption in ["unknown_root", "unknown_account", "object"] {
+        let f = Fixture::new();
+        f.store
+            .migrate(&f.ctx, Installation::LegacyUpgrade, b"{}", true, 0)
+            .unwrap();
+        let mut v: serde_json::Value = serde_json::from_slice(&frozen_v1(&f)).unwrap();
+        match corruption {
+            "unknown_root" => v["extra"] = true.into(),
+            "unknown_account" => v["accounts"][0]["execution_mode"] = "managed".into(),
+            _ => {
+                let r = legacy_seed(&f.ctx, true, 0).unwrap();
+                fs::write(
+                    f.path.join(format!(
+                        "brain-profiles/roles/{}/{}.json",
+                        r.role_id, r.revision_id
+                    )),
+                    b"{}",
+                )
+                .unwrap();
+            }
+        }
+        let bytes = serde_json::to_vec(&v).unwrap();
+        fs::write(f.path.join("brain-bindings.json"), &bytes).unwrap();
+        let other = AccountContext::new("new_account".into()).unwrap();
+        assert!(
+            f.store
+                .initialize(&other, Installation::Fresh, b"{}", true, 1, Some(1))
+                .is_err(),
+            "{corruption}"
+        );
+        assert_eq!(fs::read(f.path.join("brain-bindings.json")).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn execution_initialization_root_faults_and_unknown_schema() {
+    for stage in [
+        "root_create",
+        "root_write",
+        "root_sync",
+        "root_rename",
+        "root_dir_sync",
+    ] {
+        let mut f = Fixture::new();
+        f.store.fail = Some(stage);
+        assert!(
+            f.store
+                .initialize(&f.ctx, Installation::Fresh, b"{}", true, 0, None)
+                .is_err()
+        );
+        f.store.fail = None;
+        let expected = if stage == "root_dir_sync" {
+            ExecutionMode::Managed
+        } else {
+            ExecutionMode::Legacy
+        };
+        assert_eq!(f.store.execution_mode(&f.ctx).unwrap(), expected);
+        assert_eq!(
+            f.store
+                .initialize(&f.ctx, Installation::Fresh, b"{}", true, 1, None)
+                .unwrap(),
+            1
+        );
+    }
+    let f = Fixture::new();
+    assert_eq!(
+        f.store
+            .initialize(&f.ctx, Installation::Fresh, b"{}", true, 0, Some(3))
+            .unwrap_err()
+            .0,
+        "schema_unsupported"
+    );
 }

@@ -3,7 +3,7 @@
   "type": "object",
   "properties": {
     "schema_version": {
-      "const": 1
+      "const": 2
     },
     "generation": {
       "type": "integer",
@@ -215,13 +215,20 @@
               "type": "null"
             }
           ]
+        },
+        "execution_mode": {
+          "enum": [
+            "legacy",
+            "managed"
+          ]
         }
       },
       "required": [
         "account_id",
         "active",
         "draft",
-        "legacy_fallback"
+        "legacy_fallback",
+        "execution_mode"
       ],
       "additionalProperties": false
     },
