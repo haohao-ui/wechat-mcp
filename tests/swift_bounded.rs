@@ -96,7 +96,10 @@ fn save_attachment_preflights_folders_before_any_click() {
     let preflight = body
         .find("preflightFolders(")
         .expect("saveAttachment 必须调用 preflightFolders");
-    let first_click = body.find("rightClick(").expect("rightClick");
+    // The right-click lives in the shared chooseContextMenu; its call is the first click here.
+    let first_click = body
+        .find("chooseContextMenu(")
+        .expect("saveAttachment 通过 chooseContextMenu 右键");
     assert!(preflight < first_click, "文件夹探测必须在右键点击之前");
 }
 
