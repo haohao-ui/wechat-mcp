@@ -383,22 +383,34 @@ final class CaptureWorker {
     /// at 2x and 3x, require exactly one line within edit distance 1 of 「转文字」 at the same place in
     /// both reads, click that row. Anything else clicks nothing (the menu also holds 删除).
     func clickVoiceMenuItem(owner: pid_t, near point: CGPoint) throws -> Bool {
-        let rows=CGWindowListCopyWindowInfo([.optionOnScreenOnly,.excludeDesktopElements],kCGNullWindowID) as? [[String:Any]] ?? []
-        let popups:[(UInt32,CGRect)]=rows.compactMap { row in
-            guard row[kCGWindowOwnerPID as String] as? Int32 == owner, (row[kCGWindowLayer as String] as? Int ?? 0) != 0,
-                  let id=row[kCGWindowNumber as String] as? UInt32, let bounds=row[kCGWindowBounds as String] as? [String:Any],
-                  let rect=CGRect(dictionaryRepresentation:bounds as CFDictionary),
-                  rect.width>20, rect.height>20, rect.width<600, rect.height<900, rect.insetBy(dx:-40,dy:-40).contains(point) else { return nil }
-            return (id,rect)
+        let stamp=Int(Date().timeIntervalSince1970)
+        let directory=base.appendingPathComponent("tmp/menus")
+        try? FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
+        // The menu can take a moment to appear; WeChat may also own other floating windows.
+        for attempt in 0..<6 {
+            if attempt > 0 { pauseUI(0.25) }
+            let rows=CGWindowListCopyWindowInfo([.optionOnScreenOnly,.excludeDesktopElements],kCGNullWindowID) as? [[String:Any]] ?? []
+            let popups:[(UInt32,CGRect,Int)]=rows.compactMap { row in
+                guard row[kCGWindowOwnerPID as String] as? Int32 == owner,
+                      let layer=row[kCGWindowLayer as String] as? Int, layer != 0,
+                      let id=row[kCGWindowNumber as String] as? UInt32, let bounds=row[kCGWindowBounds as String] as? [String:Any],
+                      let rect=CGRect(dictionaryRepresentation:bounds as CFDictionary),
+                      rect.width>20, rect.height>20, rect.width<600, rect.height<900, rect.insetBy(dx:-60,dy:-60).contains(point) else { return nil }
+                return (id,rect,layer)
+            }
+            for (n,(id,rect,layer)) in popups.sorted(by:{ $0.1.width*$0.1.height < $1.1.width*$1.1.height }).enumerated() {
+                let image=try windowImage(["window_id":id])
+                let path=directory.appendingPathComponent("\(stamp)-\(attempt)-\(n)-layer\(layer).png")
+                FileManager.default.createFile(atPath:path.path,contents:nil,attributes:[.posixPermissions:0o600])
+                try? writePNG(image,path:path)
+                guard let row=try voiceTranscribeButton(image,CGRect(x:0,y:0,width:image.width,height:image.height),maxDistanceY:8) else { continue }
+                // Image pixels to screen points; click the whole row around the recognised text.
+                let sy=rect.height/Double(image.height)
+                try act { try botActions.click(CGRect(x:rect.minX+8,y:rect.minY+row.midY*sy-6,width:rect.width-16,height:12)) }
+                return true
+            }
         }
-        guard popups.count==1, let (id,rect)=popups.first else { return false }
-        let image=try windowImage(["window_id":id])
-        let points=CGRect(x:0,y:0,width:image.width,height:image.height)
-        guard let row=try voiceTranscribeButton(image,points,maxDistanceY:8) else { return false }
-        // Image pixels to screen points.
-        let sy=rect.height/Double(image.height)
-        try act { try botActions.click(CGRect(x:rect.minX+8,y:rect.minY+row.midY*sy-6,width:rect.width-16,height:12)) }
-        return true
+        return false
     }
     func keepDiagnosticFrame(_ image: CGImage, snapshot: String) {
         let directory=base.appendingPathComponent("tmp/frames")
