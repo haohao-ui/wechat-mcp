@@ -550,7 +550,7 @@ final class CaptureWorker {
                   let item=(frame["bubbles"] as? [[String:Any]])?.first(where:{ $0["media_id"] as? String==id && $0["kind"] as? String=="file" }),
                   let name=item["filename"] as? String else { throw Failure.invalid("file_snapshot_changed") }
             let ext=URL(fileURLWithPath:name).pathExtension.lowercased()
-            guard ["pdf","txt","md","csv","json","docx","xlsx","png","jpg","jpeg"].contains(ext) else { throw Failure.invalid("unsupported_file_type") }
+            guard ["pdf","txt","md","csv","json","docx","xlsx","xls","png","jpg","jpeg"].contains(ext) else { throw Failure.invalid("unsupported_file_type") }
             let directory=media.appendingPathComponent(id)
             try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
             try checkPrivate(directory,type:.typeDirectory,mode:0o700)

@@ -778,7 +778,7 @@ impl WorkerClient {
         }
 
         let allowed_exts = [
-            "png", "jpg", "jpeg", "pdf", "txt", "md", "csv", "json", "docx", "xlsx",
+            "png", "jpg", "jpeg", "pdf", "txt", "md", "csv", "json", "docx", "xlsx", "xls",
         ];
         if !allowed_exts.contains(&final_ext.as_str()) {
             bail!("unexpected media extension");
