@@ -46,6 +46,9 @@ jobs:
           lipo -create -output "dist/$OUT/wechat-mcp" \
             target/aarch64-apple-darwin/release/wechat-mcp \
             target/x86_64-apple-darwin/release/wechat-mcp
+          lipo -create -output "dist/$OUT/wechat-updater" \
+            target/aarch64-apple-darwin/release/wechat-updater \
+            target/x86_64-apple-darwin/release/wechat-updater
           for t in wechat_ocr wechat_window; do
             swiftc -O -target arm64-apple-macos12 native/$t.swift -o "/tmp/$t-arm64"
             swiftc -O -target x86_64-apple-macos12 native/$t.swift -o "/tmp/$t-x86_64"
