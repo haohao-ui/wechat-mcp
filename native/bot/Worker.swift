@@ -591,20 +591,33 @@ final class CaptureWorker {
                 return all.count > rank ? all[all.count-1-rank] : nil
             }
             let item=first[chosen]
-            if let text=item["transcript"] as? String, !text.isEmpty { return ["transcript":text] }
+            _ = item  // an existing transcript may still be loading: settled below, never clicked again
             // Several voices in a row: converting the first converts the following ones by itself
             // (user, 2026-11-10). After an earlier voice of this batch, wait read-only before clicking.
             let awaitSeconds=min(20.0,max(0.0,params["await_seconds"] as? Double ?? Double(params["await_seconds"] as? Int ?? 0)))
-            var waited=0.0
-            while waited < awaitSeconds {
-                pauseUI(0.5); waited += 0.5
-                if let text=voice(try capture(recipient,accepted:accepted,manage:manage))?["transcript"] as? String, !text.isEmpty {
-                    return ["transcript":text,"converted_by":"chain"]
+            // WeChat first shows a loading glyph in the transcript bubble (OCR read it as "Q"), then the
+            // text: a transcript counts only once it has stayed the same for 2 seconds.
+            func settledTranscript(within seconds: Double) throws -> String? {
+                var last="", since=0.0, waited=0.0
+                while waited < seconds {
+                    pauseUI(0.5); waited += 0.5
+                    let text=(voice(try capture(recipient,accepted:accepted,manage:manage))?["transcript"] as? String ?? "")
+                        .trimmingCharacters(in:.whitespacesAndNewlines)
+                    if text != last { last=text; since=waited; continue }
+                    if !text.isEmpty && waited-since >= 2.0 { return text }
                 }
+                return nil
+            }
+            if awaitSeconds > 0, let text=try settledTranscript(within:awaitSeconds+2) {
+                return ["transcript":text,"converted_by":"chain"]
             }
             // Re-read the position: an earlier transcript may have moved this voice.
             guard let current=voice(try capture(recipient,accepted:accepted,manage:manage)) else { throw Failure.invalid("voice_snapshot_changed") }
-            if let text=current["transcript"] as? String, !text.isEmpty { return ["transcript":text,"converted_by":"chain"] }
+            if let text=current["transcript"] as? String, !text.isEmpty {
+                // Already converting or converted: never click again, wait for the settled text.
+                if let settled=try settledTranscript(within:20) { return ["transcript":settled,"converted_by":"chain"] }
+                throw Failure.invalid("voice_transcript_timeout")
+            }
             guard let bx=current["x"] as? Int,let by=current["y"] as? Int,let bw=current["width"] as? Int,let bh=current["height"] as? Int else { throw Failure.invalid("voice_geometry_missing") }
             let window=try readyWindow(manage:manage).window
             try screenGate(window)
@@ -623,13 +636,8 @@ final class CaptureWorker {
                 let bubble=CGRect(x:wx+chat.minX+Double(bx),y:wy+chat.minY+Double(by),width:Double(bw),height:Double(bh))
                 try chooseContextMenu(bubble,menu:"transcribe",app:app)
             }
-            // Transcription takes a moment; poll read-only for the transcript bubble.
-            for _ in 0..<24 {
-                pauseUI(0.5)
-                if let text=voice(try capture(recipient,accepted:accepted,manage:manage))?["transcript"] as? String, !text.isEmpty {
-                    return ["transcript":text]
-                }
-            }
+            // Transcription takes a moment; poll read-only until the transcript settles.
+            if let text=try settledTranscript(within:20) { return ["transcript":text] }
             throw Failure.invalid("voice_transcript_timeout")
         }
         if operation == "prepare_image" {
