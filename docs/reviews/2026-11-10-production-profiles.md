@@ -124,12 +124,19 @@
 
 ### 实际测试命令与回归记录
 
+今后测试命令规范：必须同时给出**默认并行**与 `--test-threads=1` 单线程的执行命令与结果，避免进程级全局统计（如全局 `/dev/fd` 数量）掩盖并发测试干扰。
+
 | 命令 | 退出码 | 结果 |
 | --- | ---: | --- |
-| cargo test --locked --bin wechat-mcp brain_profiles -- --test-threads=1 | 0 | **40 通过、0 失败、0 ignored**；旧 33 项全部回归通过，新增 7 项测试全部 GREEN |
+| cargo test --locked --bins -- brain_profiles（默认并行，连续 5 次） | 0 | 连续 5 次均为 **40 通过、0 失败、0 ignored**；`cas_error_releases_locks_and_file_descriptors` 不再受并行线程干扰 |
+| cargo test --locked --bins -- brain_profiles -- --test-threads=1 | 0 | **40 通过、0 失败、0 ignored**；旧 33 项全部回归通过，新增 7 项测试全部 GREEN |
+| cargo fmt --check | 0 | 格式完全合规 |
+| cargo clippy --bin wechat-mcp --tests | 0 | 通过 |
+| bash scripts/test-gates.sh | 0 | 静态门禁全部 PASS |
 | git diff --check | 0 | 无空白错误 |
 
-40 项测试覆盖：
+- **描述符泄漏断言修复**：`cas_error_releases_locks_and_file_descriptors` 原实现使用进程全局 `fs::read_dir("/dev/fd").count()`，并发跑其它测试时会因其它线程并发打开文件而误报 leak。修复后通过遍历 `/dev/fd` 并通过 `libc::fcntl(fd, libc::F_GETPATH, ...)`（macOS）与 `readlink`（Linux）精确只统计解析到当前 Store 专属 `f.path` 目录的描述符，杜绝跨测试干扰，且真实保留了 30 次注入故障后的描述符泄漏防护断言。
+- 40 项测试覆盖：
 - `execution_fresh_managed_without_seed_and_repeat`：初始 Legacy、Fresh Managed、无种子 role_required、重复初始化幂等、缺席账号 Legacy。
 - `execution_drafts_stay_legacy_activate_and_rollback_manage`：草稿保持 Legacy、已有草稿拒 Fresh/Upgrade 冲突、Activate 切 Managed、Rollback 保持 Managed。
 - `execution_legacy_initialize_repeat_checks_source_and_reachable_objects`：LegacyUpgrade 重复校验配置 hash、对象损坏后重复调用拦截报错。
