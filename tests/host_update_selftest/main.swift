@@ -350,17 +350,102 @@ func runTests() -> Int32 {
         print("--- Running Real Rust Control + Swift Client Contract Tests ---")
         let realClient = UpdateClient(configPath: realCfg)
         
-        // 10.1 真实 update-status 调用
+        var stateDirPath: String? = nil
+        if let cfgData = try? Data(contentsOf: URL(fileURLWithPath: realCfg)),
+           let cfgObj = try? JSONSerialization.jsonObject(with: cfgData) as? [String: Any],
+           let sDir = cfgObj["state_dir"] as? String {
+            stateDirPath = sDir
+        }
+
+        // 10.1 真实 update-status 调用：releaseId/sequence=null 显示整套未知，core_version 独立
         do {
             let status = try realClient.fetchStatus()
             check("real_control_update_status_success", true)
-            check("real_control_status_transaction_idle", status.transaction.status == .idle || status.transaction.status == .recoveryRequired)
-            print("Real status architecture: \(status.currentRelease.architecture), maintenance: \(status.guardInfo.maintenanceActive)")
+            check("real_control_release_id_null", status.currentRelease.releaseId == nil)
+            check("real_control_sequence_null", status.currentRelease.sequence == nil)
+            check("real_control_release_desc_unknown", status.currentRelease.userFacingReleaseDescription == "整套版本无法核验 (未知)")
+            check("real_control_core_version_independent", status.currentRelease.coreVersion != nil && !status.currentRelease.coreVersion!.isEmpty)
+            check("real_control_core_desc_independent", status.currentRelease.userFacingCoreVersionDescription.contains("核心编译版"))
+            check("real_control_seq_desc_unknown", status.currentRelease.userFacingSequenceDescription == "未知 (未标记)")
+            check("real_control_trust_desc_untrusted", status.currentRelease.userFacingTrustDescription.contains("不可信"))
+            check("real_control_not_trusted", status.currentRelease.isTrustedInstalledRelease == false)
+            check("real_control_status_transaction_idle", status.transaction.status == .idle)
+            print("Real status core_version: \(status.currentRelease.coreVersion ?? "nil"), arch: \(status.currentRelease.architecture)")
         } catch {
             check("real_control_update_status_success", false, "Real status failed: \(error.localizedDescription)")
         }
 
-        // 10.2 真实 update-check 调用（未配置源）
+        // 10.2 guard 高水位 1001 隔离测试：不回填安装 sequence，releaseId 仍为 null
+        if let sDir = stateDirPath {
+            let seqFile = URL(fileURLWithPath: sDir).appendingPathComponent("highest_accepted_sequence")
+            try? "1001\n".write(to: seqFile, atomically: true, encoding: .utf8)
+
+            do {
+                let status1001 = try realClient.fetchStatus()
+                check("real_control_guard_highest_seq_1001", status1001.guardInfo.highestAcceptedSequence == 1001)
+                check("real_control_guard_seq_not_leak_to_installed_seq", status1001.currentRelease.sequence == nil)
+                check("real_control_guard_seq_not_leak_to_release_id", status1001.currentRelease.releaseId == nil)
+                check("real_control_guard_desc_anti_downgrade", status1001.guardInfo.userFacingGuardDescription.contains("防降级高水位"))
+            } catch {
+                check("real_control_guard_highest_seq_1001", false, "Failed fetchStatus with guard sequence: \(error)")
+            }
+            try? FileManager.default.removeItem(at: seqFile)
+        }
+
+        // 10.3 坏 journal / sequence 测试：显示恢复所需且未知来源不默认正常
+        if let sDir = stateDirPath {
+            // 坏 sequence 文件
+            let seqFile = URL(fileURLWithPath: sDir).appendingPathComponent("highest_accepted_sequence")
+            try? "corrupt_not_u64\n".write(to: seqFile, atomically: true, encoding: .utf8)
+
+            do {
+                let statusCorruptSeq = try realClient.fetchStatus()
+                check("real_control_corrupt_seq_recovery_required", statusCorruptSeq.transaction.status == .recoveryRequired && statusCorruptSeq.transaction.recoveryRequired)
+                check("real_control_corrupt_seq_err_message", statusCorruptSeq.transaction.error?.contains("corrupt_sequence_file") == true)
+                check("real_control_corrupt_seq_not_trusted", statusCorruptSeq.currentRelease.isTrustedInstalledRelease == false)
+                check("real_control_corrupt_seq_trust_desc", statusCorruptSeq.currentRelease.userFacingTrustDescription.contains("不可信"))
+            } catch {
+                check("real_control_corrupt_seq_recovery_required", false, "Failed fetchStatus with corrupt seq: \(error)")
+            }
+            try? FileManager.default.removeItem(at: seqFile)
+
+            // 坏 journal 文件 (update-journal.json)
+            let jFile = URL(fileURLWithPath: sDir).appendingPathComponent("update-journal.json")
+            try? "{broken_json_content".write(to: jFile, atomically: true, encoding: .utf8)
+
+            do {
+                let statusCorruptJournal = try realClient.fetchStatus()
+                check("real_control_corrupt_journal_recovery_required", statusCorruptJournal.transaction.status == .recoveryRequired && statusCorruptJournal.transaction.recoveryRequired)
+                check("real_control_corrupt_journal_err_message", statusCorruptJournal.transaction.error?.contains("corrupt_or_unreadable_journal") == true)
+                check("real_control_corrupt_journal_trust_desc", statusCorruptJournal.currentRelease.userFacingTrustDescription.contains("不可信"))
+            } catch {
+                check("real_control_corrupt_journal_recovery_required", false, "Failed fetchStatus with corrupt journal: \(error)")
+            }
+            try? FileManager.default.removeItem(at: jFile)
+        }
+
+        // 10.4 伪造 VERSION 文件测试：不改变当前版本，不冒充整套发布包
+        if let sDir = stateDirPath {
+            let stateVer = URL(fileURLWithPath: sDir).appendingPathComponent("VERSION")
+            let parentVer = URL(fileURLWithPath: sDir).deletingLastPathComponent().appendingPathComponent("VERSION")
+            try? "8.8.8\n".write(to: stateVer, atomically: true, encoding: .utf8)
+            try? "9.9.9\n".write(to: parentVer, atomically: true, encoding: .utf8)
+
+            do {
+                let statusFakeVer = try realClient.fetchStatus()
+                check("real_control_fake_ver_release_id_stays_nil", statusFakeVer.currentRelease.releaseId == nil)
+                check("real_control_fake_ver_seq_stays_nil", statusFakeVer.currentRelease.sequence == nil)
+                check("real_control_fake_ver_release_desc_unknown", statusFakeVer.currentRelease.userFacingReleaseDescription == "整套版本无法核验 (未知)")
+                check("real_control_fake_ver_not_used_in_core", statusFakeVer.currentRelease.coreVersion != "8.8.8" && statusFakeVer.currentRelease.coreVersion != "9.9.9")
+            } catch {
+                check("real_control_fake_ver_release_id_stays_nil", false, "Failed fetchStatus with fake VERSION: \(error)")
+            }
+
+            try? FileManager.default.removeItem(at: stateVer)
+            try? FileManager.default.removeItem(at: parentVer)
+        }
+
+        // 10.5 真实 update-check 调用（未配置源）
         do {
             let checkRes = try realClient.checkUpdate()
             check("real_control_update_check_unconfigured", checkRes.status == .unconfigured)

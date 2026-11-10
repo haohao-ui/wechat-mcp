@@ -107,9 +107,11 @@ fn test_swift_update_ui_selftest() {
         "host": "local",
         "account_id": "update_contract_test_acct",
         "state_dir": state_dir.to_str().unwrap(),
-        "allowlist": []
+        "allowlist": [{"recipient": "测试联系人", "kind": "private"}]
     });
     std::fs::write(&cfg_path, cfg_json.to_string()).expect("write config.json");
+    std::fs::set_permissions(&cfg_path, std::fs::Permissions::from_mode(0o600))
+        .expect("chmod config.json");
 
     let wechat_mcp_bin = root.join("target").join("debug").join("wechat-mcp");
 
