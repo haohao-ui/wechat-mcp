@@ -363,9 +363,20 @@ public struct BrainRoleEntry: Codable, Equatable {
         self.roleId = roleId
         self.draftRevisionId = draftRevisionId
         self.activeRevisionId = activeRevisionId
-        self.name = name
+        self.name = name.isEmpty ? roleId : name
         self.archived = archived
         self.activeBindingCount = activeBindingCount
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.roleId = try container.decode(String.self, forKey: .roleId)
+        self.draftRevisionId = try container.decode(String.self, forKey: .draftRevisionId)
+        self.activeRevisionId = try container.decodeIfPresent(String.self, forKey: .activeRevisionId)
+        let decodedName = try container.decodeIfPresent(String.self, forKey: .name)
+        self.name = (decodedName != nil && !decodedName!.isEmpty) ? decodedName! : roleId
+        self.archived = (try? container.decodeIfPresent(Bool.self, forKey: .archived)) ?? false
+        self.activeBindingCount = (try? container.decodeIfPresent(Int.self, forKey: .activeBindingCount)) ?? 0
     }
 
     public var hasDraftChanges: Bool {
@@ -417,6 +428,31 @@ public struct BrainBindingSet: Codable, Equatable {
         }
         try container.encode(overrides, forKey: .overrides)
     }
+}
+
+public struct BrainAllowlistContact: Codable, Equatable {
+    public var contactId: String
+    public var displayName: String
+    public var chatKind: String
+
+    enum CodingKeys: String, CodingKey {
+        case contactId = "contact_id"
+        case displayName = "display_name"
+        case chatKind = "chat_kind"
+    }
+
+    public init(contactId: String, displayName: String, chatKind: String = "private") {
+        self.contactId = contactId
+        self.displayName = displayName
+        self.chatKind = chatKind
+    }
+}
+
+public enum BrainBindingError: Error, Equatable {
+    case notInAllowlist
+    case duplicateContact
+    case overrideNotFound
+    case invalidRole
 }
 
 public struct BrainModelSummary: Codable, Equatable {
@@ -630,14 +666,19 @@ public struct BrainPageLogic {
             throw NSError(domain: "BrainPage", code: 1, userInfo: [NSLocalizedDescriptionKey: "无效 UTF8 字符串"])
         }
         let decoder = JSONDecoder()
-        if let resp = try? decoder.decode(BrainControlResponse<BrainListPayload>.self, from: data) {
+        do {
+            let resp = try decoder.decode(BrainControlResponse<BrainListPayload>.self, from: data)
             guard resp.ok, let payload = resp.data else {
                 let msg = resp.error?.message ?? "获取大脑配置失败"
                 throw NSError(domain: "BrainPage", code: 2, userInfo: [NSLocalizedDescriptionKey: msg])
             }
             return payload
+        } catch {
+            if let direct = try? decoder.decode(BrainListPayload.self, from: data) {
+                return direct
+            }
+            throw error
         }
-        return try decoder.decode(BrainListPayload.self, from: data)
     }
 
     public static func parsePreviewResult(jsonString: String) throws -> BrainPreviewResult {
@@ -688,6 +729,72 @@ public struct BrainPageLogic {
         }
         return true
     }
+
+    public static func setDefaultRole(in bindings: BrainBindingSet, roleId: String, revisionId: String) -> BrainBindingSet {
+        var copy = bindings
+        copy.defaultRef = BrainRoleRef(roleId: roleId, revisionId: revisionId)
+        return copy
+    }
+
+    public static func addOverride(
+        to bindings: BrainBindingSet,
+        contact: BrainAllowlistContact,
+        roleId: String,
+        revisionId: String,
+        allowlist: [BrainAllowlistContact]
+    ) -> Result<BrainBindingSet, BrainBindingError> {
+        let isAllowed = allowlist.contains {
+            $0.contactId == contact.contactId && ($0.chatKind == contact.chatKind || contact.chatKind.isEmpty)
+        }
+        guard isAllowed else {
+            return .failure(.notInAllowlist)
+        }
+        guard !bindings.overrides.contains(where: { $0.contactId == contact.contactId }) else {
+            return .failure(.duplicateContact)
+        }
+        var copy = bindings
+        copy.overrides.append(BrainOverride(
+            contactId: contact.contactId,
+            chatKind: contact.chatKind,
+            roleId: roleId,
+            revisionId: revisionId
+        ))
+        return .success(copy)
+    }
+
+    public static func updateOverride(
+        in bindings: BrainBindingSet,
+        contactId: String,
+        newRoleId: String,
+        newRevisionId: String
+    ) -> Result<BrainBindingSet, BrainBindingError> {
+        guard let idx = bindings.overrides.firstIndex(where: { $0.contactId == contactId }) else {
+            return .failure(.overrideNotFound)
+        }
+        var copy = bindings
+        let old = copy.overrides[idx]
+        copy.overrides[idx] = BrainOverride(
+            contactId: old.contactId,
+            chatKind: old.chatKind,
+            roleId: newRoleId,
+            revisionId: newRevisionId
+        )
+        return .success(copy)
+    }
+
+    public static func deleteOverride(from bindings: BrainBindingSet, contactId: String) -> BrainBindingSet {
+        var copy = bindings
+        copy.overrides.removeAll(where: { $0.contactId == contactId })
+        return copy
+    }
+
+    public static func handleBindingsConflict(
+        localDraft: BrainBindingSet,
+        error: BrainControlError
+    ) -> (preservedBindings: BrainBindingSet, errorMessage: String) {
+        let msg = "保存绑定冲突 [\(error.code)]：\(error.message)。已保留您当前未提交的绑定草稿与表单，请稍后重试。"
+        return (preservedBindings: localDraft, errorMessage: msg)
+    }
 }
 
 // MARK: - BrainClient
@@ -697,6 +804,10 @@ public final class BrainClient {
 
     private let configPath: String
     private let executor: CommandExecutor
+
+    public func getConfigPath() -> String {
+        return configPath
+    }
 
     public init(configPath: String? = nil, executor: @escaping CommandExecutor = runControlCommand) {
         self.configPath = configPath ?? (FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".WeChatRPABot/config.json").path)
@@ -961,8 +1072,20 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     private let unreadableLargeField = NSTextField()
 
     // Form Inputs - Bindings
+    public private(set) var currentDraftBindings: BrainBindingSet = BrainBindingSet()
+    public private(set) var hasUnsavedBindingsChanges: Bool = false
+    public private(set) var allowlistContacts: [BrainAllowlistContact] = []
+
     private let defaultRolePopup = NSPopUpButton()
     private let overridesSummaryLabel = NSTextField(wrappingLabelWithString: "暂无特定联系人覆盖")
+    private let overridesTableView = NSTableView()
+    private let overrideContactPopup = NSPopUpButton()
+    private let overrideRolePopup = NSPopUpButton()
+    private let addOverrideButton = NSButton(title: "添加覆盖", target: nil, action: nil)
+    private let updateOverrideButton = NSButton(title: "更新选定覆盖", target: nil, action: nil)
+    private let deleteOverrideButton = NSButton(title: "删除选定覆盖", target: nil, action: nil)
+    private let saveBindingsDraftButton = NSButton(title: "保存绑定草稿", target: nil, action: nil)
+    private let bindingsStatusLabel = NSTextField(wrappingLabelWithString: "")
 
     // Form Inputs - Version & Action
     private let saveDraftButton = NSButton(title: "保存草稿", target: nil, action: nil)
@@ -1357,46 +1480,129 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 12
+        stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let intro = NSTextField(wrappingLabelWithString: "账号与联系人绑定。联系人唯一来源为白名单，本处仅引用不复制联系人清单。")
+        let intro = NSTextField(wrappingLabelWithString: "账号与联系人绑定。联系人唯一来源为白名单，本处仅引用不复制联系人清单；修改仅暂存为草稿，点击「保存绑定草稿」通过 CAS 校验后落盘；启用配置后在下一轮对话生效。")
         intro.font = NSFont.systemFont(ofSize: 12)
         intro.textColor = .secondaryLabelColor
         intro.maximumNumberOfLines = 0
         intro.lineBreakMode = .byWordWrapping
-        intro.preferredMaxLayoutWidth = 480
+        intro.preferredMaxLayoutWidth = 460
         stack.addArrangedSubview(intro)
 
-        defaultRolePopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
+        defaultRolePopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
+        defaultRolePopup.target = self
+        defaultRolePopup.action = #selector(handleDefaultRoleChanged)
         let defaultRow = NSStackView(views: [NSTextField(labelWithString: "账号默认角色:"), defaultRolePopup])
         defaultRow.alignment = .centerY
         defaultRow.spacing = 8
         stack.addArrangedSubview(defaultRow)
 
+        // 覆盖规则管理框 (包含列表表格、白名单下拉框、角色下拉框、增删改按钮与草稿保存)
         let ovBox = NSBox()
-        ovBox.title = "特定联系人覆盖规则"
+        ovBox.title = "特定联系人 / 群覆盖规则 (白名单唯一来源)"
         let ovStack = NSStackView()
         ovStack.orientation = .vertical
         ovStack.alignment = .leading
-        ovStack.spacing = 6
+        ovStack.spacing = 8
 
-        overridesSummaryLabel.font = NSFont.systemFont(ofSize: 12)
+        // 覆盖规则表格
+        overridesTableView.delegate = self
+        overridesTableView.dataSource = self
+        overridesTableView.headerView = NSTableHeaderView()
+
+        let colContact = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("col_contact"))
+        colContact.title = "联系人/群 (白名单)"
+        colContact.width = 140
+
+        let colKind = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("col_kind"))
+        colKind.title = "类型"
+        colKind.width = 60
+
+        let colRole = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("col_role"))
+        colRole.title = "绑定角色"
+        colRole.width = 140
+
+        let colRev = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("col_rev"))
+        colRev.title = "版本"
+        colRev.width = 70
+
+        overridesTableView.addTableColumn(colContact)
+        overridesTableView.addTableColumn(colKind)
+        overridesTableView.addTableColumn(colRole)
+        overridesTableView.addTableColumn(colRev)
+
+        let scroll = NSScrollView()
+        scroll.documentView = overridesTableView
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.heightAnchor.constraint(equalToConstant: 100).isActive = true
+        scroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 440).isActive = true
+        ovStack.addArrangedSubview(scroll)
+
+        // 表单输入区：选择白名单联系人 + 选择角色
+        overrideContactPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 160).isActive = true
+        overrideRolePopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
+        let formRow1 = NSStackView(views: [
+            NSTextField(labelWithString: "白名单联系人:"),
+            overrideContactPopup,
+            NSTextField(labelWithString: "角色:"),
+            overrideRolePopup
+        ])
+        formRow1.alignment = .centerY
+        formRow1.spacing = 6
+        ovStack.addArrangedSubview(formRow1)
+
+        // 按钮行：添加、更新、删除
+        addOverrideButton.target = self
+        addOverrideButton.action = #selector(handleAddOverride)
+        updateOverrideButton.target = self
+        updateOverrideButton.action = #selector(handleUpdateOverride)
+        deleteOverrideButton.target = self
+        deleteOverrideButton.action = #selector(handleDeleteOverride)
+
+        let btnRow = NSStackView(views: [
+            addOverrideButton,
+            updateOverrideButton,
+            deleteOverrideButton
+        ])
+        btnRow.alignment = .centerY
+        btnRow.spacing = 8
+        ovStack.addArrangedSubview(btnRow)
+
+        // 只读摘要保留（展示当前所有生效或草稿覆盖）
+        overridesSummaryLabel.font = NSFont.systemFont(ofSize: 11)
+        overridesSummaryLabel.textColor = .secondaryLabelColor
         overridesSummaryLabel.maximumNumberOfLines = 0
         overridesSummaryLabel.lineBreakMode = .byWordWrapping
         overridesSummaryLabel.preferredMaxLayoutWidth = 460
         ovStack.addArrangedSubview(overridesSummaryLabel)
 
         ovBox.setContent(ovStack, inset: 8)
-        ovBox.widthAnchor.constraint(equalToConstant: 480).isActive = true
+        ovBox.translatesAutoresizingMaskIntoConstraints = false
         stack.addArrangedSubview(ovBox)
+
+        // 保存绑定草稿行
+        saveBindingsDraftButton.target = self
+        saveBindingsDraftButton.action = #selector(handleSaveBindingsDraft)
+        bindingsStatusLabel.font = NSFont.systemFont(ofSize: 11)
+        bindingsStatusLabel.maximumNumberOfLines = 0
+        bindingsStatusLabel.lineBreakMode = .byWordWrapping
+        bindingsStatusLabel.preferredMaxLayoutWidth = 450
+
+        let saveRow = NSStackView(views: [saveBindingsDraftButton, bindingsStatusLabel])
+        saveRow.alignment = .centerY
+        saveRow.spacing = 10
+        stack.addArrangedSubview(saveRow)
 
         bindingsView.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: bindingsView.topAnchor),
             stack.leadingAnchor.constraint(equalTo: bindingsView.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: bindingsView.trailingAnchor),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: bindingsView.bottomAnchor)
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: bindingsView.bottomAnchor),
+            ovBox.widthAnchor.constraint(lessThanOrEqualTo: bindingsView.widthAnchor, constant: -8)
         ])
     }
 
@@ -1571,8 +1777,11 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             defaultRolePopup.lastItem?.representedObject = role.roleId
         }
 
-        let currentBindings = payload.draft ?? payload.active
-        if let defaultRoleId = currentBindings?.defaultRef?.roleId {
+        if !hasUnsavedBindingsChanges {
+            currentDraftBindings = payload.draft ?? payload.active ?? BrainBindingSet(defaultRef: nil, overrides: [])
+        }
+
+        if let defaultRoleId = currentDraftBindings.defaultRef?.roleId {
             for (index, item) in defaultRolePopup.itemArray.enumerated() {
                 if (item.representedObject as? String) == defaultRoleId || item.title.contains(defaultRoleId) {
                     defaultRolePopup.selectItem(at: index)
@@ -1581,16 +1790,259 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             }
         }
 
-        if let overrides = currentBindings?.overrides, !overrides.isEmpty {
+        overrideRolePopup.removeAllItems()
+        for role in payload.roles {
+            let title = "\(role.name) [\(role.draftRevisionId)]"
+            overrideRolePopup.addItem(withTitle: title)
+            overrideRolePopup.lastItem?.representedObject = role.roleId
+        }
+
+        reloadAllowlistContacts()
+        overrideContactPopup.removeAllItems()
+        for c in allowlistContacts {
+            let kindStr = c.chatKind == "group" ? "群聊" : "私聊"
+            let title = "\(c.displayName) (\(c.contactId), \(kindStr))"
+            overrideContactPopup.addItem(withTitle: title)
+            overrideContactPopup.lastItem?.representedObject = c.contactId
+        }
+
+        updateOverridesListUI()
+    }
+
+    private func updateOverridesListUI() {
+        overridesTableView.reloadData()
+
+        if !currentDraftBindings.overrides.isEmpty {
             var lines: [String] = []
-            for ov in overrides {
-                let roleName = payload.roles.first(where: { $0.roleId == ov.roleId })?.name ?? ov.roleId
+            for ov in currentDraftBindings.overrides {
+                let roleName = listPayload?.roles.first(where: { $0.roleId == ov.roleId })?.name ?? ov.roleId
                 let kindStr = ov.chatKind == "group" ? "群聊" : "私聊"
                 lines.append("• 联系人: \(ov.contactId) [\(kindStr)] ➔ \(roleName) (\(ov.roleId)) [版本: \(ov.revisionId)]")
             }
             overridesSummaryLabel.stringValue = lines.joined(separator: "\n")
         } else {
             overridesSummaryLabel.stringValue = "暂无特定联系人覆盖（所有联系人均使用默认角色）"
+        }
+    }
+
+    private func reloadAllowlistContacts() {
+        if !allowlistContacts.isEmpty { return }
+        var list: [BrainAllowlistContact] = []
+        let path = client.getConfigPath()
+        if FileManager.default.fileExists(atPath: path),
+           let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let rawAllows = obj["allowlist"] as? [[String: Any]] {
+            for item in rawAllows {
+                if let name = item["recipient"] as? String {
+                    let kind = (item["kind"] as? String) ?? "private"
+                    list.append(BrainAllowlistContact(contactId: name, displayName: name, chatKind: kind))
+                }
+            }
+        }
+        let currentOverrides = listPayload?.draft?.overrides ?? listPayload?.active?.overrides ?? []
+        for ov in currentOverrides {
+            if !list.contains(where: { $0.contactId == ov.contactId }) {
+                list.append(BrainAllowlistContact(contactId: ov.contactId, displayName: ov.contactId, chatKind: ov.chatKind))
+            }
+        }
+        self.allowlistContacts = list
+    }
+
+    // MARK: - Bindings Form Actions & Fixtures
+
+    public func setAllowlistContacts(_ contacts: [BrainAllowlistContact]) {
+        self.allowlistContacts = contacts
+        updateBindingsUI()
+    }
+
+    public func addOverrideDraft(contact: BrainAllowlistContact, roleId: String, revisionId: String) {
+        if !allowlistContacts.contains(where: { $0.contactId == contact.contactId }) {
+            allowlistContacts.append(contact)
+        }
+        let res = BrainPageLogic.addOverride(to: currentDraftBindings, contact: contact, roleId: roleId, revisionId: revisionId, allowlist: allowlistContacts)
+        if case .success(let b) = res {
+            currentDraftBindings = b
+            hasUnsavedBindingsChanges = true
+            updateOverridesListUI()
+        }
+    }
+
+    public func updateOverrideDraft(contactId: String, roleId: String, revisionId: String) {
+        let res = BrainPageLogic.updateOverride(in: currentDraftBindings, contactId: contactId, newRoleId: roleId, newRevisionId: revisionId)
+        if case .success(let b) = res {
+            currentDraftBindings = b
+            hasUnsavedBindingsChanges = true
+            updateOverridesListUI()
+        }
+    }
+
+    public func deleteOverrideDraft(contactId: String) {
+        currentDraftBindings = BrainPageLogic.deleteOverride(from: currentDraftBindings, contactId: contactId)
+        hasUnsavedBindingsChanges = true
+        updateOverridesListUI()
+    }
+
+    public func selectDefaultRoleDraft(roleId: String) {
+        guard let payload = listPayload, let role = payload.roles.first(where: { $0.roleId == roleId }) else { return }
+        currentDraftBindings = BrainPageLogic.setDefaultRole(in: currentDraftBindings, roleId: roleId, revisionId: role.draftRevisionId)
+        hasUnsavedBindingsChanges = true
+        updateBindingsUI()
+    }
+
+    public func setBindingsConflictFixture(message: String) {
+        bindingsStatusLabel.stringValue = message
+        bindingsStatusLabel.textColor = .systemRed
+    }
+
+    @objc private func handleDefaultRoleChanged() {
+        guard let selectedRoleId = defaultRolePopup.selectedItem?.representedObject as? String,
+              let payload = listPayload,
+              let roleEntry = payload.roles.first(where: { $0.roleId == selectedRoleId }) else { return }
+        let rev = roleEntry.draftRevisionId
+        currentDraftBindings = BrainPageLogic.setDefaultRole(in: currentDraftBindings, roleId: selectedRoleId, revisionId: rev)
+        hasUnsavedBindingsChanges = true
+        bindingsStatusLabel.stringValue = "默认角色草稿已选择为「\(roleEntry.name)」，待点击「保存绑定草稿」"
+        bindingsStatusLabel.textColor = .labelColor
+        updateOverridesListUI()
+    }
+
+    private func selectedAllowlistContactFromPopup() -> BrainAllowlistContact? {
+        guard let contactId = overrideContactPopup.selectedItem?.representedObject as? String else {
+            return nil
+        }
+        return allowlistContacts.first(where: { $0.contactId == contactId })
+    }
+
+    private func selectedRoleRefFromOverridePopup() -> BrainRoleRef? {
+        guard let roleId = overrideRolePopup.selectedItem?.representedObject as? String,
+              let payload = listPayload,
+              let role = payload.roles.first(where: { $0.roleId == roleId }) else {
+            return nil
+        }
+        return BrainRoleRef(roleId: roleId, revisionId: role.draftRevisionId)
+    }
+
+    @objc private func handleAddOverride() {
+        guard let contact = selectedAllowlistContactFromPopup() else {
+            bindingsStatusLabel.stringValue = "添加失败：请先选择合法的白名单联系人"
+            bindingsStatusLabel.textColor = .systemRed
+            return
+        }
+        guard let roleRef = selectedRoleRefFromOverridePopup() else {
+            bindingsStatusLabel.stringValue = "添加失败：请选择有效的角色"
+            bindingsStatusLabel.textColor = .systemRed
+            return
+        }
+        let res = BrainPageLogic.addOverride(
+            to: currentDraftBindings,
+            contact: contact,
+            roleId: roleRef.roleId,
+            revisionId: roleRef.revisionId,
+            allowlist: allowlistContacts
+        )
+        switch res {
+        case .success(let newBindings):
+            currentDraftBindings = newBindings
+            hasUnsavedBindingsChanges = true
+            bindingsStatusLabel.stringValue = "已添加针对「\(contact.displayName)」的覆盖规则草稿，待保存"
+            bindingsStatusLabel.textColor = .labelColor
+            updateOverridesListUI()
+        case .failure(let err):
+            switch err {
+            case .duplicateContact:
+                bindingsStatusLabel.stringValue = "添加失败：联系人「\(contact.displayName)」已存在覆盖规则，可直接编辑"
+            case .notInAllowlist:
+                bindingsStatusLabel.stringValue = "添加失败：联系人必须源自真实白名单，禁止凭姓名构造ID"
+            default:
+                bindingsStatusLabel.stringValue = "添加覆盖失败"
+            }
+            bindingsStatusLabel.textColor = .systemRed
+        }
+    }
+
+    @objc private func handleUpdateOverride() {
+        guard let contact = selectedAllowlistContactFromPopup() else {
+            bindingsStatusLabel.stringValue = "更新失败：请选择要更新的白名单联系人"
+            bindingsStatusLabel.textColor = .systemRed
+            return
+        }
+        guard let roleRef = selectedRoleRefFromOverridePopup() else {
+            bindingsStatusLabel.stringValue = "更新失败：请选择有效的角色"
+            bindingsStatusLabel.textColor = .systemRed
+            return
+        }
+        let res = BrainPageLogic.updateOverride(
+            in: currentDraftBindings,
+            contactId: contact.contactId,
+            newRoleId: roleRef.roleId,
+            newRevisionId: roleRef.revisionId
+        )
+        switch res {
+        case .success(let newBindings):
+            currentDraftBindings = newBindings
+            hasUnsavedBindingsChanges = true
+            bindingsStatusLabel.stringValue = "已更新针对「\(contact.displayName)」的覆盖规则草稿，待保存"
+            bindingsStatusLabel.textColor = .labelColor
+            updateOverridesListUI()
+        case .failure:
+            bindingsStatusLabel.stringValue = "更新失败：未找到对应的覆盖规则，请先点击「添加覆盖」"
+            bindingsStatusLabel.textColor = .systemRed
+        }
+    }
+
+    @objc private func handleDeleteOverride() {
+        let contactIdToDelete: String?
+        if let contact = selectedAllowlistContactFromPopup() {
+            contactIdToDelete = contact.contactId
+        } else {
+            let row = overridesTableView.selectedRow
+            if row >= 0 && row < currentDraftBindings.overrides.count {
+                contactIdToDelete = currentDraftBindings.overrides[row].contactId
+            } else {
+                contactIdToDelete = nil
+            }
+        }
+        guard let cid = contactIdToDelete else {
+            bindingsStatusLabel.stringValue = "删除失败：请在表格中或下拉框中选择要删除的覆盖规则"
+            bindingsStatusLabel.textColor = .systemRed
+            return
+        }
+        currentDraftBindings = BrainPageLogic.deleteOverride(from: currentDraftBindings, contactId: cid)
+        hasUnsavedBindingsChanges = true
+        bindingsStatusLabel.stringValue = "已从草稿中删除覆盖规则 [\(cid)]，待点击「保存绑定草稿」"
+        bindingsStatusLabel.textColor = .labelColor
+        updateOverridesListUI()
+    }
+
+    @objc private func handleSaveBindingsDraft() {
+        guard let payload = listPayload else { return }
+        bindingsStatusLabel.stringValue = "正在保存绑定草稿至核心..."
+        bindingsStatusLabel.textColor = .labelColor
+        let gen = payload.generation
+        let draft = currentDraftBindings
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            do {
+                _ = try self.client.saveBindings(draft: draft, expectedGeneration: gen)
+                DispatchQueue.main.async {
+                    self.hasUnsavedBindingsChanges = false
+                    self.bindingsStatusLabel.stringValue = "绑定草稿保存成功！新配置将在启用后作用于新轮次。"
+                    self.bindingsStatusLabel.textColor = .systemGreen
+                    self.reloadBrainData()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    let handled = BrainPageLogic.handleBindingsConflict(
+                        localDraft: draft,
+                        error: BrainControlError(code: "conflict", message: error.localizedDescription)
+                    )
+                    self.currentDraftBindings = handled.preservedBindings
+                    self.bindingsStatusLabel.stringValue = handled.errorMessage
+                    self.bindingsStatusLabel.textColor = .systemRed
+                    self.updateOverridesListUI()
+                }
+            }
         }
     }
 
@@ -1884,10 +2336,38 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     // MARK: - NSTableViewDataSource & Delegate
 
     public func numberOfRows(in tableView: NSTableView) -> Int {
+        if tableView == overridesTableView {
+            return currentDraftBindings.overrides.count
+        }
         return listPayload?.roles.count ?? 0
     }
 
     public func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        if tableView == overridesTableView {
+            guard row < currentDraftBindings.overrides.count else { return nil }
+            let ov = currentDraftBindings.overrides[row]
+            let colId = tableColumn?.identifier.rawValue ?? ""
+            let text: String
+            switch colId {
+            case "col_contact":
+                let match = allowlistContacts.first(where: { $0.contactId == ov.contactId })
+                text = match != nil ? "\(match!.displayName) (\(ov.contactId))" : ov.contactId
+            case "col_kind":
+                text = ov.chatKind == "group" ? "群聊" : "私聊"
+            case "col_role":
+                let role = listPayload?.roles.first(where: { $0.roleId == ov.roleId })
+                text = role != nil ? "\(role!.name) (\(ov.roleId))" : ov.roleId
+            case "col_rev":
+                text = ov.revisionId
+            default:
+                text = "-"
+            }
+            let tf = NSTextField(labelWithString: text)
+            tf.font = NSFont.systemFont(ofSize: 11)
+            tf.lineBreakMode = .byTruncatingTail
+            return tf
+        }
+
         guard let roles = listPayload?.roles, row < roles.count else { return nil }
         let entry = roles[row]
         let cell = NSStackView()
@@ -1909,6 +2389,26 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     }
 
     public func tableViewSelectionDidChange(_ notification: Notification) {
+        if let tbl = notification.object as? NSTableView, tbl == overridesTableView {
+            let row = overridesTableView.selectedRow
+            if row >= 0 && row < currentDraftBindings.overrides.count {
+                let ov = currentDraftBindings.overrides[row]
+                for (i, item) in overrideContactPopup.itemArray.enumerated() {
+                    if (item.representedObject as? String) == ov.contactId {
+                        overrideContactPopup.selectItem(at: i)
+                        break
+                    }
+                }
+                for (i, item) in overrideRolePopup.itemArray.enumerated() {
+                    if (item.representedObject as? String) == ov.roleId {
+                        overrideRolePopup.selectItem(at: i)
+                        break
+                    }
+                }
+            }
+            return
+        }
+
         let row = roleTable.selectedRow
         if row >= 0 && row != selectedRoleIndex {
             selectedRoleIndex = row

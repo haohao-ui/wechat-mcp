@@ -140,6 +140,16 @@ INSERT INTO schema_migrations(version, applied_at) VALUES (1, 1), (2, 1), (3, 1)
 INSERT INTO contacts(contact_id, account_id, kind, display_name, created_at, updated_at)
 VALUES ('c_contract', 'contract_test_acct', 'private', '契约联系人', 1700000000, 1700000000);
 
+CREATE TABLE contact_names(
+  id INTEGER PRIMARY KEY, contact_id TEXT NOT NULL REFERENCES contacts(contact_id),
+  account_id TEXT NOT NULL, raw_name TEXT NOT NULL, name_key TEXT NOT NULL,
+  source TEXT NOT NULL,
+  first_seen_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL,
+  UNIQUE(contact_id, raw_name));
+
+INSERT INTO contact_names(id, contact_id, account_id, raw_name, name_key, source, first_seen_at, last_seen_at)
+VALUES (1, 'c_contract', 'contract_test_acct', '契约联系人', '契约联系人', 'config', 1700000000, 1700000000);
+
 INSERT INTO brain_turns(account_id, turn_id, contact_id, snapshot_id, snapshot_json, input_message_ids, observation_json, decision_json, model_json, send_key, execution_json, created_at, updated_at)
 VALUES (
   'contract_test_acct',
