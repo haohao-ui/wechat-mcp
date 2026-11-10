@@ -2505,7 +2505,7 @@ impl crate::core::brain_profiles::ContactAccess for ControlContactAccess {
         if let Some(ba) = &self.brain_access {
             ba.permit(contact)
         } else {
-            true
+            false
         }
     }
     fn family(&self, account: &str, contact: &str) -> Vec<String> {
@@ -2577,6 +2577,81 @@ fn execute_write<W: std::io::Write>(
         }
         Err(e) => handle_store_error(stdout, e, store, ctx),
     }
+}
+
+pub(crate) fn compute_allowlist_contacts_projection(
+    cfg: &BotConfig,
+    db_path: &Path,
+    conn: Option<&rusqlite::Connection>,
+    brain_access: Option<&crate::core::open_api::access::BrainAccess>,
+) -> (Value, &'static str, Option<&'static str>) {
+    if !db_path.exists() {
+        return (json!([]), "unavailable", Some("history_store_unavailable"));
+    }
+    let conn = match conn {
+        Some(c) => c,
+        None => return (json!([]), "unavailable", Some("history_store_unavailable")),
+    };
+    let brain_access = match brain_access {
+        Some(ba) => ba,
+        None => return (json!([]), "unavailable", Some("access_resolution_failed")),
+    };
+
+    let mut stmt = match conn.prepare(
+        "SELECT contact_id, display_name, kind FROM contacts WHERE account_id = ?1 AND merged_into IS NULL ORDER BY rowid",
+    ) {
+        Ok(s) => s,
+        Err(_) => return (json!([]), "unavailable", Some("access_resolution_failed")),
+    };
+
+    let mut rows = match stmt.query([&cfg.account_id]) {
+        Ok(r) => r,
+        Err(_) => return (json!([]), "unavailable", Some("access_resolution_failed")),
+    };
+
+    let mut list = Vec::new();
+    loop {
+        let row_opt = match rows.next() {
+            Ok(r) => r,
+            Err(_) => return (json!([]), "unavailable", Some("access_resolution_failed")),
+        };
+        let row = match row_opt {
+            Some(r) => r,
+            None => break,
+        };
+
+        let cid: String = match row.get(0) {
+            Ok(v) => v,
+            Err(_) => return (json!([]), "unavailable", Some("access_resolution_failed")),
+        };
+        let disp: String = match row.get(1) {
+            Ok(v) => v,
+            Err(_) => return (json!([]), "unavailable", Some("access_resolution_failed")),
+        };
+        let kind_str: String = match row.get(2) {
+            Ok(v) => v,
+            Err(_) => return (json!([]), "unavailable", Some("access_resolution_failed")),
+        };
+
+        let chat_kind = match kind_str.as_str() {
+            "private" => crate::core::brain_profiles::ChatKind::Private,
+            "group" => crate::core::brain_profiles::ChatKind::Group,
+            _ => return (json!([]), "unavailable", Some("access_resolution_failed")),
+        };
+
+        if brain_access.permit(&cid) {
+            list.push(json!({
+                "contact_id": cid,
+                "display_name": disp,
+                "chat_kind": match chat_kind {
+                    crate::core::brain_profiles::ChatKind::Group => "group",
+                    crate::core::brain_profiles::ChatKind::Private => "private",
+                },
+            }));
+        }
+    }
+
+    (json!(list), "ready", None)
 }
 
 fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
@@ -2681,41 +2756,13 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
                 Err(e) => return handle_store_error(stdout, e, &store, &ctx),
             };
 
-            let (allowlist_contacts, allowlist_status, allowlist_err) = if !db_path.exists() {
-                (json!([]), "unavailable", Some("history_store_unavailable"))
-            } else if access.conn.is_none() {
-                (json!([]), "unavailable", Some("history_store_unavailable"))
-            } else if access.brain_access.is_none() {
-                (json!([]), "unavailable", Some("access_resolution_failed"))
-            } else {
-                let mut list = Vec::new();
-                if let Some(c) = &access.conn {
-                    if let Ok(mut stmt) = c.prepare(
-                        "SELECT contact_id, display_name, kind FROM contacts WHERE account_id = ?1 AND merged_into IS NULL ORDER BY rowid",
-                    ) {
-                        if let Ok(rows) = stmt.query_map([&cfg.account_id], |r| {
-                            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
-                        }) {
-                            for row in rows.flatten() {
-                                let (cid, disp, kind_str) = row;
-                                let chat_kind = if kind_str == "group" {
-                                    crate::core::brain_profiles::ChatKind::Group
-                                } else {
-                                    crate::core::brain_profiles::ChatKind::Private
-                                };
-                                if access.permits(&cfg.account_id, &cid, &chat_kind) {
-                                    list.push(json!({
-                                        "contact_id": cid,
-                                        "display_name": disp,
-                                        "chat_kind": if chat_kind == crate::core::brain_profiles::ChatKind::Group { "group" } else { "private" },
-                                    }));
-                                }
-                            }
-                        }
-                    }
-                }
-                (json!(list), "ready", None)
-            };
+            let (allowlist_contacts, allowlist_status, allowlist_err) =
+                compute_allowlist_contacts_projection(
+                    &cfg,
+                    &db_path,
+                    access.conn.as_ref(),
+                    access.brain_access.as_ref(),
+                );
 
             let data = json!({
                 "generation": generation,
@@ -7218,7 +7265,13 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(code, 0);
+        assert_eq!(
+            code,
+            0,
+            "stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
         let out: Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(out["data"]["allowlist_contacts_status"], "unavailable");
         assert_eq!(
@@ -7283,7 +7336,13 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(code, 0);
+        assert_eq!(
+            code,
+            0,
+            "stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
         let out: Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(out["data"]["allowlist_contacts_status"], "ready");
         assert!(out["data"]["allowlist_contacts_error"].is_null());
@@ -7292,5 +7351,383 @@ mod tests {
         assert_eq!(list[0]["contact_id"], "c_zhangsan");
         assert_eq!(list[0]["display_name"], "张三真实名");
         assert_eq!(list[0]["chat_kind"], "private");
+    }
+
+    #[test]
+    fn test_control_brain_list_projection_missing_column_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::new();
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let cfg = json!({
+            "schema_version": 1,
+            "host": "local",
+            "account_id": "acc_proj_missing_col",
+            "state_dir": state_dir.to_str().unwrap(),
+            "allowlist": [{"recipient": "张三", "kind": "private"}]
+        });
+        let cfg_path = temp.path().join("config.json");
+        fs::write(&cfg_path, serde_json::to_string(&cfg).unwrap()).unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let init_code = execute_control_full(
+            &[
+                "brain-initialize".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+                "--request-json".into(),
+                json!({ "installation": "fresh" }).to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(init_code, 0);
+
+        // 构造 contacts 缺少 display_name 列的数据库，BrainAccess::load 能够执行，但投影查询必失败
+        let history_dir = state_dir.join("history");
+        fs::create_dir_all(&history_dir).unwrap();
+        let db_path = history_dir.join("history.sqlite3");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE contacts(
+                contact_id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                merged_into TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE contact_names(
+                id INTEGER PRIMARY KEY,
+                contact_id TEXT NOT NULL REFERENCES contacts(contact_id),
+                account_id TEXT NOT NULL,
+                raw_name TEXT NOT NULL,
+                name_key TEXT NOT NULL,
+                source TEXT NOT NULL,
+                first_seen_at INTEGER NOT NULL,
+                last_seen_at INTEGER NOT NULL
+            );
+            INSERT INTO contacts VALUES('c_zhangsan', 'acc_proj_missing_col', 'private', NULL, 100, 100);
+            INSERT INTO contact_names VALUES(1, 'c_zhangsan', 'acc_proj_missing_col', '张三', '张三', 'config', 100, 100);
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-list".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(
+            code,
+            0,
+            "stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
+        let out: Value = serde_json::from_slice(&stdout).unwrap();
+        // 缺列导致 prepare 失败，必须不可用并返回 access_resolution_failed，不能吞成空 ready
+        assert_eq!(out["data"]["allowlist_contacts_status"], "unavailable");
+        assert_eq!(
+            out["data"]["allowlist_contacts_error"],
+            "access_resolution_failed"
+        );
+        assert_eq!(out["data"]["allowlist_contacts"], json!([]));
+    }
+
+    #[test]
+    fn test_control_brain_list_projection_invalid_kind_or_null_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::new();
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let cfg = json!({
+            "schema_version": 1,
+            "host": "local",
+            "account_id": "acc_proj_invalid",
+            "state_dir": state_dir.to_str().unwrap(),
+            "allowlist": [
+                {"recipient": "合法人", "kind": "private"},
+                {"recipient": "未知类型", "kind": "private"}
+            ]
+        });
+        let cfg_path = temp.path().join("config.json");
+        fs::write(&cfg_path, serde_json::to_string(&cfg).unwrap()).unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let _ = execute_control_full(
+            &[
+                "brain-initialize".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+                "--request-json".into(),
+                json!({ "installation": "fresh" }).to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+
+        let history_dir = state_dir.join("history");
+        fs::create_dir_all(&history_dir).unwrap();
+        let db_path = history_dir.join("history.sqlite3");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE contacts(
+                contact_id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                kind TEXT,
+                display_name TEXT,
+                merged_into TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE contact_names(
+                id INTEGER PRIMARY KEY,
+                contact_id TEXT NOT NULL REFERENCES contacts(contact_id),
+                account_id TEXT NOT NULL,
+                raw_name TEXT NOT NULL,
+                name_key TEXT NOT NULL,
+                source TEXT NOT NULL,
+                first_seen_at INTEGER NOT NULL,
+                last_seen_at INTEGER NOT NULL
+            );
+            -- 第一条合法
+            INSERT INTO contacts VALUES('c_valid', 'acc_proj_invalid', 'private', '合法人名', NULL, 100, 100);
+            INSERT INTO contact_names VALUES(1, 'c_valid', 'acc_proj_invalid', '合法人', '合法人', 'config', 100, 100);
+
+            -- 第二条是非法的 kind (如 channel/unknown，不是 private/group)
+            INSERT INTO contacts VALUES('c_bad_kind', 'acc_proj_invalid', 'channel', '未知类型名', NULL, 100, 100);
+            INSERT INTO contact_names VALUES(2, 'c_bad_kind', 'acc_proj_invalid', '未知类型', '未知类型', 'config', 100, 100);
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-list".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(
+            code,
+            0,
+            "stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
+        let out: Value = serde_json::from_slice(&stdout).unwrap();
+        // 出现非 private/group 的非法 kind，必须丢弃部分结果，返回 unavailable
+        assert_eq!(out["data"]["allowlist_contacts_status"], "unavailable");
+        assert_eq!(
+            out["data"]["allowlist_contacts_error"],
+            "access_resolution_failed"
+        );
+        assert_eq!(out["data"]["allowlist_contacts"], json!([]));
+
+        // 再测试某行 display_name 为 NULL
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            UPDATE contacts SET kind = 'private' WHERE contact_id = 'c_bad_kind';
+            UPDATE contacts SET display_name = NULL WHERE contact_id = 'c_bad_kind';
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-list".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(
+            code,
+            0,
+            "stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
+        let out: Value = serde_json::from_slice(&stdout).unwrap();
+        // 某行字段损坏/NULL，导致解码错误，同样必须返回 unavailable
+        assert_eq!(out["data"]["allowlist_contacts_status"], "unavailable");
+        assert_eq!(
+            out["data"]["allowlist_contacts_error"],
+            "access_resolution_failed"
+        );
+        assert_eq!(out["data"]["allowlist_contacts"], json!([]));
+    }
+
+    #[test]
+    fn test_control_brain_list_projection_group_private_and_revocation() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::new();
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        // 1. 配置私聊 + 群聊
+        let mut cfg = json!({
+            "schema_version": 1,
+            "host": "local",
+            "account_id": "acc_proj_combo",
+            "state_dir": state_dir.to_str().unwrap(),
+            "allowlist": [
+                {"recipient": "客户张三", "kind": "private"},
+                {"recipient": "技术支持群", "kind": "group"}
+            ]
+        });
+        let cfg_path = temp.path().join("config.json");
+        fs::write(&cfg_path, serde_json::to_string(&cfg).unwrap()).unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let _ = execute_control_full(
+            &[
+                "brain-initialize".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+                "--request-json".into(),
+                json!({ "installation": "fresh" }).to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+
+        let history_dir = state_dir.join("history");
+        fs::create_dir_all(&history_dir).unwrap();
+        let db_path = history_dir.join("history.sqlite3");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE contacts(
+                contact_id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                merged_into TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE contact_names(
+                id INTEGER PRIMARY KEY,
+                contact_id TEXT NOT NULL REFERENCES contacts(contact_id),
+                account_id TEXT NOT NULL,
+                raw_name TEXT NOT NULL,
+                name_key TEXT NOT NULL,
+                source TEXT NOT NULL,
+                first_seen_at INTEGER NOT NULL,
+                last_seen_at INTEGER NOT NULL
+            );
+            -- 私聊
+            INSERT INTO contacts VALUES('c_zhangsan_id', 'acc_proj_combo', 'private', '客户张三真实名', NULL, 100, 100);
+            INSERT INTO contact_names VALUES(1, 'c_zhangsan_id', 'acc_proj_combo', '客户张三', '客户张三', 'config', 100, 100);
+
+            -- 群聊
+            INSERT INTO contacts VALUES('c_group_id', 'acc_proj_combo', 'group', '技术支持群名称', NULL, 100, 100);
+            INSERT INTO contact_names VALUES(2, 'c_group_id', 'acc_proj_combo', '技术支持群', '技术支持群', 'config', 100, 100);
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        // 2. 验证私聊与群聊均能正确识别与投影
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-list".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(
+            code,
+            0,
+            "stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
+        let out: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(out["data"]["allowlist_contacts_status"], "ready");
+        assert!(out["data"]["allowlist_contacts_error"].is_null());
+        let list = out["data"]["allowlist_contacts"].as_array().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0]["contact_id"], "c_zhangsan_id");
+        assert_eq!(list[0]["chat_kind"], "private");
+        assert_eq!(list[1]["contact_id"], "c_group_id");
+        assert_eq!(list[1]["chat_kind"], "group");
+
+        // 3. 白名单撤销：原联系人均被移除，改为未入库联系人
+        cfg["allowlist"] = json!([{"recipient": "未入库新用户", "kind": "private"}]);
+        fs::write(&cfg_path, serde_json::to_string(&cfg).unwrap()).unwrap();
+
+        // 再次刷新 brain-list：必须成功计算但无可授权项 (ready + error: null + [])
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-list".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(
+            code,
+            0,
+            "stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
+        let out: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(out["data"]["allowlist_contacts_status"], "ready");
+        assert!(out["data"]["allowlist_contacts_error"].is_null());
+        assert_eq!(out["data"]["allowlist_contacts"], json!([]));
     }
 }
