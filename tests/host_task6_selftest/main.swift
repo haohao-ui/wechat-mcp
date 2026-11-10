@@ -99,6 +99,13 @@ func run() -> Int32 {
             let outData = try JSONSerialization.data(withJSONObject: resp, options: [.sortedKeys])
             print(String(data: outData, encoding: .utf8)!)
             return 0
+        } else if command == "mcp_open_api_enabled" {
+            let config = dict["config"] as? [String: Any] ?? [:]
+            let enabled = dict["enabled"] as? Bool ?? false
+            let updated = McpPageLogic.updateOpenApiEnabled(config: config, enabled: enabled)
+            let outData = try JSONSerialization.data(withJSONObject: ["ok": true, "updated": updated], options: [.sortedKeys])
+            print(String(data: outData, encoding: .utf8)!)
+            return 0
         } else if command == "mcp_brain_settings" {
             let config = dict["config"] as? [String: Any] ?? [:]
             let timeoutSeconds = dict["timeout_seconds"] as? Int ?? 120
