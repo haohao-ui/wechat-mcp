@@ -39,8 +39,8 @@ use crate::core::delivery::{EchoOutcome, ToolClient, is_not_sent};
 use crate::core::history::store::{HistoryStore, similar};
 use crate::core::model::{Bubble, Frame};
 use crate::core::policy::{
-    ContinuityError, Policy, echo_matches, fingerprint, merge_pages, new_bubbles, reconcile,
-    relocate, separator_tail, strip_member_count, validate_reply,
+    ContinuityError, Fingerprint, Policy, echo_matches, fingerprint, merge_pages, new_bubbles,
+    reconcile, relocate, separator_tail, strip_member_count, validate_reply,
 };
 use crate::core::state::{read_json, write_private};
 use crate::core::worker_client::action_interrupted;
@@ -892,12 +892,16 @@ impl BotService {
         let rec_bottom = reconcile(&frame.bubbles, &bottom.bubbles);
         let fp_frame: Vec<_> = frame.bubbles.iter().map(fingerprint).collect();
         let fp_rec: Vec<_> = rec_bottom.iter().map(fingerprint).collect();
+        // Opening a chat with unread messages, WeChat puts the first unread at the top with blank
+        // space below; back at the bottom the view is anchored normally and shows older bubbles
+        // above. Confirmed when the bottom still ends with what was seen (2026-11-09 device).
+        let confirms = |rec: &[Fingerprint]| !fp_frame.is_empty() && rec.ends_with(&fp_frame);
 
-        if fp_frame != fp_rec {
+        if !confirms(&fp_rec) {
             bottom = self.scroll_to_bottom(capture, 40).await?;
             let rec_bottom2 = reconcile(&frame.bubbles, &bottom.bubbles);
             let fp_rec2: Vec<_> = rec_bottom2.iter().map(fingerprint).collect();
-            if changes.is_some() && fp_frame != fp_rec2 {
+            if changes.is_some() && !confirms(&fp_rec2) {
                 self.recovery_unconfirmed = true;
                 return Ok(None);
             }
@@ -1146,7 +1150,9 @@ impl BotService {
             confirmed.bubbles = reconcile(&frame.bubbles, &confirmed.bubbles);
             let fp1: Vec<_> = frame.bubbles.iter().map(fingerprint).collect();
             let fp2: Vec<_> = confirmed.bubbles.iter().map(fingerprint).collect();
-            if fp1 != fp2 {
+            // Older bubbles appearing above (the unread-jump layout settling at the bottom) are not a
+            // change; anything different at the end is.
+            if fp1.is_empty() || !fp2.ends_with(&fp1) {
                 self.health("waiting_for_stable_frame", Map::new())?;
                 return Ok(());
             }
@@ -4874,6 +4880,74 @@ mod tests {
 
         let client = MockToolClient::new_default();
         svc.cycle(&client, &mut cap).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_service_unread_jump_layout_image_is_recovered_and_answered() {
+        // WeChat opened the chat at the first unread: the new image alone at the top, blank below.
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        let seen_prompt = Arc::new(Mutex::new(String::new()));
+        let sp = seen_prompt.clone();
+        svc.brain = Some(Arc::new(move |turn| {
+            *sp.lock().unwrap() = turn.text.clone();
+            Box::pin(async {
+                Ok(BrainReply {
+                    reply: "你好，我是AI客服助手。".to_string(),
+                    metadata: HashMap::new(),
+                })
+            })
+        }));
+        let placed = |b: &Bubble, y: i64, h: i64| {
+            let mut b = b.clone();
+            b.y = Some(y);
+            b.height = Some(h);
+            b
+        };
+        let a = test_bubble("a", "inbound_visual");
+        let b = test_bubble("b", "inbound_visual");
+        let pic = test_bubble("PIC", "inbound_visual");
+        svc.advance(test_frame(
+            vec![placed(&a, 300, 40), placed(&b, 360, 40)],
+            "午夜咖啡",
+        ))
+        .unwrap();
+        let jumped = test_frame(vec![placed(&pic, 63, 247)], "午夜咖啡");
+        let up = test_frame(
+            vec![
+                placed(&a, 33, 40),
+                placed(&b, 93, 40),
+                placed(&pic, 153, 247),
+            ],
+            "午夜咖啡",
+        );
+        let bottom = test_frame(
+            vec![
+                placed(&a, 58, 40),
+                placed(&b, 118, 40),
+                placed(&pic, 178, 247),
+            ],
+            "午夜咖啡",
+        );
+        let mut after_b = bottom.bubbles.clone();
+        after_b.push(test_bubble("你好，我是AI客服助手。", "outbound_visual"));
+        let after = test_frame(after_b, "午夜咖啡");
+        let mut cap = MockCapture::new(vec![
+            jumped,
+            bottom.clone(),
+            bottom.clone(),
+            bottom.clone(),
+            bottom.clone(),
+            after,
+        ]);
+        cap.scroll_pages = vec![up, bottom.clone(), bottom.clone(), bottom];
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+        let health: Value = read_json(svc.root.join("health.json")).unwrap();
+        assert_ne!(health["state"], "waiting_for_stable_frame");
+        assert_eq!(*seen_prompt.lock().unwrap(), "PIC");
     }
 
     #[tokio::test]
