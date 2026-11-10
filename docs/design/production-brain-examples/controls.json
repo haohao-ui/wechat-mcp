@@ -1,0 +1,91 @@
+{
+  "fixture_only": true,
+  "requests": [
+    {
+      "op": "brain-save-bindings",
+      "schema_version": 1,
+      "account_id": "fixture_account",
+      "request_id": "00000000-0000-4000-8000-000000000001",
+      "expected_generation": 1,
+      "draft": {
+        "default": {
+          "role_id": "legacy_service_fixture",
+          "revision_id": "r1"
+        },
+        "overrides": [
+          {
+            "contact_id": "fixture_group",
+            "chat_kind": "group",
+            "role_id": "fixture_group_role",
+            "revision_id": "r2"
+          }
+        ]
+      }
+    },
+    {
+      "op": "brain-activate",
+      "schema_version": 1,
+      "account_id": "fixture_account",
+      "request_id": "00000000-0000-4000-8000-000000000002",
+      "expected_generation": 2
+    }
+  ],
+  "responses": [
+    {
+      "ok": true,
+      "data": {
+        "generation": 2
+      }
+    },
+    {
+      "ok": true,
+      "data": {
+        "generation": 3,
+        "previous_active": {
+          "default": {
+            "role_id": "legacy_service_fixture",
+            "revision_id": "r1"
+          },
+          "overrides": []
+        }
+      }
+    },
+    {
+      "ok": false,
+      "error": {
+        "code": "revision_conflict",
+        "message": "配置已被修改，请重新读取",
+        "retryable": false,
+        "details": {
+          "current_generation": 3
+        }
+      }
+    }
+  ],
+  "preview": {
+    "request": {
+      "op": "brain-preview",
+      "role_id": "legacy_service_fixture",
+      "revision_id": "r1",
+      "execution": "assemble_only",
+      "input": {
+        "text": "合成问题",
+        "chat_kind": "private",
+        "files": [],
+        "images": [],
+        "failed": [],
+        "context": []
+      }
+    },
+    "response": {
+      "ok": true,
+      "data": {
+        "preview_id": "preview_fixture",
+        "decision": null,
+        "cost": {
+          "incurred": false
+        }
+      }
+    }
+  }
+}
