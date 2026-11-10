@@ -70,7 +70,7 @@
 
 WriteResult 为去重缓存的紧凑成功结果，所有字段显式出现；写操作对外 data 统一为该 WriteResult，额外的绑定/激活详情由后续只读操作取得，避免历史淘汰后无法精确重放旧响应，不在缓存保存角色正文、知识、其他账号摘要或任意 envelope。写失败不缓存；完成结果与根原子提交。操作枚举为 brain-save-role、brain-save-knowledge、brain-copy-role、brain-archive-role、brain-save-bindings、brain-activate、brain-rollback；预览和只读操作不进入写去重缓存。
 
-根 limits：最多16个账号；每账号128个 RoleEntry（含归档）、128个 KnowledgeEntry，每个 BindingSet 最多200个覆盖且 contact_id 唯一；每账号每种迁移 ID 唯一、最多4条迁移记录。RoleRevision 完整序列化最大128 KiB；每个模板最大2000 Unicode字符；KnowledgeRevision 完整JSON最大2 MiB（正文仍最大1 MiB，title/source_label各最多500字符）；ID 80字符，账号标识为可信原始值但最多256 UTF-8字节、不得作为路径片段。对象/引用必须满足目录全局ID唯一且归属一致；generation/时间戳均限非负安全整数。根完整序列化最大128 MiB，任何细项或总额超限均在提交前返回 storage_capacity_exceeded、保留旧根；不得静默清除其他账号记录腾空间。
+根 limits：最多16个账号；每账号128个 RoleEntry（含归档）、128个 KnowledgeEntry，每个 BindingSet 最多200个覆盖且 contact_id 唯一；每账号每种迁移 ID 唯一、最多4条迁移记录。RoleRevision 完整序列化最大128 KiB；每个模板最大2000 Unicode字符；KnowledgeRevision 完整JSON最大2 MiB（正文仍最大1 MiB，title/source_label各最多500字符）；ID 80字符，账号标识为可信原始值但最多256 UTF-8字节、不得作为路径片段。迁移 id 为18 ASCII字节前缀 `legacy-builtin-v1:` 加原账号 UTF-8 字节，最大274字节（非Unicode字符数）；Rust独立校验字节上限。对象/引用必须满足目录全局ID唯一且归属一致；generation/时间戳均限非负安全整数。根完整序列化最大128 MiB，任何细项或总额超限均在提交前返回 storage_capacity_exceeded、保留旧根；不得静默清除其他账号记录腾空间。
 
 activation_history 每账号只保留最近100次成功激活/回退记录，超额在同一原子提交内移除该账号最旧记录；排序按 generation。当前 active 永远保留，回退只允许仍保留的当前账号 generation，否则 not_found；不承诺无限回退。修订对象不因该保留策略自动删除，历史快照仍可审计。request_results 每账号只保留最近1000次成功写结果，WriteResult最大4 KiB，按提交generation排序；同账号可跨操作复用UUID，但去重主键必须为 (可信account_id, operation, request_id)，哈希覆盖操作、可信账号及完整规范化请求（包括 expected_generation）。同键同hash重放，同键异hash为 request_conflict；跨账号同UUID绝不能读到对方结果。淘汰后只适用正常CAS，不保证永久去重。账号总不可变对象占用上限1 GiB，达到上限拒绝新增，不自动删除历史引用；后续清理必须单独设计。首版无删除账号操作，migration记录不自动过期。
 
