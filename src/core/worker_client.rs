@@ -983,6 +983,9 @@ impl WorkerClient {
                             json!({
                                 "media_id": item.media_id,
                                 "snapshot_id": current_frame.snapshot_id,
+                                // Same-duration voices share a digest: say which one by position.
+                                "y": crate::core::policy::locate_in_run(&items, index, &current_frame.bubbles)
+                                    .or(item.y),
                                 // Converting the first voice of a run converts the next ones by
                                 // itself; wait for that before clicking again.
                                 "await_seconds": if voices_done > 0 { 8 } else { 0 },

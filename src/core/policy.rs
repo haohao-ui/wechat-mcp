@@ -281,6 +281,27 @@ pub fn reconcile(previous: &[Bubble], current: &[Bubble]) -> Vec<Bubble> {
     result
 }
 
+/// Where `items[index]` is in `current`, by the whole run of `items` (newest occurrence). Voices of
+/// the same duration have identical pixels, so a digest alone points at any of them.
+pub fn locate_in_run(items: &[Bubble], index: usize, current: &[Bubble]) -> Option<i64> {
+    let run: Vec<(usize, Fingerprint)> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| !is_voice_transcript(b))
+        .map(|(i, b)| (i, fingerprint(b)))
+        .collect();
+    let position = run.iter().position(|(i, _)| *i == index)?;
+    let frame: Vec<&Bubble> = current.iter().filter(|b| !is_voice_transcript(b)).collect();
+    let n = run.len();
+    if n == 0 || frame.len() < n {
+        return None;
+    }
+    (0..=frame.len() - n)
+        .rev()
+        .find(|start| (0..n).all(|k| fingerprint(frame[start + k]) == run[k].1))
+        .and_then(|start| frame[start + position].y)
+}
+
 pub fn relocate(items: &[Bubble], current: &[Bubble]) -> Vec<Bubble> {
     let mut used = HashSet::new();
     let mut result = Vec::new();
@@ -963,6 +984,26 @@ mod tests {
         let mut b = make_bubble(text, direction, None);
         b.kind = Some(kind.to_string());
         b
+    }
+
+    #[test]
+    fn identical_voices_are_located_by_the_newest_run() {
+        let voice = |y: i64| {
+            let mut b = kinded("v3", "voice", None);
+            b.y = Some(y);
+            b
+        };
+        let reply = make_bubble("r", Some("outbound_visual"), None);
+        // An old 3s voice (already answered) above, then the two new identical 3s voices.
+        let frame = vec![voice(40), reply.clone(), voice(300), voice(350)];
+        let batch = vec![voice(0), voice(0)];
+        assert_eq!(locate_in_run(&batch, 0, &frame), Some(300));
+        assert_eq!(locate_in_run(&batch, 1, &frame), Some(350));
+        // Transcripts inserted under the voices do not change the run.
+        let mut t = kinded("t", "voice_transcript", None);
+        t.y = Some(330);
+        let with = vec![voice(40), reply, voice(290), t, voice(380)];
+        assert_eq!(locate_in_run(&batch, 1, &with), Some(380));
     }
 
     #[test]
