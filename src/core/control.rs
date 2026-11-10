@@ -2429,6 +2429,7 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
             };
             let data = json!({
                 "generation": generation,
+                "execution_mode": account_entry.as_ref().map(|a| a.execution_mode).unwrap_or(ExecutionMode::Legacy),
                 "roles": roles,
                 "active": account_entry.as_ref().map(|a| &a.active),
                 "draft": account_entry.as_ref().map(|a| &a.draft),
@@ -3062,6 +3063,91 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
                 }
             }
         }
+        "brain-initialize" => {
+            let installation_str = match req_val.get("installation").and_then(Value::as_str) {
+                Some(i) => i,
+                None => {
+                    return emit_brain_error(
+                        stdout,
+                        "invalid_arguments",
+                        "missing installation (fresh or legacy_upgrade)",
+                        false,
+                        None,
+                        2,
+                    );
+                }
+            };
+            let installation = match installation_str {
+                "fresh" => Installation::Fresh,
+                "legacy_upgrade" => Installation::LegacyUpgrade,
+                _ => {
+                    return emit_brain_error(
+                        stdout,
+                        "invalid_arguments",
+                        "invalid installation: must be fresh or legacy_upgrade",
+                        false,
+                        None,
+                        2,
+                    );
+                }
+            };
+            let upgrade_schema_from = req_val
+                .get("upgrade_schema_from")
+                .and_then(Value::as_u64)
+                .map(|v| v as u32);
+            let raw_config_bytes = match std::fs::read(&config_path) {
+                Ok(b) => b,
+                Err(e) => {
+                    return emit_brain_error(
+                        stdout,
+                        "invalid_arguments",
+                        &format!("failed to read config file: {e}"),
+                        false,
+                        None,
+                        2,
+                    );
+                }
+            };
+            let is_service = true;
+            let at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            let _maintenance =
+                match crate::core::serve::acquire_core_lock_for_maintenance(&cfg.state_dir) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        return emit_brain_error(
+                            stdout,
+                            "store_unavailable",
+                            &format!("cannot initialize while core is running: {e}"),
+                            true,
+                            None,
+                            1,
+                        );
+                    }
+                };
+
+            match store.initialize(
+                &ctx,
+                installation,
+                &raw_config_bytes,
+                is_service,
+                at,
+                upgrade_schema_from,
+            ) {
+                Ok(generation) => {
+                    let _ = writeln!(
+                        stdout,
+                        "{}",
+                        json!({ "ok": true, "data": { "generation": generation } })
+                    );
+                    0
+                }
+                Err(e) => handle_store_error(stdout, e, &store, &ctx),
+            }
+        }
         other => emit_brain_error(
             stdout,
             "invalid_arguments",
@@ -3203,7 +3289,13 @@ mod tests {
             &mut stderr,
             Some(false),
         );
-        assert_eq!(code, 0);
+        assert_eq!(
+            code,
+            0,
+            "stderr: {}, stdout: {}",
+            String::from_utf8_lossy(&stderr),
+            String::from_utf8_lossy(&stdout)
+        );
         let out: Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(out, json!({"ok": true}));
 
@@ -3253,7 +3345,13 @@ mod tests {
             &mut stderr,
             Some(false),
         );
-        assert_eq!(code, 0);
+        assert_eq!(
+            code,
+            0,
+            "stderr: {}, stdout: {}",
+            String::from_utf8_lossy(&stderr),
+            String::from_utf8_lossy(&stdout)
+        );
         assert!(pause_file.exists());
         let mode = fs::metadata(&pause_file).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
@@ -3274,7 +3372,13 @@ mod tests {
             &mut stderr,
             Some(false),
         );
-        assert_eq!(code, 0);
+        assert_eq!(
+            code,
+            0,
+            "stderr: {}, stdout: {}",
+            String::from_utf8_lossy(&stderr),
+            String::from_utf8_lossy(&stdout)
+        );
         assert!(!pause_file.exists());
         let out: Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(out, json!({"status": "resumed"}));
@@ -3298,7 +3402,13 @@ mod tests {
             &mut stderr,
             Some(false),
         );
-        assert_eq!(code, 0);
+        assert_eq!(
+            code,
+            0,
+            "stderr: {}, stdout: {}",
+            String::from_utf8_lossy(&stderr),
+            String::from_utf8_lossy(&stdout)
+        );
         let out: Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(out["launchd_loaded"], false);
         assert_eq!(out["health"], Value::Null);
@@ -3335,7 +3445,13 @@ mod tests {
             &mut stderr,
             Some(true),
         );
-        assert_eq!(code, 0);
+        assert_eq!(
+            code,
+            0,
+            "stderr: {}, stdout: {}",
+            String::from_utf8_lossy(&stderr),
+            String::from_utf8_lossy(&stdout)
+        );
         let out: Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(out["launchd_loaded"], true);
         assert_eq!(out["health"]["state"], "running");
@@ -3368,7 +3484,13 @@ mod tests {
             &mut stderr,
             Some(true),
         );
-        assert_eq!(code, 0);
+        assert_eq!(
+            code,
+            0,
+            "stderr: {}, stdout: {}",
+            String::from_utf8_lossy(&stderr),
+            String::from_utf8_lossy(&stdout)
+        );
         let stderr_str = String::from_utf8(stderr).unwrap();
         assert!(stderr_str.contains("界面核对连续失败，请运行 control calibrate 重新定位"));
         let out: Value = serde_json::from_slice(&stdout).unwrap();
@@ -3458,7 +3580,13 @@ mod tests {
             Some(true),
         );
         thread_handle.join().unwrap();
-        assert_eq!(code, 0);
+        assert_eq!(
+            code,
+            0,
+            "stderr: {}, stdout: {}",
+            String::from_utf8_lossy(&stderr),
+            String::from_utf8_lossy(&stdout)
+        );
         let stdout_str = String::from_utf8(stdout).unwrap();
         assert!(stdout_str.contains("Differences from current layout:\n  input.y: 400.0 -> 420.0"));
         assert!(
@@ -3511,7 +3639,13 @@ mod tests {
             Some(true),
         );
         thread_handle2.join().unwrap();
-        assert_eq!(code, 0);
+        assert_eq!(
+            code,
+            0,
+            "stderr: {}, stdout: {}",
+            String::from_utf8_lossy(&stderr),
+            String::from_utf8_lossy(&stdout)
+        );
         let stdout_str = String::from_utf8(stdout).unwrap();
         assert!(stdout_str.contains("\"accepted\":true"));
     }
@@ -4153,7 +4287,13 @@ mod tests {
             Some(true),
         );
         handle.join().unwrap();
-        assert_eq!(code, 0);
+        assert_eq!(
+            code,
+            0,
+            "stderr: {}, stdout: {}",
+            String::from_utf8_lossy(&stderr),
+            String::from_utf8_lossy(&stdout)
+        );
 
         let out_str = String::from_utf8(stdout).unwrap();
         let last_line = out_str.lines().last().unwrap();
@@ -4226,7 +4366,13 @@ mod tests {
             Some(true),
         );
         handle.join().unwrap();
-        assert_eq!(code, 0);
+        assert_eq!(
+            code,
+            0,
+            "stderr: {}, stdout: {}",
+            String::from_utf8_lossy(&stderr),
+            String::from_utf8_lossy(&stdout)
+        );
 
         let out_str = String::from_utf8(stdout).unwrap();
         let last_line = out_str.lines().last().unwrap();
@@ -4531,7 +4677,13 @@ mod tests {
             Some(true),
         );
         bot_thread.join().unwrap();
-        assert_eq!(code, 0);
+        assert_eq!(
+            code,
+            0,
+            "stderr: {}, stdout: {}",
+            String::from_utf8_lossy(&stderr),
+            String::from_utf8_lossy(&stdout)
+        );
 
         let out_str = String::from_utf8(stdout).unwrap();
         let last_line = out_str.lines().last().unwrap();
@@ -4696,7 +4848,13 @@ mod tests {
             unsafe { std::env::set_var("HOME", h) };
         }
 
-        assert_eq!(code, 0);
+        assert_eq!(
+            code,
+            0,
+            "stderr: {}, stdout: {}",
+            String::from_utf8_lossy(&stderr),
+            String::from_utf8_lossy(&stdout)
+        );
         let out: Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(out["health"], health);
     }
@@ -4738,7 +4896,13 @@ mod tests {
             unsafe { std::env::set_var("HOME", h) };
         }
 
-        assert_eq!(code, 0);
+        assert_eq!(
+            code,
+            0,
+            "stderr: {}, stdout: {}",
+            String::from_utf8_lossy(&stderr),
+            String::from_utf8_lossy(&stdout)
+        );
         assert_eq!(run_calls.len(), 2);
         assert_eq!(run_calls[0][0], "disable");
         assert_eq!(run_calls[1][0], "bootout");
@@ -5310,7 +5474,13 @@ mod tests {
             Some(&mut loaded_fn),
             Some(&mut cmd_runner),
         );
-        assert_eq!(code, 0);
+        assert_eq!(
+            code,
+            0,
+            "stderr: {}, stdout: {}",
+            String::from_utf8_lossy(&stderr),
+            String::from_utf8_lossy(&stdout)
+        );
         assert!(
             core_enabled_path.exists(),
             "control start must create core.enabled for CoreSupervisor"
@@ -5329,7 +5499,13 @@ mod tests {
             Some(&mut loaded_fn),
             Some(&mut cmd_runner),
         );
-        assert_eq!(code, 0);
+        assert_eq!(
+            code,
+            0,
+            "stderr: {}, stdout: {}",
+            String::from_utf8_lossy(&stderr),
+            String::from_utf8_lossy(&stdout)
+        );
         assert!(
             !core_enabled_path.exists(),
             "control stop must remove core.enabled"
@@ -5363,7 +5539,13 @@ mod tests {
             Some(&mut loaded_fn),
             None,
         );
-        assert_eq!(code, 0);
+        assert_eq!(
+            code,
+            0,
+            "stderr: {}, stdout: {}",
+            String::from_utf8_lossy(&stderr),
+            String::from_utf8_lossy(&stdout)
+        );
         let out: Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(out["python_launchd_loaded"], false);
         assert_eq!(out["core_enabled"], true);
@@ -6004,7 +6186,13 @@ mod tests {
             None,
         );
         let out: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
-        assert_eq!(code, 0);
+        assert_eq!(
+            code,
+            0,
+            "stderr: {}, stdout: {}",
+            String::from_utf8_lossy(&stderr),
+            String::from_utf8_lossy(&stdout)
+        );
         assert_eq!(out["ok"], true);
         assert_eq!(out["data"]["persona"], "测试助手");
 
@@ -6037,7 +6225,13 @@ mod tests {
             None,
         );
         let out: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
-        assert_eq!(code, 0);
+        assert_eq!(
+            code,
+            0,
+            "stderr: {}, stdout: {}",
+            String::from_utf8_lossy(&stderr),
+            String::from_utf8_lossy(&stdout)
+        );
         assert_eq!(out["ok"], true);
         assert_eq!(out["data"]["cost"]["incurred"], false);
         assert!(
@@ -6098,5 +6292,98 @@ mod tests {
         assert_eq!(out["ok"], false);
         assert_eq!(out["error"]["code"], "revision_conflict");
         assert_eq!(out["error"]["details"]["current_generation"], 1);
+    }
+
+    #[test]
+    fn test_brain_initialize_control() {
+        let temp = TempDir::new();
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let cfg = json!({
+            "schema_version": 1,
+            "host": "local",
+            "account_id": "test-account",
+            "state_dir": state_dir.to_str().unwrap(),
+            "allowlist": [{"recipient": "测试联系人", "kind": "private"}]
+        });
+        let cfg_path = temp.path().join("config.json");
+        fs::write(&cfg_path, serde_json::to_string(&cfg).unwrap()).unwrap();
+
+        // 1. 初始未初始化时，brain-list 显示 execution_mode 为 legacy
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-list".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(
+            code,
+            0,
+            "stderr: {}, stdout: {}",
+            String::from_utf8_lossy(&stderr),
+            String::from_utf8_lossy(&stdout)
+        );
+        let out: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+        assert_eq!(out["data"]["execution_mode"], "legacy");
+
+        // 2. 调用 brain-initialize fresh 成功
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-initialize".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+                "--request-json".into(),
+                json!({ "installation": "fresh" }).to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(
+            code,
+            0,
+            "stderr: {}, stdout: {}",
+            String::from_utf8_lossy(&stderr),
+            String::from_utf8_lossy(&stdout)
+        );
+        let out: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+        assert_eq!(out["ok"], true);
+        assert!(out["data"]["generation"].as_u64().is_some());
+
+        // 3. 此时 brain-list 显示 execution_mode 为 managed
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-list".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(
+            code,
+            0,
+            "stderr: {}, stdout: {}",
+            String::from_utf8_lossy(&stderr),
+            String::from_utf8_lossy(&stdout)
+        );
+        let out: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+        assert_eq!(out["data"]["execution_mode"], "managed");
     }
 }

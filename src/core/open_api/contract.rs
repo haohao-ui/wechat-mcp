@@ -349,6 +349,7 @@ mod tests {
             image_count: None,
             earlier_images: 0,
             max_attachment_mb: 50,
+            snapshot: None,
             media_refs: vec![],
         };
         let claim = ClaimInfo {
@@ -384,6 +385,7 @@ mod tests {
             image_count: None,
             earlier_images: 0,
             max_attachment_mb: 50,
+            snapshot: None,
             media_refs: vec![],
         };
         let claim = ClaimInfo {
@@ -438,6 +440,7 @@ mod tests {
             image_count: None,
             earlier_images: 0,
             max_attachment_mb: 50,
+            snapshot: None,
             media_refs: vec![],
         };
         let claim = ClaimInfo {
@@ -496,6 +499,7 @@ mod tests {
             image_count: None,
             earlier_images: 0,
             max_attachment_mb: 50,
+            snapshot: None,
             media_refs: vec![],
         };
         let claim = ClaimInfo {
@@ -549,6 +553,7 @@ mod tests {
             image_count: None,
             earlier_images: 0,
             max_attachment_mb: 50,
+            snapshot: None,
             media_refs: vec![],
         };
         let claim = ClaimInfo {
@@ -613,6 +618,7 @@ mod tests {
             image_count: None,
             earlier_images: 0,
             max_attachment_mb: 50,
+            snapshot: None,
             media_refs: vec![],
         };
         let claim = ClaimInfo {
@@ -687,6 +693,7 @@ mod tests {
             image_count: None,
             earlier_images: 0,
             max_attachment_mb: 50,
+            snapshot: None,
             media_refs: vec![],
         };
         let claim = ClaimInfo {
@@ -800,6 +807,7 @@ mod tests {
             image_count: None,
             earlier_images: 0,
             max_attachment_mb: 50,
+            snapshot: None,
             media_refs: vec![MediaRef {
                 kind: "image".to_string(),
                 media_id: Some("mid_001".to_string()),
@@ -837,6 +845,7 @@ mod tests {
             image_count: None,
             earlier_images: 0,
             max_attachment_mb: 50,
+            snapshot: None,
             media_refs: vec![
                 MediaRef {
                     kind: "image".to_string(),
@@ -912,6 +921,7 @@ mod tests {
             image_count: None,
             earlier_images: 0,
             max_attachment_mb: 50,
+            snapshot: None,
             media_refs: vec![media_ref("图1", Some("md_a")), media_ref("图2", None)],
         };
         let claim = ClaimInfo {
@@ -964,6 +974,7 @@ mod tests {
             image_count: None,
             earlier_images: 0,
             max_attachment_mb: 50,
+            snapshot: None,
             media_refs: vec![
                 MediaRef {
                     kind: "image".to_string(),

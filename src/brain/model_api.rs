@@ -928,6 +928,7 @@ mod tests {
             image_count: Some(1),
             earlier_images: 0,
             max_attachment_mb: 50,
+            snapshot: None,
             media_refs: Vec::new(),
         };
 
