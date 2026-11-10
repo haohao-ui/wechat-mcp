@@ -414,7 +414,7 @@ impl BotService {
             to_hex(&hasher.finalize())
         });
 
-        Ok(Self {
+        let mut service = Self {
             config,
             root,
             recipient,
@@ -449,7 +449,9 @@ impl BotService {
             model_retries: None,
             last_health_log: Arc::new(std::sync::Mutex::new(None)),
             last_health_log_at: Arc::new(std::sync::Mutex::new(0.0)),
-        })
+        };
+        service.recover_pending()?;
+        Ok(service)
     }
 
     pub fn batch_key(&self, previous: &Frame, incoming: &[Bubble]) -> String {
@@ -690,6 +692,11 @@ impl BotService {
         map.insert("platform_message_verified".to_string(), json!(false));
         for (k, v) in &d_map {
             map.insert(k.clone(), v.clone());
+        }
+        if let (Some(history), Some(cid)) = (&self.history, &self.contact_id) {
+            if let Ok(summary) = history.pending_summary(Some(cid)) {
+                map.insert("pending_replies".to_string(), summary);
+            }
         }
 
         let now = (self.clock)();
@@ -1053,6 +1060,142 @@ impl BotService {
 
     /// Identical messages: a time separator never seen before marks the newest bubble as new.
     /// A second capture must show the same bubbles and separators, otherwise nothing is new.
+    /// Persist the inbound bubbles of a turn before anything else can consume them, so a crash
+    /// between detection and send cannot drop the reply (P0 "no silent miss").
+    fn record_pending_arrivals(&self, arrivals: &[Bubble]) -> Result<()> {
+        let (Some(history), Some(cid)) = (&self.history, &self.contact_id) else {
+            return Ok(());
+        };
+        let inbound: Vec<Bubble> = arrivals
+            .iter()
+            .filter(|b| b.direction == "inbound_visual")
+            .cloned()
+            .collect();
+        if inbound.is_empty() {
+            return Ok(());
+        }
+        history.enqueue_pending(
+            cid,
+            &self.account,
+            &inbound,
+            crate::core::history::store::now_ms(),
+        )?;
+        Ok(())
+    }
+
+    fn resolve_pending_bubbles(
+        &self,
+        bubbles: &[Bubble],
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let (Some(history), Some(cid)) = (&self.history, &self.contact_id) else {
+            return Ok(());
+        };
+        let digests: Vec<String> = bubbles
+            .iter()
+            .filter(|b| b.direction == "inbound_visual")
+            .map(|b| b.digest.clone())
+            .collect();
+        if digests.is_empty() {
+            return Ok(());
+        }
+        let _ = history.resolve_pending(cid, &digests, status, error)?;
+        Ok(())
+    }
+
+    /// A rebaseline may forget pixels, never an unanswered message: keep the newest visible inbound
+    /// bubble as a pending reply unless history can prove it was already answered.
+    fn keep_unanswered_visible(&self, frame: &Frame) -> Result<()> {
+        let (Some(history), Some(cid)) = (&self.history, &self.contact_id) else {
+            return Ok(());
+        };
+        let Some(bubble) = frame.bubbles.iter().rev().find(|b| {
+            b.direction == "inbound_visual" && b.kind.as_deref() != Some("voice_transcript")
+        }) else {
+            return Ok(());
+        };
+        let ids = history.match_recent_inbound(cid, std::slice::from_ref(bubble))?;
+        if !ids.is_empty() && history.replied_after(cid, &ids, None)? {
+            return Ok(());
+        }
+        history.enqueue_pending(
+            cid,
+            &self.account,
+            std::slice::from_ref(bubble),
+            crate::core::history::store::now_ms(),
+        )?;
+        tracing::warn!(
+            recipient = %self.recipient,
+            digest = %bubble.digest,
+            "rebaseline_kept_unanswered_message"
+        );
+        Ok(())
+    }
+
+    /// Rebuild turns that were recorded but never answered before a restart. History is the
+    /// arbiter: a pending row is only dropped when history already shows a reply, so a crash
+    /// cannot leave a customer without an answer (P0).
+    fn recover_pending(&mut self) -> Result<()> {
+        if self.turn.is_some() {
+            return Ok(());
+        }
+        let (Some(history), Some(cid)) = (self.history.clone(), self.contact_id.clone()) else {
+            return Ok(());
+        };
+        let rows = history.open_pending(&cid, 50)?;
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut bubbles = Vec::new();
+        for row in &rows {
+            let Some(list) = row.get("bubbles").and_then(Value::as_array) else {
+                continue;
+            };
+            for item in list {
+                if let Ok(bubble) = serde_json::from_value::<Bubble>(item.clone()) {
+                    bubbles.push(bubble);
+                }
+            }
+        }
+        if bubbles.is_empty() {
+            return Ok(());
+        }
+        let ids = history
+            .match_recent_inbound(&cid, &bubbles)
+            .unwrap_or_default();
+        if !ids.is_empty() && history.replied_after(&cid, &ids, None).unwrap_or(false) {
+            let _ = self.resolve_pending_bubbles(&bubbles, "replied", None);
+            return Ok(());
+        }
+        let Some(frame) = self.cursor.clone() else {
+            tracing::warn!(
+                recipient = %self.recipient,
+                pending = rows.len(),
+                "pending_reply_has_no_baseline"
+            );
+            return Ok(());
+        };
+        let now = (self.clock)();
+        let quiet = self.config.turn_quiet_seconds as f64;
+        let turn = TurnData {
+            opened_at: now,
+            baseline: frame.clone(),
+            bubbles,
+            last_inbound_at: now - quiet - 1.0,
+            frame,
+            model_failures: 0,
+            retry_at: 0.0,
+        };
+        tracing::warn!(
+            recipient = %self.recipient,
+            pending = rows.len(),
+            "pending_reply_recovered"
+        );
+        self.keep_turn(turn)?;
+        Ok(())
+    }
+
     async fn separator_arrivals(
         &mut self,
         capture: &mut impl Capture,
@@ -1169,6 +1312,7 @@ impl BotService {
                         visible = frame.bubbles.len(),
                         "theme_changed_rebaseline"
                     );
+                    self.keep_unanswered_visible(&frame)?;
                     self.advance(frame.clone())?;
                     let mut d = Map::new();
                     d.insert(
@@ -1257,6 +1401,7 @@ impl BotService {
                 reason = %reason_text,
                 "rebaselined_without_reply"
             );
+            self.keep_unanswered_visible(&confirmed)?;
             self.advance(confirmed)?;
             let mut d = Map::new();
             d.insert("reason".to_string(), json!(reason_text));
@@ -1301,6 +1446,7 @@ impl BotService {
                     retry_at: 0.0,
                 });
             }
+            let persisted = arrivals.clone();
             if let Some(t) = &mut self.turn {
                 t.bubbles.extend(arrivals);
                 t.last_inbound_at = now;
@@ -1308,6 +1454,8 @@ impl BotService {
                 write_private(&self.turn_path, t)?;
             }
             self.advance(confirmed)?;
+            // Durable before the model or the send can fail: a crash from here on is recoverable.
+            self.record_pending_arrivals(&persisted)?;
         } else if self.turn.is_none() {
             self.advance(frame.clone())?;
         }
@@ -1885,6 +2033,7 @@ impl BotService {
                 map.insert("status".to_string(), json!("skipped_by_brain"));
             }
             self.write_journal(journal_path, record)?;
+            self.resolve_pending_bubbles(&pending.bubbles, "handoff", Some("skipped by brain"))?;
             return Ok(None);
         }
 
@@ -1900,6 +2049,7 @@ impl BotService {
                 map.insert("status".to_string(), json!("handoff"));
             }
             self.write_journal(journal_path, record)?;
+            self.resolve_pending_bubbles(&pending.bubbles, "handoff", None)?;
             let mut d = Map::new();
             d.insert("recipient".to_string(), json!(self.recipient));
             d.insert("turn_id".to_string(), json!(key));
@@ -1965,6 +2115,7 @@ impl BotService {
                 )?;
             }
         }
+        self.resolve_pending_bubbles(&pending.bubbles, "replied", None)?;
 
         let (mut result, mut receipt, mut send_err) = self
             .try_send_once(client, journal_path, record, confirmed, &reply, key)
@@ -4746,6 +4897,165 @@ mod tests {
         assert!(
             svc.root.join("baseline-established.json").exists(),
             "the marker is what records that this empty chat was opened once"
+        );
+    }
+
+    fn pending_history(td: &TestDir) -> (Arc<HistoryStore>, String) {
+        let history = Arc::new(HistoryStore::open(td.path().join("h")).unwrap());
+        history.migrate().unwrap();
+        let cid = history
+            .ensure_contact("fixture", &json!({"recipient": "示例联系人甲", "kind": "private"}), false)
+            .unwrap();
+        (history, cid)
+    }
+
+    #[tokio::test]
+    async fn test_service_send_closes_the_pending_reply() {
+        let td = TestDir::new();
+        let (history, cid) = pending_history(&td);
+        let mut svc = BotService::new(
+            fixture_config(td.path()),
+            None,
+            Some(history.clone()),
+            Some(cid.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        svc.brain = Some(default_brain("收到。"));
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "示例联系人甲");
+        svc.advance(old).unwrap();
+        let current = test_frame(
+            vec![
+                test_bubble("old", "inbound_visual"),
+                test_bubble("你好", "inbound_visual"),
+            ],
+            "示例联系人甲",
+        );
+        let after = test_frame(
+            vec![
+                test_bubble("old", "inbound_visual"),
+                test_bubble("你好", "inbound_visual"),
+                test_bubble("收到。", "outbound_visual"),
+            ],
+            "示例联系人甲",
+        );
+        let mut cap = MockCapture::new(vec![
+            current.clone(),
+            current.clone(),
+            current.clone(),
+            after,
+        ]);
+        cap.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        let open = history.open_pending(&cid, 10).unwrap();
+        assert!(open.is_empty(), "the send must close the queued reply: {open:?}");
+        let summary = history.pending_summary(Some(&cid)).unwrap();
+        assert_eq!(summary["open"], 0);
+        assert!(summary["by_status"]["replied"].as_i64().unwrap() >= 1, "{summary}");
+    }
+
+    #[tokio::test]
+    async fn test_service_restart_recovers_an_unanswered_pending_reply() {
+        let td = TestDir::new();
+        let (history, cid) = pending_history(&td);
+        let frame = test_frame(
+            vec![
+                test_bubble("old", "inbound_visual"),
+                test_bubble("语音没回", "inbound_visual"),
+            ],
+            "示例联系人甲",
+        );
+        // Detected before the crash: the cursor advanced and the reply was queued, no turn survived.
+        let mut first = BotService::new(
+            fixture_config(td.path()),
+            None,
+            Some(history.clone()),
+            Some(cid.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+        first.advance(frame.clone()).unwrap();
+        history
+            .enqueue_pending(
+                &cid,
+                "fixture",
+                &[test_bubble("语音没回", "inbound_visual")],
+                crate::core::history::store::now_ms(),
+            )
+            .unwrap();
+        drop(first);
+
+        let mut svc = BotService::new(
+            fixture_config(td.path()),
+            None,
+            Some(history.clone()),
+            Some(cid.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        svc.brain = Some(default_brain("收到。"));
+        assert!(svc.turn.is_some(), "a restart rebuilds the unfinished turn");
+
+        let mut cap = MockCapture::new(vec![frame.clone(); 6]);
+        cap.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        let sends: Vec<_> = client
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| name == "send_message")
+            .cloned()
+            .collect();
+        assert_eq!(sends.len(), 1, "the recovered message is answered");
+        assert!(
+            history.open_pending(&cid, 10).unwrap().is_empty(),
+            "the recovered reply closes the queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_service_rebaseline_keeps_the_unanswered_message() {
+        let td = TestDir::new();
+        let (history, cid) = pending_history(&td);
+        let mut svc = BotService::new(
+            fixture_config(td.path()),
+            None,
+            Some(history.clone()),
+            Some(cid.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+        let mut old = test_frame(vec![test_bubble("旧消息", "inbound_visual")], "示例联系人甲");
+        old.profile = Some("wechat-4-light".to_string());
+        svc.advance(old).unwrap();
+
+        // The repaint cannot be anchored by content, so the baseline would swallow this message.
+        let frame = test_frame(
+            vec![test_bubble("完全不同的消息", "inbound_visual")],
+            "示例联系人甲",
+        );
+        let mut cap = MockCapture::new(vec![frame.clone(); 3]);
+        cap.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        let open = history.open_pending(&cid, 10).unwrap();
+        assert_eq!(open.len(), 1, "the rebaseline keeps the unanswered message: {open:?}");
+        assert_eq!(
+            open[0]["bubbles"][0]["text"].as_str(),
+            Some("完全不同的消息")
         );
     }
 

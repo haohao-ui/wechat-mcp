@@ -17,6 +17,18 @@ use crate::core::policy;
 pub const ECHO_WINDOW_MS: i64 = 10 * 60 * 1000;
 pub const MAX_MEDIA: usize = 50 * 1024 * 1024;
 
+/// `pending_replies.status` 的全部合法取值（与建表 CHECK 一致）。
+const PENDING_STATUSES: &[&str] = &[
+    "pending",
+    "replied",
+    "failed_explicit",
+    "handoff",
+    "unresolved",
+];
+
+/// `resolve_pending` 允许写入的终态（不含 `pending`）。
+const PENDING_TERMINAL_STATUSES: &[&str] = &["replied", "failed_explicit", "handoff", "unresolved"];
+
 pub const EXCLUDED_SEND: &[&str] = &[
     "superseded",
     "stopped_before_send",
@@ -261,6 +273,29 @@ CREATE TABLE contact_reviews(
   resolved_at INTEGER
 );
 CREATE INDEX contact_reviews_account ON contact_reviews(account_id);
+"#,
+    ),
+    (
+        // v1-v4 已占用（v3 = media 理解字段，v4 = 联系人资料/待确认）。
+        // 新迁移只能追加更大的版本号：migrate() 以版本号去重，重复版本会让
+        // 已升级的库跳过执行、新库重复执行到报错。
+        5,
+        r#"
+CREATE TABLE pending_replies(
+  pending_id TEXT PRIMARY KEY,
+  contact_id TEXT NOT NULL REFERENCES contacts(contact_id),
+  account_id TEXT NOT NULL,
+  bubble_digest TEXT NOT NULL,
+  bubble_text TEXT NOT NULL,
+  bubbles_json TEXT NOT NULL CHECK(json_valid(bubbles_json)),
+  status TEXT NOT NULL CHECK(status IN ('pending','replied','failed_explicit','handoff','unresolved')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  first_seen_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX pending_open_once ON pending_replies(contact_id, bubble_digest, bubble_text) WHERE status='pending';
+CREATE INDEX pending_open_idx ON pending_replies(contact_id, status, first_seen_at);
 "#,
     ),
 ];
@@ -1153,6 +1188,212 @@ impl HistoryStore {
             )
             .optional()?;
         Ok(found.is_some())
+    }
+
+    // Pending Replies ----------------------------------------------------------
+
+    /// 把一批入站气泡落进待回复队列（“不漏回” P0 的持久化半边）。
+    ///
+    /// 每条 bubble 单独一行，`bubbles_json` 保存该单条的 JSON 数组，进程重启后
+    /// 由 [`HistoryStore::open_pending`] 原样取回。`pending_id` 形如 `p_...`。
+    /// 同一 contact 已有同 `(bubble_digest, bubble_text)` 的 pending 行时忽略该
+    /// 条（唯一索引 `pending_open_once` + `INSERT OR IGNORE`），因此重复处理同一
+    /// 帧是幂等的；返回实际新建的 `pending_id`（按输入顺序）。
+    ///
+    /// 不做任何业务判断，也不替调用方建档：`contact_id` 必须已由
+    /// `ensure_contact`/`upsert_profile` 建立。未知 contact 返回明确错误
+    /// (`unknown contact ...`)，`contacts(contact_id)` 外键仍作为第二重兜底。
+    /// 这与本文件其它写入 API（`record_frame`/`record_bot_reply`/`import_message`）
+    /// 的约定一致。
+    ///
+    /// 整个调用在一个事务内完成：要么整批写入，要么都不写。
+    pub fn enqueue_pending(
+        &self,
+        contact_id: &str,
+        account_id: &str,
+        bubbles: &[Bubble],
+        first_seen_at: i64,
+    ) -> Result<Vec<String>> {
+        if bubbles.is_empty() {
+            return Ok(Vec::new());
+        }
+        let guard = self.conn.lock().unwrap();
+        let conn = guard.unchecked_transaction()?;
+        let known: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM contacts WHERE contact_id=?)",
+            params![contact_id],
+            |r| r.get(0),
+        )?;
+        if !known {
+            bail!("unknown contact {contact_id}: call ensure_contact before enqueue_pending");
+        }
+
+        let mut created = Vec::new();
+        for bubble in bubbles {
+            let pending_id = new_id("p_");
+            // 单条存成数组：恢复时可直接反序列化成 Vec<Bubble>，调用方不需要
+            // 知道“单条为什么也是数组”。
+            let bubbles_json = serde_json::to_string(&[bubble])?;
+            let changed = conn.execute(
+                "INSERT OR IGNORE INTO pending_replies(
+                     pending_id, contact_id, account_id, bubble_digest, bubble_text,
+                     bubbles_json, status, attempts, last_error, first_seen_at, updated_at)
+                 VALUES(?1,?2,?3,?4,?5,?6,'pending',0,NULL,?7,?7)",
+                params![
+                    pending_id,
+                    contact_id,
+                    account_id,
+                    bubble.digest,
+                    bubble.text,
+                    bubbles_json,
+                    first_seen_at
+                ],
+            )?;
+            if changed == 1 {
+                created.push(pending_id);
+            }
+        }
+        conn.commit()?;
+        Ok(created)
+    }
+
+    /// 把该 contact 下 digest 命中且仍为 `pending` 的行置为终态。
+    ///
+    /// `status` 只能是 `replied` / `failed_explicit` / `handoff` / `unresolved`；
+    /// 其它值返回错误且不触碰任何行。命中行 `attempts` 加一、`last_error` 写入
+    /// `error`（`None` 清空）、`updated_at` 置为当前时间；已终态的行不会被再次
+    /// 改写，所以重复调用是幂等的（第二次返回 0）。返回实际更新行数。
+    pub fn resolve_pending(
+        &self,
+        contact_id: &str,
+        digests: &[String],
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<usize> {
+        if !PENDING_TERMINAL_STATUSES.contains(&status) {
+            bail!(
+                "invalid pending reply status {status:?}: expected one of {PENDING_TERMINAL_STATUSES:?}"
+            );
+        }
+        if digests.is_empty() {
+            return Ok(0);
+        }
+        let marks = digests.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "UPDATE pending_replies
+                SET status=?, attempts=attempts+1, last_error=?, updated_at=?
+              WHERE contact_id=? AND status='pending' AND bubble_digest IN ({marks})"
+        );
+        let stamp = now_ms();
+        let mut sql_params: Vec<&dyn rusqlite::ToSql> = vec![&status, &error, &stamp, &contact_id];
+        for digest in digests {
+            sql_params.push(digest);
+        }
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute(&sql, rusqlite::params_from_iter(sql_params))?;
+        Ok(updated)
+    }
+
+    /// 取该 contact 未结项（`status='pending'`）的气泡，按
+    /// `(first_seen_at, pending_id)` 升序，最多 `limit` 行。
+    ///
+    /// 每项含 `pending_id`、`bubbles`（解析后的 [`Bubble`] 数组，
+    /// 通常只有一条）、`first_seen_at`、`attempts`，另附 `contact_id`、
+    /// `account_id`、`bubble_digest`、`bubble_text`、`status`、`last_error`、
+    /// `updated_at`，方便恢复路径直接复用。
+    pub fn open_pending(&self, contact_id: &str, limit: usize) -> Result<Vec<Value>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT pending_id, account_id, bubble_digest, bubble_text, bubbles_json,
+                    status, attempts, last_error, first_seen_at, updated_at
+               FROM pending_replies
+              WHERE contact_id=? AND status='pending'
+              ORDER BY first_seen_at, pending_id
+              LIMIT ?",
+        )?;
+        let mut rows = stmt.query(params![contact_id, limit])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let pending_id: String = row.get(0)?;
+            let bubbles_json: String = row.get(4)?;
+            let bubbles: Vec<Bubble> = serde_json::from_str(&bubbles_json).with_context(|| {
+                format!("pending_replies {pending_id} has invalid bubbles_json")
+            })?;
+            out.push(json!({
+                "pending_id": pending_id,
+                "contact_id": contact_id,
+                "account_id": row.get::<_, String>(1)?,
+                "bubble_digest": row.get::<_, String>(2)?,
+                "bubble_text": row.get::<_, String>(3)?,
+                "bubbles": serde_json::to_value(&bubbles)?,
+                "status": row.get::<_, String>(5)?,
+                "attempts": row.get::<_, i64>(6)?,
+                "last_error": row.get::<_, Option<String>>(7)?,
+                "first_seen_at": row.get::<_, i64>(8)?,
+                "updated_at": row.get::<_, i64>(9)?,
+            }));
+        }
+        Ok(out)
+    }
+
+    /// 待回复队列指标，供 health/监控使用。
+    ///
+    /// 返回 `{"open": n, "oldest_ms": Option<i64>, "by_status": {...}}`：
+    /// `open` 是 `status='pending'` 行数，`oldest_ms` 是其中最老的
+    /// `first_seen_at`（无未结项时是 JSON null），`by_status` 包含
+    /// `pending` 与 4 个终态键（没有行也补 0）。`contact_id=None` 汇总全库。
+    pub fn pending_summary(&self, contact_id: Option<&str>) -> Result<Value> {
+        let conn = self.conn.lock().unwrap();
+        let (open, oldest_ms): (i64, Option<i64>) = if let Some(cid) = contact_id {
+            conn.query_row(
+                "SELECT COUNT(*), MIN(first_seen_at) FROM pending_replies
+                  WHERE contact_id=? AND status='pending'",
+                params![cid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?
+        } else {
+            conn.query_row(
+                "SELECT COUNT(*), MIN(first_seen_at) FROM pending_replies
+                  WHERE status='pending'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?
+        };
+
+        let mut by_status = serde_json::Map::new();
+        for status in PENDING_STATUSES {
+            by_status.insert((*status).to_string(), json!(0));
+        }
+        let mut counts: Vec<(String, i64)> = Vec::new();
+        if let Some(cid) = contact_id {
+            let mut stmt = conn.prepare(
+                "SELECT status, COUNT(*) FROM pending_replies WHERE contact_id=? GROUP BY status",
+            )?;
+            let mapped = stmt.query_map(params![cid], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            for row in mapped {
+                counts.push(row?);
+            }
+        } else {
+            let mut stmt =
+                conn.prepare("SELECT status, COUNT(*) FROM pending_replies GROUP BY status")?;
+            let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            for row in mapped {
+                counts.push(row?);
+            }
+        }
+        for (status, count) in counts {
+            by_status.insert(status, json!(count));
+        }
+
+        Ok(json!({
+            "open": open,
+            "oldest_ms": oldest_ms,
+            "by_status": by_status,
+        }))
     }
 
     // Record Frame -------------------------------------------------------------
@@ -5025,5 +5266,288 @@ mod tests {
             .find(|p| p["contact_id"] == cid2)
             .unwrap();
         assert!(prof2_after["removed_at"].is_null());
+    }
+
+    // Pending replies ----------------------------------------------------------
+
+    #[test]
+    fn test_store_enqueue_pending_dedupes_same_open_bubble() {
+        let f = setup_fixture();
+        let bubble = bub("在吗", "inbound_visual", "text");
+
+        let first = f
+            .store
+            .enqueue_pending(&f.c, "acct", std::slice::from_ref(&bubble), 1000)
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        assert!(first[0].starts_with("p_"));
+
+        // 同一帧被重复处理：唯一索引 pending_open_once 吞掉第二条。
+        let again = f
+            .store
+            .enqueue_pending(&f.c, "acct", std::slice::from_ref(&bubble), 2000)
+            .unwrap();
+        assert!(again.is_empty());
+
+        let conn = f.store.connection();
+        let guard = conn.lock().unwrap();
+        let (count, first_seen_at, attempts, status): (i64, i64, i64, String) = guard
+            .query_row(
+                "SELECT COUNT(*), MIN(first_seen_at), MIN(attempts), MIN(status)
+                   FROM pending_replies WHERE contact_id=?",
+                [&f.c],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (count, first_seen_at, attempts, status.as_str()),
+            (1, 1000, 0, "pending")
+        );
+    }
+
+    #[test]
+    fn test_store_pending_enqueue_resolve_and_summary() {
+        let f = setup_fixture();
+        let a = bub("第一条", "inbound_visual", "text");
+        let b = bub("第二条", "inbound_visual", "text");
+        assert_eq!(
+            f.store
+                .enqueue_pending(&f.c, "acct", &[a], 1000)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            f.store
+                .enqueue_pending(&f.c, "acct", &[b], 2000)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // 两条不同气泡两行；按 first_seen_at 升序返回，bubbles 可解析回 Bubble。
+        let open = f.store.open_pending(&f.c, 10).unwrap();
+        assert_eq!(open.len(), 2);
+        assert_eq!(open[0]["bubbles"][0]["text"], "第一条");
+        assert_eq!(open[0]["bubbles"][0]["digest"], "第一条");
+        assert_eq!(open[1]["bubbles"][0]["text"], "第二条");
+        assert_eq!(open[0]["first_seen_at"], 1000);
+        assert_eq!(open[0]["attempts"], 0);
+        assert_eq!(open[0]["status"], "pending");
+        assert!(open[0]["last_error"].is_null());
+
+        // 全库与单 contact 汇总一致；未出现的终态键补 0。
+        let all = f.store.pending_summary(None).unwrap();
+        let scoped = f.store.pending_summary(Some(&f.c)).unwrap();
+        assert_eq!(all["open"], 2);
+        assert_eq!(scoped["open"], 2);
+        assert_eq!(all["oldest_ms"], 1000);
+        assert_eq!(scoped["oldest_ms"], 1000);
+        for status in [
+            "pending",
+            "replied",
+            "failed_explicit",
+            "handoff",
+            "unresolved",
+        ] {
+            let expected: i64 = if status == "pending" { 2 } else { 0 };
+            assert_eq!(scoped["by_status"][status], expected, "status {status}");
+        }
+
+        // 只结算最老的一条：open/oldest 跟着变，该行不再从 open_pending 返回。
+        assert_eq!(
+            f.store
+                .resolve_pending(&f.c, &["第一条".to_string()], "replied", None)
+                .unwrap(),
+            1
+        );
+        let open = f.store.open_pending(&f.c, 10).unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0]["bubbles"][0]["text"], "第二条");
+        let summary = f.store.pending_summary(Some(&f.c)).unwrap();
+        assert_eq!(summary["open"], 1);
+        assert_eq!(summary["oldest_ms"], 2000);
+        assert_eq!(summary["by_status"]["pending"], 1);
+        assert_eq!(summary["by_status"]["replied"], 1);
+        assert_eq!(summary["by_status"]["failed_explicit"], 0);
+        assert_eq!(summary["by_status"]["handoff"], 0);
+        assert_eq!(summary["by_status"]["unresolved"], 0);
+
+        // 最后一条转人工后队列清空：oldest 是 null，终态计数保留。
+        assert_eq!(
+            f.store
+                .resolve_pending(&f.c, &["第二条".to_string()], "handoff", Some("转人工"))
+                .unwrap(),
+            1
+        );
+        assert!(f.store.open_pending(&f.c, 10).unwrap().is_empty());
+        assert!(f.store.open_pending(&f.c, 0).unwrap().is_empty());
+        let summary = f.store.pending_summary(Some(&f.c)).unwrap();
+        assert_eq!(summary["open"], 0);
+        assert!(summary["oldest_ms"].is_null());
+        assert_eq!(summary["by_status"]["pending"], 0);
+        assert_eq!(summary["by_status"]["replied"], 1);
+        assert_eq!(summary["by_status"]["handoff"], 1);
+        assert_eq!(summary["by_status"]["unresolved"], 0);
+    }
+
+    #[test]
+    fn test_store_resolve_pending_is_idempotent_and_rejects_bad_status() {
+        let f = setup_fixture();
+        let bubble = bub("重复结算", "inbound_visual", "text");
+        f.store
+            .enqueue_pending(&f.c, "acct", &[bubble], 1000)
+            .unwrap();
+        let digest = vec!["重复结算".to_string()];
+
+        // "pending" 不是终态，未知状态同样拒绝，且都不触碰行。
+        assert!(
+            f.store
+                .resolve_pending(&f.c, &digest, "pending", None)
+                .is_err()
+        );
+        assert!(
+            f.store
+                .resolve_pending(&f.c, &digest, "done", None)
+                .is_err()
+        );
+        assert_eq!(f.store.open_pending(&f.c, 10).unwrap().len(), 1);
+
+        assert_eq!(
+            f.store
+                .resolve_pending(&f.c, &digest, "failed_explicit", Some("超时"))
+                .unwrap(),
+            1
+        );
+        // 已终态的行不会被第二次结算改写。
+        assert_eq!(
+            f.store
+                .resolve_pending(&f.c, &digest, "replied", None)
+                .unwrap(),
+            0
+        );
+
+        let conn = f.store.connection();
+        let guard = conn.lock().unwrap();
+        let (status, attempts, last_error): (String, i64, Option<String>) = guard
+            .query_row(
+                "SELECT status, attempts, last_error FROM pending_replies WHERE contact_id=?",
+                [&f.c],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (status.as_str(), attempts, last_error.as_deref()),
+            ("failed_explicit", 1, Some("超时"))
+        );
+    }
+
+    #[test]
+    fn test_store_enqueue_pending_rejects_unknown_contact() {
+        let f = setup_fixture();
+        let err = f
+            .store
+            .enqueue_pending(
+                "c_missing",
+                "acct",
+                &[bub("没有联系人", "inbound_visual", "text")],
+                1000,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown contact"), "{err}");
+        let count: i64 = f
+            .store
+            .connection()
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM pending_replies", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_store_migration_upgrades_existing_v2_database_for_pending_replies() {
+        let temp = TestTempDir::new();
+        let state = temp.path().join("state");
+        let history = state.join("history");
+        fs::create_dir_all(&history).unwrap();
+        let db = history.join("history.sqlite3");
+
+        // 手工建一个只应用了 v1/v2 的老库（模拟线上已存在的库）。
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+                .unwrap();
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)",
+                [],
+            )
+            .unwrap();
+            for &(version, sql) in MIGRATIONS.iter().filter(|entry| entry.0 <= 2) {
+                conn.execute_batch(sql).unwrap();
+                conn.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    params![version, 0],
+                )
+                .unwrap();
+            }
+        }
+        {
+            let conn = Connection::open(&db).unwrap();
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='pending_replies')",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(!exists, "老库升级前不应有 pending_replies");
+        }
+
+        // 打开即继续升级到最新版本，新表/索引可用。
+        let store = HistoryStore::open(&state).unwrap();
+        let cid = store
+            .ensure_contact(
+                "acct",
+                &json!({"recipient": "老库客户", "kind": "private"}),
+                true,
+            )
+            .unwrap();
+        let ids = store
+            .enqueue_pending(
+                &cid,
+                "acct",
+                &[bub("升级后的消息", "inbound_visual", "text")],
+                1000,
+            )
+            .unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(store.open_pending(&cid, 10).unwrap().len(), 1);
+
+        let conn = store.connection();
+        let guard = conn.lock().unwrap();
+        let versions: HashSet<i64> = {
+            let mut stmt = guard
+                .prepare("SELECT version FROM schema_migrations")
+                .unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .filter_map(Result::ok)
+                .collect()
+        };
+        for version in [1, 2, 3, 4, 5] {
+            assert!(versions.contains(&version), "missing migration {version}");
+        }
+        let index_exists: bool = guard
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='pending_open_once')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            index_exists,
+            "pending_open_once index must exist after upgrade"
+        );
     }
 }
