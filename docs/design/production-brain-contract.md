@@ -32,7 +32,7 @@
 - `brain-bindings.json`：唯一可变根，含全部角色目录状态、draft 指针、active 绑定与迁移记录；不可变对象未被根引用时只是孤儿，不生效。
 - `brain-profiles/.write.lock`：进程间 flock，涵盖读取 generation、验证、写对象与根提交；与运行维护 core.lock 不互相替代。需要两锁时固定 core.lock → profile lock；正常编辑只取 profile lock，不停核心。
 
-所有对象 `schema_version:1`，拒绝未知 schema，写入未知字段报错；未来较新 schema 启动只读并返回 schema_unsupported，不重置、不默认迁移。旧 config.json 原样保留且不额外添加 brain schema 字段。
+不可变修订对象（RoleRevision/KnowledgeRevision）保持 `schema_version:1`，根清单 `brain-bindings.json` 升级为 `schema_version:2` 且 AccountEntry 引入必填 `execution_mode`（`legacy|managed`）；拒绝未知 schema，写入未知字段报错；未来较新 schema 启动只读并返回 schema_unsupported，不重置、不默认迁移。旧 config.json 原样保留且不额外添加 brain schema 字段。
 
 ### RoleRevision 字段
 
@@ -56,10 +56,10 @@
 
 | 对象 | 精确字段与类型 |
 |---|---|
-| 根 | schema_version:整数1；generation:0..2^53-1整数；roles:RoleEntry[]；knowledge:KnowledgeEntry[]；accounts:AccountEntry[]；migrations:MigrationEntry[]；activation_history:ActivationEntry[]；request_results:RequestEntry[] |
+| 根 | schema_version:整数2；generation:0..2^53-1整数；roles:RoleEntry[]；knowledge:KnowledgeEntry[]；accounts:AccountEntry[]；migrations:MigrationEntry[]；activation_history:ActivationEntry[]；request_results:RequestEntry[] |
 | RoleEntry | owner_account_id:string；role_id:string；draft_revision_id:string；archived:bool |
 | KnowledgeEntry | owner_account_id:string；knowledge_id:string；draft_revision_id:string |
-| AccountEntry | account_id:string；active:BindingSet；draft:BindingSet；legacy_fallback:RoleRef或null |
+| AccountEntry | account_id:string；active:BindingSet；draft:BindingSet；legacy_fallback:RoleRef或null；execution_mode:legacy或managed |
 | BindingSet | default:RoleRef或null；overrides:Override[] |
 | RoleRef | role_id:string；revision_id:string |
 | Override | contact_id:string；chat_kind:private或group；role_id:string；revision_id:string |
