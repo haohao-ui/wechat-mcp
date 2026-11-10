@@ -318,3 +318,152 @@ fn compare_version_strings(v1: &str, v2: &str) -> i32 {
     }
     0
 }
+
+/// 解析签名封套并严格校验：
+/// 1. 拒绝包含重复 JSON 键的对象（包含嵌套对象）；
+/// 2. 拒绝任何未定义字段（serde deny_unknown_fields）；
+/// 3. 校验 UTF-8 编码。
+pub fn parse_signed_envelope(bytes: &[u8]) -> Result<SignedEnvelope> {
+    let json_str =
+        std::str::from_utf8(bytes).map_err(|e| anyhow::anyhow!("invalid_utf8_in_envelope: {e}"))?;
+    ensure_no_duplicate_json_keys(json_str)?;
+    let envelope: SignedEnvelope = serde_json::from_slice(bytes)?;
+    Ok(envelope)
+}
+
+/// 递归扫描 JSON 字符串中的所有对象，确保同一层级内不存在重复键
+pub fn ensure_no_duplicate_json_keys(json_str: &str) -> Result<()> {
+    let mut chars = json_str.chars().peekable();
+    skip_whitespace(&mut chars);
+    parse_json_value(&mut chars)?;
+    skip_whitespace(&mut chars);
+    if chars.next().is_some() {
+        bail!("trailing_characters_in_json");
+    }
+    Ok(())
+}
+
+fn skip_whitespace(chars: &mut std::iter::Peekable<std::str::Chars>) {
+    while let Some(&c) = chars.peek() {
+        if c.is_whitespace() {
+            chars.next();
+        } else {
+            break;
+        }
+    }
+}
+
+fn parse_json_string(chars: &mut std::iter::Peekable<std::str::Chars>) -> Result<String> {
+    if chars.next() != Some('"') {
+        bail!("expected_quote");
+    }
+    let mut s = String::new();
+    while let Some(c) = chars.next() {
+        if c == '"' {
+            return Ok(s);
+        }
+        if c == '\\' {
+            let esc = chars
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("unterminated_escape"))?;
+            s.push('\\');
+            s.push(esc);
+        } else {
+            s.push(c);
+        }
+    }
+    bail!("unterminated_string");
+}
+
+fn parse_json_value(chars: &mut std::iter::Peekable<std::str::Chars>) -> Result<()> {
+    skip_whitespace(chars);
+    match chars.peek() {
+        Some('{') => parse_json_object(chars),
+        Some('[') => parse_json_array(chars),
+        Some('"') => {
+            let _ = parse_json_string(chars)?;
+            Ok(())
+        }
+        Some(_) => {
+            while let Some(&c) = chars.peek() {
+                if c == ',' || c == '}' || c == ']' || c.is_whitespace() {
+                    break;
+                }
+                chars.next();
+            }
+            Ok(())
+        }
+        None => bail!("unexpected_eof"),
+    }
+}
+
+fn parse_json_object(chars: &mut std::iter::Peekable<std::str::Chars>) -> Result<()> {
+    if chars.next() != Some('{') {
+        bail!("expected_open_brace");
+    }
+    let mut seen_keys = std::collections::HashSet::new();
+    loop {
+        skip_whitespace(chars);
+        match chars.peek() {
+            Some('}') => {
+                chars.next();
+                return Ok(());
+            }
+            Some('"') => {
+                let key = parse_json_string(chars)?;
+                if !seen_keys.insert(key.clone()) {
+                    bail!(
+                        "duplicate_json_key_rejected: key '{}' declared more than once",
+                        key
+                    );
+                }
+                skip_whitespace(chars);
+                if chars.next() != Some(':') {
+                    bail!("expected_colon_after_key");
+                }
+                parse_json_value(chars)?;
+                skip_whitespace(chars);
+                match chars.peek() {
+                    Some(',') => {
+                        chars.next();
+                    }
+                    Some('}') => {
+                        chars.next();
+                        return Ok(());
+                    }
+                    _ => bail!("expected_comma_or_close_brace"),
+                }
+            }
+            _ => bail!("expected_key_or_close_brace"),
+        }
+    }
+}
+
+fn parse_json_array(chars: &mut std::iter::Peekable<std::str::Chars>) -> Result<()> {
+    if chars.next() != Some('[') {
+        bail!("expected_open_bracket");
+    }
+    loop {
+        skip_whitespace(chars);
+        match chars.peek() {
+            Some(']') => {
+                chars.next();
+                return Ok(());
+            }
+            _ => {
+                parse_json_value(chars)?;
+                skip_whitespace(chars);
+                match chars.peek() {
+                    Some(',') => {
+                        chars.next();
+                    }
+                    Some(']') => {
+                        chars.next();
+                        return Ok(());
+                    }
+                    _ => bail!("expected_comma_or_close_bracket"),
+                }
+            }
+        }
+    }
+}

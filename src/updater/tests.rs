@@ -508,3 +508,138 @@ fn test_local_signer_failure_simulation() {
     assert!(res.is_err());
     assert!(res.unwrap_err().to_string().contains("keychain_locked"));
 }
+
+#[test]
+fn test_duplicate_json_keys_rejected() {
+    // 1. 顶层重复键
+    let dup_top = r#"{"envelope_schema": 1, "envelope_schema": 2, "key_id": "k1", "signature_algorithm": "ed25519", "signature": "00", "manifest": {}}"#;
+    let err_top = parse_signed_envelope(dup_top.as_bytes()).unwrap_err();
+    assert!(
+        err_top.to_string().contains("duplicate_json_key_rejected"),
+        "expected duplicate key rejection, got: {err_top}"
+    );
+
+    // 2. 嵌套 manifest 重复键
+    let dup_nested = r#"{
+        "envelope_schema": 1,
+        "key_id": "k1",
+        "signature_algorithm": "ed25519",
+        "signature": "00",
+        "manifest": {
+            "sequence": 1,
+            "sequence": 2
+        }
+    }"#;
+    let err_nested = parse_signed_envelope(dup_nested.as_bytes()).unwrap_err();
+    assert!(
+        err_nested
+            .to_string()
+            .contains("duplicate_json_key_rejected"),
+        "expected duplicate key rejection in nested object, got: {err_nested}"
+    );
+}
+
+#[test]
+fn test_database_auto_rollback_is_unsupported() {
+    let temp = TempTestDir::new("db_rollback_guard");
+    let backup_file = temp.0.join("backup.sqlite3");
+    let target_db = temp.0.join("target.sqlite3");
+    let res = restore_database_backup_guarded(&backup_file, &target_db);
+    assert!(res.is_err());
+    assert!(
+        res.unwrap_err()
+            .to_string()
+            .contains("unsupported_db_rollback")
+    );
+}
+
+#[test]
+fn test_cli_rejects_test_pubkey_and_mutations_without_side_effects() {
+    let temp = TempTestDir::new("cli_side_effects");
+    let state_dir = temp.0.join("state");
+    fs::create_dir_all(&state_dir).unwrap();
+    let cfg_file = temp.0.join("config.json");
+    fs::write(
+        &cfg_file,
+        format!(
+            r#"{{"listen": "127.0.0.1:0", "state_dir": "{}"}}"#,
+            state_dir.display()
+        ),
+    )
+    .unwrap();
+
+    let manifest_file = temp.0.join("manifest.json");
+    let (key_pair, pub_key_bytes) = generate_test_ed25519_key();
+    let manifest = sample_manifest(1001, "arm64");
+    let sig = sign_manifest(&key_pair, &manifest);
+    let envelope = SignedEnvelope {
+        envelope_schema: 1,
+        key_id: "test-root".into(),
+        signature_algorithm: "ed25519".into(),
+        signature: sig,
+        manifest,
+    };
+    fs::write(&manifest_file, serde_json::to_vec(&envelope).unwrap()).unwrap();
+
+    let exe = std::env::var("CARGO_BIN_EXE_wechat-updater")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/wechat-updater")
+        });
+
+    // 1. 验证拒绝 --test-pubkey-hex 选项（退出码 2，unrecognized argument）
+    let output_flag = std::process::Command::new(&exe)
+        .args([
+            "check",
+            "--config",
+            cfg_file.to_str().unwrap(),
+            "--manifest",
+            manifest_file.to_str().unwrap(),
+            "--test-pubkey-hex",
+            &hex_encode(&pub_key_bytes),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output_flag.status.code(), Some(2));
+    let stderr_flag = String::from_utf8_lossy(&output_flag.stderr);
+    assert!(stderr_flag.contains("unrecognized argument"));
+
+    // 2. 验证生产 check 无可信根时 fail closed（退出码 1，报 trust_root_unconfigured）
+    let output_check = std::process::Command::new(&exe)
+        .args([
+            "check",
+            "--config",
+            cfg_file.to_str().unwrap(),
+            "--manifest",
+            manifest_file.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output_check.status.code(), Some(1));
+    let stderr_check = String::from_utf8_lossy(&output_check.stderr);
+    assert!(stderr_check.contains("trust_root_unconfigured"));
+
+    // 3. 验证 apply / rollback / recover 返回 unsupported 且不产生副作用
+    for action in &["apply", "rollback", "recover"] {
+        let entries_before: Vec<_> = fs::read_dir(&temp.0).unwrap().collect();
+        let output_act = std::process::Command::new(&exe)
+            .args([
+                action,
+                "--config",
+                cfg_file.to_str().unwrap(),
+                "--manifest",
+                manifest_file.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(output_act.status.code(), Some(1));
+        let stderr_act = String::from_utf8_lossy(&output_act.stderr);
+        assert!(stderr_act.contains("unsupported"));
+
+        // 验证文件系统无新文件或变更
+        let entries_after: Vec<_> = fs::read_dir(&temp.0).unwrap().collect();
+        assert_eq!(entries_before.len(), entries_after.len());
+        assert!(!state_dir.join("core.maintenance").exists());
+        assert!(!temp.0.join("current").exists());
+    }
+}

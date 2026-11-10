@@ -2303,7 +2303,6 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
         "update-check" => {
             let mut config_file: Option<PathBuf> = None;
             let mut manifest_file: Option<PathBuf> = None;
-            let mut test_pubkey_hex: Option<String> = None;
             let mut idx = 1;
             while idx < args.len() {
                 if args[idx] == "--config" && idx + 1 < args.len() {
@@ -2311,9 +2310,6 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                     idx += 2;
                 } else if args[idx] == "--manifest" && idx + 1 < args.len() {
                     manifest_file = Some(PathBuf::from(&args[idx + 1]));
-                    idx += 2;
-                } else if args[idx] == "--test-pubkey-hex" && idx + 1 < args.len() {
-                    test_pubkey_hex = Some(args[idx + 1].clone());
                     idx += 2;
                 } else {
                     idx += 1;
@@ -2357,7 +2353,7 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             };
 
             let envelope: crate::updater::manifest::SignedEnvelope =
-                match serde_json::from_slice(&manifest_bytes) {
+                match crate::updater::manifest::parse_signed_envelope(&manifest_bytes) {
                     Ok(env) => env,
                     Err(e) => {
                         let out_obj = json!({
@@ -2411,31 +2407,8 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 return 0;
             }
 
-            // 验签检查：生产未定信任根，无注入测试公钥时不能假装 verified
-            let verified = if let Some(ref hex_key) = test_pubkey_hex {
-                let s = hex_key.trim();
-                let mut b = Vec::new();
-                let mut ok = s.len() % 2 == 0;
-                if ok {
-                    for i in (0..s.len()).step_by(2) {
-                        if let Ok(byte) = u8::from_str_radix(&s[i..i + 2], 16) {
-                            b.push(byte);
-                        } else {
-                            ok = false;
-                            break;
-                        }
-                    }
-                }
-                if ok {
-                    let store = crate::updater::manifest::TrustedKeyStore::new()
-                        .with_key(&envelope.key_id, &b);
-                    store.verify_envelope(&envelope).is_ok()
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
+            // 生产环境下无可信根公钥配置必须 fail closed；测试公钥仅限 fixture 适配器注入，禁止外部测试 key 注入
+            let publisher_verified = false;
 
             match crate::updater::manifest::validate_manifest_compatibility(
                 &envelope.manifest,
@@ -2445,7 +2418,7 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             ) {
                 Ok(()) => {
                     let out_obj = json!({
-                        "status": if verified { "available" } else { "unverified_trust_root" },
+                        "status": "unverified_trust_root",
                         "candidate": {
                             "release_id": envelope.manifest.release_id,
                             "sequence": envelope.manifest.sequence,
@@ -2456,7 +2429,7 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                             "requires_local_signing": true
                         },
                         "verification": {
-                            "publisher_verified": verified,
+                            "publisher_verified": publisher_verified,
                             "key_id": envelope.key_id
                         }
                     });
