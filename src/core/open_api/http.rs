@@ -785,28 +785,48 @@ async fn call_tool(
                     .unwrap_or(false)
             };
             if is_v2 {
-                if let Some(req_snap) = args.get("snapshot_id").and_then(|v| v.as_str()) {
-                    let turn_id = args["turn_id"].as_str().unwrap();
+                let req_snap = match args.get("snapshot_id").and_then(|v| v.as_str()) {
+                    Some(s) => s,
+                    None => {
+                        return business(
+                            "invalid_arguments",
+                            "snapshot_id is required in v2 reply",
+                        );
+                    }
+                };
+                let turn_id = args["turn_id"].as_str().unwrap();
+                let actual_snap = {
                     let conn = rusqlite::Connection::open_with_flags(
                         state.config.state_dir.join("history/history.sqlite3"),
                         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
                     );
                     if let Ok(conn) = conn {
-                        let actual_snap: rusqlite::Result<String> = conn.query_row(
+                        conn.query_row(
                             "SELECT snapshot_id FROM brain_turns WHERE account_id = ? AND turn_id = ?",
                             rusqlite::params![access.account_id(), turn_id],
                             |row| row.get(0),
+                        )
+                        .ok()
+                    } else {
+                        None
+                    }
+                };
+                let pending_snap = {
+                    let st = state.brain.state.lock().await;
+                    st.pending.get(turn_id).and_then(|p| {
+                        p.turn.snapshot.as_ref().and_then(|s| {
+                            s.get("snapshot_id")
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        })
+                    })
+                };
+                if let Some(expected) = actual_snap.or(pending_snap) {
+                    if expected != req_snap {
+                        return business(
+                            "snapshot_mismatch",
+                            format!("snapshot_id mismatch: expected {expected}, got {req_snap}"),
                         );
-                        if let Ok(actual_snap) = actual_snap {
-                            if actual_snap != req_snap {
-                                return business(
-                                    "snapshot_mismatch",
-                                    format!(
-                                        "snapshot_id mismatch: expected {actual_snap}, got {req_snap}"
-                                    ),
-                                );
-                            }
-                        }
                     }
                 }
             }
@@ -1615,5 +1635,99 @@ mod tests {
             res["result"]["structuredContent"]["error"]["code"],
             "not_found"
         );
+    }
+
+    #[tokio::test]
+    async fn v2_reply_requires_snapshot_id_and_validates_mismatch() {
+        let t = TestServer::new(Duration::from_secs(90)).await;
+        let sid = t.init().await;
+
+        // 1. 协商 v2
+        let neg = t
+            .call(
+                &sid,
+                "brain_negotiate",
+                json!({"versions": [2], "capabilities": ["snapshot_v1"]}),
+            )
+            .await;
+        assert_eq!(neg["result"]["structuredContent"]["selected_version"], 2);
+
+        // 2. 入队带有 snapshot 的 turn
+        let turn_id = "v2_test_snap";
+        let pending = t.enqueue(turn_id).await;
+        {
+            let mut brain_st = t.brain.state.lock().await;
+            if let Some(pt) = brain_st.pending.get_mut(turn_id) {
+                pt.turn.snapshot = Some(json!({
+                    "snapshot_id": "snap_correct",
+                    "schema_version": 1
+                }));
+            }
+        }
+
+        // 3. 认领 turn
+        let claim = t.call(&sid, "next_turn", json!({"wait_seconds": 1})).await;
+        let turn_json = &claim["result"]["structuredContent"]["turn"];
+        assert_eq!(turn_json["turn_id"], turn_id);
+        let claim_token = turn_json["claim"]["claim_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // 4. v2 reply 缺失 snapshot_id -> invalid_arguments
+        let res_missing = t
+            .call(
+                &sid,
+                "reply",
+                json!({
+                    "turn_id": turn_id,
+                    "claim_token": &claim_token,
+                    "action": "send",
+                    "text": "回复内容"
+                }),
+            )
+            .await;
+        assert_eq!(
+            res_missing["result"]["structuredContent"]["error"]["code"],
+            "invalid_arguments"
+        );
+
+        // 5. v2 reply 错误 snapshot_id -> snapshot_mismatch
+        let res_wrong = t
+            .call(
+                &sid,
+                "reply",
+                json!({
+                    "turn_id": turn_id,
+                    "claim_token": &claim_token,
+                    "action": "send",
+                    "text": "回复内容",
+                    "snapshot_id": "snap_wrong"
+                }),
+            )
+            .await;
+        assert_eq!(
+            res_wrong["result"]["structuredContent"]["error"]["code"],
+            "snapshot_mismatch"
+        );
+
+        // 6. 验证 claim 仍然有效，使用正确的 snapshot_id 进行回复 -> accepted: true
+        let res_ok = t
+            .call(
+                &sid,
+                "reply",
+                json!({
+                    "turn_id": turn_id,
+                    "claim_token": &claim_token,
+                    "action": "send",
+                    "text": "回复内容",
+                    "snapshot_id": "snap_correct"
+                }),
+            )
+            .await;
+        assert_eq!(res_ok["result"]["structuredContent"]["accepted"], true);
+
+        let received = pending.await.unwrap().unwrap();
+        assert_eq!(received.reply, "回复内容");
     }
 }

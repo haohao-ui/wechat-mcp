@@ -1645,35 +1645,72 @@ impl BotService {
 
         let mut fixed_snapshot: Option<Value> = None;
         let mut fixed_role: Option<crate::core::brain_profiles::RoleRevision> = None;
-        if let Ok(store) = crate::core::brain_profiles::Store::open(&self.config.state_dir) {
-            if let Ok(ctx) = crate::core::brain_profiles::AccountContext::new(self.account.clone())
-            {
-                let chat_kind = if self.group {
-                    crate::core::brain_profiles::ChatKind::Group
+        let bindings_path = self.config.state_dir.join("brain-bindings.json");
+        let (mode, store_ctx) = if bindings_path.exists() {
+            let store = match crate::core::brain_profiles::Store::open(&self.config.state_dir) {
+                Ok(s) => s,
+                Err(e) => {
+                    if let Some(map) = record.as_object_mut() {
+                        map.insert("status".to_string(), json!("integrity_mismatch"));
+                    }
+                    self.write_journal(journal_path, record)?;
+                    return Err(anyhow::anyhow!("brain profile store open failed: {e:?}"));
+                }
+            };
+            let ctx = match crate::core::brain_profiles::AccountContext::new(self.account.clone()) {
+                Ok(c) => c,
+                Err(e) => {
+                    if let Some(map) = record.as_object_mut() {
+                        map.insert("status".to_string(), json!("integrity_mismatch"));
+                    }
+                    self.write_journal(journal_path, record)?;
+                    return Err(anyhow::anyhow!("invalid account context: {e:?}"));
+                }
+            };
+            match store.execution_mode(&ctx) {
+                Ok(m) => (m, Some((store, ctx))),
+                Err(e) => {
+                    if let Some(map) = record.as_object_mut() {
+                        map.insert("status".to_string(), json!("integrity_mismatch"));
+                    }
+                    self.write_journal(journal_path, record)?;
+                    return Err(anyhow::anyhow!(
+                        "brain profile store integrity mismatch: {e:?}"
+                    ));
+                }
+            }
+        } else {
+            (crate::core::brain_profiles::ExecutionMode::Legacy, None)
+        };
+
+        if let Some((store, ctx)) = store_ctx {
+            let chat_kind = if self.group {
+                crate::core::brain_profiles::ChatKind::Group
+            } else {
+                crate::core::brain_profiles::ChatKind::Private
+            };
+            if let Some(cid) = &self.contact_id {
+                let db_path = if let Some(h) = &self.history {
+                    h.root_dir().join("history.sqlite3")
                 } else {
-                    crate::core::brain_profiles::ChatKind::Private
+                    self.config.state_dir.join("history/history.sqlite3")
                 };
-                if let Some(cid) = &self.contact_id {
-                    let db_path = if let Some(h) = &self.history {
-                        h.root_dir().join("history.sqlite3")
-                    } else {
-                        self.config.state_dir.join("history/history.sqlite3")
-                    };
-                    let conn = rusqlite::Connection::open_with_flags(
-                        &db_path,
-                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-                            | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-                    )
-                    .ok();
-                    let brain_access = conn.as_ref().and_then(|c| {
-                        crate::core::open_api::access::BrainAccess::load(&self.config, c).ok()
-                    });
-                    let access = crate::core::control::ControlContactAccess {
-                        account_id: self.account.clone(),
-                        brain_access,
-                        conn,
-                    };
-                    if let Ok(role) = store.resolve(&ctx, cid, &chat_kind, &access) {
+                let conn = rusqlite::Connection::open_with_flags(
+                    &db_path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                        | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+                )
+                .ok();
+                let brain_access = conn.as_ref().and_then(|c| {
+                    crate::core::open_api::access::BrainAccess::load(&self.config, c).ok()
+                });
+                let access = crate::core::control::ControlContactAccess {
+                    account_id: self.account.clone(),
+                    brain_access,
+                    conn,
+                };
+                match store.resolve(&ctx, cid, &chat_kind, &access) {
+                    Ok(role) => {
                         let mut knowledge = Vec::new();
                         for kref in &role.knowledge_refs {
                             if let Ok(k) = store.knowledge(&ctx, kref) {
@@ -1749,6 +1786,16 @@ impl BotService {
                             }
                         }
                     }
+                    Err(_e) => {
+                        if mode == crate::core::brain_profiles::ExecutionMode::Managed {
+                            if let Some(map) = record.as_object_mut() {
+                                map.insert("status".to_string(), json!("role_required"));
+                            }
+                            self.write_journal(journal_path, record)?;
+                            return Ok(None);
+                        }
+                        // Legacy 模式无配置角色则保留原有链路
+                    }
                 }
             }
         }
@@ -1820,6 +1867,7 @@ impl BotService {
             image_count: Some(images.len()),
             earlier_images: earlier,
             max_attachment_mb: self.config.max_attachment_mb,
+            snapshot: fixed_snapshot.clone(),
             media_refs,
         };
 
@@ -7211,6 +7259,7 @@ mod tests {
         let client = MockToolClient::new_default();
 
         let res = svc.cycle(&client, &mut cap).await;
+
         assert!(res.is_err());
         assert!(svc.paused);
     }
@@ -7545,6 +7594,7 @@ mod tests {
         }));
 
         let res = svc.cycle(&client, &mut cap).await;
+
         // 恢复目录权限供清理
         let _ = fs::set_permissions(td.path(), fs::Permissions::from_mode(0o700));
 
@@ -7602,6 +7652,7 @@ mod tests {
         }));
 
         let res = svc.cycle(&client, &mut cap).await;
+
         assert!(res.is_err(), "record_bot_reply 失败必须阻断发送并返回错误");
         let calls = client.calls.lock().unwrap();
         let sent = calls.iter().any(|(tool, _)| tool == "send_message");
@@ -8091,6 +8142,7 @@ mod tests {
         }));
 
         let res = svc.cycle(&client, &mut cap).await;
+
         assert!(res.is_ok(), "收到停止信号应安全退出并保留 turn");
 
         // 验证 client 绝对没有发送消息
@@ -8178,6 +8230,7 @@ mod tests {
         ]);
 
         let res = svc.cycle(&client, &mut cap).await;
+
         assert!(
             res.is_ok(),
             "延迟轮询中即使外部窗口标题不符，也应忽略坏帧继续完成本轮"
@@ -8356,6 +8409,7 @@ mod tests {
         let mut cap = MockCapture::new(vec![new_f.clone(), new_f.clone(), new_f]);
 
         let res = svc.cycle(&client, &mut cap).await;
+
         assert!(res.is_ok());
         assert!(brain_called.load(Ordering::SeqCst));
 
@@ -8409,5 +8463,186 @@ mod tests {
         let calls = client2.calls.lock().unwrap();
         let sent = calls.iter().any(|(tool, _)| tool == "send_message");
         assert!(!sent, "快照写入失败时绝对不能调用发送");
+    }
+
+    #[tokio::test]
+    async fn test_fresh_managed_mode_no_role_records_role_required() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let state_dir = cfg.state_dir.clone();
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let store = crate::core::brain_profiles::Store::open(&state_dir).unwrap();
+        let ctx = crate::core::brain_profiles::AccountContext::new("fixture".into()).unwrap();
+        // Fresh 初始化：处于 Managed 模式但无配置/激活角色
+        store
+            .initialize(
+                &ctx,
+                crate::core::brain_profiles::Installation::Fresh,
+                b"{}",
+                true,
+                0,
+                None,
+            )
+            .unwrap();
+
+        let mut svc = BotService::new(cfg, None, None, Some("c1".into()), None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+
+        let brain_called = Arc::new(AtomicBool::new(false));
+        let bc = brain_called.clone();
+        svc.brain = Some(Arc::new(move |_turn| {
+            bc.store(true, Ordering::SeqCst);
+            Box::pin(async {
+                Ok(BrainReply {
+                    reply: "这条绝不能生成".into(),
+                    metadata: HashMap::new(),
+                })
+            })
+        }));
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "午夜咖啡");
+        svc.advance(old).unwrap();
+
+        let current = test_frame(
+            vec![
+                test_bubble("old", "inbound_visual"),
+                test_bubble("客户新发的一条消息", "inbound_visual"),
+            ],
+            "午夜咖啡",
+        );
+        let mut cap = MockCapture::new(vec![current.clone(), current.clone(), current]);
+        let client = MockToolClient::new_default();
+        let res = svc.cycle(&client, &mut cap).await;
+
+        assert!(res.is_ok(), "cycle 本身安全返回 Ok");
+        assert!(
+            !brain_called.load(Ordering::SeqCst),
+            "Managed 模式无角色绝对不调用模型"
+        );
+        let calls = client.calls.lock().unwrap();
+        let sent = calls.iter().any(|(tool, _)| tool == "send_message");
+        assert!(!sent, "Managed 模式无角色绝对不调用发送");
+
+        // 验证 journal 记录了 role_required
+        let journal_file = std::fs::read_dir(&svc.root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.file_name().to_string_lossy().starts_with("send-"))
+            .map(|e| e.path())
+            .expect("journal file exists");
+        let content = std::fs::read_to_string(journal_file).unwrap();
+        let journal: Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(journal["status"], "role_required");
+    }
+
+    #[tokio::test]
+    async fn test_broken_root_blocks_and_records_integrity_mismatch() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let state_dir = cfg.state_dir.clone();
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        // 写入损坏的根文件（不支持的 schema 版本或非法的 JSON 内容）
+        let bindings_path = state_dir.join("brain-bindings.json");
+        std::fs::write(&bindings_path, b"{\"schema_version\": 999}").unwrap();
+
+        let mut svc = BotService::new(cfg, None, None, Some("c1".into()), None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+
+        let brain_called = Arc::new(AtomicBool::new(false));
+        let bc = brain_called.clone();
+        svc.brain = Some(Arc::new(move |_turn| {
+            bc.store(true, Ordering::SeqCst);
+            Box::pin(async {
+                Ok(BrainReply {
+                    reply: "损坏根绝不能调用模型".into(),
+                    metadata: HashMap::new(),
+                })
+            })
+        }));
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "午夜咖啡");
+        svc.advance(old).unwrap();
+
+        let current = test_frame(
+            vec![
+                test_bubble("old", "inbound_visual"),
+                test_bubble("客户新消息", "inbound_visual"),
+            ],
+            "午夜咖啡",
+        );
+        let mut cap = MockCapture::new(vec![current.clone(), current.clone(), current]);
+        let client = MockToolClient::new_default();
+        let res = svc.cycle(&client, &mut cap).await;
+        assert!(res.is_err(), "损坏根必须 fail-closed 阻断并报错");
+        assert!(
+            !brain_called.load(Ordering::SeqCst),
+            "损坏根绝不调用模型，绝不降级为 Legacy"
+        );
+        let calls = client.calls.lock().unwrap();
+        let sent = calls.iter().any(|(tool, _)| tool == "send_message");
+        assert!(!sent, "损坏根绝不调用发送");
+
+        // 验证 journal 记录了 integrity_mismatch
+        let journal_file = std::fs::read_dir(&svc.root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.file_name().to_string_lossy().starts_with("send-"))
+            .map(|e| e.path())
+            .expect("journal file exists");
+        let content = std::fs::read_to_string(journal_file).unwrap();
+        let journal: Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(journal["status"], "integrity_mismatch");
+    }
+
+    #[tokio::test]
+    async fn test_legacy_mode_no_role_preserves_old_pipeline() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let state_dir = cfg.state_dir.clone();
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // 未初始化（没有 brain-bindings.json），Legacy 模式
+
+        let mut svc = BotService::new(cfg, None, None, Some("c1".into()), None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+
+        let brain_called = Arc::new(AtomicBool::new(false));
+        let bc = brain_called.clone();
+        svc.brain = Some(Arc::new(move |_turn| {
+            bc.store(true, Ordering::SeqCst);
+            Box::pin(async {
+                Ok(BrainReply {
+                    reply: "Legacy 正常回复".into(),
+                    metadata: HashMap::new(),
+                })
+            })
+        }));
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "午夜咖啡");
+        svc.advance(old).unwrap();
+
+        let current = test_frame(
+            vec![
+                test_bubble("old", "inbound_visual"),
+                test_bubble("客户新消息", "inbound_visual"),
+            ],
+            "午夜咖啡",
+        );
+        let mut cap = MockCapture::new(vec![current.clone(), current.clone(), current]);
+        let client = MockToolClient::new_default();
+        let res = svc.cycle(&client, &mut cap).await;
+
+        assert!(res.is_ok(), "Legacy 模式正常执行");
+        assert!(
+            brain_called.load(Ordering::SeqCst),
+            "Legacy 模式保留原有链路调用模型"
+        );
+        let calls = client.calls.lock().unwrap();
+        let sent = calls.iter().any(|(tool, _)| tool == "send_message");
+        assert!(sent, "Legacy 模式正常调用发送");
     }
 }

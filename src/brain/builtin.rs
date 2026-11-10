@@ -71,6 +71,12 @@ pub fn context_view(item: &ContextItem) -> Value {
 }
 
 pub fn build_prompt(turn: &Turn) -> Result<String> {
+    if let Some(snap) = &turn.snapshot {
+        if let Some(compiled) = snap.get("compiled").and_then(Value::as_str) {
+            return Ok(compiled.to_string());
+        }
+    }
+
     let purpose = if turn.mode == "service" {
         "你是用户部署的个人微信AI客服助手。友好简洁地回应当前联系人，回复不超过100字。\
          首次自我介绍时说明你是AI客服助手。没有提供商家知识库、订单工具或业务权限，\
@@ -217,6 +223,7 @@ mod tests {
             image_count: None,
             earlier_images: 0,
             max_attachment_mb,
+            snapshot: None,
             media_refs: Vec::new(),
         };
 
@@ -333,6 +340,7 @@ mod tests {
             image_count: None,
             earlier_images: 0,
             max_attachment_mb: 50,
+            snapshot: None,
             media_refs: Vec::new(),
         };
 
@@ -406,6 +414,7 @@ exit 0
             image_count: None,
             earlier_images: 0,
             max_attachment_mb: 50,
+            snapshot: None,
             media_refs: Vec::new(),
         };
 
@@ -424,5 +433,44 @@ exit 0
         assert_eq!(res.metadata["backend"], "codex-exec");
         assert_eq!(res.metadata["model"], "gpt-4o-mini");
         assert_eq!(res.metadata["provider"], "openai");
+    }
+
+    #[test]
+    fn test_build_prompt_prefers_compiled_snapshot() {
+        let mut turn = Turn {
+            turn_id: "t_test".to_string(),
+            account_id: "acc_test".to_string(),
+            contact: Default::default(),
+            text: "你好".to_string(),
+            mode: "service".to_string(),
+            chat_kind: "private".to_string(),
+            context: vec![],
+            images: vec![],
+            files: vec![],
+            notes: vec![],
+            failed: vec![],
+            image_count: None,
+            earlier_images: 0,
+            max_attachment_mb: 50,
+            snapshot: None,
+            media_refs: Vec::new(),
+        };
+
+        // 无快照时，为默认提示词
+        let default_prompt = build_prompt(&turn).unwrap();
+        assert!(default_prompt.contains("个人微信AI客服助手"));
+
+        // 注入已编译的快照
+        turn.snapshot = Some(json!({
+            "snapshot_id": "snap-123456",
+            "compiled": "这是由角色/知识/能力快照编译出的专属提示词系统输入"
+        }));
+
+        let compiled_prompt = build_prompt(&turn).unwrap();
+        assert_eq!(
+            compiled_prompt,
+            "这是由角色/知识/能力快照编译出的专属提示词系统输入"
+        );
+        assert!(!compiled_prompt.contains("个人微信AI客服助手"));
     }
 }

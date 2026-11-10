@@ -90,6 +90,8 @@ pub struct Turn {
     pub earlier_images: usize,
     #[serde(default = "default_max_attachment_mb")]
     pub max_attachment_mb: u64,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub snapshot: Option<Value>,
     #[serde(skip)]
     pub media_refs: Vec<MediaRef>,
 }
