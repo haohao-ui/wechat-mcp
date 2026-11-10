@@ -1,5 +1,6 @@
 // native/bootstrap/UpdatePage.swift
 // Application update management, version verification, drain coordination, and failure recovery.
+// STRICT READ-ONLY PHASE: All real downloads, installs, deferrals, and rollbacks are disabled.
 import Foundation
 import AppKit
 
@@ -228,7 +229,7 @@ public struct UpdateSigningStatus: Equatable {
 
     public var userFacingDescription: String {
         if canPerformLocalSigning {
-            return "本机代码签名钥匙串正常，证书已就绪"
+            return "专用机自签名证书与钥匙串就绪 (待发布者验证通过后重签)"
         }
         if let err = lastError, !err.isEmpty {
             return "签名不可用: \(err)"
@@ -236,27 +237,7 @@ public struct UpdateSigningStatus: Equatable {
         if !keychainAvailable {
             return "钥匙串处于锁定状态或未解锁"
         }
-        return "专用机本地代码签名自签名证书未找到"
-    }
-}
-
-public struct UpdateDrainState: Equatable {
-    public var isDraining: Bool
-    public var inflightCount: Int
-    public var drainReason: String
-    public var deferred: Bool
-
-    public init(isDraining: Bool = false, inflightCount: Int = 0, drainReason: String = "", deferred: Bool = false) {
-        self.isDraining = isDraining
-        self.inflightCount = inflightCount
-        self.drainReason = drainReason
-        self.deferred = deferred
-    }
-
-    public mutating func deferUpdate() {
-        self.deferred = true
-        self.isDraining = false
-        self.drainReason = "已延期更新，自动处理保持运行"
+        return "专用机本地自签名证书未找到"
     }
 }
 
@@ -293,21 +274,18 @@ public enum UpdatePageLogic {
         return try decoder.decode(UpdateCheckResult.self, from: data)
     }
 
+    /// 严格只读阶段：无论如何均不可安装
     public static func canInstall(
         checkResult: UpdateCheckResult?,
         transaction: UpdateTransactionStatus
     ) -> Bool {
-        guard let cr = checkResult else { return false }
-        guard transaction == .idle || transaction == .committed else { return false }
-        guard let cand = cr.candidate, cand.compatible else { return false }
-        // 关键安全门禁：未经验证的发布者签名坚决不可安装
-        guard let ver = cr.verification, ver.publisherVerified else { return false }
-        return true
+        // 当前阶段未放行真实安装，硬编码返回 false 防止任何非受控写入
+        return false
     }
 
     public static func recoveryGuide(for transaction: UpdateTransactionInfo) -> String {
         guard transaction.recoveryRequired else { return "系统状态正常，无需恢复。" }
-        let stage = transaction.stage ?? "Unknown"
+        let stage = transaction.stage ?? "未知阶段"
         let err = transaction.error ?? "未知错误"
         let tx = transaction.transactionId ?? "无事务ID"
 
@@ -317,10 +295,11 @@ public enum UpdatePageLogic {
         - 中断阶段: \(stage)
         - 错误原因: \(err)
 
-        恢复指引:
+        只读说明与恢复指引:
         1. 核心自动处理已被安全抑制，原旧版本及客户会话未受污染。
-        2. 请核对 ~/.wechat-rpa/logs/core.log 与 host.log 获取详细故障上下文。
-        3. 若需切回原稳定版本，可执行控制台命令进行安全清理，或重新点击「检查更新」。
+        2. 当前界面处于严格只读受控阶段，禁止通过界面清除维护标志或篡改状态。
+        3. 请核对 ~/.wechat-rpa/logs/core.log 与 host.log 获取详细故障上下文。
+        4. 需恢复旧版时，请由管理员核实独立 update-journal.json 后通过专用命令行执行受控回退。
         """
     }
 
@@ -380,21 +359,18 @@ public final class UpdatePageController: NSViewController {
     private let context: StatusPanelController
     private var client: UpdateClient
 
-    // 页面状态
+    // 页面状态（只读）
     private var currentStatusPayload: UpdateStatusPayload?
     private var currentCheckResult: UpdateCheckResult?
     private var signingStatus = UpdateSigningStatus(keychainAvailable: true, localCertificateFound: true)
-    private var drainState = UpdateDrainState()
     private var isChecking = false
-    private var isDownloading = false
-    private var downloadPercent: Double = 0.0
 
     // UI - 当前版本卡片
     private let currentReleaseLabel = NSTextField(labelWithString: "加载中...")
-    private let currentSeqLabel = NSTextField(labelWithString: "-")
-    private let architectureLabel = NSTextField(labelWithString: "-")
-    private let consistencyBadge = NSTextField(labelWithString: "未校验")
-    private let supervisorStatusLabel = NSTextField(labelWithString: "正常运行")
+    private let currentSeqLabel = NSTextField(labelWithString: "未校验")
+    private let architectureLabel = NSTextField(labelWithString: "未知")
+    private let consistencyBadge = NSTextField(labelWithString: "未校验 (未知)")
+    private let supervisorStatusLabel = NSTextField(labelWithString: "检查中...")
 
     // UI - 候选更新卡片
     private let candidateStatusLabel = NSTextField(wrappingLabelWithString: "尚未检查更新")
@@ -408,23 +384,26 @@ public final class UpdatePageController: NSViewController {
 
     // UI - 流程流水线与进度
     private let pipelineStepsLabel = NSTextField(labelWithString: "检查 → 下载 → 验证 → 本机签名 → 等待排空 → 备份 → 安装 → 自检")
-    private let currentStageLabel = NSTextField(labelWithString: "空闲")
+    private let currentStageLabel = NSTextField(labelWithString: "只读监控中")
     private let progressBar = NSProgressIndicator()
     private let progressDetailLabel = NSTextField(labelWithString: "")
     private let drainWarningLabel = NSTextField(wrappingLabelWithString: "")
     private let permissionsNoteLabel = NSTextField(wrappingLabelWithString: "提示：专用机应用更新后将由本地自签名钥匙串重签名，若系统权限重置需在「设置」中重新授权。")
 
-    // UI - 操作按钮
+    // UI - 操作按钮 (只读阶段全部禁用写操作)
     private let checkButton = NSButton(title: "检查更新", target: nil, action: nil)
-    private let downloadButton = NSButton(title: "下载更新", target: nil, action: nil)
-    private let installButton = NSButton(title: "安装并重启", target: nil, action: nil)
-    private let deferButton = NSButton(title: "延期更新", target: nil, action: nil)
+    private let downloadButton = NSButton(title: "下载更新 (本阶段未支持)", target: nil, action: nil)
+    private let installButton = NSButton(title: "安装并重启 (本阶段未支持)", target: nil, action: nil)
+    private let deferButton = NSButton(title: "延期更新 (本阶段未支持)", target: nil, action: nil)
     private let refreshStatusButton = NSButton(title: "刷新状态", target: nil, action: nil)
-    private let actionFeedbackLabel = NSTextField(wrappingLabelWithString: "")
+    private let actionFeedbackLabel = NSTextField(wrappingLabelWithString: "当前处于只读状态查看阶段；真实下载、安装、排空延期与恢复写入均已安全禁用。")
 
     // UI - 恢复卡片 (当出现 recovery_required 时高亮)
     private let recoveryBox = NSBox()
     private let recoveryDetailsLabel = NSTextField(wrappingLabelWithString: "")
+
+    // UI - 整个内容 Stack
+    public let contentStack = NSStackView()
 
     public init(context: StatusPanelController, client: UpdateClient? = nil) {
         self.context = context
@@ -453,30 +432,29 @@ public final class UpdatePageController: NSViewController {
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
 
-        let contentStack = NSStackView()
         contentStack.orientation = .vertical
         contentStack.alignment = .leading
         contentStack.spacing = 16
         contentStack.translatesAutoresizingMaskIntoConstraints = false
 
         // 1. 标题
-        let headerLabel = NSTextField(labelWithString: "应用版本更新")
+        let headerLabel = NSTextField(labelWithString: "应用版本更新 (只读状态)")
         headerLabel.font = NSFont.systemFont(ofSize: 18, weight: .bold)
         contentStack.addArrangedSubview(headerLabel)
 
-        let introLabel = NSTextField(wrappingLabelWithString: "管理微信客服助手整套原生组件与核心服务更新。应用更新实行用户确认与本地代码重签名机制，不进行后台静默替换。")
+        let introLabel = NSTextField(wrappingLabelWithString: "管理微信客服助手整套原生组件与核心服务更新。当前处于 I6 限定审查阶段，界面严格以真实读模型为准，真实更新写入处于 unsupported 禁用状态。")
         introLabel.font = NSFont.systemFont(ofSize: 12)
         introLabel.textColor = .secondaryLabelColor
         contentStack.addArrangedSubview(introLabel)
 
         // 2. 当前版本卡片
-        let currentBox = createSectionBox(title: "当前运行环境")
+        let currentBox = createSectionBox(title: "当前运行环境 (真实读模型)")
         let currentGrid = NSGridView(views: [
             [NSTextField(labelWithString: "当前整套版本:"), currentReleaseLabel],
             [NSTextField(labelWithString: "序列号 (Sequence):"), currentSeqLabel],
-            [NSTextField(labelWithString: "宿主架构与系统:"), architectureLabel],
+            [NSTextField(labelWithString: "宿主运行架构:"), architectureLabel],
             [NSTextField(labelWithString: "组件一致性:"), consistencyBadge],
-            [NSTextField(labelWithString: "维护与协调状态:"), supervisorStatusLabel]
+            [NSTextField(labelWithString: "维护抑制状态:"), supervisorStatusLabel]
         ])
         currentGrid.rowSpacing = 6
         currentGrid.columnSpacing = 12
@@ -569,8 +547,8 @@ public final class UpdatePageController: NSViewController {
         pipelineBox.setContent(pipeStack)
         contentStack.addArrangedSubview(pipelineBox)
 
-        // 5. 失败恢复指引卡片（初始隐藏）
-        recoveryBox.title = "⚠️ 故障恢复指引"
+        // 5. 失败恢复指引卡片
+        recoveryBox.title = "⚠️ 故障恢复指引 (只读状态)"
         recoveryBox.titleFont = NSFont.systemFont(ofSize: 13, weight: .bold)
         recoveryBox.boxType = .primary
         recoveryBox.translatesAutoresizingMaskIntoConstraints = false
@@ -585,8 +563,8 @@ public final class UpdatePageController: NSViewController {
         recoveryBox.isHidden = true
         contentStack.addArrangedSubview(recoveryBox)
 
-        // 6. 操作按钮行
-        let actionBox = createSectionBox(title: "操作与维护")
+        // 6. 操作按钮行 (严格只读，所有写操作永久禁用)
+        let actionBox = createSectionBox(title: "操作与维护 (只读受控)")
         let actStack = NSStackView()
         actStack.orientation = .vertical
         actStack.alignment = .leading
@@ -599,14 +577,15 @@ public final class UpdatePageController: NSViewController {
         checkButton.target = self
         checkButton.action = #selector(handleCheckUpdate)
         downloadButton.target = self
-        downloadButton.action = #selector(handleDownloadUpdate)
+        downloadButton.action = #selector(handleDisabledWriteAction)
         installButton.target = self
-        installButton.action = #selector(handleInstallUpdate)
+        installButton.action = #selector(handleDisabledWriteAction)
         deferButton.target = self
-        deferButton.action = #selector(handleDeferUpdate)
+        deferButton.action = #selector(handleDisabledWriteAction)
         refreshStatusButton.target = self
         refreshStatusButton.action = #selector(handleRefreshStatus)
 
+        // 核心约束：下载/安装/延期在生产代码中始终禁用
         downloadButton.isEnabled = false
         installButton.isEnabled = false
         deferButton.isEnabled = false
@@ -678,14 +657,14 @@ public final class UpdatePageController: NSViewController {
     public func applyStatusPayload(_ payload: UpdateStatusPayload) {
         self.currentStatusPayload = payload
 
-        // 当前版本信息
-        currentReleaseLabel.stringValue = payload.currentRelease.releaseId
+        // 当前版本信息：严格展示实际读模型，不臆造
+        currentReleaseLabel.stringValue = payload.currentRelease.releaseId.isEmpty ? "未知" : payload.currentRelease.releaseId
         if let s = payload.currentRelease.sequence {
             currentSeqLabel.stringValue = "\(s)"
         } else {
-            currentSeqLabel.stringValue = "未标记"
+            currentSeqLabel.stringValue = "未标记 (null)"
         }
-        architectureLabel.stringValue = "\(payload.currentRelease.architecture) · macOS 12.0+"
+        architectureLabel.stringValue = payload.currentRelease.architecture.isEmpty ? "未知" : payload.currentRelease.architecture
 
         if let c = payload.currentRelease.componentsConsistent {
             if c {
@@ -696,16 +675,17 @@ public final class UpdatePageController: NSViewController {
                 consistencyBadge.textColor = .systemRed
             }
         } else {
-            consistencyBadge.stringValue = "未校验"
+            consistencyBadge.stringValue = "未校验 (未知)"
             consistencyBadge.textColor = .secondaryLabelColor
         }
 
         if payload.guardInfo.maintenanceActive {
-            supervisorStatusLabel.stringValue = "处于维护抑制态 (已暂停新轮次)"
+            supervisorStatusLabel.stringValue = "处于维护抑制态 (核心启动被抑制)"
             supervisorStatusLabel.textColor = .systemOrange
         } else {
-            supervisorStatusLabel.stringValue = "守护服务正常运行"
-            supervisorStatusLabel.textColor = .systemGreen
+            // 真实求实：不处于维护抑制态不等于运行正常
+            supervisorStatusLabel.stringValue = "未处于维护抑制态 (运行健康度未经验证)"
+            supervisorStatusLabel.textColor = .secondaryLabelColor
         }
 
         // 事务与阶段
@@ -719,16 +699,14 @@ public final class UpdatePageController: NSViewController {
         case .unconfigured:
             candidateStatusLabel.stringValue = "更新源尚未配置"
             candidateStatusLabel.textColor = .systemOrange
-            candidateVersionLabel.stringValue = "无可用版本"
+            candidateVersionLabel.stringValue = "无可用版本 (null)"
             candidatePublishedLabel.stringValue = "-"
             candidateSizeLabel.stringValue = "-"
             publisherVerificationBadge.stringValue = "未配置公钥根"
             publisherVerificationBadge.textColor = .secondaryLabelColor
-            localSigningLabel.stringValue = "-"
+            localSigningLabel.stringValue = "未配置发布源，禁止重签"
             compatibilityLabel.stringValue = result.reason ?? "生产环境下需配置授权更新清单；禁止任意未经验证的网络下载"
             releaseNotesView.string = "系统未配置已批准的更新清单或分发源。为保障微信业务与专用机安全，禁止使用任意 URL 下载执行内容。"
-            downloadButton.isEnabled = false
-            installButton.isEnabled = false
 
         case .unverifiedTrustRoot:
             candidateStatusLabel.stringValue = "已发现候选版本（来源尚未验证）"
@@ -741,14 +719,12 @@ public final class UpdatePageController: NSViewController {
                 } else {
                     candidateSizeLabel.stringValue = "未知"
                 }
-                compatibilityLabel.stringValue = cand.compatible ? "系统与架构兼容" : "架构或系统不兼容"
+                compatibilityLabel.stringValue = cand.compatible ? "架构兼容 (发布者未验证)" : "架构或系统不兼容"
                 releaseNotesView.string = cand.releaseNotes ?? "（无详细发布说明）"
             }
             publisherVerificationBadge.stringValue = "尚未验证（无可信根公钥配置）"
             publisherVerificationBadge.textColor = .systemRed
-            localSigningLabel.stringValue = "待重签名（需要发布者验证通过）"
-            downloadButton.isEnabled = true
-            installButton.isEnabled = false
+            localSigningLabel.stringValue = "禁止重签 (需要发布者验证通过)"
 
         case .alreadyInstalled:
             candidateStatusLabel.stringValue = "当前已是最新版本"
@@ -758,13 +734,11 @@ public final class UpdatePageController: NSViewController {
             }
             candidatePublishedLabel.stringValue = "-"
             candidateSizeLabel.stringValue = "-"
-            publisherVerificationBadge.stringValue = "已验证"
+            publisherVerificationBadge.stringValue = "已生效"
             publisherVerificationBadge.textColor = .systemGreen
-            localSigningLabel.stringValue = "已生效"
+            localSigningLabel.stringValue = "已在运行"
             compatibilityLabel.stringValue = "当前版本已与本地环境兼容"
             releaseNotesView.string = "没有待更新的候选版本。"
-            downloadButton.isEnabled = false
-            installButton.isEnabled = false
 
         case .incompatible:
             candidateStatusLabel.stringValue = "候选版本不兼容当前环境"
@@ -774,11 +748,9 @@ public final class UpdatePageController: NSViewController {
             candidateSizeLabel.stringValue = "-"
             publisherVerificationBadge.stringValue = "未通过兼容性核验"
             publisherVerificationBadge.textColor = .systemRed
-            localSigningLabel.stringValue = "禁止签名"
+            localSigningLabel.stringValue = "禁止重签"
             compatibilityLabel.stringValue = result.reason ?? "不满足最低系统或架构要求"
             releaseNotesView.string = "该版本无法安装在当前目标专用机上。"
-            downloadButton.isEnabled = false
-            installButton.isEnabled = false
 
         case .available:
             candidateStatusLabel.stringValue = "发现可用版本并通过完整验证"
@@ -795,9 +767,12 @@ public final class UpdatePageController: NSViewController {
             publisherVerificationBadge.stringValue = "发布者签名已验证"
             publisherVerificationBadge.textColor = .systemGreen
             localSigningLabel.stringValue = signingStatus.userFacingDescription
-            downloadButton.isEnabled = true
-            installButton.isEnabled = UpdatePageLogic.canInstall(checkResult: result, transaction: currentStatusPayload?.transaction.status ?? .idle)
         }
+
+        // 始终确保写按钮禁用
+        downloadButton.isEnabled = false
+        installButton.isEnabled = false
+        deferButton.isEnabled = false
     }
 
     private func updateTransactionUI(_ transaction: UpdateTransactionInfo) {
@@ -806,8 +781,8 @@ public final class UpdatePageController: NSViewController {
             currentStageLabel.textColor = .systemRed
             recoveryBox.isHidden = false
             recoveryDetailsLabel.stringValue = UpdatePageLogic.recoveryGuide(for: transaction)
-            installButton.isEnabled = false
             downloadButton.isEnabled = false
+            installButton.isEnabled = false
             deferButton.isEnabled = false
             return
         }
@@ -815,43 +790,66 @@ public final class UpdatePageController: NSViewController {
         recoveryBox.isHidden = true
         switch transaction.status {
         case .idle:
-            currentStageLabel.stringValue = "空闲"
+            currentStageLabel.stringValue = "空闲 (只读状态)"
             currentStageLabel.textColor = .secondaryLabelColor
             progressBar.doubleValue = 0.0
             progressDetailLabel.stringValue = ""
             drainWarningLabel.stringValue = ""
-            deferButton.isEnabled = false
 
         case .inProgress:
-            let stageName = transaction.stage ?? "进行中"
-            currentStageLabel.stringValue = "正在执行: \(stageName)"
+            let stageName = transaction.stage ?? "执行中"
+            currentStageLabel.stringValue = "状态: \(stageName) (外部事务)"
             currentStageLabel.textColor = .systemBlue
             if stageName == "Draining" {
-                drainWarningLabel.stringValue = "⚠️ 正在等待在途轮次完成，已暂停新轮次接单。如需取消请点击「延期更新」。"
-                deferButton.isEnabled = true
+                drainWarningLabel.stringValue = "⚠️ 外部更新事务处于排空等待态；当前界面为只读，延期请由管理员命令行协调。"
             } else {
                 drainWarningLabel.stringValue = ""
-                deferButton.isEnabled = false
             }
 
         case .committed:
-            currentStageLabel.stringValue = "最近更新已提交成功"
+            currentStageLabel.stringValue = "最近记录已提交"
             currentStageLabel.textColor = .systemGreen
             progressBar.doubleValue = 100.0
-            progressDetailLabel.stringValue = "新版本已就绪生效"
+            progressDetailLabel.stringValue = "已记录生效"
             drainWarningLabel.stringValue = ""
-            deferButton.isEnabled = false
 
         case .rolledBack:
-            currentStageLabel.stringValue = "已安全回退到旧版本"
+            currentStageLabel.stringValue = "已安全记录回退状态"
             currentStageLabel.textColor = .systemOrange
             progressBar.doubleValue = 0.0
-            progressDetailLabel.stringValue = "系统保持原版本继续服务"
+            progressDetailLabel.stringValue = "保持旧版本记录"
             drainWarningLabel.stringValue = ""
-            deferButton.isEnabled = false
 
         case .recoveryRequired:
             break
+        }
+
+        downloadButton.isEnabled = false
+        installButton.isEnabled = false
+        deferButton.isEnabled = false
+    }
+
+    /// 供测试夹具显式注入合成状态，用于离屏截图与 UI 验证，与生产 handler 严格隔离
+    public func applySyntheticState(
+        stage: String,
+        progress: Double,
+        progressDetail: String,
+        drainWarning: String? = nil,
+        recoveryInfo: UpdateTransactionInfo? = nil
+    ) {
+        currentStageLabel.stringValue = stage
+        progressBar.doubleValue = progress
+        progressDetailLabel.stringValue = progressDetail
+        if let dw = drainWarning {
+            drainWarningLabel.stringValue = dw
+        } else {
+            drainWarningLabel.stringValue = ""
+        }
+        if let rec = recoveryInfo, rec.recoveryRequired {
+            recoveryBox.isHidden = false
+            recoveryDetailsLabel.stringValue = UpdatePageLogic.recoveryGuide(for: rec)
+        } else {
+            recoveryBox.isHidden = true
         }
     }
 
@@ -861,7 +859,7 @@ public final class UpdatePageController: NSViewController {
         guard !isChecking else { return }
         isChecking = true
         checkButton.isEnabled = false
-        actionFeedbackLabel.stringValue = "正在检查更新并核对清单..."
+        actionFeedbackLabel.stringValue = "正在查询更新状态 (只读查询)..."
         actionFeedbackLabel.textColor = .systemBlue
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -872,7 +870,7 @@ public final class UpdatePageController: NSViewController {
                     self.isChecking = false
                     self.checkButton.isEnabled = true
                     self.applyCheckResult(res)
-                    self.actionFeedbackLabel.stringValue = "检查完成。"
+                    self.actionFeedbackLabel.stringValue = "检查完成 (只读呈现)。"
                     self.actionFeedbackLabel.textColor = .secondaryLabelColor
                 }
             } catch {
@@ -886,64 +884,15 @@ public final class UpdatePageController: NSViewController {
         }
     }
 
-    @objc private func handleDownloadUpdate() {
-        guard !isDownloading else { return }
-        isDownloading = true
-        downloadButton.isEnabled = false
-        progressBar.isIndeterminate = false
-        progressBar.doubleValue = 10.0
-        currentStageLabel.stringValue = "正在下载更新包..."
-        progressDetailLabel.stringValue = "下载中 (后台网络传输，微信业务正常处理中)..."
-
-        // 模拟下载过程演示
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self = self else { return }
-            self.progressBar.doubleValue = 65.0
-            self.progressDetailLabel.stringValue = "正在校验发布者哈希与签名..."
-            
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                guard let self = self else { return }
-                self.isDownloading = false
-                self.downloadButton.isEnabled = true
-                self.progressBar.doubleValue = 100.0
-                self.currentStageLabel.stringValue = "下载与校验完成"
-                self.progressDetailLabel.stringValue = "更新包就绪，已保存在安全暂存区。"
-                // 刷新可安装状态
-                if let cr = self.currentCheckResult {
-                    self.installButton.isEnabled = UpdatePageLogic.canInstall(checkResult: cr, transaction: .idle)
-                }
-            }
-        }
-    }
-
-    @objc private func handleInstallUpdate() {
-        let alert = NSAlert()
-        alert.messageText = "确认安装并重启应用？"
-        alert.informativeText = "安装将暂停接收新轮次、等待在途轮次安全排空、备份数据库与角色配置，并在独立更新器中进行原子替换与重启。\n\n本阶段真实更新入口处于协调者受控阶段 (unsupported)，点击确认将核验系统真实接入状态。"
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "确认安装")
-        alert.addButton(withTitle: "取消")
-
-        let resp = alert.runModal()
-        if resp == .alertFirstButtonReturn {
-            // 真实调用 I5 安装逻辑（或报告真实 unsupported 状态）
-            actionFeedbackLabel.stringValue = "系统提示: 按照生产契约，本阶段真实安装入口未启用 (unsupported)，仅允许 fixture 适配器验证。"
-            actionFeedbackLabel.textColor = .systemOrange
-        }
-    }
-
-    @objc private func handleDeferUpdate() {
-        drainState.deferUpdate()
-        actionFeedbackLabel.stringValue = "更新已延期，已取消排空等待，恢复正常业务处理。"
-        actionFeedbackLabel.textColor = .systemBlue
-        currentStageLabel.stringValue = "已延期"
-        drainWarningLabel.stringValue = ""
-        deferButton.isEnabled = false
+    /// 关键安全防线：所有写入操作全部重定向到此 handler，严格禁止任何模拟写入或状态修改
+    @objc public func handleDisabledWriteAction() {
+        actionFeedbackLabel.stringValue = "操作未启用: 当前阶段真实更新下载/安装/延期入口为只读禁用状态 (unsupported)，不进行任何写入或业务状态修改。"
+        actionFeedbackLabel.textColor = .systemOrange
     }
 
     @objc private func handleRefreshStatus() {
         loadInitialStatus()
-        actionFeedbackLabel.stringValue = "状态已刷新。"
+        actionFeedbackLabel.stringValue = "状态已刷新 (只读)。"
         actionFeedbackLabel.textColor = .secondaryLabelColor
     }
 }
