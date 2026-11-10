@@ -76,6 +76,48 @@ fn time_label(bubble: &Bubble) -> Option<&str> {
     bubble.extra.get("time_label").and_then(Value::as_str)
 }
 
+/// Identity of what a bubble says, not of how the current theme painted it. WeChat repaints every
+/// bubble when the light/dark theme changes, so the pixel digest of the same message differs between
+/// themes; images and files carry their own theme-independent digest (size, filename+size), while
+/// words, kind and the time separator stay the same under either theme.
+pub fn content_identity(bubble: &Bubble) -> String {
+    let kind = bubble.kind.as_deref().unwrap_or("text");
+    match kind {
+        "image" | "file" => format!("{kind}:{}", bubble.digest),
+        _ => {
+            let text: String = bubble.text.nfkc().collect();
+            let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let mut hasher = Sha256::new();
+            hasher.update(kind.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(time_label(bubble).unwrap_or("").as_bytes());
+            hasher.update(b"\0");
+            hasher.update(words.as_bytes());
+            let hex: String = hasher
+                .finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            format!("content:{hex}")
+        }
+    }
+}
+
+/// The same sequence keyed by content identity instead of pixels, for comparing two frames captured
+/// under different themes. Geometry and media ids stay for layout and download use; only the
+/// pixel-derived identity fields are replaced.
+pub fn content_keyed(bubbles: &[Bubble]) -> Vec<Bubble> {
+    bubbles
+        .iter()
+        .map(|bubble| {
+            let mut keyed = bubble.clone();
+            keyed.digest = content_identity(bubble);
+            keyed.phash = None;
+            keyed
+        })
+        .collect()
+}
+
 /// Minutes since midnight for a plain "HH:MM" separator; prefixed labels ("昨天 21:30") return None.
 fn clock_minutes(label: &str) -> Option<u32> {
     let (h, m) = label.split_once(':')?;
@@ -916,6 +958,42 @@ mod tests {
             ocr_cached: None,
             extra: serde_json::Map::new(),
         }
+    }
+
+    #[test]
+    fn content_identity_survives_a_theme_repaint_but_not_a_new_message() {
+        // The same words with different pixel digests (light vs dark) are the same message.
+        let light = make_bubble("你好", Some("inbound_visual"), Some("light-pixels"));
+        let dark = make_bubble("你好", Some("inbound_visual"), Some("dark-pixels"));
+        assert_eq!(content_identity(&light), content_identity(&dark));
+        // Different words stay different.
+        let other = make_bubble("你好呀", Some("inbound_visual"), Some("dark-pixels"));
+        assert_ne!(content_identity(&light), content_identity(&other));
+        // The same duration voice is ambiguous by content, exactly as it is by pixels.
+        let mut voice_light = make_bubble("[语音4秒]", Some("inbound_visual"), Some("light-voice"));
+        voice_light.kind = Some("voice".to_string());
+        let mut voice_dark = make_bubble("[语音4秒]", Some("inbound_visual"), Some("dark-voice"));
+        voice_dark.kind = Some("voice".to_string());
+        assert_eq!(
+            content_identity(&voice_light),
+            content_identity(&voice_dark)
+        );
+        // A time separator keeps identical words apart, and it is not repainted either.
+        let mut earlier = light.clone();
+        earlier
+            .extra
+            .insert("time_label".to_string(), json!("21:30"));
+        assert_ne!(content_identity(&light), content_identity(&earlier));
+        // Images already carry a size-based digest: a different perceptual hash is still the same
+        // bubble, and the pixel hash is dropped from the key.
+        let light_image = make_image("0f0f0f0f", Some("image:50:40"), None);
+        let mut dark_image = light_image.clone();
+        dark_image.phash = Some("f0f0f0f0".to_string());
+        assert_eq!(
+            content_identity(&light_image),
+            content_identity(&dark_image)
+        );
+        assert_eq!(content_keyed(&[dark_image])[0].phash, None);
     }
 
     #[test]

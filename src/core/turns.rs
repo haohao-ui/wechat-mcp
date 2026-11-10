@@ -39,8 +39,8 @@ use crate::core::delivery::{EchoOutcome, ToolClient, is_not_sent};
 use crate::core::history::store::{HistoryStore, similar};
 use crate::core::model::{Bubble, Frame};
 use crate::core::policy::{
-    ContinuityError, Fingerprint, Policy, echo_matches, fingerprint, merge_pages, new_bubbles,
-    reconcile, relocate, separator_tail, strip_member_count, validate_reply,
+    ContinuityError, Fingerprint, Policy, content_keyed, echo_matches, fingerprint, merge_pages,
+    new_bubbles, reconcile, relocate, separator_tail, strip_member_count, validate_reply,
 };
 use crate::core::state::{read_json, write_private};
 use crate::core::worker_client::action_interrupted;
@@ -231,6 +231,31 @@ pub struct BotService {
     pub model_retries: Option<usize>,
     last_health_log: Arc<std::sync::Mutex<Option<(String, String)>>>,
     last_health_log_at: Arc<std::sync::Mutex<f64>>,
+}
+
+/// New bubbles after `previous` when pixels cannot be compared because the theme changed: both
+/// sequences are keyed by content, and the real bubbles of the arrival suffix are returned. `None`
+/// means the content did not anchor on what was already seen, so the caller must not guess.
+fn content_arrivals(previous: &[Bubble], current: &[Bubble]) -> Option<Vec<Bubble>> {
+    let visible: Vec<Bubble> = current
+        .iter()
+        .filter(|b| b.kind.as_deref() != Some("voice_transcript"))
+        .cloned()
+        .collect();
+    let keyed_previous = content_keyed(previous);
+    let keyed_current = content_keyed(current);
+    let arrivals = match new_bubbles(&keyed_previous, &keyed_current) {
+        Ok(changes) => changes.len(),
+        Err(ContinuityError::AmbiguousAnchor { certain }) => certain.len(),
+        Err(_) => return None,
+    };
+    if arrivals == 0 {
+        return Some(Vec::new());
+    }
+    // `new_bubbles` hands back a stripped suffix of `current`; the matching suffix of `visible` keeps
+    // the real bubbles (digest, media id) that the turn and its attachments need.
+    let start = visible.len().checked_sub(arrivals)?;
+    Some(visible[start..].to_vec())
 }
 
 impl BotService {
@@ -908,6 +933,11 @@ impl BotService {
         }
 
         let Some(ch) = changes else {
+            tracing::warn!(
+                recipient = %self.recipient,
+                pages = pages.len(),
+                "gap_recovery_exhausted"
+            );
             return Ok(None);
         };
 
@@ -1049,55 +1079,102 @@ impl BotService {
         let cursor_bubbles = self.cursor.as_ref().unwrap().bubbles.clone();
         frame.bubbles = reconcile(&cursor_bubbles, &frame.bubbles);
 
-        let changes = match new_bubbles(&cursor_bubbles, &frame.bubbles) {
-            Ok(ch) => ch,
-            Err(ref err @ ContinuityError::AmbiguousAnchor { ref certain }) => {
-                ambiguous = Some(err.to_string());
-                if certain.is_empty() {
-                    self.separator_arrivals(capture, &cursor_bubbles, &frame)
-                        .await?
-                } else {
-                    certain.clone()
+        // A theme switch repaints every bubble, so pixel digests no longer identify messages that were
+        // already seen (device 2026-11-10: light -> dark left a stale cursor, every anchor missed, the
+        // new voice was rebaselined as history and never answered). Content is what survives a repaint:
+        // compare it, and never scroll for pixels that no longer exist under the current theme.
+        let theme_from = self
+            .cursor
+            .as_ref()
+            .and_then(|c| c.profile.clone())
+            .filter(|p| !p.is_empty());
+        let theme_to = frame.profile.clone().filter(|p| !p.is_empty());
+        let theme_changed = matches!(
+            (theme_from.as_deref(), theme_to.as_deref()),
+            (Some(from), Some(to)) if from != to
+        );
+
+        let changes = if theme_changed {
+            tracing::warn!(
+                recipient = %self.recipient,
+                from = theme_from.as_deref().unwrap_or("-"),
+                to = theme_to.as_deref().unwrap_or("-"),
+                visible = frame.bubbles.len(),
+                "visual_theme_changed"
+            );
+            match content_arrivals(&cursor_bubbles, &frame.bubbles) {
+                Some(arrivals) if !arrivals.is_empty() => arrivals,
+                _ => {
+                    // Nothing can be attributed to this arrival round: rebuild the baseline with an
+                    // explicit trace instead of scrolling, and never guess which bubbles were new.
+                    tracing::warn!(
+                        recipient = %self.recipient,
+                        from = theme_from.as_deref().unwrap_or("-"),
+                        to = theme_to.as_deref().unwrap_or("-"),
+                        visible = frame.bubbles.len(),
+                        "theme_changed_rebaseline"
+                    );
+                    self.advance(frame.clone())?;
+                    let mut d = Map::new();
+                    d.insert(
+                        "reason".to_string(),
+                        json!("visual theme changed; baseline rebuilt without a reply"),
+                    );
+                    self.health("watching", d)?;
+                    return Ok(());
                 }
             }
-            Err(ContinuityError::ContinuityGap) => {
-                // Layout only (kind, direction, position): enough to explain a gap without content.
-                let layout = |bubbles: &[Bubble]| {
-                    bubbles
-                        .iter()
-                        .map(|b| {
-                            format!(
-                                "{}/{}@{}+{}",
-                                b.kind.as_deref().unwrap_or("-"),
-                                b.direction,
-                                b.y.unwrap_or(-1),
-                                b.height.unwrap_or(-1)
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",")
-                };
-                tracing::warn!(
-                    recipient = %self.recipient,
-                    snapshot = frame.snapshot_id.as_deref().unwrap_or("-"),
-                    frame = %layout(&frame.bubbles),
-                    cursor_tail = %layout(&cursor_bubbles[cursor_bubbles.len().saturating_sub(4)..]),
-                    "continuity_gap"
-                );
-                match self.recover_gap(capture, &frame, GAP_SCROLL_PAGES).await? {
-                    Some(recovered) => recovered,
-                    None => {
-                        if self.recovery_unconfirmed {
-                            let mut d = Map::new();
-                            d.insert(
-                                "reason".to_string(),
-                                json!("scrolled back but bottom frame changed"),
-                            );
-                            self.health("waiting_for_stable_frame", d)?;
-                            return Ok(());
+        } else {
+            match new_bubbles(&cursor_bubbles, &frame.bubbles) {
+                Ok(ch) => ch,
+                Err(ref err @ ContinuityError::AmbiguousAnchor { ref certain }) => {
+                    ambiguous = Some(err.to_string());
+                    if certain.is_empty() {
+                        self.separator_arrivals(capture, &cursor_bubbles, &frame)
+                            .await?
+                    } else {
+                        certain.clone()
+                    }
+                }
+                Err(ContinuityError::ContinuityGap) => {
+                    // Layout only (kind, direction, position): enough to explain a gap without content.
+                    let layout = |bubbles: &[Bubble]| {
+                        bubbles
+                            .iter()
+                            .map(|b| {
+                                format!(
+                                    "{}/{}@{}+{}",
+                                    b.kind.as_deref().unwrap_or("-"),
+                                    b.direction,
+                                    b.y.unwrap_or(-1),
+                                    b.height.unwrap_or(-1)
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    };
+                    tracing::warn!(
+                        recipient = %self.recipient,
+                        snapshot = frame.snapshot_id.as_deref().unwrap_or("-"),
+                        frame = %layout(&frame.bubbles),
+                        cursor_tail = %layout(&cursor_bubbles[cursor_bubbles.len().saturating_sub(4)..]),
+                        "continuity_gap"
+                    );
+                    match self.recover_gap(capture, &frame, GAP_SCROLL_PAGES).await? {
+                        Some(recovered) => recovered,
+                        None => {
+                            if self.recovery_unconfirmed {
+                                let mut d = Map::new();
+                                d.insert(
+                                    "reason".to_string(),
+                                    json!("scrolled back but bottom frame changed"),
+                                );
+                                self.health("waiting_for_stable_frame", d)?;
+                                return Ok(());
+                            }
+                            ambiguous = Some("visual continuity gap".to_string());
+                            Vec::new()
                         }
-                        ambiguous = Some("visual continuity gap".to_string());
-                        Vec::new()
                     }
                 }
             }
@@ -2166,6 +2243,22 @@ mod tests {
             }
         }
         test_frame(visible, "示例联系人甲")
+    }
+
+    fn test_voice(seconds: i64, digest: &str) -> Bubble {
+        let mut b = test_bubble(&format!("[语音{seconds}秒]"), "inbound_visual");
+        b.digest = digest.to_string();
+        b.kind = Some("voice".to_string());
+        b.media_id = Some(digest.to_string());
+        b.extra.insert("voice_seconds".to_string(), json!(seconds));
+        b
+    }
+
+    fn test_transcript(text: &str, digest: &str) -> Bubble {
+        let mut b = test_bubble(text, "inbound_visual");
+        b.digest = digest.to_string();
+        b.kind = Some("voice_transcript".to_string());
+        b
     }
 
     fn test_frame(bubbles: Vec<Bubble>, title: &str) -> Frame {
@@ -4557,6 +4650,166 @@ mod tests {
             .cloned()
             .collect();
         assert_eq!(sends.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_service_theme_change_answers_the_voice_that_arrived() {
+        // Device 2026-11-10: the chat was last seen in the light theme, WeChat then switched to dark,
+        // and the first frame after clicking back in was repainted. Nothing matched the stale pixel
+        // digests, gap recovery scrolled 24 pages for an anchor that could not exist, and the new voice
+        // was rebaselined as history and never answered.
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        let seen_prompt = Arc::new(Mutex::new(String::new()));
+        let sp = seen_prompt.clone();
+        svc.brain = Some(Arc::new(move |turn| {
+            *sp.lock().unwrap() = turn.text.clone();
+            Box::pin(async {
+                Ok(BrainReply {
+                    reply: "收到语音了。".to_string(),
+                    metadata: HashMap::new(),
+                })
+            })
+        }));
+
+        let mut light_image = test_bubble("[图片]", "inbound_visual");
+        light_image.kind = Some("image".to_string());
+        light_image.digest = "image:50:40".to_string();
+        light_image.phash = Some("0".repeat(16));
+        light_image.media_id = Some("a".repeat(64));
+        let light_voice = test_voice(4, "light-voice");
+        let light_transcript = test_transcript("请认真理解这张图片。", "light-transcript");
+        let mut light_reply = test_bubble("我看清了，这是一页除法练习。", "outbound_visual");
+        light_reply.digest = "light-reply".to_string();
+
+        let mut cursor = test_frame(
+            vec![light_image, light_voice, light_transcript, light_reply],
+            "示例联系人甲",
+        );
+        cursor.profile = Some("wechat-4-light".to_string());
+        svc.advance(cursor).unwrap();
+
+        let dark_voice = test_voice(4, "dark-voice");
+        let dark_transcript = test_transcript("请认真理解这张图片。", "dark-transcript");
+        let mut dark_reply = test_bubble("我看清了，这是一页除法练习。", "outbound_visual");
+        dark_reply.digest = "dark-reply".to_string();
+        // The voice that arrived: same duration as the older one, so the same content identity.
+        let arrived = test_voice(4, "dark-voice");
+        let current = test_frame(
+            vec![dark_voice, dark_transcript, dark_reply, arrived],
+            "示例联系人甲",
+        );
+
+        let mut cap = MockCapture::new(vec![current.clone(); 6]);
+        cap.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
+
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        assert!(
+            cap.scroll_calls.lock().unwrap().is_empty(),
+            "a repainted frame must not scroll history looking for pixels that no longer exist"
+        );
+        assert_eq!(*seen_prompt.lock().unwrap(), "[语音4秒]");
+        let sends: Vec<_> = client
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| name == "send_message")
+            .cloned()
+            .collect();
+        assert_eq!(sends.len(), 1, "the voice that arrived during the repaint gets a reply");
+        assert_eq!(
+            svc.cursor.as_ref().and_then(|c| c.profile.as_deref()),
+            Some("wechat-4-dark"),
+            "the advanced baseline carries the new theme"
+        );
+        let health: Value = read_json(svc.root.join("health.json")).unwrap();
+        assert_eq!(health["state"], "watching");
+    }
+
+    #[tokio::test]
+    async fn test_service_theme_change_without_new_messages_rebaselines_without_reply() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        svc.brain = Some(default_brain("不应该回复"));
+
+        let mut light = test_bubble("你好", "inbound_visual");
+        light.digest = "light-hello".to_string();
+        let mut cursor = test_frame(vec![light], "示例联系人甲");
+        cursor.profile = Some("wechat-4-light".to_string());
+        svc.advance(cursor).unwrap();
+
+        let mut dark = test_bubble("你好", "inbound_visual");
+        dark.digest = "dark-hello".to_string();
+        let current = test_frame(vec![dark], "示例联系人甲");
+
+        let mut cap = MockCapture::new(vec![current.clone(); 3]);
+        cap.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
+
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        assert!(cap.scroll_calls.lock().unwrap().is_empty());
+        assert!(
+            client.calls.lock().unwrap().is_empty(),
+            "a repaint with nothing new must not call the model or send"
+        );
+        assert_eq!(
+            svc.cursor.as_ref().map(|c| c.bubbles.clone()),
+            Some(current.bubbles.clone())
+        );
+        let health: Value = read_json(svc.root.join("health.json")).unwrap();
+        assert_eq!(health["state"], "watching");
+        assert!(
+            health["reason"].as_str().unwrap_or("").contains("theme"),
+            "{health}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_service_theme_change_with_unrelated_content_rebaselines_without_guessing() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        svc.brain = Some(default_brain("不应该回复"));
+
+        let mut light = test_bubble("旧消息", "inbound_visual");
+        light.digest = "light-old".to_string();
+        let mut cursor = test_frame(vec![light], "示例联系人甲");
+        cursor.profile = Some("wechat-4-light".to_string());
+        svc.advance(cursor).unwrap();
+
+        let mut dark = test_bubble("完全不同的消息", "inbound_visual");
+        dark.digest = "dark-new".to_string();
+        let current = test_frame(vec![dark], "示例联系人甲");
+
+        let mut cap = MockCapture::new(vec![current.clone(); 3]);
+        cap.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
+
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        assert!(cap.scroll_calls.lock().unwrap().is_empty());
+        assert!(
+            client.calls.lock().unwrap().is_empty(),
+            "content that does not anchor on the baseline is not guessed into a reply"
+        );
+        assert_eq!(
+            svc.cursor.as_ref().map(|c| c.bubbles.clone()),
+            Some(current.bubbles.clone())
+        );
+        let health: Value = read_json(svc.root.join("health.json")).unwrap();
+        assert!(
+            health["reason"].as_str().unwrap_or("").contains("theme"),
+            "{health}"
+        );
     }
 
     #[tokio::test]
