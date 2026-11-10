@@ -795,22 +795,41 @@ async fn call_tool(
                     }
                 };
                 let turn_id = args["turn_id"].as_str().unwrap();
-                let actual_snap = {
-                    let conn = rusqlite::Connection::open_with_flags(
-                        state.config.state_dir.join("history/history.sqlite3"),
-                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-                    );
-                    if let Ok(conn) = conn {
-                        conn.query_row(
-                            "SELECT snapshot_id FROM brain_turns WHERE account_id = ? AND turn_id = ?",
-                            rusqlite::params![access.account_id(), turn_id],
-                            |row| row.get(0),
-                        )
-                        .ok()
-                    } else {
-                        None
+                let db_path = state.config.state_dir.join("history/history.sqlite3");
+                let actual_from_db: Option<Result<String, rusqlite::Error>> = if db_path.exists() {
+                    match rusqlite::Connection::open_with_flags(
+                        &db_path,
+                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                            | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+                    ) {
+                        Ok(conn) => {
+                            match conn.query_row(
+                                "SELECT snapshot_id FROM brain_turns WHERE account_id = ? AND turn_id = ?",
+                                rusqlite::params![access.account_id(), turn_id],
+                                |row| row.get(0),
+                            ) {
+                                Ok(snap) => Some(Ok(snap)),
+                                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                                Err(e) => Some(Err(e)),
+                            }
+                        }
+                        Err(e) => Some(Err(e)),
                     }
+                } else {
+                    None
                 };
+
+                let actual_snap = match actual_from_db {
+                    Some(Ok(s)) => Some(s),
+                    Some(Err(e)) => {
+                        return business(
+                            "internal",
+                            format!("database error while verifying snapshot: {e}"),
+                        );
+                    }
+                    None => None,
+                };
+
                 let pending_snap = {
                     let st = state.brain.state.lock().await;
                     st.pending.get(turn_id).and_then(|p| {
@@ -821,13 +840,22 @@ async fn call_tool(
                         })
                     })
                 };
-                if let Some(expected) = actual_snap.or(pending_snap) {
-                    if expected != req_snap {
+
+                let expected = match actual_snap.or(pending_snap) {
+                    Some(s) => s,
+                    None => {
                         return business(
-                            "snapshot_mismatch",
-                            format!("snapshot_id mismatch: expected {expected}, got {req_snap}"),
+                            "snapshot_not_found",
+                            format!("no snapshot available to verify for turn {turn_id}"),
                         );
                     }
+                };
+
+                if expected != req_snap {
+                    return business(
+                        "snapshot_mismatch",
+                        format!("snapshot_id mismatch: expected {expected}, got {req_snap}"),
+                    );
                 }
             }
             state
@@ -1729,5 +1757,103 @@ mod tests {
 
         let received = pending.await.unwrap().unwrap();
         assert_eq!(received.reply, "回复内容");
+    }
+
+    #[tokio::test]
+    async fn v2_reply_rejects_missing_snapshot_and_db_failure_preserving_claim() {
+        let t = TestServer::new(Duration::from_secs(90)).await;
+        let sid = t.init().await;
+
+        // 协商 v2
+        let neg = t
+            .call(
+                &sid,
+                "brain_negotiate",
+                json!({"versions": [2], "capabilities": ["snapshot_v1"]}),
+            )
+            .await;
+        assert_eq!(neg["result"]["structuredContent"]["selected_version"], 2);
+
+        // 1. 测试无 snapshot 的 turn：v2 reply 必须拒绝且保留 claim
+        let turn_no_snap = "turn_no_snap";
+        let pending1 = t.enqueue(turn_no_snap).await;
+        let claim1 = t.call(&sid, "next_turn", json!({"wait_seconds": 1})).await;
+        let claim_token1 = claim1["result"]["structuredContent"]["turn"]["claim"]["claim_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let res_no_snap = t
+            .call(
+                &sid,
+                "reply",
+                json!({
+                    "turn_id": turn_no_snap,
+                    "claim_token": &claim_token1,
+                    "action": "send",
+                    "text": "尝试回复",
+                    "snapshot_id": "any_snap_id"
+                }),
+            )
+            .await;
+        assert_eq!(
+            res_no_snap["result"]["structuredContent"]["error"]["code"], "snapshot_not_found",
+            "无快照时绝不能当作匹配接受"
+        );
+        // claim 依然有效
+        assert_eq!(
+            t.call(&sid, "get_turn_status", json!({"turn_id": turn_no_snap}))
+                .await["result"]["structuredContent"]["state"],
+            "claimed"
+        );
+        pending1.abort();
+
+        // 2. 测试 DB 读失败（如表损坏）：绝对不能无声降级，必须拒绝且保留 claim
+        let turn_db_err = "turn_db_err";
+        let pending2 = t.enqueue(turn_db_err).await;
+        let claim2 = t.call(&sid, "next_turn", json!({"wait_seconds": 1})).await;
+        let claim_token2 = claim2["result"]["structuredContent"]["turn"]["claim"]["claim_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // 人为在 history.sqlite3 写入一条损坏语句或损坏 DB 文件
+        let db_path = t.fixture.state.join("history/history.sqlite3");
+        std::fs::write(&db_path, b"corrupted sqlite database header").unwrap();
+
+        let res_db_err = t
+            .call(
+                &sid,
+                "reply",
+                json!({
+                    "turn_id": turn_db_err,
+                    "claim_token": &claim_token2,
+                    "action": "send",
+                    "text": "尝试回复",
+                    "snapshot_id": "snap_test"
+                }),
+            )
+            .await;
+        assert_eq!(
+            res_db_err["result"]["structuredContent"]["error"]["code"], "internal",
+            "DB 读取失败时必须报错拒绝，不得吞掉降级"
+        );
+        // claim 依然在内存中有效保留
+        {
+            let st = t.brain.state.lock().await;
+            let pending = st.pending.get(turn_db_err);
+            assert!(pending.is_some(), "turn 必须依然在 pending 中");
+            let pending = pending.unwrap();
+            assert!(
+                pending.claimed_by.is_some(),
+                "DB 读取失败时 claim 必须依然被保留"
+            );
+            assert_eq!(
+                pending.claim_token.as_deref(),
+                Some(claim_token2.as_str()),
+                "claim token 必须保持一致"
+            );
+        }
+        pending2.abort();
     }
 }

@@ -2326,6 +2326,7 @@ mod tests {
 
         let cfg = BotConfig {
             schema_version: 1,
+            mode: None,
             host: "local".to_string(),
             account_id: "test-acc".to_string(),
             allowlist,
@@ -3545,6 +3546,7 @@ mod tests {
             frame: test_frame(vec![], "snap"),
             model_failures: 0,
             retry_at: 100.0,
+            fixed_snapshot: None,
         });
         let now = (coord.clock)();
         coord.last_visit.insert("c".to_string(), now);
@@ -6830,7 +6832,7 @@ mod tests {
     #[tokio::test]
     async fn no_badge_never_opens_contacts() {
         // Without the 通讯录 badge the bot must not leave the chat, even on first enable.
-        let (_td, mut coord, calls) =
+        let (_td, mut coord, _calls) =
             friend_fixture(crate::core::friend_requests::Mode::DryRun, true);
         let mut cap = MockCoordinatorCapture::new();
         cap.call_responses

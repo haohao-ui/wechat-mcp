@@ -3091,10 +3091,22 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
                     );
                 }
             };
-            let upgrade_schema_from = req_val
-                .get("upgrade_schema_from")
-                .and_then(Value::as_u64)
-                .map(|v| v as u32);
+            let upgrade_schema_from = match req_val.get("upgrade_schema_from") {
+                None => None,
+                Some(v) => match v.as_i64() {
+                    Some(1) if v.is_i64() || v.is_u64() => Some(1u32),
+                    _ => {
+                        return emit_brain_error(
+                            stdout,
+                            "invalid_arguments",
+                            "upgrade_schema_from must be integer 1",
+                            false,
+                            None,
+                            2,
+                        );
+                    }
+                },
+            };
             let raw_config_bytes = match std::fs::read(&config_path) {
                 Ok(b) => b,
                 Err(e) => {
@@ -3108,7 +3120,14 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
                     );
                 }
             };
-            let is_service = true;
+            let is_service = match cfg
+                .mode
+                .as_deref()
+                .or_else(|| req_val.get("mode").and_then(Value::as_str))
+            {
+                Some("service") => true,
+                _ => false, // 严格确保非 service 绝不会被种成客服！
+            };
             let at = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -6385,5 +6404,105 @@ mod tests {
         );
         let out: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
         assert_eq!(out["data"]["execution_mode"], "managed");
+
+        // 4. 严格校验 upgrade_schema_from：非法数值 (如 4294967297, -1, "1", 2) 必须直接拒绝为 invalid_arguments，且根文件与对象字节不变
+        let root_bytes_before = fs::read(state_dir.join("brain-bindings.json")).unwrap();
+        for invalid_val in [
+            json!(4294967297u64),
+            json!(-1),
+            json!("1"),
+            json!(2),
+            json!(0),
+            json!(1.5),
+            json!([1]),
+        ] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let code = execute_control_full(
+                &[
+                    "brain-initialize".into(),
+                    "--config".into(),
+                    cfg_path.to_str().unwrap().into(),
+                    "--request-json".into(),
+                    json!({
+                        "installation": "legacy_upgrade",
+                        "upgrade_schema_from": invalid_val
+                    })
+                    .to_string(),
+                ],
+                &mut stdout,
+                &mut stderr,
+                None,
+                None,
+            );
+            assert_eq!(code, 2, "非法 upgrade_schema_from 必须退出码 2");
+            let out: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error"]["code"], "invalid_arguments");
+            assert_eq!(
+                fs::read(state_dir.join("brain-bindings.json")).unwrap(),
+                root_bytes_before,
+                "被拒绝后根文件字节必须完全不变"
+            );
+        }
+
+        // 5. 校验 mode 来源：当既有配置明确包含 "mode": "test" 时，绝不能种成客服
+        let test_state = temp.path().join("state_test_mode");
+        fs::create_dir_all(&test_state).unwrap();
+        fs::set_permissions(&test_state, fs::Permissions::from_mode(0o700)).unwrap();
+        let cfg_test = json!({
+            "schema_version": 1,
+            "host": "local",
+            "account_id": "test-account-2",
+            "mode": "test",
+            "state_dir": test_state.to_str().unwrap(),
+            "allowlist": [{"recipient": "测试联系人", "kind": "private"}]
+        });
+        let cfg_test_path = temp.path().join("config_test.json");
+        fs::write(&cfg_test_path, serde_json::to_string(&cfg_test).unwrap()).unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-initialize".into(),
+                "--config".into(),
+                cfg_test_path.to_str().unwrap().into(),
+                "--request-json".into(),
+                json!({ "installation": "legacy_upgrade" }).to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(
+            code,
+            0,
+            "stderr: {}, stdout: {}",
+            String::from_utf8_lossy(&stderr),
+            String::from_utf8_lossy(&stdout)
+        );
+        let out: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+        assert_eq!(out["ok"], true);
+
+        // 验证种出的角色不是客服
+        let store2 = crate::core::brain_profiles::Store::open(&test_state).unwrap();
+        let ctx2 =
+            crate::core::brain_profiles::AccountContext::new("test-account-2".into()).unwrap();
+        let role = store2
+            .resolve(
+                &ctx2,
+                "c_any",
+                &crate::core::brain_profiles::ChatKind::Private,
+                &crate::core::control::ControlContactAccess {
+                    account_id: "test-account-2".into(),
+                    brain_access: None,
+                    conn: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(role.name, "原内置测试");
+        assert_eq!(role.persona, "个人微信授权测试 Bot");
     }
 }
