@@ -2833,6 +2833,48 @@ fn test_mcp_page_brain_settings_round_trip() {
 }
 
 #[test]
+fn test_mcp_page_open_api_toggle_keeps_bind_and_port() {
+    let off = serde_json::json!({
+        "schema_version": 1,
+        "account_id": "test_acc",
+        "open_api": {"enabled": false, "bind": "192.168.3.81", "port": 9000}
+    });
+    let res = run_task6_cmd(
+        "mcp_open_api_enabled",
+        &serde_json::json!({"config": off, "enabled": true}),
+    )
+    .expect("mcp_open_api_enabled failed");
+    let api = &res["updated"]["open_api"];
+    assert_eq!(api["enabled"], true);
+    assert_eq!(api["bind"], "192.168.3.81");
+    assert_eq!(api["port"], 9000);
+    assert_eq!(res["updated"]["account_id"], "test_acc");
+
+    // Absent section: defaults are written so the core sees a complete open_api object.
+    let res = run_task6_cmd(
+        "mcp_open_api_enabled",
+        &serde_json::json!({"config": {"schema_version": 1}, "enabled": true}),
+    )
+    .expect("mcp_open_api_enabled failed");
+    let api = &res["updated"]["open_api"];
+    assert_eq!(api["enabled"], true);
+    assert_eq!(api["bind"], "127.0.0.1");
+    assert_eq!(api["port"], 8770);
+}
+
+#[test]
+fn test_saved_settings_restart_the_supervised_core_not_the_legacy_label() {
+    let src = fs::read_to_string("native/bootstrap/StatusPanel.swift").expect("StatusPanel.swift");
+    assert!(
+        !src.contains("reloader: ConfigFormLogic.defaultReloadBot"),
+        "saving must restart serve-core through CoreSupervisor"
+    );
+    assert!(src.contains("restartCoreForConfig"));
+    let contacts = fs::read_to_string("native/bootstrap/ContactsPage.swift").expect("ContactsPage");
+    assert!(contacts.contains("persistConfig(updated, restartCore: false)"));
+}
+
+#[test]
 fn test_contacts_and_mcp_pages_registered_in_shell_order() {
     let src = fs::read_to_string("native/bootstrap/main.swift").expect("main.swift exists");
     let overview_idx = src.find("\"overview\"").expect("overview registered");

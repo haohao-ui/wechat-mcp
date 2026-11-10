@@ -697,6 +697,22 @@ public final class StatusPanelController: NSViewController {
         refresh()
     }
 
+    /// The Rust core is supervised in-process: restart it the same way as 「重启机器人」 (a planned
+    /// stop, not counted as a crash). The legacy launchd label `local.wechat-rpa.bot` no longer
+    /// exists, so kickstarting it left saved settings without effect.
+    fileprivate func restartCoreForConfig() throws {
+        guard FileManager.default.fileExists(atPath: coreSupervisor.coreEnabledURL.path) else {
+            try ConfigFormLogic.defaultReloadBot()
+            return
+        }
+        let supervisor = coreSupervisor
+        DispatchQueue.global(qos: .userInitiated).async {
+            supervisor.reset()
+            supervisor.stopProcess()
+            supervisor.checkAndReconcile()
+        }
+    }
+
     @objc private func handleRestartBot() {
         actionMessageLabel.stringValue = "正在重启机器人..."
         if FileManager.default.fileExists(atPath: coreSupervisor.coreEnabledURL.path) {
@@ -833,7 +849,7 @@ public final class StatusPanelController: NSViewController {
                 targetPath: targetURL,
                 newConfigData: data,
                 checker: ConfigFormLogic.defaultCheckConfig,
-                reloader: ConfigFormLogic.defaultReloadBot
+                reloader: { [weak self] in try self?.restartCoreForConfig() }
             )
             rawConfigDict = newConfig
             actionMessageLabel.stringValue = "配置保存成功，机器人已重启生效"
@@ -888,7 +904,9 @@ public final class StatusPanelController: NSViewController {
         handleCopyDiagnostics()
     }
 
-    public func persistConfig(_ newConfig: [String: Any]) throws {
+    /// Saves the config; `restartCore` restarts serve-core so settings read only at start (brain,
+    /// open_api, pacing) take effect. Allowlist edits are re-read live and need no restart.
+    public func persistConfig(_ newConfig: [String: Any], restartCore: Bool = true) throws {
         guard let targetURL = currentConfigURL else {
             throw ConfigFormError.writeFailed("配置路径无效")
         }
@@ -897,7 +915,7 @@ public final class StatusPanelController: NSViewController {
             targetPath: targetURL,
             newConfigData: data,
             checker: ConfigFormLogic.defaultCheckConfig,
-            reloader: ConfigFormLogic.defaultReloadBot
+            reloader: restartCore ? { [weak self] in try self?.restartCoreForConfig() } : nil
         )
         rawConfigDict = newConfig
         refresh()
