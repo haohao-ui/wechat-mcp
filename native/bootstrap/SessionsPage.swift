@@ -84,7 +84,7 @@ public final class SessionsPageController: NSViewController {
         textScroll.hasVerticalScroller = true
         detailTextView.isEditable = false
         detailTextView.font = NSFont.userFixedPitchFont(ofSize: 11)
-        detailTextView.string = "暂无选中轮次。输入 turn_id 或点击会话行查看详细快照、角色修订与发送状态。"
+        detailTextView.string = "暂无选中轮次。请在上方输入框手动输入有效 turn_id 并点击查询，以查看详细快照、角色修订与发送状态。"
         textScroll.documentView = detailTextView
         textScroll.heightAnchor.constraint(equalToConstant: 180).isActive = true
         textScroll.widthAnchor.constraint(equalToConstant: 640).isActive = true
@@ -186,7 +186,23 @@ public final class SessionsPageController: NSViewController {
         }
     }
 
-    private func displayTurnDetail(_ detail: BrainTurnDetail) {
+    public func applyFixtureState(sessions: [String: SessionHealthInput], selectedTurnDetail: BrainTurnDetail?) {
+        sessionsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        if sessions.isEmpty {
+            sessionsStack.addArrangedSubview(emptyLabel)
+        } else {
+            for (name, session) in sessions.sorted(by: { $0.key < $1.key }) {
+                let row = createSessionRow(name: name, session: session)
+                sessionsStack.addArrangedSubview(row)
+            }
+        }
+        if let detail = selectedTurnDetail {
+            self.turnSearchField.stringValue = detail.turnId
+            self.displayTurnDetail(detail)
+        }
+    }
+
+    public func displayTurnDetail(_ detail: BrainTurnDetail) {
         var text = "【轮次追溯详情】\n"
         text += "Turn ID: \(detail.turnId)\n"
         text += "联系人: \(detail.contactId)\n"

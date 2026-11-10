@@ -1506,6 +1506,28 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         }
     }
 
+    public func selectTab(index: Int) {
+        sectionSegment.selectedSegment = index
+        switchTab(index: index)
+    }
+
+    public func applyFixtureState(payload: BrainListPayload, role: BrainRoleRevision, accountId: String = "wx_fixture_account") {
+        self.listPayload = payload
+        self.currentDraftRole = role
+        self.accountLabel.stringValue = "当前账号: \(accountId)"
+        if let summary = payload.modelSummary {
+            self.modeLabel.stringValue = "模式: \(summary.mode) · 模型: 已配置"
+        }
+        self.statusMessageLabel.stringValue = "草稿已加载，可编辑后保存或合成预览"
+        self.loadErrorLabel.stringValue = ""
+        self.roleTable.reloadData()
+        if !payload.roles.isEmpty {
+            self.selectedRoleIndex = 0
+            self.roleTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+            self.populateRoleForm(role, entry: payload.roles[0])
+        }
+    }
+
     private func populateRoleForm(_ role: BrainRoleRevision, entry: BrainRoleEntry) {
         roleNameField.stringValue = role.name
         toneField.stringValue = role.tone
