@@ -78,6 +78,35 @@ func press(_ element: AXUIElement) throws {
 }
 
 /// Clicks the first of `titles` found by OCR in a small WeChat popup window (context menu) near `point`.
+/// Right-clicks `rect` (screen points) and chooses the context-menu row labelled `menu` in the layout
+/// map: the accessibility tree first, then the menu read off the screen (WeChat 4 draws it outside the
+/// tree). Shared by every context-menu action (save as, 转文字); nothing found closes it with Esc.
+func chooseContextMenu(_ rect: CGRect, menu: String, app: NSRunningApplication) throws {
+    let root=AXUIElementCreateApplication(app.processIdentifier)
+    // Labels come only from the layout map; a map without them is a calibration error, not a guess.
+    guard let titles = try currentLayout().menuLabels[menu], !titles.isEmpty else { throw Failure.invalid("layout_missing_menu:\(menu)") }
+    // The context menu opens where the press landed; look for it there.
+    var point=CGPoint(x:rect.midX,y:rect.midY)
+    try act { point=try botActions.rightClick(rect) }
+    pauseUI(0.4)
+    saveDebugStep("1-after-right-click",root)
+    var roots=[root]
+    if let focused=attribute(AXUIElementCreateSystemWide(),"AXFocusedUIElement"), CFGetTypeID(focused)==AXUIElementGetTypeID() {
+        roots.append(unsafeBitCast(focused,to:AXUIElement.self))
+    }
+    let menus=roots.flatMap { elements($0) }.filter { attribute($0,"AXRole") as? String == "AXMenuItem" }
+    var matches:[AXUIElement]=[]
+    for item in menus where titles.contains(attribute(item,"AXTitle") as? String ?? "") {
+        if !matches.contains(where:{ CFEqual($0,item) }) { matches.append(item) }
+    }
+    if matches.count==1 {
+        try press(matches[0])
+    } else if try !clickMenuTextOnScreen(titles,owner:app.processIdentifier,near:point) {
+        try? key(53)
+        throw Failure.invalid("\(menu)_menu_missing")
+    }
+}
+
 func clickMenuTextOnScreen(_ titles: [String], owner: pid_t, near point: CGPoint) throws -> Bool {
     let rows = CGWindowListCopyWindowInfo([.optionOnScreenOnly,.excludeDesktopElements],kCGNullWindowID) as? [[String:Any]] ?? []
     let popups: [(UInt32,CGRect)] = rows.compactMap { row in
@@ -161,32 +190,9 @@ func saveAttachment(_ item: [String:Any], window:[String:Any], destination:URL, 
           let x=item["x"] as? Int,let y=item["y"] as? Int,
           let w=item["width"] as? Int,let h=item["height"] as? Int else { throw Failure.invalid("wechat_not_foreground_or_invalid_media") }
     let root=AXUIElementCreateApplication(app.processIdentifier)
-    let layout = try currentLayout()
-    let chatRegion = try layoutRegion(layout, "chat")
+    let chatRegion = try layoutRegion(try currentLayout(), "chat")
     let mediaRect=CGRect(x:(window["x"] as! Double)+chatRegion.minX+Double(x),y:(window["y"] as! Double)+chatRegion.minY+Double(y),width:Double(w),height:Double(h))
-    // The context menu opens where the press landed; look for it there.
-    var point=CGPoint(x:mediaRect.midX,y:mediaRect.midY)
-    try act { point=try botActions.rightClick(mediaRect) }
-    pauseUI(0.4)
-    saveDebugStep("1-after-right-click",root)
-    // Labels come only from the layout map; a map without them is a calibration error, not a guess.
-    guard let titles = layout.menuLabels["save_as"], !titles.isEmpty else { throw Failure.invalid("layout_missing_menu:save_as") }
-    var roots=[root]
-    if let focused=attribute(AXUIElementCreateSystemWide(),"AXFocusedUIElement"), CFGetTypeID(focused)==AXUIElementGetTypeID() {
-        roots.append(unsafeBitCast(focused,to:AXUIElement.self))
-    }
-    let menus=roots.flatMap { elements($0) }.filter { attribute($0,"AXRole") as? String == "AXMenuItem" }
-    var save:[AXUIElement]=[]
-    for item in menus where titles.contains(attribute(item,"AXTitle") as? String ?? "") {
-        if !save.contains(where:{ CFEqual($0,item) }) { save.append(item) }
-    }
-    if save.count==1 {
-        try press(save[0])
-    } else if try !clickMenuTextOnScreen(titles,owner:app.processIdentifier,near:point) {
-        // WeChat 4 draws its context menu outside the accessibility tree: read it off the screen instead.
-        try? key(53)
-        throw Failure.invalid("save_as_menu_missing")
-    }
+    try chooseContextMenu(mediaRect,menu:"save_as",app:app)
     pauseUI(0.3)
     saveDebugStep("2-after-menu-click",root)
     pauseUI(0.7)
