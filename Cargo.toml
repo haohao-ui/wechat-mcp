@@ -20,6 +20,19 @@ unicode-normalization = "0.1.26"
 sha2 = "0.11.1"
 serde_json_canonicalizer = "=0.3.2"
 libc = "=0.2.189"
+ring = { version = "=0.17.14", default-features = false }
+
+[lib]
+name = "wechat_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wechat-mcp"
+path = "src/main.rs"
+
+[[bin]]
+name = "wechat-updater"
+path = "src/bin/wechat-updater.rs"
 
 [lints.clippy]
 correctness = "deny"
