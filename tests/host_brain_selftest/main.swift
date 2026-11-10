@@ -89,6 +89,29 @@ func runTests() -> Int32 {
         
         let migratedRole = payload.roles[1]
         check("migrated_role_origin_detect", BrainPageLogic.isMigratedRole(migratedRole))
+
+        // 验证旧结构缺字段时向后兼容：status 默认 unavailable
+        check("brain_list_legacy_shape_status", payload.allowlistContactsStatus == "unavailable")
+        check("brain_list_legacy_shape_contacts_empty", payload.allowlistContacts.isEmpty)
+
+        // 验证新结构包含权威白名单投影：
+        let modernListJson = """
+        {
+            "generation": 11,
+            "execution_mode": "managed",
+            "roles": [],
+            "allowlist_contacts": [
+                { "contact_id": "c_zhangsan", "display_name": "张三真实名", "chat_kind": "private" }
+            ],
+            "allowlist_contacts_status": "ready",
+            "allowlist_contacts_error": null
+        }
+        """
+        if let modernPayload = try? BrainPageLogic.parseBrainList(jsonString: modernListJson) {
+            check("brain_list_modern_shape_status", modernPayload.allowlistContactsStatus == "ready")
+            check("brain_list_modern_shape_contacts_count", modernPayload.allowlistContacts.count == 1)
+            check("brain_list_modern_shape_contact_id", modernPayload.allowlistContacts[0].contactId == "c_zhangsan")
+        }
     }
 
     // 3. CAS Conflict Handling: preserve user input on generation mismatch
@@ -584,6 +607,12 @@ func runTests() -> Int32 {
         let bindDelOK = renderOpaquePNG(view: brainController.view, size: brainSize, outputURL: bindDelURL)
         check("brain_page_bindings_deleted_written", bindDelOK && FileManager.default.fileExists(atPath: bindDelURL.path))
 
+        // 12.4.5 渲染来源不可用状态 (在 680px 宿主最小宽下验证表单禁用与错误提示排布)
+        brainController.setAllowlistContacts([], status: "unavailable", error: "history_store_unavailable")
+        let bindUnavailURL = fixtureDir.appendingPathComponent("brain_page_bindings_unavailable_680.png")
+        let bindUnavailOK = renderOpaquePNG(view: brainController.view, size: minSize, outputURL: bindUnavailURL)
+        check("brain_page_bindings_unavailable_written", bindUnavailOK && FileManager.default.fileExists(atPath: bindUnavailURL.path))
+
         // 12.5 渲染版本管理页
         brainController.selectTab(index: 4)
         let verURL = fixtureDir.appendingPathComponent("brain_page_version.png")
@@ -649,6 +678,14 @@ func runTests() -> Int32 {
             let listPayload = try realClient.fetchList()
             check("real_control_list_mode", listPayload.executionMode == "managed")
             check("real_control_list_gen", listPayload.generation == initGen)
+            
+            // 验证真实控制通道只读权威白名单联系人投影（严格基于核心 BrainAccess 过滤，不凭名字造 ID）
+            check("real_control_list_allowlist_status", listPayload.allowlistContactsStatus == "ready")
+            check("real_control_list_allowlist_count", listPayload.allowlistContacts.count == 1)
+            check("real_control_list_allowlist_id_exact", listPayload.allowlistContacts.first?.contactId == "c_contract")
+            check("real_control_list_allowlist_name_exact", listPayload.allowlistContacts.first?.displayName == "契约联系人")
+            check("real_control_list_allowlist_kind_exact", listPayload.allowlistContacts.first?.chatKind == "private")
+            check("real_control_list_allowlist_id_ne_name", listPayload.allowlistContacts.first?.contactId != listPayload.allowlistContacts.first?.displayName)
             
             // 13.3 角色新建与保存
             var role = BrainRoleRevision(
