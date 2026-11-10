@@ -99,4 +99,44 @@
 
 当前 `list` 先按可信账号筛选，再校验该账号目录指向的磁盘角色、父修订和知识；损坏对象会被过滤出 roles，其读取失败或 owner/hash 完整性错误记录不含正文的 `integrity_mismatch` 日志。**成功返回空 roles 不等于无配置或全新安装**，尤其根仍可能保留账号绑定和角色目录；当前 list 没有逐条错误字段，I2/UI必须保留既有状态并结合明确读取/诊断展示加载失败，不能因空列表重置、重新迁移或隐式写默认角色。根本身损坏/未知schema仍返回错误，不变为空根。
 
+## I1 增量：显式执行模式与根 schema 2
+
+状态：纯存储增量交付；未接入运行时/serve/control，保持既有边界。
+
+### 设计与决策冻结（依据 msg_012a8b1f9166 与 msg_1301e6be92d1）
+
+1. **Schema 2 闭合升级**：
+   - `AccountEntry` 新增必填字段 `execution_mode: ExecutionMode`（枚举 `legacy | managed`，无 serde 默认值）。
+   - `Root.schema_version` 升级为 2；不可变对象 `RoleRevision` 与 `KnowledgeRevision` 保持 `schema_version: 1` 及哈希算法不变。
+   - 闭合 JSON 反序列化拒绝未知根字段、未知账号字段、未知执行模式及未来 schema。
+2. **模式流转与上下文**：
+   - `Store::execution_mode(ctx) -> Result<ExecutionMode>`：无根文件或根中无该账号时返回 `Ok(ExecutionMode::Legacy)`；损坏根或未知 schema 报错。
+   - `ensure_account` 自动创建的草稿账号设为 `ExecutionMode::Legacy`。
+   - `SaveRole`、`SaveKnowledge`、`SaveBindings`、`CopyRole`、`ArchiveRole` 保持现有模式不变。
+   - `Activate` 与成功的 `Rollback` 在同一原子事务内将当前账号设为 `ExecutionMode::Managed`。
+3. **显式初始化与迁移**：
+   - 新增 `Store::initialize(ctx, installation, validated_config_bytes, service, at, upgrade_schema_from)` 持进程间 flock：
+     - **普通读取/初始化拒隐式升级**：`upgrade_schema_from: None` 时，遇 V1 根返回 `schema_unsupported`，不静默改写磁盘。
+     - **Fresh 初始化**：原子建立当前账号为 `Managed`，无种子、无角色，后续 resolve 返回 `role_required`；若遇已有 `Legacy` 配置账号，拒绝冲突返回 `revision_conflict`，绝不擦除已有草稿；重复 Managed 初始化幂等返回当前 generation。
+     - **LegacyUpgrade 初始化**：生成种子角色并原子提交根，设当前账号为 `Managed`；已有 Legacy 账号且无匹配迁移记录时返回 `revision_conflict`；重复 Managed 初始化校验配置 hash 与磁盘可达对象一致性，通过则幂等，损坏则报错。
+     - **显式 V1 升级（upgrade_schema_from: Some(1)）**：完整校验 V1 闭合结构及所有可达角色/知识对象的磁盘存在、所有权与哈希；保留全部其他账号数据并明确标为 `Legacy`；当前账号按初始化请求升级为 `Managed`；根升为 2，单次 generation +1；损坏/未知字段/冲突均拒绝且不修改原 V1 根。
+     - 其它未支持版本（如 `Some(3)`）返回 `schema_unsupported`。
+
+### 实际测试命令与回归记录
+
+| 命令 | 退出码 | 结果 |
+| --- | ---: | --- |
+| cargo test --locked --bin wechat-mcp brain_profiles -- --test-threads=1 | 0 | **40 通过、0 失败、0 ignored**；旧 33 项全部回归通过，新增 7 项测试全部 GREEN |
+| git diff --check | 0 | 无空白错误 |
+
+40 项测试覆盖：
+- `execution_fresh_managed_without_seed_and_repeat`：初始 Legacy、Fresh Managed、无种子 role_required、重复初始化幂等、缺席账号 Legacy。
+- `execution_drafts_stay_legacy_activate_and_rollback_manage`：草稿保持 Legacy、已有草稿拒 Fresh/Upgrade 冲突、Activate 切 Managed、Rollback 保持 Managed。
+- `execution_legacy_initialize_repeat_checks_source_and_reachable_objects`：LegacyUpgrade 重复校验配置 hash、对象损坏后重复调用拦截报错。
+- `execution_v1_requires_explicit_upgrade_and_preserves_other_account`：普通读 V1 报 schema_unsupported、显式升级保留其他账号原字段与对象、原账号显式标记 Legacy。
+- `execution_v1_current_migration_upgrade_no_reseed_or_draft_loss`：V1 当前账号升级保留 draft 与 active、不重种、重复调用幂等。
+- `execution_v1_rejects_unknown_closed_fields_and_corrupt_objects`：V1 根未知字段、账号未知字段、损坏对象均拒绝升级且原根字节不变。
+- `execution_initialization_root_faults_and_unknown_schema`：root_create/write/sync/rename/dir_sync 故障恢复及 Some(3) schema_unsupported 校验。
+- 原 33 项所有 CAS 隔离、所有权校验、并发抢锁、联系人覆盖、配额截断及迁移回归测试均 100% 保持通过。
+
 归档保护已在设计原条款最小明确：draft 的 default 和 overrides 引用均会阻止归档并返回 role_in_use，须先显式解除草稿引用；active 和 legacy_fallback 的原保护保持。没有为归档自动清空绑定，也不新增 UI 或放松账号权限。

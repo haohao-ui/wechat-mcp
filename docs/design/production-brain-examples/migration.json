@@ -88,7 +88,7 @@
       "content_sha256": "159ac33d7bdad0ebbe2f98df6f6af5a6df84803dc53d32b1198520150dc09774"
     },
     "root": {
-      "schema_version": 1,
+      "schema_version": 2,
       "generation": 1,
       "roles": [
         {
@@ -115,7 +115,8 @@
             },
             "overrides": []
           },
-          "legacy_fallback": null
+          "legacy_fallback": null,
+          "execution_mode": "managed"
         }
       ],
       "migrations": [

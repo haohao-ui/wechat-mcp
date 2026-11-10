@@ -50,7 +50,7 @@ pub struct WriteRequest {
     pub request_id: String,
     pub mutation: Mutation,
 }
-use super::schema::{SAFE_INT, account, decode, hex, id, require};
+use super::schema::{SAFE_INT, account, decode, decode_root, hex, id, require};
 use fs2::FileExt;
 use std::{
     collections::HashSet,
@@ -71,11 +71,11 @@ pub struct Store {
     #[cfg(test)]
     pub(crate) hook: Option<Box<dyn Fn(&str) + Send + Sync>>,
 }
-fn disk_error() -> Error {
+pub(crate) fn disk_error() -> Error {
     tracing::warn!(code = "integrity_mismatch", "brain profile object rejected");
     Error("not_found")
 }
-fn stored_owner(valid: bool) -> Result<()> {
+pub(crate) fn stored_owner(valid: bool) -> Result<()> {
     if valid { Ok(()) } else { Err(disk_error()) }
 }
 struct Temp<'a> {
@@ -208,14 +208,15 @@ impl Store {
         if !self.exists(Path::new("brain-bindings.json"))? {
             return Ok(Root::default());
         }
-        let root: Root = decode(&self.bytes(Path::new("brain-bindings.json"), 128 * 1024 * 1024)?)?;
+        let root: Root =
+            decode_root(&self.bytes(Path::new("brain-bindings.json"), 128 * 1024 * 1024)?)?;
         root.validate()?;
         Ok(root)
     }
     pub fn generation(&self) -> Result<u64> {
         Ok(self.load()?.generation)
     }
-    fn object_path(kind: &str, id_: &str, revision: &str) -> Result<PathBuf> {
+    pub(crate) fn object_path(kind: &str, id_: &str, revision: &str) -> Result<PathBuf> {
         require(id(id_) && id(revision), "invalid_arguments")?;
         Ok(PathBuf::from(format!(
             "brain-profiles/{kind}/{id_}/{revision}.json"
@@ -682,6 +683,7 @@ impl Store {
                 active: BindingSet::default(),
                 draft: BindingSet::default(),
                 legacy_fallback: None,
+                execution_mode: ExecutionMode::Legacy,
             });
         }
         root.accounts
@@ -897,6 +899,7 @@ impl Store {
                     account.draft = b.clone();
                 }
                 account.active = b.clone();
+                account.execution_mode = ExecutionMode::Managed;
                 root.activation_history.push(ActivationEntry {
                     account_id: ctx.account_id.clone(),
                     generation,
@@ -966,7 +969,7 @@ impl BindingSet {
 }
 impl Root {
     pub(crate) fn validate(&self) -> Result<()> {
-        require(self.schema_version == 1, "schema_unsupported")?;
+        require(self.schema_version == 2, "schema_unsupported")?;
         require(self.generation <= SAFE_INT, "invalid_arguments")?;
         require(
             self.accounts.len() <= 16
