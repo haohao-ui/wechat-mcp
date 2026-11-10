@@ -3120,14 +3120,19 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
                     );
                 }
             };
-            let is_service = match cfg
-                .mode
-                .as_deref()
-                .or_else(|| req_val.get("mode").and_then(Value::as_str))
-            {
-                Some("service") => true,
-                _ => false, // 严格确保非 service 绝不会被种成客服！
-            };
+            if req_val.get("mode").is_some() {
+                return emit_brain_error(
+                    stdout,
+                    "invalid_arguments",
+                    "mode parameter is not supported; brain-initialize preserves BotService service deployment semantics",
+                    false,
+                    None,
+                    2,
+                );
+            }
+            // 依据已核实的既有 BotService::new Policy service 及 BrainTurn service 调用链固定为 true，
+            // 严格保持此控制入口原有语义迁移当前 BotService 部署。
+            let is_service = true;
             let at = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -6446,20 +6451,72 @@ mod tests {
             );
         }
 
-        // 5. 校验 mode 来源：当既有配置明确包含 "mode": "test" 时，绝不能种成客服
-        let test_state = temp.path().join("state_test_mode");
-        fs::create_dir_all(&test_state).unwrap();
-        fs::set_permissions(&test_state, fs::Permissions::from_mode(0o700)).unwrap();
-        let cfg_test = json!({
+        // 5. 原 strict reader 必须拒绝根含有 "mode" 字段的配置
+        let cfg_with_mode = json!({
             "schema_version": 1,
             "host": "local",
-            "account_id": "test-account-2",
+            "account_id": "acc-mode-invalid",
             "mode": "test",
-            "state_dir": test_state.to_str().unwrap(),
+            "state_dir": state_dir.to_str().unwrap(),
             "allowlist": [{"recipient": "测试联系人", "kind": "private"}]
         });
-        let cfg_test_path = temp.path().join("config_test.json");
-        fs::write(&cfg_test_path, serde_json::to_string(&cfg_test).unwrap()).unwrap();
+        let invalid_mode_cfg_path = temp.path().join("config_with_mode.json");
+        fs::write(
+            &invalid_mode_cfg_path,
+            serde_json::to_string(&cfg_with_mode).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            crate::core::config::BotConfig::load(&invalid_mode_cfg_path).is_err(),
+            "strict reader 必须拒绝含有未声明根字段 mode 的非法配置"
+        );
+
+        // 6. 请求参数包含 "mode" 时必须明确拒绝（invalid_arguments，退出码 2）且磁盘根文件不变
+        for req_mode in ["service", "test", "other"] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let code = execute_control_full(
+                &[
+                    "brain-initialize".into(),
+                    "--config".into(),
+                    cfg_path.to_str().unwrap().into(),
+                    "--request-json".into(),
+                    json!({
+                        "installation": "legacy_upgrade",
+                        "mode": req_mode
+                    })
+                    .to_string(),
+                ],
+                &mut stdout,
+                &mut stderr,
+                None,
+                None,
+            );
+            assert_eq!(code, 2, "请求出现 mode 必须拒绝（退出码 2）");
+            let out: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+            assert_eq!(out["ok"], false);
+            assert_eq!(out["error"]["code"], "invalid_arguments");
+            assert_eq!(
+                fs::read(state_dir.join("brain-bindings.json")).unwrap(),
+                root_bytes_before,
+                "被拒绝后磁盘根文件字节必须完全未变"
+            );
+        }
+
+        // 7. 旧无 mode 配置成功升级并保持原客服语义（is_service 固定为 true）
+        let legacy_state = temp.path().join("state_legacy_service");
+        fs::create_dir_all(&legacy_state).unwrap();
+        fs::set_permissions(&legacy_state, fs::Permissions::from_mode(0o700)).unwrap();
+        let cfg_legacy = json!({
+            "schema_version": 1,
+            "host": "local",
+            "account_id": "legacy-acc-1",
+            "state_dir": legacy_state.to_str().unwrap(),
+            "allowlist": [{"recipient": "客户张三", "kind": "private"}]
+        });
+        let cfg_legacy_path = temp.path().join("config_legacy.json");
+        let cfg_legacy_bytes = serde_json::to_vec(&cfg_legacy).unwrap();
+        fs::write(&cfg_legacy_path, &cfg_legacy_bytes).unwrap();
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -6467,7 +6524,7 @@ mod tests {
             &[
                 "brain-initialize".into(),
                 "--config".into(),
-                cfg_test_path.to_str().unwrap().into(),
+                cfg_legacy_path.to_str().unwrap().into(),
                 "--request-json".into(),
                 json!({ "installation": "legacy_upgrade" }).to_string(),
             ],
@@ -6476,33 +6533,93 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(
-            code,
-            0,
-            "stderr: {}, stdout: {}",
-            String::from_utf8_lossy(&stderr),
-            String::from_utf8_lossy(&stdout)
-        );
+        assert_eq!(code, 0, "旧无 mode 配置 legacy_upgrade 成功");
         let out: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
         assert_eq!(out["ok"], true);
+        assert_eq!(
+            fs::read(&cfg_legacy_path).unwrap(),
+            cfg_legacy_bytes,
+            "升级后配置文件原字节必须完全不变"
+        );
 
-        // 验证种出的角色不是客服
-        let store2 = crate::core::brain_profiles::Store::open(&test_state).unwrap();
-        let ctx2 =
-            crate::core::brain_profiles::AccountContext::new("test-account-2".into()).unwrap();
-        let role = store2
+        let store_legacy = crate::core::brain_profiles::Store::open(&legacy_state).unwrap();
+        let ctx_legacy =
+            crate::core::brain_profiles::AccountContext::new("legacy-acc-1".into()).unwrap();
+        let role_legacy = store_legacy
             .resolve(
-                &ctx2,
+                &ctx_legacy,
                 "c_any",
                 &crate::core::brain_profiles::ChatKind::Private,
                 &crate::core::control::ControlContactAccess {
-                    account_id: "test-account-2".into(),
+                    account_id: "legacy-acc-1".into(),
                     brain_access: None,
                     conn: None,
                 },
             )
             .unwrap();
-        assert_eq!(role.name, "原内置测试");
-        assert_eq!(role.persona, "个人微信授权测试 Bot");
+        assert_eq!(role_legacy.name, "原内置客服");
+        assert_eq!(role_legacy.persona, "用户部署的个人微信AI客服助手");
+
+        // 8. 外部大脑模式配置（brain.mode: "external"）升级保留客服人设与配置字节不变
+        let ext_state = temp.path().join("state_ext_mode");
+        fs::create_dir_all(&ext_state).unwrap();
+        fs::set_permissions(&ext_state, fs::Permissions::from_mode(0o700)).unwrap();
+        let cfg_ext = json!({
+            "schema_version": 1,
+            "host": "local",
+            "account_id": "ext-acc-1",
+            "state_dir": ext_state.to_str().unwrap(),
+            "allowlist": [{"recipient": "客户李四", "kind": "private"}],
+            "brain": {
+                "mode": "external",
+                "external": {
+                    "timeout_action": "builtin"
+                }
+            }
+        });
+        let cfg_ext_path = temp.path().join("config_ext.json");
+        let cfg_ext_bytes = serde_json::to_vec(&cfg_ext).unwrap();
+        fs::write(&cfg_ext_path, &cfg_ext_bytes).unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-initialize".into(),
+                "--config".into(),
+                cfg_ext_path.to_str().unwrap().into(),
+                "--request-json".into(),
+                json!({ "installation": "legacy_upgrade" }).to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(code, 0, "外部大脑配置 legacy_upgrade 成功");
+        let out: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+        assert_eq!(out["ok"], true);
+        assert_eq!(
+            fs::read(&cfg_ext_path).unwrap(),
+            cfg_ext_bytes,
+            "外部模式升级后配置文件原字节完全未变"
+        );
+
+        let store_ext = crate::core::brain_profiles::Store::open(&ext_state).unwrap();
+        let ctx_ext = crate::core::brain_profiles::AccountContext::new("ext-acc-1".into()).unwrap();
+        let root_ext: Value =
+            serde_json::from_slice(&fs::read(ext_state.join("brain-bindings.json")).unwrap())
+                .unwrap();
+        assert!(
+            root_ext["accounts"][0]["active"]["default"].is_null(),
+            "外部模式不激活默认角色"
+        );
+        let fallback_ref_val = &root_ext["accounts"][0]["legacy_fallback"];
+        assert!(fallback_ref_val.is_object(), "外部模式设置 legacy_fallback");
+        let fallback_ref: crate::core::brain_profiles::RoleRef =
+            serde_json::from_value(fallback_ref_val.clone()).unwrap();
+        let role_ext = store_ext.role(&ctx_ext, &fallback_ref).unwrap();
+        assert_eq!(role_ext.name, "原内置客服");
+        assert_eq!(role_ext.persona, "用户部署的个人微信AI客服助手");
     }
 }

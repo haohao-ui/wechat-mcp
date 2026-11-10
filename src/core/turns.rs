@@ -2580,7 +2580,6 @@ mod tests {
     fn fixture_config(state_dir: &Path) -> BotConfig {
         BotConfig {
             schema_version: 1,
-            mode: None,
             host: "local".to_string(),
             account_id: "fixture".to_string(),
             allowlist: vec![AllowlistEntry {

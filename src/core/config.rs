@@ -94,8 +94,6 @@ impl Default for BrainConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BotConfig {
     pub schema_version: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
     pub host: String,
     pub account_id: String,
     pub allowlist: Vec<AllowlistEntry>,
@@ -558,7 +556,6 @@ impl BotConfig {
 
         let allowed = [
             "schema_version",
-            "mode",
             "host",
             "account_id",
             "allowlist",
@@ -723,22 +720,8 @@ impl BotConfig {
             .transpose()
             .context("invalid ignorelist")?;
 
-        let mode = match map.get("mode") {
-            Some(v) => {
-                let s = v
-                    .as_str()
-                    .context("invalid mode (must be 'service' or 'test')")?;
-                if s != "service" && s != "test" {
-                    bail!("invalid mode (must be 'service' or 'test')");
-                }
-                Some(s.to_string())
-            }
-            None => None,
-        };
-
         Ok(BotConfig {
             schema_version,
-            mode,
             host: host.to_string(),
             account_id: account_id.to_string(),
             allowlist,

@@ -2326,7 +2326,6 @@ mod tests {
 
         let cfg = BotConfig {
             schema_version: 1,
-            mode: None,
             host: "local".to_string(),
             account_id: "test-acc".to_string(),
             allowlist,
