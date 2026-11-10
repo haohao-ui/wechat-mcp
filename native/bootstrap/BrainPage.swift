@@ -608,9 +608,14 @@ public struct BrainTurnDetail: Codable, Equatable {
             if let delivery = exec["delivery"]?.value as? String {
                 if delivery == "echo_observed" {
                     labels.append("己方回显")
+                    labels.append("送达状态: 未知 (unknown)")
                 } else if delivery == "unknown" {
-                    labels.append("送达未知")
+                    labels.append("送达状态: 未知 (unknown)")
+                } else {
+                    labels.append("送达状态: \(delivery)")
                 }
+            } else {
+                labels.append("送达状态: 未知 (unknown)")
             }
         }
         return labels.isEmpty ? ["状态未知"] : labels
@@ -963,7 +968,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     private let saveDraftButton = NSButton(title: "保存草稿", target: nil, action: nil)
     private let activateButton = NSButton(title: "启用配置", target: nil, action: nil)
     private let rollbackButton = NSButton(title: "回退版本", target: nil, action: nil)
-    private let revisionStatusLabel = NSTextField(labelWithString: "草稿: - · 运行: -")
+    private let revisionStatusLabel = NSTextField(wrappingLabelWithString: "草稿: - · 运行: -")
 
     // Form Inputs - Preview
     private let previewInputField = NSTextField()
@@ -1106,14 +1111,20 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         tabContainer.translatesAutoresizingMaskIntoConstraints = false
         setupTabViews()
 
-        // Bottom Action Bar
+        // Bottom Action Bar: Two-line flexible layout (status on top, action buttons below)
+        // Ensures buttons (save, activate, rollback) are never clipped at right edge in 720~760px windows.
         let bottomBar = NSBox()
         bottomBar.titlePosition = .noTitle
         let bottomStack = NSStackView()
-        bottomStack.orientation = .horizontal
-        bottomStack.spacing = 10
+        bottomStack.orientation = .vertical
+        bottomStack.alignment = .leading
+        bottomStack.spacing = 6
 
-        revisionStatusLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        revisionStatusLabel.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        revisionStatusLabel.maximumNumberOfLines = 0
+        revisionStatusLabel.lineBreakMode = .byWordWrapping
+        revisionStatusLabel.preferredMaxLayoutWidth = 500
+
         saveDraftButton.target = self
         saveDraftButton.action = #selector(handleSaveDraft)
         activateButton.target = self
@@ -1121,11 +1132,17 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         rollbackButton.target = self
         rollbackButton.action = #selector(handleRollback)
 
+        let actionRow = NSStackView(views: [
+            saveDraftButton,
+            activateButton,
+            rollbackButton
+        ])
+        actionRow.orientation = .horizontal
+        actionRow.spacing = 10
+        actionRow.alignment = .centerY
+
         bottomStack.addArrangedSubview(revisionStatusLabel)
-        bottomStack.addArrangedSubview(NSView()) // spacer
-        bottomStack.addArrangedSubview(saveDraftButton)
-        bottomStack.addArrangedSubview(activateButton)
-        bottomStack.addArrangedSubview(rollbackButton)
+        bottomStack.addArrangedSubview(actionRow)
         bottomBar.setContent(bottomStack, inset: 8)
 
         parent.addSubview(headerBox)
@@ -1214,8 +1231,11 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         let cText = NSTextField(wrappingLabelWithString: "不可虚构事实、语音转写以本轮转写为准、未识别项点名并依提示回复。本约束由代码自动拼接在角色人设之后，不可在界面删改。")
         cText.font = NSFont.systemFont(ofSize: 11)
         cText.textColor = .secondaryLabelColor
+        cText.maximumNumberOfLines = 0
+        cText.lineBreakMode = .byWordWrapping
+        cText.preferredMaxLayoutWidth = 460
         constraintsBox.setContent(cText, inset: 8)
-        constraintsBox.widthAnchor.constraint(equalToConstant: 460).isActive = true
+        constraintsBox.widthAnchor.constraint(equalToConstant: 480).isActive = true
         stack.addArrangedSubview(constraintsBox)
 
         definitionView.addSubview(stack)
@@ -1238,10 +1258,16 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         let intro = NSTextField(wrappingLabelWithString: "业务知识 (Markdown/纯文本)。通过核心 brain-save-knowledge 控制接口保存，自动计算 SHA256 摘要并固定版本。")
         intro.font = NSFont.systemFont(ofSize: 12)
         intro.textColor = .secondaryLabelColor
+        intro.maximumNumberOfLines = 0
+        intro.lineBreakMode = .byWordWrapping
+        intro.preferredMaxLayoutWidth = 480
         stack.addArrangedSubview(intro)
 
         stack.addArrangedSubview(NSTextField(labelWithString: "当前角色引用的知识列表:"))
         knowledgeRefsSummaryLabel.font = NSFont.systemFont(ofSize: 12)
+        knowledgeRefsSummaryLabel.maximumNumberOfLines = 0
+        knowledgeRefsSummaryLabel.lineBreakMode = .byWordWrapping
+        knowledgeRefsSummaryLabel.preferredMaxLayoutWidth = 480
         stack.addArrangedSubview(knowledgeRefsSummaryLabel)
 
         let addBox = NSBox()
@@ -1296,6 +1322,9 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
 
         let intro = NSTextField(wrappingLabelWithString: "通用话术模板 (留空表示无自定义文案，进入待处理或人工接管):")
         intro.font = NSFont.systemFont(ofSize: 12, weight: .bold)
+        intro.maximumNumberOfLines = 0
+        intro.lineBreakMode = .byWordWrapping
+        intro.preferredMaxLayoutWidth = 480
         stack.addArrangedSubview(intro)
 
         let gRow = NSStackView(views: [NSTextField(labelWithString: "欢迎语 (greeting):"), greetingField])
@@ -1328,19 +1357,39 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 10
+        stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         let intro = NSTextField(wrappingLabelWithString: "账号与联系人绑定。联系人唯一来源为白名单，本处仅引用不复制联系人清单。")
         intro.font = NSFont.systemFont(ofSize: 12)
         intro.textColor = .secondaryLabelColor
+        intro.maximumNumberOfLines = 0
+        intro.lineBreakMode = .byWordWrapping
+        intro.preferredMaxLayoutWidth = 480
         stack.addArrangedSubview(intro)
 
+        defaultRolePopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
         let defaultRow = NSStackView(views: [NSTextField(labelWithString: "账号默认角色:"), defaultRolePopup])
+        defaultRow.alignment = .centerY
+        defaultRow.spacing = 8
         stack.addArrangedSubview(defaultRow)
 
-        stack.addArrangedSubview(NSTextField(labelWithString: "特定联系人覆盖:"))
-        stack.addArrangedSubview(overridesSummaryLabel)
+        let ovBox = NSBox()
+        ovBox.title = "特定联系人覆盖规则"
+        let ovStack = NSStackView()
+        ovStack.orientation = .vertical
+        ovStack.alignment = .leading
+        ovStack.spacing = 6
+
+        overridesSummaryLabel.font = NSFont.systemFont(ofSize: 12)
+        overridesSummaryLabel.maximumNumberOfLines = 0
+        overridesSummaryLabel.lineBreakMode = .byWordWrapping
+        overridesSummaryLabel.preferredMaxLayoutWidth = 460
+        ovStack.addArrangedSubview(overridesSummaryLabel)
+
+        ovBox.setContent(ovStack, inset: 8)
+        ovBox.widthAnchor.constraint(equalToConstant: 480).isActive = true
+        stack.addArrangedSubview(ovBox)
 
         bindingsView.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -1362,7 +1411,31 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         let intro = NSTextField(wrappingLabelWithString: "版本管理：保存草稿不影响运行版本；启用配置仅对新轮次生效。支持并发修改检测 (CAS) 与原子激活/回退。")
         intro.font = NSFont.systemFont(ofSize: 12)
         intro.textColor = .secondaryLabelColor
+        intro.maximumNumberOfLines = 0
+        intro.lineBreakMode = .byWordWrapping
+        intro.preferredMaxLayoutWidth = 480
         stack.addArrangedSubview(intro)
+
+        let verBox = NSBox()
+        verBox.title = "版本与代次规则说明"
+        let verStack = NSStackView()
+        verStack.orientation = .vertical
+        verStack.alignment = .leading
+        verStack.spacing = 6
+
+        let l1 = NSTextField(wrappingLabelWithString: "• 草稿与运行分离：保存草稿仅存入本地草稿区，不影响当前服务对外响应。")
+        l1.maximumNumberOfLines = 0; l1.lineBreakMode = .byWordWrapping; l1.preferredMaxLayoutWidth = 460
+        let l2 = NSTextField(wrappingLabelWithString: "• 原子激活：点击「启用配置」时将草稿生成新版本并原子推进激活代次。")
+        l2.maximumNumberOfLines = 0; l2.lineBreakMode = .byWordWrapping; l2.preferredMaxLayoutWidth = 460
+        let l3 = NSTextField(wrappingLabelWithString: "• 安全回退：点击「回退版本」将配置无损切换回上一稳定激活代次。")
+        l3.maximumNumberOfLines = 0; l3.lineBreakMode = .byWordWrapping; l3.preferredMaxLayoutWidth = 460
+
+        verStack.addArrangedSubview(l1)
+        verStack.addArrangedSubview(l2)
+        verStack.addArrangedSubview(l3)
+        verBox.setContent(verStack, inset: 8)
+        verBox.widthAnchor.constraint(equalToConstant: 480).isActive = true
+        stack.addArrangedSubview(verBox)
 
         versionView.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -1384,6 +1457,9 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         let notice = NSTextField(wrappingLabelWithString: "合成测试仅执行确定性组装预览 (assemble_only)，标明【未调用模型】，不产生费用，绝不发送真实微信消息。")
         notice.font = NSFont.systemFont(ofSize: 12, weight: .bold)
         notice.textColor = .systemBlue
+        notice.maximumNumberOfLines = 0
+        notice.lineBreakMode = .byWordWrapping
+        notice.preferredMaxLayoutWidth = 480
         stack.addArrangedSubview(notice)
 
         previewChatKindPopup.addItems(withTitles: ["私聊 (private)", "群聊 (group)"])
@@ -1474,6 +1550,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         loadErrorLabel.stringValue = ""
 
         roleTable.reloadData()
+        updateBindingsUI()
         if !payload.roles.isEmpty {
             if selectedRoleIndex < 0 || selectedRoleIndex >= payload.roles.count {
                 selectedRoleIndex = 0
@@ -1482,6 +1559,38 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             loadSelectedRole()
         } else {
             statusMessageLabel.stringValue = "暂无角色，请点击「新增角色」创建"
+        }
+    }
+
+    private func updateBindingsUI() {
+        guard let payload = listPayload else { return }
+        defaultRolePopup.removeAllItems()
+        for role in payload.roles {
+            let title = "\(role.name) (\(role.roleId))"
+            defaultRolePopup.addItem(withTitle: title)
+            defaultRolePopup.lastItem?.representedObject = role.roleId
+        }
+
+        let currentBindings = payload.draft ?? payload.active
+        if let defaultRoleId = currentBindings?.defaultRef?.roleId {
+            for (index, item) in defaultRolePopup.itemArray.enumerated() {
+                if (item.representedObject as? String) == defaultRoleId || item.title.contains(defaultRoleId) {
+                    defaultRolePopup.selectItem(at: index)
+                    break
+                }
+            }
+        }
+
+        if let overrides = currentBindings?.overrides, !overrides.isEmpty {
+            var lines: [String] = []
+            for ov in overrides {
+                let roleName = payload.roles.first(where: { $0.roleId == ov.roleId })?.name ?? ov.roleId
+                let kindStr = ov.chatKind == "group" ? "群聊" : "私聊"
+                lines.append("• 联系人: \(ov.contactId) [\(kindStr)] ➔ \(roleName) (\(ov.roleId)) [版本: \(ov.revisionId)]")
+            }
+            overridesSummaryLabel.stringValue = lines.joined(separator: "\n")
+        } else {
+            overridesSummaryLabel.stringValue = "暂无特定联系人覆盖（所有联系人均使用默认角色）"
         }
     }
 
@@ -1511,6 +1620,11 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         switchTab(index: index)
     }
 
+    public func setPreviewFixture(input: String, result: String) {
+        previewInputField.stringValue = input
+        previewResultTextView.string = result
+    }
+
     public func applyFixtureState(payload: BrainListPayload, role: BrainRoleRevision, accountId: String = "wx_fixture_account") {
         self.listPayload = payload
         self.currentDraftRole = role
@@ -1521,6 +1635,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         self.statusMessageLabel.stringValue = "草稿已加载，可编辑后保存或合成预览"
         self.loadErrorLabel.stringValue = ""
         self.roleTable.reloadData()
+        self.updateBindingsUI()
         if !payload.roles.isEmpty {
             self.selectedRoleIndex = 0
             self.roleTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)

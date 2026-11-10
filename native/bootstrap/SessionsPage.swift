@@ -187,6 +187,7 @@ public final class SessionsPageController: NSViewController {
     }
 
     public func applyFixtureState(sessions: [String: SessionHealthInput], selectedTurnDetail: BrainTurnDetail?) {
+        _ = self.view // 确保 viewDidLoad 已执行完毕
         sessionsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         if sessions.isEmpty {
             sessionsStack.addArrangedSubview(emptyLabel)
@@ -200,6 +201,7 @@ public final class SessionsPageController: NSViewController {
             self.turnSearchField.stringValue = detail.turnId
             self.displayTurnDetail(detail)
         }
+        self.view.layoutSubtreeIfNeeded()
     }
 
     public func displayTurnDetail(_ detail: BrainTurnDetail) {

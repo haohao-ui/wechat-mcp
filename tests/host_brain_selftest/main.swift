@@ -459,20 +459,45 @@ func runTests() -> Int32 {
         let knowOK = renderOpaquePNG(view: brainController.view, size: brainSize, outputURL: knowURL)
         check("brain_page_knowledge_written", knowOK && FileManager.default.fileExists(atPath: knowURL.path))
 
-        // 12.3 渲染绑定页
+        // 12.3 渲染话术页
+        brainController.selectTab(index: 2)
+        let templURL = fixtureDir.appendingPathComponent("brain_page_templates.png")
+        let templOK = renderOpaquePNG(view: brainController.view, size: brainSize, outputURL: templURL)
+        check("brain_page_templates_written", templOK && FileManager.default.fileExists(atPath: templURL.path))
+
+        // 12.4 渲染绑定页
         brainController.selectTab(index: 3)
         let bindURL = fixtureDir.appendingPathComponent("brain_page_bindings.png")
         let bindOK = renderOpaquePNG(view: brainController.view, size: brainSize, outputURL: bindURL)
         check("brain_page_bindings_written", bindOK && FileManager.default.fileExists(atPath: bindURL.path))
 
-        // 12.4 渲染版本管理页
+        // 12.5 渲染版本管理页
         brainController.selectTab(index: 4)
         let verURL = fixtureDir.appendingPathComponent("brain_page_version.png")
         let verOK = renderOpaquePNG(view: brainController.view, size: brainSize, outputURL: verURL)
         check("brain_page_version_written", verOK && FileManager.default.fileExists(atPath: verURL.path))
 
-        // 12.5 渲染会话页（载入真实结构化合成 provenance）
+        // 12.6 渲染合成测试页
+        brainController.selectTab(index: 5)
+        brainController.setPreviewFixture(
+            input: "请问VIP客户退换货流程是怎样的？",
+            result: """
+            【组装预览结果】
+            状态: 未调用模型，仅执行确定性组装预览 (assemble_only)
+            实际费用产生: 否 (0 Token / 0 费用)
+            快照摘要: 11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff
+            字节预算: 原始=49152, 纳入=18240, 是否截断=否
+            系统能力约束:
+            不可虚构事实、语音转写以本轮转写为准、未识别项点名并依提示回复。
+            """
+        )
+        let prevURL = fixtureDir.appendingPathComponent("brain_page_preview.png")
+        let prevOK = renderOpaquePNG(view: brainController.view, size: brainSize, outputURL: prevURL)
+        check("brain_page_preview_written", prevOK && FileManager.default.fileExists(atPath: prevURL.path))
+
+        // 12.7 渲染会话页（载入真实结构化合成 provenance 与阶段标签）
         let sessController = SessionsPageController(context: dummyContext)
+        _ = sessController.view // 确保 viewDidLoad 完成
         let dummyTurnDetail = BrainTurnDetail(
             turnId: "turn_contract_real_101",
             contactId: "联系人_王经理",
@@ -481,7 +506,7 @@ func runTests() -> Int32 {
             decision: ["action": AnyCodable("send"), "text": AnyCodable("您好！已为您登记售后换货申请，专员将在2小时内与您联系。")],
             model: ["provider": AnyCodable("openai"), "model": AnyCodable("gpt-4o")],
             sendKey: "send_key_8891_vip",
-            execution: ["phase": AnyCodable("sent"), "delivery": AnyCodable("confirmed")]
+            execution: ["phase": AnyCodable("sent"), "delivery": AnyCodable("echo_observed")]
         )
         sessController.applyFixtureState(
             sessions: [
