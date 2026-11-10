@@ -16,7 +16,7 @@
 - 闭合 schema；全部 nullable 字段也必须出现；未知 schema/字段拒绝。角色/知识完整内容与 owner 使用 RFC8785 + 现有 SHA256；黄金向量验证 UTF16 键序、负零、指数及数字边界。正文、模板变量、预算、对象/根大小、账号/目录/覆盖数量与安全整数限制独立检查。
 - 角色与知识修订只新增；父修订必须属于同账号，修改推进 draft，不改变 active。知识正文/人工摘要固定修订和摘要，source_label 不读取路径或 URL。复制只允许本账号；被 active/draft/legacy fallback 引用的角色不能归档。
 - 唯一可变根原子提交，generation CAS、账号/操作/UUID 作用域去重，完整请求（包含 expected_generation）参与规范化摘要；缓存前复核磁盘对象、父修订和知识归属。跨账号/损坏 owner 对外同为 not_found，磁盘完整性失败只记录不含正文的 integrity_mismatch。缓存紧凑结果，与根同时提交；保留每账号1000结果/100激活历史，不删除修订或其他账号记录腾空间。
-- 账号默认 + 稳定联系人覆盖；权限与合并 family 全部由注入 ContactAccess 提供，不查真实 contacts/history DB。撤销权限的覆盖 dormant；冲突 family 返回 binding_ambiguous，群/私聊覆盖分别匹配；回退只改 active 指针，保留 draft。
+- 账号默认 + 稳定联系人覆盖；权限与合并 family 全部由注入 ContactAccess 提供，不查真实 contacts/history DB。撤销权限的覆盖 dormant；冲突 family 返回 binding_ambiguous，群/私聊覆盖分别匹配；回退按目标账号的保留激活历史同时重建 draft + active；不倒退全局根或修改其他账号（本轮修订纠正原“保留 draft”的契约偏差）。
 - Store::open 只接受调用者提供的现存私有 state 根；不会发现 HOME/config 路径。AccountContext 必须由可信调用者按 authenticated effective account 构造，不能由 wire 请求选择账号。本模块不提供 HTTP/MCP/control 接口，也不声称替调用者完成账号认证。
 - 文件0600、目录0700；基于持有的目录 FD 和 openat(O_NOFOLLOW/O_DIRECTORY)、mkdirat/linkat/renameat/unlinkat 遍历/发布/清理，防 FIFO 阻塞和路径穿越。unsafe 仅集中在 store.rs 的 unix 小封装，说明 FD 所有权和单组件路径不变量；File/stream/临时文件 guard 在错误时释放。根替换或父目录替换拒绝；不可变对象用原子 no-clobber linkat 发布，防 rename 覆盖旧修订；对象与根均 fsync、父目录 fsync，根用 renameat 原子替换。
 - 同一 flock 覆盖校验/对象/根；提交前失败保留旧根，允许无效力的孤立对象；完全相同孤立对象可重试复用且配额不重复计数。根 rename 后响应/目录同步失败则报告错误，原 request_id 可恢复成功结果，不能以错误断言根未提交。
@@ -68,3 +68,35 @@
 - 未运行完整原生App构建、安装/升级、远端、真实模型、GUI/屏幕权限、微信发送或连续运行；未发布、推送、合并或修改原 checkout。
 
 最终源码诊断/重复读取简化后已再跑31项模块测试与全target clippy；完整925项回归、协议/Swift在此无返回语义变化的收尾前执行。实现本地commit见Orca完成回执（不把待填hash写入提交自身）。
+
+## 协调者复核修订：rollback 同步 draft + active
+
+本轮起点 `7e83069e83728b1cd50aa78585c8b16ccc737872`，`git status --short` 为空；只修改 store.rs、tests.rs、本文及获准的归档保护设计短语。重新读取 AGENTS.md；图查询未返回相关新节点，已刷新本 worktree 非持久索引，仍未命中该过滤查询，明确以当前源码核对。未修改运行接入、公共协议、数据库、配置 reader 或其他 worktree。
+
+协调者指出的偏差成立：D1 §3 已要求从目标账号保留激活历史重建 **draft + active**，旧实现及本文原叙述却保留旧 draft。最小修复仅在 `Mutation::Rollback` 分支把目标 BindingSet 同时赋给同一 AccountEntry 的 draft 和 active，然后仍走原根提交、CAS、授权和请求去重流程；普通 Activate 不改行为，不修改角色目录 draft_revision_id，不倒退全局 generation，不改其他账号。
+
+新增2个测试均先在旧实现上退出101（行为 RED），不是编译失败：
+
+- `cas_rollback_restores_draft_and_active_without_touching_other_account`：构造目标历史、不同的现行 active 与空 draft，以及另一个真实存在于合成根的账号；RED 精确失败于 draft 应等于目标。测试还覆盖权限拒绝、跨账号 target_generation 拒绝、旧 CAS 拒绝且根字节不变；成功回退后另一个账号的绑定/角色/迁移/激活历史/请求缓存保持不变；同请求重放不写根；撤权限后缓存也不能绕过授权；再次 Activate 不会跳回先前草稿。
+- `cas_concurrent_rollbacks_restore_both_bindings_once`：两个独立打开 Store/锁描述符的线程竞争同 expected_generation，只有一个提交，另一个 revision_conflict；generation 只增加1，draft/active 均为目标。旧实现的并发/CAS断言通过，但最终 draft 断言失败，RED退出101。
+
+沿用已核对的 `/tmp/i1-evidence/run`：独立临时 HOME/XDG_CONFIG_HOME/state/DB、GUI/模型命令拒绝替身、合成账号/内容、无真实微信/数据库/付费模型。日志 `rollback-red.log`、`rollback-concurrent-red.log`、`rollback-green.log`、`rollback-clippy.log` 均在 `/tmp/i1-evidence/`，仅为本机临时证据。
+
+本轮实际命令与结果（均使用上述隔离入口运行Rust命令）：
+
+| 命令 | 退出码 | 结果 |
+| --- | ---: | --- |
+| cargo test --locked --bin wechat-mcp brain_profiles::tests::cas_rollback_restores_draft_and_active_without_touching_other_account -- --test-threads=1（实现前） | 101 | RED，0通过1失败，精确命中draft未回退 |
+| cargo test --locked --bin wechat-mcp brain_profiles::tests::cas_concurrent_rollbacks_restore_both_bindings_once -- --test-threads=1（实现前） | 101 | RED，0通过1失败，并发后draft仍非目标 |
+| cargo test --locked --bin wechat-mcp brain_profiles::tests -- --test-threads=1（修复后） | 0 | GREEN，33通过0失败0 ignored，含原31项全部回归 |
+| cargo clippy --all-targets --locked | 0 | test target 1981警告（1472 duplicates）；未放宽规则，新增长测试带来1项pedantic警告 |
+| rustfmt --edition 2024 --check src/core/brain_profiles/store.rs src/core/brain_profiles/tests.rs | 0 | 无格式差异 |
+| git diff --check | 0 | 无空白错误 |
+
+本轮未重复全量Rust、协议/Swift和真机检查：仅存储分支有5行新增/1行替换，原31项及两项新增定向覆盖均已通过；上一轮唯一 Q0 ops_tools_list_unchanged 失败仍为既有未解决项，不将本轮33项GREEN宣称为全项目全绿。本次本地提交的完整hash见Orca回执，未推送/合并/部署。
+
+### I2/UI list 与归档约束
+
+当前 `list` 先按可信账号筛选，再校验该账号目录指向的磁盘角色、父修订和知识；损坏对象会被过滤出 roles，其读取失败或 owner/hash 完整性错误记录不含正文的 `integrity_mismatch` 日志。**成功返回空 roles 不等于无配置或全新安装**，尤其根仍可能保留账号绑定和角色目录；当前 list 没有逐条错误字段，I2/UI必须保留既有状态并结合明确读取/诊断展示加载失败，不能因空列表重置、重新迁移或隐式写默认角色。根本身损坏/未知schema仍返回错误，不变为空根。
+
+归档保护已在设计原条款最小明确：draft 的 default 和 overrides 引用均会阻止归档并返回 role_in_use，须先显式解除草稿引用；active 和 legacy_fallback 的原保护保持。没有为归档自动清空绑定，也不新增 UI 或放松账号权限。
