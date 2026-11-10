@@ -34,20 +34,23 @@
     {
       "ok": true,
       "data": {
-        "generation": 2
+        "generation": 2,
+        "role_id": null,
+        "knowledge_id": null,
+        "revision_id": null,
+        "content_sha256": null,
+        "archived": null
       }
     },
     {
       "ok": true,
       "data": {
         "generation": 3,
-        "previous_active": {
-          "default": {
-            "role_id": "legacy_service_fixture",
-            "revision_id": "r1"
-          },
-          "overrides": []
-        }
+        "role_id": null,
+        "knowledge_id": null,
+        "revision_id": null,
+        "content_sha256": null,
+        "archived": null
       }
     },
     {
