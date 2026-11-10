@@ -2680,6 +2680,43 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
                 Ok(res) => res,
                 Err(e) => return handle_store_error(stdout, e, &store, &ctx),
             };
+
+            let (allowlist_contacts, allowlist_status, allowlist_err) = if !db_path.exists() {
+                (json!([]), "unavailable", Some("history_store_unavailable"))
+            } else if access.conn.is_none() {
+                (json!([]), "unavailable", Some("history_store_unavailable"))
+            } else if access.brain_access.is_none() {
+                (json!([]), "unavailable", Some("access_resolution_failed"))
+            } else {
+                let mut list = Vec::new();
+                if let Some(c) = &access.conn {
+                    if let Ok(mut stmt) = c.prepare(
+                        "SELECT contact_id, display_name, kind FROM contacts WHERE account_id = ?1 AND merged_into IS NULL ORDER BY rowid",
+                    ) {
+                        if let Ok(rows) = stmt.query_map([&cfg.account_id], |r| {
+                            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+                        }) {
+                            for row in rows.flatten() {
+                                let (cid, disp, kind_str) = row;
+                                let chat_kind = if kind_str == "group" {
+                                    crate::core::brain_profiles::ChatKind::Group
+                                } else {
+                                    crate::core::brain_profiles::ChatKind::Private
+                                };
+                                if access.permits(&cfg.account_id, &cid, &chat_kind) {
+                                    list.push(json!({
+                                        "contact_id": cid,
+                                        "display_name": disp,
+                                        "chat_kind": if chat_kind == crate::core::brain_profiles::ChatKind::Group { "group" } else { "private" },
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+                (json!(list), "ready", None)
+            };
+
             let data = json!({
                 "generation": generation,
                 "execution_mode": account_entry.as_ref().map(|a| a.execution_mode).unwrap_or(ExecutionMode::Legacy),
@@ -2689,7 +2726,10 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
                 "model_summary": {
                     "mode": format!("{:?}", cfg.brain.mode).to_lowercase(),
                     "timeout_seconds": cfg.brain.external.timeout_seconds,
-                }
+                },
+                "allowlist_contacts": allowlist_contacts,
+                "allowlist_contacts_status": allowlist_status,
+                "allowlist_contacts_error": allowlist_err,
             });
             let _ = writeln!(stdout, "{}", json!({ "ok": true, "data": data }));
             0
@@ -7117,5 +7157,140 @@ mod tests {
             res["current_release"]["core_version"],
             env!("CARGO_PKG_VERSION")
         );
+    }
+
+    #[test]
+    fn test_control_brain_list_allowlist_contacts_projection() {
+        let temp = TempDir::new();
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        // 1. 初始化 brain-bindings.json
+        let cfg = json!({
+            "schema_version": 1,
+            "host": "local",
+            "account_id": "acc_proj_1",
+            "state_dir": state_dir.to_str().unwrap(),
+            "allowlist": [{"recipient": "张三", "kind": "private"}]
+        });
+        let cfg_path = temp.path().join("config.json");
+        fs::write(&cfg_path, serde_json::to_string(&cfg).unwrap()).unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let init_code = execute_control_full(
+            &[
+                "brain-initialize".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+                "--request-json".into(),
+                json!({ "installation": "legacy_upgrade" }).to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(
+            init_code,
+            0,
+            "stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
+
+        // 2. 无 history.sqlite3 时：unavailable, history_store_unavailable, []
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-list".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(code, 0);
+        let out: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(out["data"]["allowlist_contacts_status"], "unavailable");
+        assert_eq!(
+            out["data"]["allowlist_contacts_error"],
+            "history_store_unavailable"
+        );
+        assert_eq!(out["data"]["allowlist_contacts"], json!([]));
+
+        // 3. 创建 history.sqlite3，插入测试联系人
+        let history_dir = state_dir.join("history");
+        fs::create_dir_all(&history_dir).unwrap();
+        let db_path = history_dir.join("history.sqlite3");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE contacts(
+                contact_id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                merged_into TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE contact_names(
+                id INTEGER PRIMARY KEY,
+                contact_id TEXT NOT NULL REFERENCES contacts(contact_id),
+                account_id TEXT NOT NULL,
+                raw_name TEXT NOT NULL,
+                name_key TEXT NOT NULL,
+                source TEXT NOT NULL,
+                first_seen_at INTEGER NOT NULL,
+                last_seen_at INTEGER NOT NULL
+            );
+            -- 当前账号合法白名单联系人
+            INSERT INTO contacts VALUES('c_zhangsan', 'acc_proj_1', 'private', '张三真实名', NULL, 100, 100);
+            INSERT INTO contact_names VALUES(1, 'c_zhangsan', 'acc_proj_1', '张三', '张三', 'config', 100, 100);
+
+            -- 未授权联系人（不在 allowlist）
+            INSERT INTO contacts VALUES('c_lisi', 'acc_proj_1', 'private', '李四', NULL, 100, 100);
+            INSERT INTO contact_names VALUES(2, 'c_lisi', 'acc_proj_1', '李四', '李四', 'config', 100, 100);
+
+            -- 跨账号联系人（acc_other）
+            INSERT INTO contacts VALUES('c_other', 'acc_other', 'private', '张三', NULL, 100, 100);
+            INSERT INTO contact_names VALUES(3, 'c_other', 'acc_other', '张三', '张三', 'config', 100, 100);
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        // 4. 再次执行 brain-list，必须输出 ready 并精确只返回 c_zhangsan
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-list".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(code, 0);
+        let out: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(out["data"]["allowlist_contacts_status"], "ready");
+        assert!(out["data"]["allowlist_contacts_error"].is_null());
+        let list = out["data"]["allowlist_contacts"].as_array().unwrap();
+        assert_eq!(list.len(), 1, "只允许当前账号被授权的联系人");
+        assert_eq!(list[0]["contact_id"], "c_zhangsan");
+        assert_eq!(list[0]["display_name"], "张三真实名");
+        assert_eq!(list[0]["chat_kind"], "private");
     }
 }
