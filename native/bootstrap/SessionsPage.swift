@@ -147,9 +147,6 @@ public final class SessionsPageController: NSViewController {
         stateLbl.font = NSFont.systemFont(ofSize: 12)
         stateLbl.widthAnchor.constraint(equalToConstant: 240).isActive = true
 
-        let traceBtn = NSButton(title: "查轮次", target: self, action: #selector(handleTraceSession(_:)))
-        traceBtn.identifier = NSUserInterfaceItemIdentifier(name)
-
         if session.handoff == true || session.state == "handoff" {
             stateLbl.textColor = .systemOrange
             let resumeBtn = NSButton(title: "恢复自动回复", target: self, action: #selector(handleResumeHandoff(_:)))
@@ -157,26 +154,17 @@ public final class SessionsPageController: NSViewController {
             rowStack.addArrangedSubview(nameLbl)
             rowStack.addArrangedSubview(stateLbl)
             rowStack.addArrangedSubview(resumeBtn)
-            rowStack.addArrangedSubview(traceBtn)
         } else if session.state == "watching" || session.state == "listening" {
             stateLbl.textColor = .systemGreen
             rowStack.addArrangedSubview(nameLbl)
             rowStack.addArrangedSubview(stateLbl)
-            rowStack.addArrangedSubview(traceBtn)
         } else {
             stateLbl.textColor = .systemYellow
             rowStack.addArrangedSubview(nameLbl)
             rowStack.addArrangedSubview(stateLbl)
-            rowStack.addArrangedSubview(traceBtn)
         }
 
         return rowStack
-    }
-
-    @objc private func handleTraceSession(_ sender: NSButton) {
-        guard let name = sender.identifier?.rawValue else { return }
-        turnSearchField.stringValue = name
-        handleQueryTurn()
     }
 
     @objc private func handleQueryTurn() {
@@ -192,7 +180,7 @@ public final class SessionsPageController: NSViewController {
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.detailTextView.string = "未找到轮次追溯 (旧版未记录或轮次不存在): \(error.localizedDescription)"
+                    self.detailTextView.string = "未找到轮次追溯 (该轮次 ID 不存在或为旧版无追溯轮次): \(error.localizedDescription)"
                 }
             }
         }
