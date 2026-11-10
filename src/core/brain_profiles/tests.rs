@@ -1036,3 +1036,194 @@ fn cas_quota_counts_orphans_once_and_never_evicts() {
         before
     );
 }
+
+struct NoContacts;
+impl ContactAccess for NoContacts {
+    fn permits(&self, _: &str, _: &str, _: &ChatKind) -> bool {
+        false
+    }
+    fn family(&self, _: &str, _: &str) -> Vec<String> {
+        vec![]
+    }
+}
+
+#[test]
+fn cas_rollback_restores_draft_and_active_without_touching_other_account() {
+    let f = Fixture::new();
+    let role = seed(&f);
+    let write = |mutation| {
+        f.store
+            .write(
+                &f.ctx,
+                &req(f.store.generation().unwrap(), mutation),
+                &Access,
+                0,
+            )
+            .unwrap()
+    };
+    write(Mutation::SaveRole(role.clone()));
+    let target = BindingSet {
+        default: Some(role.reference()),
+        overrides: vec![Override {
+            contact_id: "target_contact".into(),
+            chat_kind: ChatKind::Private,
+            role_id: role.role_id.clone(),
+            revision_id: role.revision_id.clone(),
+        }],
+    };
+    write(Mutation::SaveBindings(target.clone()));
+    let target_generation = write(Mutation::Activate).generation;
+    let other = AccountContext::new("fixture_other".into()).unwrap();
+    f.store
+        .migrate(&other, Installation::LegacyUpgrade, b"{}", true, 0)
+        .unwrap();
+    write(Mutation::SaveBindings(BindingSet {
+        default: None,
+        overrides: target.overrides.clone(),
+    }));
+    write(Mutation::Activate);
+    write(Mutation::SaveBindings(BindingSet::default()));
+    let path = f.path.join("brain-bindings.json");
+    let before = fs::read(&path).unwrap();
+    let request = req(
+        f.store.generation().unwrap(),
+        Mutation::Rollback {
+            generation: target_generation,
+        },
+    );
+    assert_eq!(
+        f.store
+            .write(&f.ctx, &request, &NoContacts, 0)
+            .unwrap_err()
+            .0,
+        "not_found"
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(
+        f.store.write(&other, &request, &Access, 0).unwrap_err().0,
+        "not_found"
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+    let mut stale = request.clone();
+    stale.expected_generation -= 1;
+    assert_eq!(
+        f.store.write(&f.ctx, &stale, &Access, 0).unwrap_err().0,
+        "revision_conflict"
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+    let result = f.store.write(&f.ctx, &request, &Access, 0).unwrap();
+    let committed = fs::read(&path).unwrap();
+    let old: Root = serde_json::from_slice(&before).unwrap();
+    let new: Root = serde_json::from_slice(&committed).unwrap();
+    let account = new
+        .accounts
+        .iter()
+        .find(|a| a.account_id == f.ctx.account_id())
+        .unwrap();
+    assert_eq!(account.active, target);
+    assert_eq!(
+        account.draft, target,
+        "rollback must rebuild draft as well as active"
+    );
+    let other_state = |root: &Root| {
+        serde_json::to_value((
+            root.accounts
+                .iter()
+                .filter(|a| a.account_id == other.account_id())
+                .collect::<Vec<_>>(),
+            root.roles
+                .iter()
+                .filter(|a| a.owner_account_id == other.account_id())
+                .collect::<Vec<_>>(),
+            root.migrations
+                .iter()
+                .filter(|a| a.owner_account_id == other.account_id())
+                .collect::<Vec<_>>(),
+            root.activation_history
+                .iter()
+                .filter(|a| a.account_id == other.account_id())
+                .collect::<Vec<_>>(),
+            root.request_results
+                .iter()
+                .filter(|a| a.account_id == other.account_id())
+                .collect::<Vec<_>>(),
+        ))
+        .unwrap()
+    };
+    assert_eq!(other_state(&old), other_state(&new));
+    assert_eq!(result.generation, old.generation + 1);
+    assert_eq!(f.store.write(&f.ctx, &request, &Access, 1).unwrap(), result);
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        committed,
+        "replay must not rewrite either binding"
+    );
+    assert_eq!(
+        f.store
+            .write(&f.ctx, &request, &NoContacts, 1)
+            .unwrap_err()
+            .0,
+        "not_found"
+    );
+    assert_eq!(fs::read(&path).unwrap(), committed);
+    write(Mutation::Activate);
+    let (_, _, current) = f.store.list(&f.ctx).unwrap();
+    assert_eq!(
+        current.unwrap().active,
+        target,
+        "activate after rollback must not resurrect the old draft"
+    );
+}
+
+#[test]
+fn cas_concurrent_rollbacks_restore_both_bindings_once() {
+    let f = Fixture::new();
+    let target_generation = f
+        .store
+        .migrate(&f.ctx, Installation::LegacyUpgrade, b"{}", true, 0)
+        .unwrap();
+    let (_, _, account) = f.store.list(&f.ctx).unwrap();
+    let target = account.unwrap().active;
+    f.store
+        .write(
+            &f.ctx,
+            &req(
+                target_generation,
+                Mutation::SaveBindings(BindingSet::default()),
+            ),
+            &Access,
+            0,
+        )
+        .unwrap();
+    let expected = f.store.generation().unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let path = f.path.clone();
+            let ctx = f.ctx.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let store = Store::open(&path).unwrap();
+                let request = req(
+                    expected,
+                    Mutation::Rollback {
+                        generation: target_generation,
+                    },
+                );
+                barrier.wait();
+                store.write(&ctx, &request, &Access, 0)
+            })
+        })
+        .collect();
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+    assert_eq!(
+        results.iter().find_map(|r| r.as_ref().err()).unwrap().0,
+        "revision_conflict"
+    );
+    assert_eq!(f.store.generation().unwrap(), expected + 1);
+    let (_, _, account) = f.store.list(&f.ctx).unwrap();
+    let account = account.unwrap();
+    assert_eq!(account.active, target);
+    assert_eq!(account.draft, target);
+}

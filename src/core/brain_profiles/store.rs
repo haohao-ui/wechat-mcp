@@ -892,7 +892,11 @@ impl Store {
                 } else {
                     Self::ensure_account(&mut root, ctx)?.draft.clone()
                 };
-                Self::ensure_account(&mut root, ctx)?.active = b.clone();
+                let account = Self::ensure_account(&mut root, ctx)?;
+                if matches!(&request.mutation, Mutation::Rollback { .. }) {
+                    account.draft = b.clone();
+                }
+                account.active = b.clone();
                 root.activation_history.push(ActivationEntry {
                     account_id: ctx.account_id.clone(),
                     generation,

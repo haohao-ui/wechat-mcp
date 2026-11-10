@@ -76,7 +76,7 @@ activation_history 每账号只保留最近100次成功激活/回退记录，超
 
 所有 list/get/save/copy/reference/archive/preview/activate/rollback 和幂等缓存查找必须先从可信上下文取得账号，再检查根目录项 owner、不可变对象 owner、父修订 owner 和所有知识引用 owner 均相等；不允许仅凭 role_id/knowledge_id 打开正文。请求中伪造 owner/account、跨账号ID、跨账号parent或knowledge ref均返回相同 not_found，校验顺序在CAS详情/缓存命中之前，禁止以冲突信息或缓存命中泄漏对象存在。损坏存储导致根/object owner不一致时停止该对象使用并记录不含正文的 integrity_mismatch，外部仍返回 not_found；list只返回当前账号目录。复制仅限本账号源，生成新ID并保持本账号owner，绝不以复制隐式共享。全局 generation 仅作CAS令牌，不能用它查询其他账号历史。
 
-draft 可与 active 相同，保存草稿不影响 active；archive 仅允许无 active、draft绑定或 legacy_fallback 引用角色，有引用返回 role_in_use；不物理删除已被历史引用对象。存储层主键、CAS、读取和修订寻址不得依赖可变显示名，名字只供展示。
+draft 可与 active 相同，保存草稿不影响 active；archive 仅允许无 active、draft绑定（含 default 与 overrides）或 legacy_fallback 引用角色，有引用返回 role_in_use；不物理删除已被历史引用对象。存储层主键、CAS、读取和修订寻址不得依赖可变显示名，名字只供展示。
 
 联系人/群稳定 ID 来自现有 contacts，绝不按显示名保存绑定；chat_kind 验证与 contacts 一致。active 解析优先精确 contact 覆盖，其次账号默认；无角色返回 role_required，禁止隐式旧人设。账号可用默认角色覆盖私聊/群，但群规则始终强制；用户可另配群覆盖。
 
