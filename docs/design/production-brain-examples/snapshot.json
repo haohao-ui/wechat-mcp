@@ -11,7 +11,7 @@
     "role": {
       "role_id": "legacy_service_fixture",
       "revision_id": "r1",
-      "content_sha256": "e7220db44af774cef4a35e7e0989a1711d37a45fe797a2542a3c856eff57b754"
+      "content_sha256": "159ac33d7bdad0ebbe2f98df6f6af5a6df84803dc53d32b1198520150dc09774"
     },
     "knowledge": [],
     "system_contract_version": "builtin-facts-v1",

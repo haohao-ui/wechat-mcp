@@ -1,0 +1,222 @@
+{
+  "fixture_only": true,
+  "description": "纯合成契约向量，不调用实际权限实现",
+  "root": {
+    "schema_version": 1,
+    "generation": 2,
+    "roles": [
+      {
+        "role_id": "legacy_service_fixture",
+        "draft_revision_id": "r1",
+        "archived": false,
+        "owner_account_id": "fixture_account"
+      },
+      {
+        "owner_account_id": "fixture_other",
+        "role_id": "other_role",
+        "draft_revision_id": "r1",
+        "archived": false
+      }
+    ],
+    "accounts": [
+      {
+        "account_id": "fixture_account",
+        "active": {
+          "default": {
+            "role_id": "legacy_service_fixture",
+            "revision_id": "r1"
+          },
+          "overrides": []
+        },
+        "draft": {
+          "default": {
+            "role_id": "legacy_service_fixture",
+            "revision_id": "r1"
+          },
+          "overrides": []
+        },
+        "legacy_fallback": null
+      },
+      {
+        "account_id": "fixture_other",
+        "active": {
+          "default": {
+            "role_id": "other_role",
+            "revision_id": "r1"
+          },
+          "overrides": []
+        },
+        "draft": {
+          "default": null,
+          "overrides": []
+        },
+        "legacy_fallback": null
+      }
+    ],
+    "migrations": [
+      {
+        "id": "legacy-builtin-v1:fixture_account",
+        "completed_generation": 1,
+        "seed_content_sha256": "159ac33d7bdad0ebbe2f98df6f6af5a6df84803dc53d32b1198520150dc09774",
+        "source_config_sha256": "d7f961e02d965edf90ede92e7ffb12c4b20a7c1e4428110307afa91b46652121",
+        "owner_account_id": "fixture_account"
+      }
+    ],
+    "activation_history": [
+      {
+        "account_id": "fixture_account",
+        "generation": 1,
+        "active": {
+          "default": {
+            "role_id": "legacy_service_fixture",
+            "revision_id": "r1"
+          },
+          "overrides": []
+        },
+        "at": 0
+      }
+    ],
+    "request_results": [
+      {
+        "account_id": "fixture_account",
+        "operation": "brain-save-bindings",
+        "request_id": "00000000-0000-4000-8000-000000000001",
+        "request_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "result": {
+          "generation": 2,
+          "role_id": null,
+          "knowledge_id": null,
+          "revision_id": null,
+          "content_sha256": null,
+          "archived": null
+        },
+        "at": 0
+      },
+      {
+        "account_id": "fixture_other",
+        "operation": "brain-save-bindings",
+        "request_id": "00000000-0000-4000-8000-000000000001",
+        "request_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "result": {
+          "generation": 1,
+          "role_id": null,
+          "knowledge_id": null,
+          "revision_id": null,
+          "content_sha256": null,
+          "archived": null
+        },
+        "at": 0
+      },
+      {
+        "account_id": "fixture_account",
+        "operation": "brain-activate",
+        "request_id": "00000000-0000-4000-8000-000000000001",
+        "request_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "result": {
+          "generation": 2,
+          "role_id": null,
+          "knowledge_id": null,
+          "revision_id": null,
+          "content_sha256": null,
+          "archived": null
+        },
+        "at": 0
+      }
+    ],
+    "knowledge": [
+      {
+        "owner_account_id": "fixture_other",
+        "knowledge_id": "other_knowledge",
+        "draft_revision_id": "k1"
+      }
+    ]
+  },
+  "knowledge_revision": {
+    "schema_version": 1,
+    "owner_account_id": "fixture_other",
+    "knowledge_id": "other_knowledge",
+    "revision_id": "k1",
+    "parent_revision_id": null,
+    "created_at": 0,
+    "title": "合成知识",
+    "text": "其他账号的合成文字",
+    "source_label": "fixture",
+    "content_sha256": "3b3d1fefea794a89ad28e54bd3e2027ef8159b481437c29b692923b81ac95915"
+  },
+  "cases": [
+    {
+      "trusted_account_id": "fixture_account",
+      "operation": "brain-get",
+      "referenced_role_id": "other_role",
+      "expected_error": "not_found"
+    },
+    {
+      "trusted_account_id": "fixture_account",
+      "operation": "brain-save-role",
+      "referenced_role_id": "other_role",
+      "expected_error": "not_found"
+    },
+    {
+      "trusted_account_id": "fixture_account",
+      "operation": "brain-copy-role",
+      "referenced_role_id": "other_role",
+      "expected_error": "not_found"
+    },
+    {
+      "trusted_account_id": "fixture_account",
+      "operation": "brain-archive-role",
+      "referenced_role_id": "other_role",
+      "expected_error": "not_found"
+    },
+    {
+      "trusted_account_id": "fixture_account",
+      "operation": "brain-preview",
+      "referenced_role_id": "other_role",
+      "expected_error": "not_found"
+    },
+    {
+      "trusted_account_id": "fixture_account",
+      "operation": "brain-save-bindings",
+      "referenced_role_id": "other_role",
+      "expected_error": "not_found"
+    },
+    {
+      "trusted_account_id": "fixture_account",
+      "operation": "brain-activate",
+      "referenced_role_id": "other_role",
+      "expected_error": "not_found"
+    },
+    {
+      "trusted_account_id": "fixture_account",
+      "operation": "brain-rollback",
+      "referenced_role_id": "other_role",
+      "expected_error": "not_found"
+    },
+    {
+      "trusted_account_id": "fixture_account",
+      "operation": "brain-save-role",
+      "referenced_knowledge_id": "other_knowledge",
+      "expected_error": "not_found"
+    },
+    {
+      "trusted_account_id": "fixture_account",
+      "operation": "brain-save-role",
+      "body_owner_account_id": "fixture_other",
+      "expected_error": "not_found"
+    },
+    {
+      "trusted_account_id": "fixture_account",
+      "operation": "brain-get",
+      "referenced_role_id": "missing_role",
+      "expected_error": "not_found"
+    }
+  ],
+  "dedup_expected": {
+    "key_fields": [
+      "account_id",
+      "operation",
+      "request_id"
+    ],
+    "distinct_entries": 3
+  }
+}
