@@ -81,6 +81,10 @@ public final class SettingsPageController: NSViewController {
     // Permission rows
     private var permissionViews: [PermissionKind: (status: NSTextField, reqBtn: NSButton, setBtn: NSButton)] = [:]
 
+    // Update navigation
+    public var onNavigateToUpdate: (() -> Void)?
+    private let jumpToUpdateButton = NSButton(title: "前往应用更新页...", target: nil, action: nil)
+
     public init(context: StatusPanelController) {
         self.context = context
         super.init(nibName: nil, bundle: nil)
@@ -211,7 +215,37 @@ public final class SettingsPageController: NSViewController {
         paceBox.setContent(paceStack)
         contentStack.addArrangedSubview(paceBox)
 
-        // 4. 底部操作按钮
+        // 4. 应用版本与更新导航
+        let updateBox = createSectionBox(title: "应用版本与更新")
+        let updateStack = NSStackView()
+        updateStack.orientation = .vertical
+        updateStack.alignment = .leading
+        updateStack.spacing = 8
+
+        let verRow = NSStackView()
+        verRow.orientation = .horizontal
+        verRow.spacing = 8
+        let verTitle = NSTextField(labelWithString: "当前宿主版本:")
+        verTitle.font = NSFont.systemFont(ofSize: 12)
+        let verVal = NSTextField(labelWithString: hostAppVersion())
+        verVal.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        verRow.addArrangedSubview(verTitle)
+        verRow.addArrangedSubview(verVal)
+        updateStack.addArrangedSubview(verRow)
+
+        let updateIntro = NSTextField(wrappingLabelWithString: "应用版本更新（含微信 Bot 核心与辅助服务）已集中在「应用更新」页面管理，支持发布者验签、排空延期与本机重签名。")
+        updateIntro.font = NSFont.systemFont(ofSize: 11)
+        updateIntro.textColor = .secondaryLabelColor
+        updateStack.addArrangedSubview(updateIntro)
+
+        jumpToUpdateButton.target = self
+        jumpToUpdateButton.action = #selector(handleJumpToUpdate)
+        updateStack.addArrangedSubview(jumpToUpdateButton)
+
+        updateBox.setContent(updateStack)
+        contentStack.addArrangedSubview(updateBox)
+
+        // 5. 底部操作按钮
         let btnRow = NSStackView()
         btnRow.orientation = .horizontal
         btnRow.spacing = 12
@@ -241,7 +275,8 @@ public final class SettingsPageController: NSViewController {
             contentStack.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -16),
             permBox.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
             accountBox.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
-            paceBox.widthAnchor.constraint(equalTo: contentStack.widthAnchor)
+            paceBox.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
+            updateBox.widthAnchor.constraint(equalTo: contentStack.widthAnchor)
         ])
     }
 
@@ -347,5 +382,13 @@ public final class SettingsPageController: NSViewController {
         manageWindowCheck.state = .on
         statusMessageLabel.stringValue = "已载入默认值，点击「保存配置」后生效"
         statusMessageLabel.textColor = .systemBlue
+    }
+
+    public func triggerUpdateNavigation() {
+        onNavigateToUpdate?()
+    }
+
+    @objc private func handleJumpToUpdate() {
+        triggerUpdateNavigation()
     }
 }

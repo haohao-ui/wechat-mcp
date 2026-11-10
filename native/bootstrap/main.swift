@@ -69,12 +69,18 @@ final class HostAppDelegate: NSObject, NSApplicationDelegate {
         _ = controller.view  // 触发 viewDidLoad（loadViewIfNeeded 需要 macOS 14，设备目标是 12）
 
         let shell = ShellViewController()
+        let settingsPage = SettingsPageController(context: controller)
+        settingsPage.onNavigateToUpdate = { [weak shell] in
+            shell?.selectPage(id: "update")
+        }
+
         shell.register(page: OverviewPageController(context: controller), id: "overview", title: "总览")
         shell.register(page: SessionsPageController(context: controller), id: "sessions", title: "会话")
         shell.register(page: ContactsPageController(context: controller), id: "contacts", title: "联系人")
         shell.register(page: BrainPageController(context: controller), id: "brain", title: "大脑")
         shell.register(page: McpPageController(context: controller), id: "mcp", title: "MCP")
-        shell.register(page: SettingsPageController(context: controller), id: "settings", title: "设置")
+        shell.register(page: settingsPage, id: "settings", title: "设置")
+        shell.register(page: UpdatePageController(context: controller), id: "update", title: "应用更新")
         shell.register(page: LogsPageController(context: controller), id: "logs", title: "日志")
 
         window.contentViewController = shell
