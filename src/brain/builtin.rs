@@ -16,7 +16,7 @@ pub fn too_large_hint(max_mb: u64) -> String {
 pub fn unreadable_hints(reason: Option<&str>, max_attachment_mb: u64) -> String {
     match reason {
         Some("unsupported_type") => {
-            "这种格式暂时读不了（能读pdf、docx、xlsx、txt、md、csv、json和图片），请对方转成这些格式再发；不要说还在上传".to_string()
+            "这种格式暂时读不了（能读pdf、docx、xlsx、xls、txt、md、csv、json和图片），请对方转成这些格式再发；不要说还在上传".to_string()
         }
         Some("too_large") => too_large_hint(max_attachment_mb),
         Some("download_failed") => "这次没能取到文件，请对方重发一次".to_string(),
