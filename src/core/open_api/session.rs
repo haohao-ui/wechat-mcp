@@ -7,6 +7,8 @@ pub struct Session {
     pub token: String,
     pub last_seen: Instant,
     pub ended: watch::Sender<bool>,
+    pub api_version: u32,
+    pub capabilities: Vec<String>,
 }
 
 pub struct Sessions {
@@ -46,6 +48,8 @@ impl Sessions {
             token,
             last_seen: Instant::now(),
             ended,
+            api_version: 1,
+            capabilities: Vec::new(),
         });
         id
     }

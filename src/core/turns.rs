@@ -1643,6 +1643,116 @@ impl BotService {
         }
         let full_text = text_lines.join("\n");
 
+        let mut fixed_snapshot: Option<Value> = None;
+        let mut fixed_role: Option<crate::core::brain_profiles::RoleRevision> = None;
+        if let Ok(store) = crate::core::brain_profiles::Store::open(&self.config.state_dir) {
+            if let Ok(ctx) = crate::core::brain_profiles::AccountContext::new(self.account.clone())
+            {
+                let chat_kind = if self.group {
+                    crate::core::brain_profiles::ChatKind::Group
+                } else {
+                    crate::core::brain_profiles::ChatKind::Private
+                };
+                if let Some(cid) = &self.contact_id {
+                    let db_path = if let Some(h) = &self.history {
+                        h.root_dir().join("history.sqlite3")
+                    } else {
+                        self.config.state_dir.join("history/history.sqlite3")
+                    };
+                    let conn = rusqlite::Connection::open_with_flags(
+                        &db_path,
+                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                            | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+                    )
+                    .ok();
+                    let brain_access = conn.as_ref().and_then(|c| {
+                        crate::core::open_api::access::BrainAccess::load(&self.config, c).ok()
+                    });
+                    let access = crate::core::control::ControlContactAccess {
+                        account_id: self.account.clone(),
+                        brain_access,
+                        conn,
+                    };
+                    if let Ok(role) = store.resolve(&ctx, cid, &chat_kind, &access) {
+                        let mut knowledge = Vec::new();
+                        for kref in &role.knowledge_refs {
+                            if let Ok(k) = store.knowledge(&ctx, kref) {
+                                knowledge.push(k);
+                            }
+                        }
+                        let synthetic_input = crate::brain::snapshot::SyntheticInput {
+                            text: full_text.clone(),
+                            chat_kind: if self.group {
+                                "group".into()
+                            } else {
+                                "private".into()
+                            },
+                            files: files.iter().map(model_view_file).collect(),
+                            images: images
+                                .iter()
+                                .map(|img| json!({"label": img.label, "source": img.source}))
+                                .collect(),
+                            failed: failed
+                                .iter()
+                                .map(|f| json!({"label": f.label, "reason": f.reason}))
+                                .collect(),
+                            context: context_items
+                                .iter()
+                                .map(|c| json!({"role": c.role, "text": c.text}))
+                                .collect(),
+                        };
+                        match crate::brain::snapshot::compile(
+                            &role,
+                            &knowledge,
+                            &self.account,
+                            synthetic_input,
+                            self.config.max_attachment_mb,
+                        ) {
+                            Ok(snap) => {
+                                let snap_id = snap
+                                    .get("snapshot_id")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string();
+                                if let Some(history) = &self.history {
+                                    let obs = json!({"bubbles_count": incoming.len(), "images_count": images.len(), "files_count": files.len()});
+                                    if let Err(e) = history.record_brain_turn_snapshot(
+                                        &self.account,
+                                        key,
+                                        cid,
+                                        &snap_id,
+                                        &snap,
+                                        input_ids,
+                                        &obs,
+                                    ) {
+                                        if let Some(map) = record.as_object_mut() {
+                                            map.insert(
+                                                "status".to_string(),
+                                                json!("snapshot_failed"),
+                                            );
+                                        }
+                                        self.write_journal(journal_path, record)?;
+                                        return Err(anyhow::anyhow!(
+                                            "snapshot persistence failed: {e}"
+                                        ));
+                                    }
+                                }
+                                fixed_snapshot = Some(snap);
+                                fixed_role = Some(role);
+                            }
+                            Err(_e) => {
+                                if let Some(map) = record.as_object_mut() {
+                                    map.insert("status".to_string(), json!("budget_exceeded"));
+                                }
+                                self.write_journal(journal_path, record)?;
+                                return Ok(None);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let (notes, model_images, earlier) = self
             .understand_images(&full_text, &images, &mut failed, context_items)
             .await?;
@@ -1728,6 +1838,18 @@ impl BotService {
             .unwrap_or_else(|| "send".to_string());
 
         if action == "skip" {
+            if let (Some(history), Some(_snap)) = (&self.history, &fixed_snapshot) {
+                let dec = json!({"action": "skip"});
+                let _ = history.update_brain_turn_decision(
+                    &self.account,
+                    key,
+                    &dec,
+                    &json!(model_provenance),
+                    None,
+                );
+                let exec = json!({"phase": "not_sent", "action": "skip", "delivery": "unknown", "updated_at": (self.clock)()});
+                let _ = history.update_brain_turn_execution(&self.account, key, &exec);
+            }
             if let Some(map) = record.as_object_mut() {
                 map.insert("status".to_string(), json!("skipped_by_brain"));
             }
@@ -1736,6 +1858,18 @@ impl BotService {
         }
 
         if action == "handoff" {
+            if let (Some(history), Some(_snap)) = (&self.history, &fixed_snapshot) {
+                let dec = json!({"action": "handoff"});
+                let _ = history.update_brain_turn_decision(
+                    &self.account,
+                    key,
+                    &dec,
+                    &json!(model_provenance),
+                    None,
+                );
+                let exec = json!({"phase": "not_sent", "action": "handoff", "delivery": "unknown", "updated_at": (self.clock)()});
+                let _ = history.update_brain_turn_execution(&self.account, key, &exec);
+            }
             let handoff_path = self.root.join("handoff.json");
             let handoff_data = json!({
                 "recipient": self.recipient,
@@ -1797,9 +1931,31 @@ impl BotService {
             return Ok(None);
         }
 
+        if let (Some(history), Some(_snap)) = (&self.history, &fixed_snapshot) {
+            let dec = json!({"action": "send", "reply": reply});
+            let _ = history.update_brain_turn_decision(
+                &self.account,
+                key,
+                &dec,
+                &json!(model_provenance),
+                Some(key),
+            );
+        }
+
         if let Some(history) = &self.history {
             if let Some(cid) = &self.contact_id {
-                let model_val = record.get("model").cloned().unwrap_or_else(|| json!({}));
+                let mut model_val = record.get("model").cloned().unwrap_or_else(|| json!({}));
+                if let (Some(snap), Some(role)) = (&fixed_snapshot, &fixed_role) {
+                    if let Some(mobj) = model_val.as_object_mut() {
+                        mobj.insert(
+                            "brain".into(),
+                            json!({
+                                "snapshot_id": snap["snapshot_id"],
+                                "role_revision_id": role.revision_id,
+                            }),
+                        );
+                    }
+                }
                 history.record_bot_reply(
                     cid,
                     key,
@@ -1816,6 +1972,24 @@ impl BotService {
         let (mut result, mut receipt, mut send_err) = self
             .try_send_once(client, journal_path, record, confirmed, &reply, key)
             .await?;
+
+        if let (Some(history), Some(_snap)) = (&self.history, &fixed_snapshot) {
+            let phase = if receipt.get("status").and_then(|v| v.as_str()) == Some("triggered") {
+                "triggered"
+            } else if send_err.is_some() {
+                "failed"
+            } else {
+                "not_sent"
+            };
+            let exec = json!({
+                "phase": phase,
+                "delivery": "unknown",
+                "echo_observed": false,
+                "error_code": send_err.as_ref().map(|e| e.to_string()),
+                "updated_at": (self.clock)(),
+            });
+            let _ = history.update_brain_turn_execution(&self.account, key, &exec);
+        }
 
         if send_err.is_none() && receipt.get("status").and_then(|v| v.as_str()) == Some("triggered")
         {
@@ -8086,5 +8260,154 @@ mod tests {
             external_called.load(Ordering::SeqCst),
             "首个 sweep 中热加会话必须调用外部大脑，绝不能越过外部大脑退化到 builtin"
         );
+    }
+
+    #[tokio::test]
+    async fn test_brain_snapshot_provenance_and_failure_injection() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let state_dir = cfg.state_dir.clone();
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let history = Arc::new(HistoryStore::open(&state_dir).unwrap());
+        history.migrate().unwrap();
+
+        let entry = json!({"recipient": "午夜咖啡", "kind": "private"});
+        let cid = history.ensure_contact("fixture", &entry, false).unwrap();
+
+        // 1. 初始化 Store 并激活一个角色
+        let store = crate::core::brain_profiles::Store::open(&state_dir).unwrap();
+        let ctx = crate::core::brain_profiles::AccountContext::new("fixture".into()).unwrap();
+        let mut r = crate::core::brain_profiles::legacy_seed(&ctx, true, 1).unwrap();
+        r.role_id = "role_turn".into();
+        r.revision_id = "rev_t1".into();
+        r.persona = "运行测试角色".into();
+        let sealed = r.seal().unwrap();
+
+        let access = crate::core::control::ControlContactAccess {
+            account_id: "fixture".into(),
+            brain_access: None,
+            conn: None,
+        };
+
+        let write_req = crate::core::brain_profiles::WriteRequest {
+            expected_generation: 0,
+            request_id: uuid::Uuid::new_v4().to_string(),
+            mutation: crate::core::brain_profiles::Mutation::SaveRole(sealed),
+        };
+        store.write(&ctx, &write_req, &access, 100).unwrap();
+
+        let bindings = crate::core::brain_profiles::BindingSet {
+            default: Some(crate::core::brain_profiles::RoleRef {
+                role_id: "role_turn".into(),
+                revision_id: "rev_t1".into(),
+            }),
+            overrides: vec![],
+        };
+        let write_bind = crate::core::brain_profiles::WriteRequest {
+            expected_generation: 1,
+            request_id: uuid::Uuid::new_v4().to_string(),
+            mutation: crate::core::brain_profiles::Mutation::SaveBindings(bindings),
+        };
+        store.write(&ctx, &write_bind, &access, 101).unwrap();
+
+        let write_act = crate::core::brain_profiles::WriteRequest {
+            expected_generation: 2,
+            request_id: uuid::Uuid::new_v4().to_string(),
+            mutation: crate::core::brain_profiles::Mutation::Activate,
+        };
+        store.write(&ctx, &write_act, &access, 102).unwrap();
+
+        let mut svc = BotService::new(
+            cfg,
+            None,
+            Some(history.clone()),
+            Some(cid.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+
+        let brain_called = Arc::new(AtomicBool::new(false));
+        let bc = brain_called.clone();
+        svc.brain = Some(Arc::new(move |_turn| {
+            bc.store(true, Ordering::SeqCst);
+            Box::pin(async {
+                Ok(BrainReply {
+                    reply: "收到测试消息".into(),
+                    metadata: HashMap::new(),
+                })
+            })
+        }));
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "午夜咖啡");
+        svc.advance(old).unwrap();
+
+        let new_f = test_frame(
+            vec![
+                test_bubble("old", "inbound_visual"),
+                test_bubble("你好", "inbound_visual"),
+            ],
+            "午夜咖啡",
+        );
+        let client = MockToolClient::new_default();
+        let mut cap = MockCapture::new(vec![new_f.clone(), new_f.clone(), new_f]);
+
+        let res = svc.cycle(&client, &mut cap).await;
+        assert!(res.is_ok());
+        assert!(brain_called.load(Ordering::SeqCst));
+
+        // 验证持久化到了 brain_turns 表中
+        let turns: i64 = history
+            .connection()
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM brain_turns WHERE account_id='fixture'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(turns, 1);
+
+        // 验证失败注入：当快照持久化失败时，不调用模型也不发送
+        history
+            .connection()
+            .lock()
+            .unwrap()
+            .execute("DROP TABLE brain_turns", [])
+            .unwrap();
+        let brain_called_2 = Arc::new(AtomicBool::new(false));
+        let bc2 = brain_called_2.clone();
+        svc.brain = Some(Arc::new(move |_turn| {
+            bc2.store(true, Ordering::SeqCst);
+            Box::pin(async {
+                Ok(BrainReply {
+                    reply: "这条绝不能生成".into(),
+                    metadata: HashMap::new(),
+                })
+            })
+        }));
+        let new_f2 = test_frame(
+            vec![
+                test_bubble("old", "inbound_visual"),
+                test_bubble("你好", "inbound_visual"),
+                test_bubble("故障注入测试", "inbound_visual"),
+            ],
+            "午夜咖啡",
+        );
+        let mut cap2 = MockCapture::new(vec![new_f2.clone(), new_f2.clone(), new_f2]);
+        let client2 = MockToolClient::new_default();
+        let res2 = svc.cycle(&client2, &mut cap2).await;
+        assert!(res2.is_err(), "快照写入失败时必须阻断并报错");
+        assert!(
+            !brain_called_2.load(Ordering::SeqCst),
+            "快照写入失败时绝对不能调用模型"
+        );
+        let calls = client2.calls.lock().unwrap();
+        let sent = calls.iter().any(|(tool, _)| tool == "send_message");
+        assert!(!sent, "快照写入失败时绝对不能调用发送");
     }
 }

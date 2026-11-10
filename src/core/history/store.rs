@@ -263,6 +263,28 @@ CREATE TABLE contact_reviews(
 CREATE INDEX contact_reviews_account ON contact_reviews(account_id);
 "#,
     ),
+    (
+        5,
+        r#"
+CREATE TABLE brain_turns (
+  account_id TEXT NOT NULL,
+  turn_id TEXT NOT NULL,
+  contact_id TEXT NOT NULL REFERENCES contacts(contact_id),
+  snapshot_id TEXT NOT NULL,
+  snapshot_json TEXT NOT NULL,
+  input_message_ids TEXT NOT NULL,
+  observation_json TEXT NOT NULL,
+  decision_json TEXT,
+  model_json TEXT NOT NULL DEFAULT '{}',
+  send_key TEXT,
+  execution_json TEXT NOT NULL DEFAULT '{}',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(account_id, turn_id)
+);
+CREATE INDEX brain_turns_contact_time ON brain_turns(account_id, contact_id, created_at);
+"#,
+    ),
 ];
 
 fn connect(path: &Path) -> Result<Connection> {
@@ -758,6 +780,147 @@ impl HistoryStore {
         )?;
         conn.commit()?;
         Ok(message_id)
+    }
+
+    // Brain Turns ---------------------------------------------------------------
+
+    pub fn record_brain_turn_snapshot(
+        &self,
+        account_id: &str,
+        turn_id: &str,
+        contact_id: &str,
+        snapshot_id: &str,
+        snapshot: &Value,
+        input_message_ids: &[String],
+        observation: &Value,
+    ) -> Result<()> {
+        let guard = self.conn.lock().unwrap();
+        let conn =
+            rusqlite::Transaction::new_unchecked(&guard, rusqlite::TransactionBehavior::Immediate)?;
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT snapshot_id FROM brain_turns WHERE account_id=? AND turn_id=?",
+                params![account_id, turn_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(existing_snap_id) = existing {
+            if existing_snap_id != snapshot_id {
+                bail!("integrity_mismatch");
+            }
+            return Ok(());
+        }
+        let now = now_ms();
+        conn.execute(
+            "INSERT INTO brain_turns(account_id, turn_id, contact_id, snapshot_id, snapshot_json, input_message_ids, observation_json, decision_json, model_json, send_key, execution_json, created_at, updated_at) VALUES(?,?,?,?,?,?,?,NULL,'{}',NULL,'{}',?,?)",
+            params![
+                account_id,
+                turn_id,
+                contact_id,
+                snapshot_id,
+                serde_json::to_string(snapshot)?,
+                serde_json::to_string(input_message_ids)?,
+                serde_json::to_string(observation)?,
+                now,
+                now,
+            ],
+        )?;
+        conn.commit()?;
+        Ok(())
+    }
+
+    pub fn update_brain_turn_decision(
+        &self,
+        account_id: &str,
+        turn_id: &str,
+        decision: &Value,
+        model: &Value,
+        send_key: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_ms();
+        conn.execute(
+            "UPDATE brain_turns SET decision_json=?, model_json=?, send_key=?, updated_at=? WHERE account_id=? AND turn_id=?",
+            params![
+                serde_json::to_string(decision)?,
+                serde_json::to_string(model)?,
+                send_key,
+                now,
+                account_id,
+                turn_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_brain_turn_execution(
+        &self,
+        account_id: &str,
+        turn_id: &str,
+        execution: &Value,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_ms();
+        conn.execute(
+            "UPDATE brain_turns SET execution_json=?, updated_at=? WHERE account_id=? AND turn_id=?",
+            params![
+                serde_json::to_string(execution)?,
+                now,
+                account_id,
+                turn_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_brain_turn_detail(&self, account_id: &str, turn_id: &str) -> Result<Option<Value>> {
+        let conn = self.conn.lock().unwrap();
+        let table_exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='brain_turns')",
+            [],
+            |r| r.get(0),
+        ).unwrap_or(false);
+        if !table_exists {
+            return Ok(None);
+        }
+        let mut stmt = conn.prepare(
+            "SELECT account_id, turn_id, contact_id, snapshot_id, snapshot_json, input_message_ids, observation_json, decision_json, model_json, send_key, execution_json, created_at, updated_at FROM brain_turns WHERE account_id=? AND turn_id=?"
+        )?;
+        let mut rows = stmt.query(params![account_id, turn_id])?;
+        if let Some(row) = rows.next()? {
+            let snap_str: String = row.get(4)?;
+            let snap_json: Value = serde_json::from_str(&snap_str).unwrap_or(Value::Null);
+            let input_ids_str: String = row.get(5)?;
+            let input_ids: Value = serde_json::from_str(&input_ids_str).unwrap_or(json!([]));
+            let obs_str: String = row.get(6)?;
+            let obs_json: Value = serde_json::from_str(&obs_str).unwrap_or(Value::Null);
+            let dec_str: Option<String> = row.get(7)?;
+            let dec_json: Option<Value> = dec_str.and_then(|s| serde_json::from_str(&s).ok());
+            let model_str: String = row.get(8)?;
+            let model_json: Value = serde_json::from_str(&model_str).unwrap_or(json!({}));
+            let send_key: Option<String> = row.get(9)?;
+            let exec_str: String = row.get(10)?;
+            let exec_json: Value = serde_json::from_str(&exec_str).unwrap_or(json!({}));
+            let created_at: i64 = row.get(11)?;
+            let updated_at: i64 = row.get(12)?;
+            Ok(Some(json!({
+                "account_id": row.get::<_, String>(0)?,
+                "turn_id": row.get::<_, String>(1)?,
+                "contact_id": row.get::<_, String>(2)?,
+                "snapshot_id": row.get::<_, String>(3)?,
+                "snapshot": snap_json,
+                "input_message_ids": input_ids,
+                "observation": obs_json,
+                "decision": dec_json,
+                "model": model_json,
+                "send_key": send_key,
+                "execution": exec_json,
+                "created_at": created_at,
+                "updated_at": updated_at,
+            })))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn update_send(
@@ -5025,5 +5188,86 @@ mod tests {
             .find(|p| p["contact_id"] == cid2)
             .unwrap();
         assert!(prof2_after["removed_at"].is_null());
+    }
+
+    #[test]
+    fn test_brain_turns_provenance_lifecycle() {
+        let f = setup_fixture();
+        f.store.migrate().unwrap();
+
+        let cid = f
+            .store
+            .ensure_contact(
+                "acct_a",
+                &json!({"recipient":"张三","kind":"private"}),
+                false,
+            )
+            .unwrap();
+        let snap = json!({"schema_version": 1, "assembly_sha256": "sha_111", "compiled": "你好"});
+        let input_ids = vec!["m_1".to_string(), "m_2".to_string()];
+        let obs = json!({"bubbles_count": 2});
+
+        // 1. 记录快照
+        f.store
+            .record_brain_turn_snapshot(
+                "acct_a", "turn_101", &cid, "snap_111", &snap, &input_ids, &obs,
+            )
+            .unwrap();
+
+        // 2. 重复记录相同 snapshot_id 保持幂等
+        assert!(
+            f.store
+                .record_brain_turn_snapshot(
+                    "acct_a", "turn_101", &cid, "snap_111", &snap, &input_ids, &obs,
+                )
+                .is_ok()
+        );
+
+        // 3. 重复记录不同 snapshot_id 报 integrity_mismatch
+        let err = f
+            .store
+            .record_brain_turn_snapshot(
+                "acct_a", "turn_101", &cid, "snap_222", &snap, &input_ids, &obs,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("integrity_mismatch"));
+
+        // 4. 更新决策
+        let dec = json!({"action": "send", "reply": "你好！"});
+        let model = json!({"provider": "test", "seconds": 1.2});
+        f.store
+            .update_brain_turn_decision("acct_a", "turn_101", &dec, &model, Some("send_k1"))
+            .unwrap();
+
+        // 5. 更新执行状态
+        let exec = json!({"phase": "triggered", "delivery": "unknown"});
+        f.store
+            .update_brain_turn_execution("acct_a", "turn_101", &exec)
+            .unwrap();
+
+        // 6. 获取详情并验证各字段
+        let detail = f
+            .store
+            .get_brain_turn_detail("acct_a", "turn_101")
+            .unwrap()
+            .expect("turn exists");
+        assert_eq!(detail["turn_id"], "turn_101");
+        assert_eq!(detail["contact_id"], cid);
+        assert_eq!(detail["snapshot_id"], "snap_111");
+        assert_eq!(detail["snapshot"]["assembly_sha256"], "sha_111");
+        assert_eq!(detail["input_message_ids"], json!(["m_1", "m_2"]));
+        assert_eq!(detail["decision"]["action"], "send");
+        assert_eq!(detail["model"]["provider"], "test");
+        assert_eq!(detail["send_key"], "send_k1");
+        assert_eq!(detail["execution"]["phase"], "triggered");
+        assert_eq!(detail["execution"]["delivery"], "unknown");
+
+        // 7. 跨账号查询返回 None
+        assert!(
+            f.store
+                .get_brain_turn_detail("acct_b", "turn_101")
+                .unwrap()
+                .is_none()
+        );
     }
 }

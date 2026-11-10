@@ -254,6 +254,19 @@ pub fn turn_v1(
     })
 }
 
+pub fn turn_v2(
+    turn: &crate::brain::Turn,
+    claim: &ClaimInfo,
+    contact_id: &str,
+    media: &dyn MediaLookup,
+    snapshot: Value,
+) -> Value {
+    let mut v = turn_v1(turn, claim, contact_id, media);
+    v["api_version"] = serde_json::json!("2");
+    v["brain_snapshot"] = snapshot;
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,6 +362,46 @@ mod tests {
 
         let result = turn_v1(&turn, &claim, "c_zhangsan_01", &lookup);
         assert_json_matches_snapshot(&result, "turn_v1_text.json");
+    }
+
+    #[test]
+    fn turn_v2_snapshot_test() {
+        let turn = Turn {
+            turn_id: "t_1001".to_string(),
+            account_id: "wx_bot_main".to_string(),
+            contact: ContactInfo {
+                name: "张三".to_string(),
+                kind: "private".to_string(),
+            },
+            text: "你好，请问客服在吗？".to_string(),
+            mode: "service".to_string(),
+            chat_kind: "private".to_string(),
+            context: vec![],
+            images: vec![],
+            files: vec![],
+            notes: vec![],
+            failed: vec![],
+            image_count: None,
+            earlier_images: 0,
+            max_attachment_mb: 50,
+            media_refs: vec![],
+        };
+        let claim = ClaimInfo {
+            claim_token: "tok_claim_text".to_string(),
+            lease_until: 1700000060,
+            deadline_at: 1700000120,
+        };
+        let lookup = MockMediaLookup {
+            mapping: HashMap::new(),
+        };
+        let snapshot = serde_json::json!({
+            "snapshot_id": "snap_v2_1001",
+            "assembly_sha256": "sha_v2_snap",
+            "compiled": "你好，请问客服在吗？"
+        });
+
+        let result = turn_v2(&turn, &claim, "c_zhangsan_01", &lookup, snapshot);
+        assert_json_matches_snapshot(&result, "turn_v2.json");
     }
 
     #[test]

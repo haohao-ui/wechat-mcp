@@ -2202,10 +2202,874 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 0
             }
         }
+        action if action.starts_with("brain-") => {
+            execute_brain_control(action, args, stdout, stderr, default_config_path)
+        }
         other => {
             let _ = writeln!(stderr, "unknown control action: {}", other);
             2
         }
+    }
+}
+
+fn emit_brain_error<W: std::io::Write>(
+    stdout: &mut W,
+    code: &str,
+    message: &str,
+    retryable: bool,
+    details: Option<Value>,
+    exit_code: i32,
+) -> i32 {
+    let err = json!({
+        "ok": false,
+        "error": {
+            "code": code,
+            "message": message,
+            "retryable": retryable,
+            "details": details,
+        }
+    });
+    let _ = writeln!(stdout, "{err}");
+    exit_code
+}
+
+pub(crate) struct ControlContactAccess {
+    pub(crate) account_id: String,
+    pub(crate) brain_access: Option<crate::core::open_api::access::BrainAccess>,
+    pub(crate) conn: Option<rusqlite::Connection>,
+}
+
+impl crate::core::brain_profiles::ContactAccess for ControlContactAccess {
+    fn permits(
+        &self,
+        account: &str,
+        contact: &str,
+        _kind: &crate::core::brain_profiles::ChatKind,
+    ) -> bool {
+        if account != self.account_id {
+            return false;
+        }
+        if let Some(ba) = &self.brain_access {
+            ba.permit(contact)
+        } else {
+            true
+        }
+    }
+    fn family(&self, account: &str, contact: &str) -> Vec<String> {
+        if account != self.account_id {
+            return vec![];
+        }
+        if let Some(conn) = &self.conn {
+            if let Ok(mut stmt) = conn.prepare("SELECT contact_id FROM contacts WHERE account_id=? AND (contact_id=? OR merged_into=?)") {
+                if let Ok(rows) = stmt.query_map(rusqlite::params![account, contact, contact], |r| r.get::<_, String>(0)) {
+                    let list: Vec<String> = rows.filter_map(Result::ok).collect();
+                    if !list.is_empty() {
+                        return list;
+                    }
+                }
+            }
+        }
+        vec![contact.to_string()]
+    }
+}
+
+fn handle_store_error<W: std::io::Write>(
+    stdout: &mut W,
+    err: crate::core::brain_profiles::Error,
+    store: &crate::core::brain_profiles::Store,
+    ctx: &crate::core::brain_profiles::AccountContext,
+) -> i32 {
+    let code = err.0;
+    let (retryable, exit_code) = if code == "store_unavailable" {
+        (true, 1)
+    } else {
+        (false, 2)
+    };
+    let details = if code == "revision_conflict" {
+        let cur_gen = store.generation().unwrap_or(0);
+        let (_, _, acc) = store.list(ctx).unwrap_or((0, vec![], None));
+        Some(json!({
+            "current_generation": cur_gen,
+            "active": acc.as_ref().and_then(|a| a.active.default.as_ref()).map(|d| &d.role_id),
+            "draft": acc.as_ref().and_then(|a| a.draft.default.as_ref()).map(|d| &d.role_id),
+        }))
+    } else {
+        None
+    };
+    emit_brain_error(stdout, code, code, retryable, details, exit_code)
+}
+
+fn execute_write<W: std::io::Write>(
+    stdout: &mut W,
+    store: &crate::core::brain_profiles::Store,
+    ctx: &crate::core::brain_profiles::AccountContext,
+    access: &impl crate::core::brain_profiles::ContactAccess,
+    expected_generation: u64,
+    request_id: String,
+    mutation: crate::core::brain_profiles::Mutation,
+) -> i32 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let write_req = crate::core::brain_profiles::WriteRequest {
+        expected_generation,
+        request_id,
+        mutation,
+    };
+    match store.write(ctx, &write_req, access, now) {
+        Ok(res) => {
+            let _ = writeln!(stdout, "{}", json!({ "ok": true, "data": res }));
+            0
+        }
+        Err(e) => handle_store_error(stdout, e, store, ctx),
+    }
+}
+
+fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
+    action: &str,
+    args: &[String],
+    stdout: &mut W1,
+    _stderr: &mut W2,
+    default_config_path: PathBuf,
+) -> i32 {
+    use crate::core::brain_profiles::*;
+    let mut config_file: Option<PathBuf> = None;
+    let mut request_json: Option<String> = None;
+    let mut idx = 1;
+    while idx < args.len() {
+        if args[idx] == "--config" && idx + 1 < args.len() {
+            config_file = Some(PathBuf::from(&args[idx + 1]));
+            idx += 2;
+        } else if args[idx] == "--request-json" && idx + 1 < args.len() {
+            request_json = Some(args[idx + 1].clone());
+            idx += 2;
+        } else {
+            idx += 1;
+        }
+    }
+    let config_path = config_file.unwrap_or(default_config_path);
+    let cfg = match BotConfig::load(&config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            return emit_brain_error(
+                stdout,
+                "invalid_arguments",
+                &format!("config error: {e:#}"),
+                false,
+                None,
+                2,
+            );
+        }
+    };
+
+    let req_val: Value = if let Some(s) = request_json {
+        match serde_json::from_str(&s) {
+            Ok(v) => v,
+            Err(e) => {
+                return emit_brain_error(
+                    stdout,
+                    "invalid_arguments",
+                    &format!("invalid request json: {e:#}"),
+                    false,
+                    None,
+                    2,
+                );
+            }
+        }
+    } else {
+        Value::Null
+    };
+
+    if let Some(req_acc) = req_val.get("account_id").and_then(Value::as_str) {
+        if req_acc != cfg.account_id {
+            return emit_brain_error(stdout, "not_found", "account mismatch", false, None, 2);
+        }
+    }
+
+    let store = match Store::open(&cfg.state_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            return emit_brain_error(stdout, "store_unavailable", &e.to_string(), true, None, 1);
+        }
+    };
+
+    let ctx = match AccountContext::new(cfg.account_id.clone()) {
+        Ok(c) => c,
+        Err(e) => {
+            return emit_brain_error(stdout, "invalid_arguments", &e.to_string(), false, None, 2);
+        }
+    };
+
+    let db_path = cfg.state_dir.join("history/history.sqlite3");
+    let (conn, brain_access) = if db_path.exists() {
+        if let Ok(c) = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        ) {
+            let ba = crate::core::open_api::access::BrainAccess::load(&cfg, &c).ok();
+            (Some(c), ba)
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+    let access = ControlContactAccess {
+        account_id: cfg.account_id.clone(),
+        brain_access,
+        conn,
+    };
+
+    match action {
+        "brain-list" => {
+            let (generation, roles, account_entry) = match store.list(&ctx) {
+                Ok(res) => res,
+                Err(e) => return handle_store_error(stdout, e, &store, &ctx),
+            };
+            let data = json!({
+                "generation": generation,
+                "roles": roles,
+                "active": account_entry.as_ref().map(|a| &a.active),
+                "draft": account_entry.as_ref().map(|a| &a.draft),
+                "model_summary": {
+                    "mode": format!("{:?}", cfg.brain.mode).to_lowercase(),
+                    "timeout_seconds": cfg.brain.external.timeout_seconds,
+                }
+            });
+            let _ = writeln!(stdout, "{}", json!({ "ok": true, "data": data }));
+            0
+        }
+        "brain-get" => {
+            let role_id = match req_val.get("role_id").and_then(Value::as_str) {
+                Some(id) => id,
+                None => {
+                    return emit_brain_error(
+                        stdout,
+                        "invalid_arguments",
+                        "missing role_id",
+                        false,
+                        None,
+                        2,
+                    );
+                }
+            };
+            let revision_id = match req_val.get("revision_id").and_then(Value::as_str) {
+                Some(r) => r.to_string(),
+                None => {
+                    let (_, roles, _) = match store.list(&ctx) {
+                        Ok(l) => l,
+                        Err(e) => return handle_store_error(stdout, e, &store, &ctx),
+                    };
+                    match roles.into_iter().find(|r| r.role_id == role_id) {
+                        Some(e) => e.draft_revision_id,
+                        None => {
+                            return emit_brain_error(
+                                stdout,
+                                "not_found",
+                                "role not found",
+                                false,
+                                None,
+                                2,
+                            );
+                        }
+                    }
+                }
+            };
+            let role = match store.role(
+                &ctx,
+                &RoleRef {
+                    role_id: role_id.into(),
+                    revision_id,
+                },
+            ) {
+                Ok(r) => r,
+                Err(e) => return handle_store_error(stdout, e, &store, &ctx),
+            };
+            let _ = writeln!(stdout, "{}", json!({ "ok": true, "data": role }));
+            0
+        }
+        "brain-save-role" => {
+            let expected_generation =
+                match req_val.get("expected_generation").and_then(Value::as_u64) {
+                    Some(g) => g,
+                    None => {
+                        return emit_brain_error(
+                            stdout,
+                            "invalid_arguments",
+                            "missing expected_generation",
+                            false,
+                            None,
+                            2,
+                        );
+                    }
+                };
+            let request_id = match req_val.get("request_id").and_then(Value::as_str) {
+                Some(id) => id.to_string(),
+                None => {
+                    return emit_brain_error(
+                        stdout,
+                        "invalid_arguments",
+                        "missing request_id",
+                        false,
+                        None,
+                        2,
+                    );
+                }
+            };
+            let mut role: RoleRevision =
+                match serde_json::from_value(req_val.get("role").cloned().unwrap_or(Value::Null)) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return emit_brain_error(
+                            stdout,
+                            "invalid_arguments",
+                            &e.to_string(),
+                            false,
+                            None,
+                            2,
+                        );
+                    }
+                };
+            if role.owner_account_id.is_empty() {
+                role.owner_account_id = ctx.account_id().into();
+            } else if role.owner_account_id != ctx.account_id() {
+                return emit_brain_error(stdout, "not_found", "owner mismatch", false, None, 2);
+            }
+            if role.role_id.is_empty() {
+                role.role_id = format!("role_{}", uuid::Uuid::new_v4().simple());
+            }
+            if role.revision_id.is_empty() {
+                role.revision_id = format!("rev_{}", uuid::Uuid::new_v4().simple());
+            }
+            let sealed = match role.seal() {
+                Ok(s) => s,
+                Err(e) => {
+                    return emit_brain_error(
+                        stdout,
+                        "invalid_arguments",
+                        &e.to_string(),
+                        false,
+                        None,
+                        2,
+                    );
+                }
+            };
+            let mutation = Mutation::SaveRole(sealed);
+            execute_write(
+                stdout,
+                &store,
+                &ctx,
+                &access,
+                expected_generation,
+                request_id,
+                mutation,
+            )
+        }
+        "brain-save-knowledge" => {
+            let expected_generation =
+                match req_val.get("expected_generation").and_then(Value::as_u64) {
+                    Some(g) => g,
+                    None => {
+                        return emit_brain_error(
+                            stdout,
+                            "invalid_arguments",
+                            "missing expected_generation",
+                            false,
+                            None,
+                            2,
+                        );
+                    }
+                };
+            let request_id = match req_val.get("request_id").and_then(Value::as_str) {
+                Some(id) => id.to_string(),
+                None => {
+                    return emit_brain_error(
+                        stdout,
+                        "invalid_arguments",
+                        "missing request_id",
+                        false,
+                        None,
+                        2,
+                    );
+                }
+            };
+            let mut knowledge: KnowledgeRevision = match serde_json::from_value(
+                req_val.get("knowledge").cloned().unwrap_or(Value::Null),
+            ) {
+                Ok(k) => k,
+                Err(e) => {
+                    return emit_brain_error(
+                        stdout,
+                        "invalid_arguments",
+                        &e.to_string(),
+                        false,
+                        None,
+                        2,
+                    );
+                }
+            };
+            if knowledge.owner_account_id.is_empty() {
+                knowledge.owner_account_id = ctx.account_id().into();
+            } else if knowledge.owner_account_id != ctx.account_id() {
+                return emit_brain_error(stdout, "not_found", "owner mismatch", false, None, 2);
+            }
+            if knowledge.knowledge_id.is_empty() {
+                knowledge.knowledge_id = format!("kn_{}", uuid::Uuid::new_v4().simple());
+            }
+            if knowledge.revision_id.is_empty() {
+                knowledge.revision_id = format!("rev_{}", uuid::Uuid::new_v4().simple());
+            }
+            let sealed = match knowledge.seal() {
+                Ok(s) => s,
+                Err(e) => {
+                    return emit_brain_error(
+                        stdout,
+                        "invalid_arguments",
+                        &e.to_string(),
+                        false,
+                        None,
+                        2,
+                    );
+                }
+            };
+            let mutation = Mutation::SaveKnowledge(sealed);
+            execute_write(
+                stdout,
+                &store,
+                &ctx,
+                &access,
+                expected_generation,
+                request_id,
+                mutation,
+            )
+        }
+        "brain-copy-role" => {
+            let expected_generation =
+                match req_val.get("expected_generation").and_then(Value::as_u64) {
+                    Some(g) => g,
+                    None => {
+                        return emit_brain_error(
+                            stdout,
+                            "invalid_arguments",
+                            "missing expected_generation",
+                            false,
+                            None,
+                            2,
+                        );
+                    }
+                };
+            let request_id = match req_val.get("request_id").and_then(Value::as_str) {
+                Some(id) => id.to_string(),
+                None => {
+                    return emit_brain_error(
+                        stdout,
+                        "invalid_arguments",
+                        "missing request_id",
+                        false,
+                        None,
+                        2,
+                    );
+                }
+            };
+            let role_id = match req_val.get("role_id").and_then(Value::as_str) {
+                Some(id) => id,
+                None => {
+                    return emit_brain_error(
+                        stdout,
+                        "invalid_arguments",
+                        "missing role_id",
+                        false,
+                        None,
+                        2,
+                    );
+                }
+            };
+            let revision_id = match req_val.get("revision_id").and_then(Value::as_str) {
+                Some(r) => r,
+                None => {
+                    return emit_brain_error(
+                        stdout,
+                        "invalid_arguments",
+                        "missing revision_id",
+                        false,
+                        None,
+                        2,
+                    );
+                }
+            };
+            let new_role_id = req_val
+                .get("new_role_id")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("role_{}", uuid::Uuid::new_v4().simple()));
+            let mutation = Mutation::CopyRole {
+                source: RoleRef {
+                    role_id: role_id.into(),
+                    revision_id: revision_id.into(),
+                },
+                new_role_id,
+            };
+            execute_write(
+                stdout,
+                &store,
+                &ctx,
+                &access,
+                expected_generation,
+                request_id,
+                mutation,
+            )
+        }
+        "brain-archive-role" => {
+            let expected_generation =
+                match req_val.get("expected_generation").and_then(Value::as_u64) {
+                    Some(g) => g,
+                    None => {
+                        return emit_brain_error(
+                            stdout,
+                            "invalid_arguments",
+                            "missing expected_generation",
+                            false,
+                            None,
+                            2,
+                        );
+                    }
+                };
+            let request_id = match req_val.get("request_id").and_then(Value::as_str) {
+                Some(id) => id.to_string(),
+                None => {
+                    return emit_brain_error(
+                        stdout,
+                        "invalid_arguments",
+                        "missing request_id",
+                        false,
+                        None,
+                        2,
+                    );
+                }
+            };
+            let role_id = match req_val.get("role_id").and_then(Value::as_str) {
+                Some(id) => id.to_string(),
+                None => {
+                    return emit_brain_error(
+                        stdout,
+                        "invalid_arguments",
+                        "missing role_id",
+                        false,
+                        None,
+                        2,
+                    );
+                }
+            };
+            let mutation = Mutation::ArchiveRole { role_id };
+            execute_write(
+                stdout,
+                &store,
+                &ctx,
+                &access,
+                expected_generation,
+                request_id,
+                mutation,
+            )
+        }
+        "brain-save-bindings" => {
+            let expected_generation =
+                match req_val.get("expected_generation").and_then(Value::as_u64) {
+                    Some(g) => g,
+                    None => {
+                        return emit_brain_error(
+                            stdout,
+                            "invalid_arguments",
+                            "missing expected_generation",
+                            false,
+                            None,
+                            2,
+                        );
+                    }
+                };
+            let request_id = match req_val.get("request_id").and_then(Value::as_str) {
+                Some(id) => id.to_string(),
+                None => {
+                    return emit_brain_error(
+                        stdout,
+                        "invalid_arguments",
+                        "missing request_id",
+                        false,
+                        None,
+                        2,
+                    );
+                }
+            };
+            let draft: BindingSet = match serde_json::from_value(
+                req_val.get("draft").cloned().unwrap_or(Value::Null),
+            ) {
+                Ok(b) => b,
+                Err(e) => {
+                    return emit_brain_error(
+                        stdout,
+                        "invalid_arguments",
+                        &e.to_string(),
+                        false,
+                        None,
+                        2,
+                    );
+                }
+            };
+            let mutation = Mutation::SaveBindings(draft);
+            execute_write(
+                stdout,
+                &store,
+                &ctx,
+                &access,
+                expected_generation,
+                request_id,
+                mutation,
+            )
+        }
+        "brain-activate" => {
+            let expected_generation =
+                match req_val.get("expected_generation").and_then(Value::as_u64) {
+                    Some(g) => g,
+                    None => {
+                        return emit_brain_error(
+                            stdout,
+                            "invalid_arguments",
+                            "missing expected_generation",
+                            false,
+                            None,
+                            2,
+                        );
+                    }
+                };
+            let request_id = match req_val.get("request_id").and_then(Value::as_str) {
+                Some(id) => id.to_string(),
+                None => {
+                    return emit_brain_error(
+                        stdout,
+                        "invalid_arguments",
+                        "missing request_id",
+                        false,
+                        None,
+                        2,
+                    );
+                }
+            };
+            let mutation = Mutation::Activate;
+            execute_write(
+                stdout,
+                &store,
+                &ctx,
+                &access,
+                expected_generation,
+                request_id,
+                mutation,
+            )
+        }
+        "brain-rollback" => {
+            let expected_generation =
+                match req_val.get("expected_generation").and_then(Value::as_u64) {
+                    Some(g) => g,
+                    None => {
+                        return emit_brain_error(
+                            stdout,
+                            "invalid_arguments",
+                            "missing expected_generation",
+                            false,
+                            None,
+                            2,
+                        );
+                    }
+                };
+            let request_id = match req_val.get("request_id").and_then(Value::as_str) {
+                Some(id) => id.to_string(),
+                None => {
+                    return emit_brain_error(
+                        stdout,
+                        "invalid_arguments",
+                        "missing request_id",
+                        false,
+                        None,
+                        2,
+                    );
+                }
+            };
+            let target_generation = match req_val.get("target_generation").and_then(Value::as_u64) {
+                Some(tg) => tg,
+                None => {
+                    return emit_brain_error(
+                        stdout,
+                        "invalid_arguments",
+                        "missing target_generation",
+                        false,
+                        None,
+                        2,
+                    );
+                }
+            };
+            let mutation = Mutation::Rollback {
+                generation: target_generation,
+            };
+            execute_write(
+                stdout,
+                &store,
+                &ctx,
+                &access,
+                expected_generation,
+                request_id,
+                mutation,
+            )
+        }
+        "brain-preview" => {
+            let role_id = match req_val.get("role_id").and_then(Value::as_str) {
+                Some(id) => id,
+                None => {
+                    return emit_brain_error(
+                        stdout,
+                        "invalid_arguments",
+                        "missing role_id",
+                        false,
+                        None,
+                        2,
+                    );
+                }
+            };
+            let revision_id = match req_val.get("revision_id").and_then(Value::as_str) {
+                Some(r) => r.to_string(),
+                None => {
+                    let (_, roles, _) = match store.list(&ctx) {
+                        Ok(l) => l,
+                        Err(e) => return handle_store_error(stdout, e, &store, &ctx),
+                    };
+                    match roles.into_iter().find(|r| r.role_id == role_id) {
+                        Some(e) => e.draft_revision_id,
+                        None => {
+                            return emit_brain_error(
+                                stdout,
+                                "not_found",
+                                "role not found",
+                                false,
+                                None,
+                                2,
+                            );
+                        }
+                    }
+                }
+            };
+            let execution = req_val
+                .get("execution")
+                .and_then(Value::as_str)
+                .unwrap_or("assemble_only");
+            let cost_consent = req_val
+                .get("cost_consent")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let input: crate::brain::snapshot::SyntheticInput = match serde_json::from_value(
+                req_val.get("input").cloned().unwrap_or(Value::Null),
+            ) {
+                Ok(i) => i,
+                Err(e) => {
+                    return emit_brain_error(
+                        stdout,
+                        "invalid_arguments",
+                        &e.to_string(),
+                        false,
+                        None,
+                        2,
+                    );
+                }
+            };
+            let role = match store.role(
+                &ctx,
+                &RoleRef {
+                    role_id: role_id.into(),
+                    revision_id,
+                },
+            ) {
+                Ok(r) => r,
+                Err(e) => return handle_store_error(stdout, e, &store, &ctx),
+            };
+            let mut knowledge = Vec::new();
+            for kref in &role.knowledge_refs {
+                match store.knowledge(&ctx, kref) {
+                    Ok(k) => knowledge.push(k),
+                    Err(e) => return handle_store_error(stdout, e, &store, &ctx),
+                }
+            }
+            match crate::brain::snapshot::preview(
+                &role,
+                &knowledge,
+                ctx.account_id(),
+                input,
+                execution,
+                cost_consent,
+            ) {
+                Ok(p) => {
+                    let _ = writeln!(stdout, "{}", json!({ "ok": true, "data": p }));
+                    0
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    let code = if msg == "cost_consent_required" {
+                        "cost_consent_required"
+                    } else if msg == "preview_execution_disabled" {
+                        "preview_execution_disabled"
+                    } else if msg == "context_budget_exceeded" {
+                        "context_budget_exceeded"
+                    } else if msg == "not_found" {
+                        "not_found"
+                    } else {
+                        "invalid_arguments"
+                    };
+                    emit_brain_error(stdout, code, &msg, false, None, 2)
+                }
+            }
+        }
+        "brain-turn-detail" => {
+            let turn_id = match req_val.get("turn_id").and_then(Value::as_str) {
+                Some(id) => id,
+                None => {
+                    return emit_brain_error(
+                        stdout,
+                        "invalid_arguments",
+                        "missing turn_id",
+                        false,
+                        None,
+                        2,
+                    );
+                }
+            };
+            let hstore = match crate::core::history::store::HistoryStore::open(&cfg.state_dir) {
+                Ok(s) => s,
+                Err(e) => {
+                    return emit_brain_error(
+                        stdout,
+                        "store_unavailable",
+                        &e.to_string(),
+                        true,
+                        None,
+                        1,
+                    );
+                }
+            };
+            match hstore.get_brain_turn_detail(&cfg.account_id, turn_id) {
+                Ok(Some(detail)) => {
+                    let _ = writeln!(stdout, "{}", json!({ "ok": true, "data": detail }));
+                    0
+                }
+                Ok(None) => emit_brain_error(stdout, "not_found", "turn not found", false, None, 2),
+                Err(e) => {
+                    emit_brain_error(stdout, "store_unavailable", &e.to_string(), true, None, 1)
+                }
+            }
+        }
+        other => emit_brain_error(
+            stdout,
+            "invalid_arguments",
+            &format!("unknown brain action: {other}"),
+            false,
+            None,
+            2,
+        ),
     }
 }
 
@@ -4605,6 +5469,7 @@ mod tests {
         let cfg_path = temp.path().join("config.json");
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
 
         let cfg = json!({
             "schema_version": 1,
@@ -4730,6 +5595,7 @@ mod tests {
         let cfg_path = temp.path().join("config.json");
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
         let cfg = json!({
             "schema_version": 1,
             "host": "local",
@@ -4793,6 +5659,7 @@ mod tests {
         let cfg_path = temp.path().join("config.json");
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
 
         let cfg = json!({
             "schema_version": 1,
@@ -4898,6 +5765,7 @@ mod tests {
         let cfg_path = temp.path().join("config.json");
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
 
         let cfg = json!({
             "schema_version": 1,
@@ -4997,6 +5865,7 @@ mod tests {
         let cfg_path = temp.path().join("config.json");
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
 
         let cfg = json!({
             "schema_version": 1,
@@ -5031,5 +5900,203 @@ mod tests {
         assert_eq!(out["busy"], false);
         assert_eq!(out["tools"].as_array().unwrap().len(), 0);
         assert_eq!(out["error"], "disabled");
+    }
+
+    #[test]
+    fn test_brain_control_list_and_save() {
+        let temp = TempDir::new();
+        let cfg_path = temp.path().join("config.json");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let cfg = json!({
+            "schema_version": 1,
+            "host": "local",
+            "account_id": "test-account",
+            "state_dir": state_dir.to_str().unwrap(),
+            "allowlist": [{"recipient": "测试联系人", "kind": "private"}]
+        });
+        fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-list".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        let out: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+        assert_eq!(
+            code,
+            0,
+            "stderr: {}, stdout: {:?}",
+            String::from_utf8_lossy(&stderr),
+            out
+        );
+        assert_eq!(out["ok"], true);
+
+        // 2. brain-save-role
+        use crate::core::brain_profiles::{AccountContext, legacy_seed};
+        let ctx = AccountContext::new("test-account".into()).unwrap();
+        let mut r = legacy_seed(&ctx, true, 1).unwrap();
+        r.role_id = "role_demo".into();
+        r.revision_id = "rev_1".into();
+        r.persona = "测试助手".into();
+        let r_val = serde_json::to_value(&r).unwrap();
+
+        let req_save = json!({
+            "expected_generation": 0,
+            "request_id": uuid::Uuid::new_v4().to_string(),
+            "role": r_val,
+        });
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-save-role".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+                "--request-json".into(),
+                req_save.to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        let out: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+        assert_eq!(
+            code,
+            0,
+            "stderr: {}, stdout: {:?}",
+            String::from_utf8_lossy(&stderr),
+            out
+        );
+        assert_eq!(out["ok"], true);
+        assert_eq!(out["data"]["role_id"], "role_demo");
+        assert_eq!(out["data"]["generation"], 1);
+
+        // 3. brain-get
+        let req_get = json!({
+            "role_id": "role_demo",
+        });
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-get".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+                "--request-json".into(),
+                req_get.to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        let out: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+        assert_eq!(code, 0);
+        assert_eq!(out["ok"], true);
+        assert_eq!(out["data"]["persona"], "测试助手");
+
+        // 4. brain-preview (assemble_only)
+        let req_preview = json!({
+            "role_id": "role_demo",
+            "execution": "assemble_only",
+            "input": {
+                "text": "你好",
+                "chat_kind": "private",
+                "files": [],
+                "images": [],
+                "failed": [],
+                "context": []
+            }
+        });
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-preview".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+                "--request-json".into(),
+                req_preview.to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        let out: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+        assert_eq!(code, 0);
+        assert_eq!(out["ok"], true);
+        assert_eq!(out["data"]["cost"]["incurred"], false);
+        assert!(
+            out["data"]["snapshot"]["compiled"]
+                .as_str()
+                .unwrap()
+                .contains("测试助手")
+        );
+
+        // 5. 跨账号拒绝
+        let req_cross = json!({
+            "account_id": "other-account",
+            "role_id": "role_demo",
+        });
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-get".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+                "--request-json".into(),
+                req_cross.to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        let out: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+        assert_eq!(code, 2);
+        assert_eq!(out["ok"], false);
+        assert_eq!(out["error"]["code"], "not_found");
+
+        // 6. 冲突返回 revision_conflict
+        let req_conflict = json!({
+            "expected_generation": 999,
+            "request_id": uuid::Uuid::new_v4().to_string(),
+            "role": r_val,
+        });
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-save-role".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+                "--request-json".into(),
+                req_conflict.to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        let out: Value = serde_json::from_slice(&stdout).unwrap_or(Value::Null);
+        assert_eq!(code, 2);
+        assert_eq!(out["ok"], false);
+        assert_eq!(out["error"]["code"], "revision_conflict");
+        assert_eq!(out["error"]["details"]["current_generation"], 1);
     }
 }

@@ -10,6 +10,7 @@ use crate::core::{
     external_brain::{ExternalBrain, StrictReply},
     history::{query::HistoryQuery, serve::constant_time_eq},
 };
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -590,6 +591,7 @@ fn valid_args(schema: &Value, args: &Value) -> bool {
         match prop["type"].as_str() {
             Some("string") if value.is_string() => {}
             Some("integer") if value.is_i64() || value.is_u64() => {}
+            Some("array") if value.is_array() => {}
             _ => return false,
         }
         if prop["enum"]
@@ -621,6 +623,94 @@ async fn call_tool(
     session: &str,
     access: BrainAccess,
 ) -> Value {
+    if name == "brain_negotiate" {
+        let versions = args
+            .get("versions")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let caps = args
+            .get("capabilities")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let has_v2 = versions.iter().any(|v| v.as_u64() == Some(2));
+        let has_v1 = versions.iter().any(|v| v.as_u64() == Some(1));
+        if !has_v2 && !has_v1 {
+            return business(
+                "invalid_arguments",
+                "unsupported version requested; supported versions are [1, 2]",
+            );
+        }
+        let selected_version = if has_v2 { 2u32 } else { 1u32 };
+        let supported_caps = ["snapshot_v1", "preview_isolation_v1"];
+        let agreed_caps: Vec<String> = caps
+            .iter()
+            .filter_map(|c| c.as_str())
+            .filter(|c| supported_caps.contains(c))
+            .map(|s| s.to_string())
+            .collect();
+
+        {
+            let mut sessions = state.sessions.lock().await;
+            if let Some(s) = sessions.active.as_mut().filter(|s| s.id == session) {
+                s.api_version = selected_version;
+                s.capabilities = agreed_caps.clone();
+            }
+        }
+
+        return tool_result(
+            json!({
+                "selected_version": selected_version,
+                "capabilities": agreed_caps,
+                "preview_enabled": false
+            }),
+            false,
+        );
+    }
+    if name == "brain_get_turn_detail" {
+        let turn_id = match args["turn_id"].as_str() {
+            Some(t) => t,
+            None => return business("invalid_arguments", "missing turn_id"),
+        };
+        let conn = match rusqlite::Connection::open_with_flags(
+            state.config.state_dir.join("history/history.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ) {
+            Ok(c) => c,
+            Err(e) => return business("internal", e),
+        };
+        let row: Result<(String, String, Option<String>, String, String), rusqlite::Error> = conn.query_row(
+            "SELECT contact_id, snapshot_json, decision_json, model_json, execution_json FROM brain_turns WHERE account_id = ? AND turn_id = ?",
+            rusqlite::params![access.account_id(), turn_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        );
+        return match row {
+            Ok((cid, snap, dec, model, exec)) => {
+                if !access.permit(&cid) {
+                    return business("not_found", "turn not found");
+                }
+                let snapshot: Value = serde_json::from_str(&snap).unwrap_or(Value::Null);
+                let decision: Option<Value> = dec.and_then(|d| serde_json::from_str(&d).ok());
+                let model_info: Value = serde_json::from_str(&model).unwrap_or_else(|_| json!({}));
+                let execution: Value = serde_json::from_str(&exec).unwrap_or_else(|_| json!({}));
+                tool_result(
+                    json!({
+                        "turn_id": turn_id,
+                        "contact_id": cid,
+                        "snapshot": snapshot,
+                        "decision": decision,
+                        "model": model_info,
+                        "execution": execution,
+                    }),
+                    false,
+                )
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => business("not_found", "turn not found"),
+            Err(e) => business("internal", e),
+        };
+    }
+
     let outcome = match name {
         "next_turn" => match state
             .brain
@@ -633,21 +723,50 @@ async fn call_tool(
         {
             Ok(None) => Ok(json!({"turn":null})),
             Ok(Some(claimed)) => {
+                let is_v2 = {
+                    let sessions = state.sessions.lock().await;
+                    sessions
+                        .active
+                        .as_ref()
+                        .map(|s| s.api_version == 2)
+                        .unwrap_or(false)
+                };
                 let converted = (|| -> anyhow::Result<Value> {
                     let conn = rusqlite::Connection::open_with_flags(
                         state.config.state_dir.join("history/history.sqlite3"),
                         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
                     )?;
                     let root = state.config.state_dir.join("history/media");
-                    Ok(turn_v1(
-                        &claimed.turn,
-                        &claimed.claim,
-                        &claimed.contact_id,
-                        &HistoryMediaLookup {
-                            conn: &conn,
-                            media_root: root,
-                        },
-                    ))
+                    let lookup = HistoryMediaLookup {
+                        conn: &conn,
+                        media_root: root,
+                    };
+                    if is_v2 {
+                        let snapshot_val: Option<String> = conn
+                            .query_row(
+                                "SELECT snapshot_json FROM brain_turns WHERE account_id = ? AND turn_id = ?",
+                                rusqlite::params![access.account_id(), claimed.turn.turn_id],
+                                |r| r.get(0),
+                            )
+                            .optional()?;
+                        let snapshot_json = snapshot_val
+                            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                            .unwrap_or(Value::Null);
+                        Ok(super::contract::turn_v2(
+                            &claimed.turn,
+                            &claimed.claim,
+                            &claimed.contact_id,
+                            &lookup,
+                            snapshot_json,
+                        ))
+                    } else {
+                        Ok(turn_v1(
+                            &claimed.turn,
+                            &claimed.claim,
+                            &claimed.contact_id,
+                            &lookup,
+                        ))
+                    }
                 })();
                 // Same envelope as the idle case, so clients read one field either way.
                 converted
@@ -656,19 +775,55 @@ async fn call_tool(
             }
             Err(e) => Err(e),
         },
-        "reply" => state
-            .brain
-            .reply_strict(
-                StrictReply {
-                    turn_id: args["turn_id"].as_str().unwrap().into(),
-                    claim_token: args["claim_token"].as_str().unwrap().into(),
-                    action: args["action"].as_str().unwrap().into(),
-                    text: args["text"].as_str().map(str::to_string),
-                },
-                &access,
-            )
-            .await
-            .map(|v| json!({"accepted":v.accepted,"duplicate":v.duplicate})),
+        "reply" => {
+            let is_v2 = {
+                let sessions = state.sessions.lock().await;
+                sessions
+                    .active
+                    .as_ref()
+                    .map(|s| s.api_version == 2)
+                    .unwrap_or(false)
+            };
+            if is_v2 {
+                if let Some(req_snap) = args.get("snapshot_id").and_then(|v| v.as_str()) {
+                    let turn_id = args["turn_id"].as_str().unwrap();
+                    let conn = rusqlite::Connection::open_with_flags(
+                        state.config.state_dir.join("history/history.sqlite3"),
+                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                    );
+                    if let Ok(conn) = conn {
+                        let actual_snap: rusqlite::Result<String> = conn.query_row(
+                            "SELECT snapshot_id FROM brain_turns WHERE account_id = ? AND turn_id = ?",
+                            rusqlite::params![access.account_id(), turn_id],
+                            |row| row.get(0),
+                        );
+                        if let Ok(actual_snap) = actual_snap {
+                            if actual_snap != req_snap {
+                                return business(
+                                    "snapshot_mismatch",
+                                    format!(
+                                        "snapshot_id mismatch: expected {actual_snap}, got {req_snap}"
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            state
+                .brain
+                .reply_strict(
+                    StrictReply {
+                        turn_id: args["turn_id"].as_str().unwrap().into(),
+                        claim_token: args["claim_token"].as_str().unwrap().into(),
+                        action: args["action"].as_str().unwrap().into(),
+                        text: args["text"].as_str().map(str::to_string),
+                    },
+                    &access,
+                )
+                .await
+                .map(|v| json!({"accepted":v.accepted,"duplicate":v.duplicate}))
+        }
         "get_turn_status" => {
             state
                 .brain
@@ -725,6 +880,8 @@ pub fn open_tool_names() -> Vec<&'static str> {
         "reply",
         "get_turn_status",
         "resume_session",
+        "brain_negotiate",
+        "brain_get_turn_detail",
         "history_list_contacts",
         "history_get_contact",
         "history_get_recent_messages",
@@ -743,7 +900,7 @@ fn open_tools() -> Vec<Value> {
         ),
         (
             "reply",
-            json!({"turn_id":{"type":"string"},"claim_token":{"type":"string"},"action":{"type":"string","enum":["send","skip","handoff"]},"text":{"type":"string"}}),
+            json!({"turn_id":{"type":"string"},"claim_token":{"type":"string"},"action":{"type":"string","enum":["send","skip","handoff"]},"text":{"type":"string"},"snapshot_id":{"type":"string"}}),
             json!(["turn_id", "claim_token", "action"]),
         ),
         (
@@ -755,6 +912,19 @@ fn open_tools() -> Vec<Value> {
             "resume_session",
             json!({"contact_id":{"type":"string"}}),
             json!(["contact_id"]),
+        ),
+        (
+            "brain_negotiate",
+            json!({
+                "versions": {"type": "array"},
+                "capabilities": {"type": "array"}
+            }),
+            json!(["versions"]),
+        ),
+        (
+            "brain_get_turn_detail",
+            json!({"turn_id":{"type":"string"}}),
+            json!(["turn_id"]),
         ),
     ];
     let mut tools:Vec<_>=definitions.into_iter().map(|(name,props,required)|json!({"name":name,"description":name,"inputSchema":{"type":"object","properties":props,"required":required,"additionalProperties":false}})).collect();
@@ -1101,7 +1271,7 @@ mod tests {
             .map(|v| v["name"].as_str().unwrap())
             .collect();
         assert_eq!(names, open_tool_names());
-        assert_eq!(names.len(), 11);
+        assert_eq!(names.len(), 13);
         assert!(!names.contains(&"send_message"));
         assert!(!names.contains(&"desktop_observe"));
     }
@@ -1376,6 +1546,74 @@ mod tests {
             t.call(&sid, "reply", json!({"turn_id":"x","action":"send"}))
                 .await["error"]["code"],
             -32602
+        );
+    }
+    #[tokio::test]
+    async fn negotiate_v2_and_capabilities() {
+        let t = TestServer::new(Duration::from_secs(90)).await;
+        let sid = t.init().await;
+
+        // 协商不支持的版本
+        let res = t
+            .call(&sid, "brain_negotiate", json!({"versions":[3]}))
+            .await;
+        assert!(res["result"]["structuredContent"]["error"]["code"] == "invalid_arguments");
+
+        // 协商 v2
+        let res = t
+            .call(
+                &sid,
+                "brain_negotiate",
+                json!({
+                    "versions": [1, 2],
+                    "capabilities": ["snapshot_v1", "preview_isolation_v1", "unknown_cap"]
+                }),
+            )
+            .await;
+        let data = &res["result"]["structuredContent"];
+        assert_eq!(data["selected_version"], 2);
+        assert_eq!(
+            data["capabilities"],
+            json!(["snapshot_v1", "preview_isolation_v1"])
+        );
+        assert_eq!(data["preview_enabled"], false);
+    }
+    #[tokio::test]
+    async fn get_turn_detail_and_access_control() {
+        let t = TestServer::new(Duration::from_secs(90)).await;
+        let sid = t.init().await;
+
+        // 插入一条测试的 brain_turns 记录
+        t.fixture.conn.execute(
+            "INSERT INTO brain_turns(account_id, turn_id, contact_id, snapshot_id, snapshot_json, input_message_ids, observation_json, decision_json, model_json, execution_json, created_at, updated_at)
+             VALUES('A', 'turn_test_1', 'allowed', 'snap_1', '{\"schema_version\":1}', '[]', '{}', '{\"action\":\"send\"}', '{}', '{\"phase\":\"triggered\"}', 100, 100)",
+            [],
+        ).unwrap();
+
+        // 成功获取
+        let res = t
+            .call(
+                &sid,
+                "brain_get_turn_detail",
+                json!({"turn_id":"turn_test_1"}),
+            )
+            .await;
+        let detail = &res["result"]["structuredContent"];
+        assert_eq!(detail["turn_id"], "turn_test_1");
+        assert_eq!(detail["contact_id"], "allowed");
+        assert_eq!(detail["snapshot"]["schema_version"], 1);
+
+        // 未知 turn 返回 not_found
+        let res = t
+            .call(
+                &sid,
+                "brain_get_turn_detail",
+                json!({"turn_id":"unknown_turn"}),
+            )
+            .await;
+        assert_eq!(
+            res["result"]["structuredContent"]["error"]["code"],
+            "not_found"
         );
     }
 }
