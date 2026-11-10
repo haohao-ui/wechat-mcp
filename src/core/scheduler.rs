@@ -915,6 +915,7 @@ impl BotCoordinator {
         let marker = child.root.join("routing-disabled.json");
         if marker.exists() {
             child.cursor = None;
+            let _ = fs::remove_file(child.root.join("baseline-established.json"));
         }
 
         let connect_res = self.connect(&recipient).await;
@@ -1139,7 +1140,9 @@ impl BotCoordinator {
         Ok(())
     }
 
-    /// Whether this chat already has a reply baseline (persisted cursor with bubbles).
+    /// Whether this chat already has a reply baseline. A chat with no messages keeps an empty
+    /// cursor, so the marker written on its first baseline pass is what makes "once per chat ever"
+    /// hold; without it an empty chat was reopened on every sweep.
     fn has_baseline(
         &mut self,
         name: &str,
@@ -1148,11 +1151,12 @@ impl BotCoordinator {
         let Some(entry) = entries.get(name) else {
             return Ok(true);
         };
-        Ok(self
-            .session(entry)?
+        let child = self.session(entry)?;
+        Ok(child
             .cursor
             .as_ref()
-            .is_some_and(|c| !c.bubbles.is_empty()))
+            .is_some_and(|c| !c.bubbles.is_empty())
+            || child.root.join("baseline-established.json").exists())
     }
 
     pub async fn due_sessions(&mut self, names: &[String]) -> Result<HashSet<String>> {
@@ -3518,6 +3522,62 @@ mod tests {
     #[test]
     fn no_periodic_idle_visit() {
         assert!(!due_after_restart(0, 100_000.0, true));
+    }
+
+    /// An empty chat has no bubbles for the cursor to remember; the marker written on its first
+    /// baseline pass stops the coordinator from reopening it every sweep.
+    fn empty_chat_due(marker: bool) -> bool {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry {
+            recipient: "c".to_string(),
+            kind: "private".to_string(),
+            aliases: None,
+        }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let mut cap = MockCoordinatorCapture::new();
+        cap.rows = vec![SessionRow {
+            name: "c".to_string(),
+            preview_digest: "d1".to_string(),
+            preview_key: Some("k1".to_string()),
+            preview_time: Some("12:00".to_string()),
+            red_pixels: 0,
+            y: 100,
+        }];
+        coord.capture = Some(Box::new(cap));
+        let entry = AllowlistEntry {
+            recipient: "c".to_string(),
+            kind: "private".to_string(),
+            aliases: None,
+        };
+        let child = coord.session(&entry).unwrap();
+        child.cursor = Some(test_frame(Vec::new(), "empty"));
+        if marker {
+            fs::write(child.root.join("baseline-established.json"), b"{}").unwrap();
+        }
+        coord.list_state.insert(
+            "c".to_string(),
+            ListState {
+                digest: Some("d1".to_string()),
+                key: Some("k1".to_string()),
+                time: Some("12:00".to_string()),
+                min_red: 0,
+                left: false,
+            },
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async { coord.due_sessions(&["c".to_string()]).await.unwrap() })
+            .contains("c")
+    }
+
+    #[test]
+    fn empty_chat_with_established_baseline_is_not_reopened_every_sweep() {
+        assert!(!empty_chat_due(true));
+    }
+
+    #[test]
+    fn empty_chat_without_marker_still_gets_its_first_baseline() {
+        assert!(empty_chat_due(false));
     }
 
     #[test]
