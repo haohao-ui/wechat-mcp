@@ -39,8 +39,8 @@ use crate::core::delivery::{EchoOutcome, ToolClient, is_not_sent};
 use crate::core::history::store::{HistoryStore, similar};
 use crate::core::model::{Bubble, Frame};
 use crate::core::policy::{
-    ContinuityError, Fingerprint, Policy, content_keyed, echo_matches, fingerprint, merge_pages,
-    new_bubbles, reconcile, relocate, separator_tail, strip_member_count, validate_reply,
+    ContinuityError, Fingerprint, Policy, echo_matches, fingerprint, merge_pages, new_bubbles,
+    reconcile, relocate, separator_tail, strip_member_count, validate_reply,
 };
 use crate::core::state::{read_json, write_private};
 use crate::core::worker_client::action_interrupted;
@@ -66,6 +66,10 @@ pub const MAX_MODEL_IMAGE_BYTES: u64 = 30 * 1024 * 1024;
 /// 原来的 5 格（约 450 点）连 3 张图都翻不过去，多图会被整批当历史跳过（2026-11-08 实机）。
 /// 找到衔接点就停，平时不会多滚。
 pub const GAP_SCROLL_PAGES: u32 = 24;
+
+/// Similarity needed to call two OCR readings of the same line the same bubble when the theme
+/// changed and pixels cannot be compared.
+const CONTENT_SIMILARITY: f64 = 0.85;
 
 fn to_hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -237,25 +241,68 @@ pub struct BotService {
 /// sequences are keyed by content, and the real bubbles of the arrival suffix are returned. `None`
 /// means the content did not anchor on what was already seen, so the caller must not guess.
 fn content_arrivals(previous: &[Bubble], current: &[Bubble]) -> Option<Vec<Bubble>> {
+    let mut anchor = 0usize;
+    for k in (1..=previous.len().min(current.len())).rev() {
+        if previous[previous.len() - k..]
+            .iter()
+            .zip(&current[..k])
+            .all(|(old, new)| same_content(old, new))
+        {
+            anchor = k;
+            break;
+        }
+    }
+    if anchor == 0 {
+        return None;
+    }
     let visible: Vec<Bubble> = current
         .iter()
         .filter(|b| b.kind.as_deref() != Some("voice_transcript"))
         .cloned()
         .collect();
-    let keyed_previous = content_keyed(previous);
-    let keyed_current = content_keyed(current);
-    let arrivals = match new_bubbles(&keyed_previous, &keyed_current) {
-        Ok(changes) => changes.len(),
-        Err(ContinuityError::AmbiguousAnchor { certain }) => certain.len(),
-        Err(_) => return None,
-    };
+    // Everything after the anchor is new; transcripts are evidence, never messages of their own.
+    let arrivals = current[anchor..]
+        .iter()
+        .filter(|b| b.kind.as_deref() != Some("voice_transcript"))
+        .count();
     if arrivals == 0 {
         return Some(Vec::new());
     }
-    // `new_bubbles` hands back a stripped suffix of `current`; the matching suffix of `visible` keeps
-    // the real bubbles (digest, media id) that the turn and its attachments need.
     let start = visible.len().checked_sub(arrivals)?;
     Some(visible[start..].to_vec())
+}
+
+/// Whether two bubbles say the same thing. The theme only changes the pixels, and OCR reads the
+/// same line slightly differently from capture to capture ("抱歉" vs "抱歎" on device 2026-11-10),
+/// so words are compared with tolerance. Images and files keep their theme-independent digest.
+fn same_content(old: &Bubble, new: &Bubble) -> bool {
+    if old.direction != new.direction {
+        return false;
+    }
+    let visual = |b: &Bubble| matches!(b.kind.as_deref(), Some("image" | "file"));
+    if visual(old) != visual(new) {
+        return false;
+    }
+    if visual(old) {
+        return old.digest == new.digest;
+    }
+    if let (Some(a), Some(b)) = (
+        old.extra.get("time_label").and_then(Value::as_str),
+        new.extra.get("time_label").and_then(Value::as_str),
+    ) {
+        if a != b {
+            return false;
+        }
+    }
+    let compact = |text: &str| -> String {
+        text.split_whitespace().collect::<Vec<_>>().join("")
+    };
+    let (a, b) = (compact(&old.text), compact(&new.text));
+    // Short lines differ by one character the moment they mean something else; no fuzzy match there.
+    if a.chars().count() < 8 || b.chars().count() < 8 {
+        return a == b;
+    }
+    similar(&old.text, &new.text, CONTENT_SIMILARITY)
 }
 
 impl BotService {
@@ -1561,9 +1608,30 @@ impl BotService {
                     }
                 };
 
-                if let Some(un) = unseen {
-                    if !un.iter().any(|b| b.direction == "inbound_visual") {
-                        self.advance(after)?;
+                match unseen {
+                    Some(un) => {
+                        if !un.iter().any(|b| b.direction == "inbound_visual") {
+                            self.advance(after)?;
+                        }
+                    }
+                    None => {
+                        // Our own bubble and a transcript landing shifted the view so far that it no
+                        // longer reconciles. If the newest message is still our reply, nothing visible
+                        // can be waiting for an answer: adopt the view instead of leaving a stale
+                        // cursor, which made the next cycle scroll up to 24 history pages (device
+                        // 2026-11-10 22:17) and rebaseline whatever arrived meanwhile.
+                        let newest = after
+                            .bubbles
+                            .iter()
+                            .rev()
+                            .find(|b| b.kind.as_deref() != Some("voice_transcript"));
+                        if newest.is_some_and(|b| b.direction == "outbound_visual") {
+                            tracing::warn!(
+                                recipient = %self.recipient,
+                                "post_send_baseline_refreshed"
+                            );
+                            self.advance(after)?;
+                        }
                     }
                 }
                 let mut d = Map::new();
@@ -4729,6 +4797,127 @@ mod tests {
         );
         let health: Value = read_json(svc.root.join("health.json")).unwrap();
         assert_eq!(health["state"], "watching");
+    }
+
+    #[tokio::test]
+    async fn test_service_theme_change_tolerates_ocr_drift_in_the_baseline() {
+        // Device 2026-11-10 22:16: the same apology line was read as 抱歉 in the dark cursor and as
+        // 抱歎 after the light repaint; exact content equality missed the anchor, the repaint was
+        // rebaselined, and the voice that had just arrived was never answered.
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        let seen_prompt = Arc::new(Mutex::new(String::new()));
+        let sp = seen_prompt.clone();
+        svc.brain = Some(Arc::new(move |turn| {
+            *sp.lock().unwrap() = turn.text.clone();
+            Box::pin(async {
+                Ok(BrainReply {
+                    reply: "收到语音了。".to_string(),
+                    metadata: HashMap::new(),
+                })
+            })
+        }));
+
+        let mut cursor = test_frame(
+            vec![
+                test_bubble(
+                    "抱歉，我这边没有收到之前那条语音的文字转写，也不能凭猜测编内容。",
+                    "inbound_visual",
+                ),
+                test_bubble("重新看我发的语音", "inbound_visual"),
+                test_bubble(
+                    "抱歉，我这边没有收到之前那条语音的文字转写，也不能凭猜测编内容。",
+                    "outbound_visual",
+                ),
+            ],
+            "示例联系人甲",
+        );
+        cursor.profile = Some("wechat-4-light".to_string());
+        svc.advance(cursor).unwrap();
+
+        let current = test_frame(
+            vec![
+                test_bubble(
+                    "抱歎，我这边没有收到之前那条语音的文字转写，也不能凭猜测编内容。",
+                    "inbound_visual",
+                ),
+                test_bubble("重新看我发的语音", "inbound_visual"),
+                test_bubble(
+                    "抱歎，我这边没有收到之前那条语音的文字转写，也不能凭猜测编内容。",
+                    "outbound_visual",
+                ),
+                test_voice(3, "dark-voice-3s"),
+            ],
+            "示例联系人甲",
+        );
+
+        let mut cap = MockCapture::new(vec![current.clone(); 6]);
+        cap.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
+
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        assert!(cap.scroll_calls.lock().unwrap().is_empty());
+        assert_eq!(*seen_prompt.lock().unwrap(), "[语音3秒]");
+        let sends: Vec<_> = client
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| name == "send_message")
+            .cloned()
+            .collect();
+        assert_eq!(sends.len(), 1, "OCR drift must not turn the arrival into history");
+        let health: Value = read_json(svc.root.join("health.json")).unwrap();
+        assert_eq!(health["state"], "watching");
+    }
+
+    #[tokio::test]
+    async fn test_service_post_send_unreconciled_view_refreshes_the_baseline() {
+        // Our own reply and a transcript can shift the view past what `confirmed` showed. The old
+        // cursor then made the next cycle scroll 24 history pages; when the newest message is still our
+        // own reply, the view cannot hold an unanswered message, so it becomes the baseline.
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        svc.brain = Some(default_brain("收到。"));
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "示例联系人甲");
+        svc.advance(old).unwrap();
+
+        let current = test_frame(
+            vec![
+                test_bubble("old", "inbound_visual"),
+                test_bubble("在吗", "inbound_visual"),
+            ],
+            "示例联系人甲",
+        );
+        let after = test_frame(
+            vec![test_bubble("收到。", "outbound_visual")],
+            "示例联系人甲",
+        );
+
+        let mut cap = MockCapture::new(vec![
+            current.clone(),
+            current.clone(),
+            current.clone(),
+            current.clone(),
+            after.clone(),
+        ]);
+        cap.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
+
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        assert!(cap.scroll_calls.lock().unwrap().is_empty());
+        assert_eq!(
+            svc.cursor.as_ref().map(|c| c.bubbles.clone()),
+            Some(after.bubbles.clone()),
+            "the unreconciled view ending on our reply becomes the baseline"
+        );
     }
 
     #[tokio::test]
