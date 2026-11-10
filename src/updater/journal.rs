@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -159,15 +159,21 @@ pub fn sync_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// 写入或核对持久 highest_accepted_sequence
-pub fn load_highest_accepted_sequence(state_dir: &Path) -> u64 {
+/// 写入或核对持久 highest_accepted_sequence。文件损坏时严格返回 Err，禁止静默重置为 0。
+pub fn load_highest_accepted_sequence(state_dir: &Path) -> Result<u64> {
     let seq_path = state_dir.join("highest_accepted_sequence");
-    if let Ok(content) = fs::read_to_string(seq_path) {
-        if let Ok(val) = content.trim().parse::<u64>() {
-            return val;
-        }
+    if !seq_path.exists() {
+        return Ok(0);
     }
-    0
+    let content = fs::read_to_string(&seq_path)?;
+    match content.trim().parse::<u64>() {
+        Ok(val) => Ok(val),
+        Err(e) => bail!(
+            "corrupt_highest_accepted_sequence_file: '{}' ({})",
+            seq_path.display(),
+            e
+        ),
+    }
 }
 
 pub fn save_highest_accepted_sequence(state_dir: &Path, seq: u64) -> Result<()> {

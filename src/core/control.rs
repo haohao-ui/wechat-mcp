@@ -2222,39 +2222,59 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                 Err(_) => base.join("state"),
             };
 
-            let journal = crate::updater::journal::UpdateJournal::load_from_state(&state_dir)
-                .ok()
-                .flatten();
-            let highest_seq = crate::updater::journal::load_highest_accepted_sequence(&state_dir);
+            let journal_res = crate::updater::journal::UpdateJournal::load_from_state(&state_dir);
+            let (journal, journal_err) = match journal_res {
+                Ok(j) => (j, None),
+                Err(e) => (None, Some(format!("corrupt_or_unreadable_journal: {e}"))),
+            };
+
+            let seq_res = crate::updater::journal::load_highest_accepted_sequence(&state_dir);
+            let (highest_seq_val, seq_err) = match seq_res {
+                Ok(s) => (json!(s), None),
+                Err(e) => (Value::Null, Some(format!("corrupt_sequence_file: {e}"))),
+            };
+
             let maintenance_active = state_dir.join("core.maintenance").exists();
 
-            let (tx_status, tx_id, tx_stage, tx_err, rec_req) = match &journal {
-                None => ("idle", None, None, None, false),
-                Some(j) => {
-                    let s = match j.stage {
-                        crate::updater::journal::TransactionStage::Committed => "committed",
-                        crate::updater::journal::TransactionStage::RolledBack => "rolled_back",
-                        crate::updater::journal::TransactionStage::RecoveryRequired => {
-                            "recovery_required"
-                        }
-                        _ => "in_progress",
-                    };
-                    (
-                        s,
-                        Some(j.transaction_id.clone()),
-                        Some(format!("{:?}", j.stage)),
-                        j.error.clone(),
-                        j.stage == crate::updater::journal::TransactionStage::RecoveryRequired,
-                    )
+            let (tx_status, tx_id, tx_stage, tx_err, rec_req) = if journal_err.is_some()
+                || seq_err.is_some()
+            {
+                (
+                    "recovery_required",
+                    None,
+                    None,
+                    journal_err.or(seq_err),
+                    true,
+                )
+            } else {
+                match &journal {
+                    None => ("idle", None, None, None, false),
+                    Some(j) => {
+                        let s = match j.stage {
+                            crate::updater::journal::TransactionStage::Committed => "committed",
+                            crate::updater::journal::TransactionStage::RolledBack => "rolled_back",
+                            crate::updater::journal::TransactionStage::RecoveryRequired => {
+                                "recovery_required"
+                            }
+                            _ => "in_progress",
+                        };
+                        (
+                            s,
+                            Some(j.transaction_id.clone()),
+                            Some(format!("{:?}", j.stage)),
+                            j.error.clone(),
+                            j.stage == crate::updater::journal::TransactionStage::RecoveryRequired,
+                        )
+                    }
                 }
             };
 
             let out_obj = json!({
                 "current_release": {
                     "release_id": format!("{}-{}", env!("CARGO_PKG_VERSION"), std::env::consts::ARCH),
-                    "sequence": highest_seq,
+                    "sequence": highest_seq_val,
                     "architecture": std::env::consts::ARCH,
-                    "components_consistent": true
+                    "components_consistent": Value::Null
                 },
                 "candidate_release": journal.as_ref().map(|j| json!({
                     "release_id": j.target_release_id,
@@ -2268,7 +2288,7 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                     "recovery_required": rec_req
                 },
                 "guard": {
-                    "highest_accepted_sequence": highest_seq,
+                    "highest_accepted_sequence": highest_seq_val,
                     "maintenance_active": maintenance_active
                 }
             });
@@ -2283,6 +2303,7 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
         "update-check" => {
             let mut config_file: Option<PathBuf> = None;
             let mut manifest_file: Option<PathBuf> = None;
+            let mut test_pubkey_hex: Option<String> = None;
             let mut idx = 1;
             while idx < args.len() {
                 if args[idx] == "--config" && idx + 1 < args.len() {
@@ -2290,6 +2311,9 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                     idx += 2;
                 } else if args[idx] == "--manifest" && idx + 1 < args.len() {
                     manifest_file = Some(PathBuf::from(&args[idx + 1]));
+                    idx += 2;
+                } else if args[idx] == "--test-pubkey-hex" && idx + 1 < args.len() {
+                    test_pubkey_hex = Some(args[idx + 1].clone());
                     idx += 2;
                 } else {
                     idx += 1;
@@ -2350,7 +2374,69 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                     }
                 };
 
-            let highest_seq = crate::updater::journal::load_highest_accepted_sequence(&state_dir);
+            let highest_seq = match crate::updater::journal::load_highest_accepted_sequence(
+                &state_dir,
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    let out_obj = json!({
+                        "status": "incompatible",
+                        "reason": format!("cannot check update with corrupt sequence file: {e}"),
+                        "candidate": null
+                    });
+                    let _ = writeln!(
+                        stdout,
+                        "{}",
+                        serde_json::to_string_pretty(&out_obj).unwrap_or_default()
+                    );
+                    return 1;
+                }
+            };
+
+            // 识别同 sequence 幂等已安装
+            if envelope.manifest.sequence == highest_seq {
+                let out_obj = json!({
+                    "status": "already_installed",
+                    "reason": "candidate sequence matches current installed sequence",
+                    "candidate": {
+                        "release_id": envelope.manifest.release_id,
+                        "sequence": envelope.manifest.sequence
+                    }
+                });
+                let _ = writeln!(
+                    stdout,
+                    "{}",
+                    serde_json::to_string_pretty(&out_obj).unwrap_or_default()
+                );
+                return 0;
+            }
+
+            // 验签检查：生产未定信任根，无注入测试公钥时不能假装 verified
+            let verified = if let Some(ref hex_key) = test_pubkey_hex {
+                let s = hex_key.trim();
+                let mut b = Vec::new();
+                let mut ok = s.len() % 2 == 0;
+                if ok {
+                    for i in (0..s.len()).step_by(2) {
+                        if let Ok(byte) = u8::from_str_radix(&s[i..i + 2], 16) {
+                            b.push(byte);
+                        } else {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if ok {
+                    let store = crate::updater::manifest::TrustedKeyStore::new()
+                        .with_key(&envelope.key_id, &b);
+                    store.verify_envelope(&envelope).is_ok()
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
             match crate::updater::manifest::validate_manifest_compatibility(
                 &envelope.manifest,
                 std::env::consts::ARCH,
@@ -2359,7 +2445,7 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
             ) {
                 Ok(()) => {
                     let out_obj = json!({
-                        "status": "available",
+                        "status": if verified { "available" } else { "unverified_trust_root" },
                         "candidate": {
                             "release_id": envelope.manifest.release_id,
                             "sequence": envelope.manifest.sequence,
@@ -2370,7 +2456,7 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
                             "requires_local_signing": true
                         },
                         "verification": {
-                            "publisher_verified": true,
+                            "publisher_verified": verified,
                             "key_id": envelope.key_id
                         }
                     });

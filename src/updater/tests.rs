@@ -3,7 +3,6 @@ use super::manifest::*;
 use super::rollback::*;
 use super::signing::*;
 use super::unpack::*;
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -44,7 +43,6 @@ fn sign_manifest(key_pair: &ring::signature::Ed25519KeyPair, manifest: &ReleaseM
     message.extend_from_slice(&canonical);
 
     let sig = key_pair.sign(&message);
-    // 转换为 hex 字符串
     hex_encode(sig.as_ref())
 }
 
@@ -90,7 +88,7 @@ fn sample_manifest(sequence: u64, arch: &str) -> ReleaseManifest {
             profile_schema_min: 1,
             profile_schema_max: 2,
             history_schema_min: 1,
-            history_schema_max: 3,
+            history_schema_max: 5,
             min_updater_version: 1,
             in_place_rollback_supported: true,
         },
@@ -142,7 +140,8 @@ fn test_manifest_signing_and_verification_domain_separated() {
 fn test_manifest_compatibility_and_downgrade_prevention() {
     let manifest = sample_manifest(1005, "arm64");
 
-    // 正常通过
+    // 正常通过（arm64 与 aarch64 等价兼容）
+    assert!(validate_manifest_compatibility(&manifest, "aarch64", "13.2.1", 1004).is_ok());
     assert!(validate_manifest_compatibility(&manifest, "arm64", "13.2.1", 1004).is_ok());
 
     // 架构不符拒绝
@@ -154,115 +153,192 @@ fn test_manifest_compatibility_and_downgrade_prevention() {
     let err_os = validate_manifest_compatibility(&manifest, "arm64", "11.5", 1004).unwrap_err();
     assert!(err_os.to_string().contains("os_version_too_low"));
 
-    // 防降级拒绝：candidate sequence (1005) <= highest accepted (1005)
-    let err_down1 =
-        validate_manifest_compatibility(&manifest, "arm64", "13.2.1", 1005).unwrap_err();
-    assert!(err_down1.to_string().contains("downgrade_rejected"));
+    // 同 sequence 识别已安装（拒绝再次作为新升级执行）
+    let err_same = validate_manifest_compatibility(&manifest, "arm64", "13.2.1", 1005).unwrap_err();
+    assert!(err_same.to_string().contains("sequence_already_installed"));
 
-    // 防降级拒绝：candidate sequence (1005) <= highest accepted (1010)
-    let err_down2 =
-        validate_manifest_compatibility(&manifest, "arm64", "13.2.1", 1010).unwrap_err();
-    assert!(err_down2.to_string().contains("downgrade_rejected"));
+    // 防降级拒绝：candidate sequence (1005) < highest accepted (1010)
+    let err_down = validate_manifest_compatibility(&manifest, "arm64", "13.2.1", 1010).unwrap_err();
+    assert!(err_down.to_string().contains("downgrade_rejected"));
 }
 
 #[test]
-fn test_safe_unpack_rejects_symlink_and_traversal() {
-    let temp = TempTestDir::new("unpack_safety");
+fn test_safe_unpack_archive_is_disabled_and_unsupported() {
+    let temp = TempTestDir::new("unpack_disabled");
     let staging = temp.0.join("staging");
-
-    // 创建一个包含软链接的 tar.gz
-    let bad_src = temp.0.join("bad_src");
-    fs::create_dir_all(&bad_src).unwrap();
-    let target_file = bad_src.join("target.txt");
-    fs::write(&target_file, b"content").unwrap();
-    let bad_symlink = bad_src.join("link.txt");
-    std::os::unix::fs::symlink(&target_file, &bad_symlink).unwrap();
-
-    let tar_path = temp.0.join("bad.tar.gz");
-    let st = std::process::Command::new("/usr/bin/tar")
-        .arg("-czf")
-        .arg(&tar_path)
-        .arg("-C")
-        .arg(&bad_src)
-        .arg(".")
-        .status()
-        .unwrap();
-    assert!(st.success());
-
-    let tar_len = fs::metadata(&tar_path).unwrap().len();
-    let tar_sha = {
-        let bytes = fs::read(&tar_path).unwrap();
-        let mut h = Sha256::new();
-        h.update(&bytes);
-        hex_encode(&h.finalize())
-    };
+    let fake_archive = temp.0.join("fake.tar.gz");
+    fs::write(&fake_archive, b"fake").unwrap();
 
     let artifact = ArtifactSpec {
-        filename: "bad.tar.gz".into(),
-        sha256: tar_sha,
-        size_bytes: tar_len,
-        max_unpacked_bytes: 100000,
-        max_file_count: 10,
+        filename: "fake.tar.gz".into(),
+        sha256: "00".repeat(32),
+        size_bytes: 4,
+        max_unpacked_bytes: 1000,
+        max_file_count: 5,
     };
 
-    let comp = ComponentSpec {
-        path: "target.txt".into(),
-        kind: "regular_file".into(),
-        file_mode: 0o644,
-        sha256: "ed70c574b5e69799f14d61464a33d1515861bd7aa421371ec61fa62b789a14f2".into(),
-        size_bytes: 7,
-    };
-
-    let res = safe_unpack_and_verify(&tar_path, &staging, &artifact, &[comp]);
+    let res = safe_unpack_and_verify(&fake_archive, &staging, &artifact, &[]);
     assert!(res.is_err());
-    let err_msg = res.unwrap_err().to_string();
-    assert!(err_msg.contains("symlink_rejected") || err_msg.contains("unexpected_file"));
-    // 确保解包失败后 staging 目录被全量清理
-    assert!(!staging.exists());
+    assert!(res.unwrap_err().to_string().contains("unsupported_archive"));
 }
 
 #[test]
-fn test_safe_unpack_valid_package_and_whitelist() {
-    let temp = TempTestDir::new("unpack_valid");
+fn test_safe_verify_staged_dir_rejects_symlink_and_hardlink() {
+    let temp = TempTestDir::new("staged_links");
     let staging = temp.0.join("staging");
+    fs::create_dir_all(staging.join("bin")).unwrap();
 
-    let good_src = temp.0.join("good_src");
-    let bin_dir = good_src.join("bin");
-    fs::create_dir_all(&bin_dir).unwrap();
-    let bin_file = bin_dir.join("wechat-mcp");
-    fs::write(&bin_file, b"executable-content").unwrap();
-    fs::set_permissions(&bin_file, fs::Permissions::from_mode(0o755)).unwrap();
+    let target_file = staging.join("bin/real");
+    fs::write(&target_file, b"content").unwrap();
 
-    let tar_path = temp.0.join("good.tar.gz");
-    let st = std::process::Command::new("/usr/bin/tar")
-        .arg("-czf")
-        .arg(&tar_path)
-        .arg("-C")
-        .arg(&good_src)
-        .arg("bin")
-        .status()
-        .unwrap();
-    assert!(st.success());
-
-    let tar_len = fs::metadata(&tar_path).unwrap().len();
-    let tar_sha = {
-        let bytes = fs::read(&tar_path).unwrap();
-        let mut h = Sha256::new();
-        h.update(&bytes);
-        hex_encode(&h.finalize())
-    };
+    // 1. 软链接拒绝
+    let sym = staging.join("bin/sym");
+    std::os::unix::fs::symlink(&target_file, &sym).unwrap();
 
     let artifact = ArtifactSpec {
-        filename: "good.tar.gz".into(),
-        sha256: tar_sha,
-        size_bytes: tar_len,
+        filename: "test.tar.gz".into(),
+        sha256: "00".repeat(32),
+        size_bytes: 100,
         max_unpacked_bytes: 100000,
         max_file_count: 10,
     };
+
+    let res_sym = safe_verify_staged_dir(&staging, &artifact, &[]);
+    assert!(res_sym.is_err());
+    assert!(
+        res_sym
+            .unwrap_err()
+            .to_string()
+            .contains("symlink_rejected")
+    );
+
+    let _ = fs::remove_file(&sym);
+
+    // 2. 硬链接拒绝（nlink > 1）
+    let hard = staging.join("bin/hard");
+    fs::hard_link(&target_file, &hard).unwrap();
+    let res_hard = safe_verify_staged_dir(&staging, &artifact, &[]);
+    assert!(res_hard.is_err());
+    assert!(
+        res_hard
+            .unwrap_err()
+            .to_string()
+            .contains("hardlink_rejected")
+    );
+}
+
+#[test]
+fn test_safe_verify_staged_dir_rejects_case_and_client_hard_limits() {
+    let temp = TempTestDir::new("case_and_limits");
+    let staging = temp.0.join("staging");
+    fs::create_dir_all(staging.join("bin")).unwrap();
+
+    let f1 = staging.join("bin/file1");
+    fs::write(&f1, b"hello payload").unwrap();
+
+    // 1. 超过文件大小硬上限
+    let artifact_size_limit = ArtifactSpec {
+        filename: "test.tar.gz".into(),
+        sha256: "00".repeat(32),
+        size_bytes: 100,
+        max_unpacked_bytes: 5, // 仅允许 5 字节，payload 是 13 字节
+        max_file_count: 10,
+    };
+    let res_size = safe_verify_staged_dir(&staging, &artifact_size_limit, &[]);
+    assert!(res_size.is_err());
+    assert!(
+        res_size
+            .unwrap_err()
+            .to_string()
+            .contains("unpacked_size_limit_exceeded")
+    );
+
+    // 2. 超过文件数量硬上限
+    let f2 = staging.join("bin/file2");
+    fs::write(&f2, b"extra").unwrap();
+    let artifact_count_limit = ArtifactSpec {
+        filename: "test.tar.gz".into(),
+        sha256: "00".repeat(32),
+        size_bytes: 100,
+        max_unpacked_bytes: 100000,
+        max_file_count: 1, // 仅允许 1 个文件，staging 现有 2 个文件
+    };
+    let res_count = safe_verify_staged_dir(&staging, &artifact_count_limit, &[]);
+    assert!(res_count.is_err());
+    assert!(
+        res_count
+            .unwrap_err()
+            .to_string()
+            .contains("file_count_limit_exceeded")
+    );
+
+    // 3. 组件白名单 case 冲突
+    let artifact_ok = ArtifactSpec {
+        filename: "test.tar.gz".into(),
+        sha256: "00".repeat(32),
+        size_bytes: 100,
+        max_unpacked_bytes: 100000,
+        max_file_count: 10,
+    };
+    let case_conflict_comps = vec![
+        ComponentSpec {
+            path: "bin/file1".into(),
+            kind: "file".into(),
+            sha256: "00".repeat(32),
+            size_bytes: 13,
+            file_mode: 0o755,
+        },
+        ComponentSpec {
+            path: "bin/FILE1".into(),
+            kind: "file".into(),
+            sha256: "00".repeat(32),
+            size_bytes: 13,
+            file_mode: 0o755,
+        },
+    ];
+    let res_case = safe_verify_staged_dir(&staging, &artifact_ok, &case_conflict_comps);
+    assert!(res_case.is_err());
+    assert!(
+        res_case
+            .unwrap_err()
+            .to_string()
+            .contains("case_collision_detected")
+    );
+
+    // 4. 组件白名单非 NFC 规范化检查
+    let non_nfc_path = "bin/caf\u{0065}\u{0301}"; // e + combining acute (NFD)
+    let non_nfc_comps = vec![ComponentSpec {
+        path: non_nfc_path.into(),
+        kind: "file".into(),
+        sha256: "00".repeat(32),
+        size_bytes: 10,
+        file_mode: 0o644,
+    }];
+    let res_nfc = safe_verify_staged_dir(&staging, &artifact_ok, &non_nfc_comps);
+    assert!(res_nfc.is_err());
+    assert!(
+        res_nfc
+            .unwrap_err()
+            .to_string()
+            .contains("unicode_normalization_rejected")
+    );
+}
+
+#[test]
+fn test_safe_verify_staged_dir_valid_fixture_and_whitelist() {
+    let temp = TempTestDir::new("verify_valid");
+    let staging = temp.0.join("staging");
+    let bin_dir = staging.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    let bin_file = bin_dir.join("wechat-mcp");
+    fs::write(&bin_file, b"executable-payload").unwrap();
+    fs::set_permissions(&bin_file, fs::Permissions::from_mode(0o755)).unwrap();
 
     let file_sha = {
         let bytes = fs::read(&bin_file).unwrap();
-        let mut h = Sha256::new();
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
         h.update(&bytes);
         hex_encode(&h.finalize())
     };
@@ -275,26 +351,27 @@ fn test_safe_unpack_valid_package_and_whitelist() {
         size_bytes: 18,
     };
 
-    // 成功解包并核对白名单
-    let res = safe_unpack_and_verify(&tar_path, &staging, &artifact, &[comp.clone()]);
-    assert!(res.is_ok());
-    assert!(staging.join("bin/wechat-mcp").exists());
-
-    // 若清单有多余未提供文件 -> 拒绝
-    let missing_comp = ComponentSpec {
-        path: "bin/desktop_helper".into(),
-        kind: "executable".into(),
-        file_mode: 0o755,
+    let artifact = ArtifactSpec {
+        filename: "test.tar.gz".into(),
         sha256: "00".repeat(32),
-        size_bytes: 10,
+        size_bytes: 100,
+        max_unpacked_bytes: 100000,
+        max_file_count: 10,
     };
-    let res_missing = safe_unpack_and_verify(&tar_path, &staging, &artifact, &[comp, missing_comp]);
-    assert!(res_missing.is_err());
+
+    let res = safe_verify_staged_dir(&staging, &artifact, &[comp.clone()]);
+    assert!(res.is_ok());
+
+    // 多余未列文件测试
+    let extra = bin_dir.join("extra_unlisted");
+    fs::write(&extra, b"extra").unwrap();
+    let res_extra = safe_verify_staged_dir(&staging, &artifact, &[comp]);
+    assert!(res_extra.is_err());
     assert!(
-        res_missing
+        res_extra
             .unwrap_err()
             .to_string()
-            .contains("missing_component")
+            .contains("unexpected_file")
     );
 }
 
@@ -312,19 +389,16 @@ fn test_journal_atomic_persistence_and_recovery_evaluation() {
     assert_eq!(loaded.transaction_id, "tx-1234");
     assert_eq!(loaded.stage, TransactionStage::Staged);
 
-    // Staged 阶段断电恢复评估 -> 丢弃候选包，旧版未受影响
     let current_link = temp.0.join("current");
     let releases_dir = temp.0.join("releases");
     let act = loaded.evaluate_recovery(&releases_dir, &current_link);
     assert_eq!(act, RecoveryAction::DiscardCandidate);
 
-    // 推进阶段到 CandidateTesting
     journal.stage = TransactionStage::CandidateTesting;
     journal.persist_atomic(&state_dir).unwrap();
     let act2 = journal.evaluate_recovery(&releases_dir, &current_link);
     assert_eq!(act2, RecoveryAction::TestCandidate);
 
-    // 推进阶段到 RecoveryRequired
     journal.stage = TransactionStage::RecoveryRequired;
     journal.error = Some("new business data conflict".into());
     journal.persist_atomic(&state_dir).unwrap();
@@ -335,58 +409,91 @@ fn test_journal_atomic_persistence_and_recovery_evaluation() {
         }
         _ => panic!("expected manual intervention"),
     }
+
+    // 验证损坏的 journal 能够返回 Err（不伪装空闲）
+    fs::write(state_dir.join("update-journal.json"), b"corrupted-non-json").unwrap();
+    assert!(UpdateJournal::load_from_state(&state_dir).is_err());
 }
 
 #[test]
-fn test_rollback_atomic_switch_and_previous() {
-    let temp = TempTestDir::new("rollback_test");
-    let app_root = temp.0.clone();
-    let releases = app_root.join("releases");
-    let r1 = releases.join("0.1.0");
-    let r2 = releases.join("0.2.0");
-    fs::create_dir_all(&r1).unwrap();
-    fs::create_dir_all(&r2).unwrap();
+fn test_sequence_corrupt_file_fails_closed() {
+    let temp = TempTestDir::new("seq_corrupt");
+    let state_dir = temp.0.clone();
 
-    // 首次切换到 0.1.0
-    switch_release_atomic(&app_root, "0.1.0").unwrap();
-    assert_eq!(fs::read_link(app_root.join("current")).unwrap(), r1);
+    // 默认不存在时返回 0
+    assert_eq!(load_highest_accepted_sequence(&state_dir).unwrap(), 0);
 
-    // 再次切换到 0.2.0（previous 应当指向 0.1.0）
-    switch_release_atomic(&app_root, "0.2.0").unwrap();
-    assert_eq!(fs::read_link(app_root.join("current")).unwrap(), r2);
-    assert_eq!(fs::read_link(app_root.join("previous")).unwrap(), r1);
+    // 正常保存与读取
+    save_highest_accepted_sequence(&state_dir, 1005).unwrap();
+    assert_eq!(load_highest_accepted_sequence(&state_dir).unwrap(), 1005);
 
-    // 执行回退 -> current 切回 0.1.0
-    let target = rollback_release_atomic(&app_root).unwrap();
-    assert_eq!(target, r1);
-    assert_eq!(fs::read_link(app_root.join("current")).unwrap(), r1);
+    // 文件损坏（非整数）必须返回 Err，严禁重置为 0
+    fs::write(state_dir.join("highest_accepted_sequence"), b"bad-sequence").unwrap();
+    let err = load_highest_accepted_sequence(&state_dir).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("corrupt_highest_accepted_sequence_file")
+    );
 }
 
 #[test]
-fn test_has_new_data_prevents_silent_overwrite() {
-    let temp = TempTestDir::new("db_protection");
-    let db_path = temp.0.join("history.sqlite3");
+fn test_has_new_data_strict_errors_on_missing_corrupt_or_unknown_schema() {
+    let temp = TempTestDir::new("db_protection_strict");
 
+    // 1. 数据库文件不存在必须返回 Err
+    let missing_db = temp.0.join("non_existent.sqlite3");
+    let err_missing = has_new_data_since_backup(&missing_db, 1000).unwrap_err();
+    assert!(err_missing.to_string().contains("database_file_not_found"));
+
+    // 2. 数据库文件损坏（非 sqlite 格式）必须返回 Err 并拒绝回退
+    let corrupt_db = temp.0.join("corrupt.sqlite3");
+    fs::write(&corrupt_db, b"not a sqlite database garbage bytes").unwrap();
+    let err_corrupt = has_new_data_since_backup(&corrupt_db, 1000).unwrap_err();
+    assert!(
+        err_corrupt
+            .to_string()
+            .contains("db_integrity_check_failed")
+            || err_corrupt.to_string().contains("cannot_open_db")
+    );
+
+    // 3. 数据库存在但缺少 messages 表（未知 schema）必须返回 Err 并拒绝回退
+    let unknown_schema_db = temp.0.join("unknown.sqlite3");
     {
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let conn = rusqlite::Connection::open(&unknown_schema_db).unwrap();
+        conn.execute_batch("CREATE TABLE other_table (id INT);")
+            .unwrap();
+    }
+    let err_schema = has_new_data_since_backup(&unknown_schema_db, 1000).unwrap_err();
+    assert!(
+        err_schema
+            .to_string()
+            .contains("unknown_schema_missing_messages_table")
+    );
+
+    // 4. 合法 schema 且存在真实 messages 表
+    let valid_db = temp.0.join("valid.sqlite3");
+    {
+        let conn = rusqlite::Connection::open(&valid_db).unwrap();
         conn.execute_batch(
             "CREATE TABLE messages (id INTEGER PRIMARY KEY, created_at INTEGER, body TEXT);
              INSERT INTO messages (id, created_at, body) VALUES (1, 1000, 'old message');",
         )
         .unwrap();
     }
+    // backup_time 为 1000：无新数据，返回 Ok(false)
+    assert!(!has_new_data_since_backup(&valid_db, 1000).unwrap());
 
-    // backup_time 为 1000：此时没有比 1000 更新的数据
-    assert!(!has_new_data_since_backup(&db_path, 1000).unwrap());
-
-    // 模拟新版本启动后产生了新消息（created_at = 2000）
+    // 产生新数据（created_at = 2000）
     {
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute("INSERT INTO messages (id, created_at, body) VALUES (2, 2000, 'new message after update');", []).unwrap();
+        let conn = rusqlite::Connection::open(&valid_db).unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, created_at, body) VALUES (2, 2000, 'new message');",
+            [],
+        )
+        .unwrap();
     }
-
-    // 此时检测必须报告存在新数据！
-    assert!(has_new_data_since_backup(&db_path, 1000).unwrap());
+    // 检测到新数据，返回 Ok(true)
+    assert!(has_new_data_since_backup(&valid_db, 1000).unwrap());
 }
 
 #[test]

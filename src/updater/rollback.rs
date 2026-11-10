@@ -56,47 +56,55 @@ pub fn rollback_release_atomic(app_root: &Path) -> Result<PathBuf> {
     Ok(prev_target)
 }
 
-/// 检查切换后是否已产生新业务数据（防止更新失败回退时静默覆盖新产生的数据）
-/// 若发现数据库存在 backup_time 之后的新消息或轮次，拒绝自动覆盖恢复
+/// 检查切换后是否已产生新业务数据。
+/// 严格安全准则：对数据库不存在、权限异常、损坏、未知 schema 或查询 SQL 失败一律返回 Err，拒绝回退。
+/// 绝不吞掉错误或假定为 0。
 pub fn has_new_data_since_backup(db_path: &Path, backup_time: u64) -> Result<bool> {
     if !db_path.exists() {
-        return Ok(false);
+        bail!("database_file_not_found: {}", db_path.display());
     }
 
-    let conn = match rusqlite::Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            // 打不开数据库或损坏
-            bail!("cannot_inspect_db_for_new_data: {}", e);
-        }
-    };
+    let conn =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| anyhow::anyhow!("cannot_open_db_for_inspection: {}", e))?;
 
-    // 检查是否有消息表/轮次表带有新时间戳
-    let mut stmt = match conn.prepare(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('messages', 'turns', 'history')"
-    ) {
-        Ok(s) => s,
-        Err(_) => return Ok(false),
-    };
-
-    let table_count: i64 = stmt.query_row([], |row| row.get(0)).unwrap_or(0);
-    if table_count == 0 {
-        return Ok(false);
+    // 完整性快速校验（PRAGMA quick_check）
+    let quick_check: String = conn
+        .query_row("PRAGMA quick_check(1);", [], |row| row.get(0))
+        .map_err(|e| anyhow::anyhow!("db_integrity_check_failed: {}", e))?;
+    if quick_check != "ok" {
+        bail!(
+            "db_corrupted: PRAGMA quick_check returned '{}'",
+            quick_check
+        );
     }
 
-    // 依次检查可能的业务表
-    for tbl in &["turns", "messages", "history"] {
-        let check_sql = format!("SELECT COUNT(*) FROM {} WHERE created_at > ?", tbl);
-        if let Ok(mut query) = conn.prepare(&check_sql) {
-            let count: i64 = query
-                .query_row([backup_time as i64], |row| row.get(0))
-                .unwrap_or(0);
-            if count > 0 {
-                return Ok(true);
-            }
+    // 检查业务表 messages 是否存在
+    let mut stmt = conn
+        .prepare("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = 'messages';")?;
+    let msg_table_exists: i64 = stmt.query_row([], |row| row.get(0))?;
+    if msg_table_exists == 0 {
+        bail!(
+            "unknown_schema_missing_messages_table: schema does not match expected business tables"
+        );
+    }
+
+    // 严格查询 messages 中是否存在大于 backup_time 的记录，错误绝不吞掉
+    let mut msg_query = conn.prepare("SELECT COUNT(*) FROM messages WHERE created_at > ?;")?;
+    let new_messages_count: i64 = msg_query.query_row([backup_time as i64], |row| row.get(0))?;
+    if new_messages_count > 0 {
+        return Ok(true);
+    }
+
+    // 检查 turns 表（若存在）
+    let mut turns_stmt =
+        conn.prepare("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = 'turns';")?;
+    let turns_table_exists: i64 = turns_stmt.query_row([], |row| row.get(0))?;
+    if turns_table_exists > 0 {
+        let mut turns_query = conn.prepare("SELECT COUNT(*) FROM turns WHERE created_at > ?;")?;
+        let new_turns_count: i64 = turns_query.query_row([backup_time as i64], |row| row.get(0))?;
+        if new_turns_count > 0 {
+            return Ok(true);
         }
     }
 

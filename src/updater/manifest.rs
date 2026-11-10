@@ -256,9 +256,15 @@ pub fn validate_manifest_compatibility(
         }
     }
 
-    if manifest.sequence <= highest_accepted_seq {
+    if manifest.sequence == highest_accepted_seq {
         bail!(
-            "downgrade_rejected: candidate sequence {} is not greater than highest accepted sequence {}",
+            "sequence_already_installed: candidate sequence {} matches highest accepted sequence (re-installation rejected)",
+            manifest.sequence
+        );
+    }
+    if manifest.sequence < highest_accepted_seq {
+        bail!(
+            "downgrade_rejected: candidate sequence {} is lower than highest accepted sequence {}",
             manifest.sequence,
             highest_accepted_seq
         );
