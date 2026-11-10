@@ -893,6 +893,7 @@ impl WorkerClient {
         let mut number = 0usize;
         let mut items = items.to_vec();
         let mut current_frame = frame.clone();
+        let mut voices_done = 0usize;
 
         for index in 0..items.len() {
             let item = items[index].clone();
@@ -982,6 +983,9 @@ impl WorkerClient {
                             json!({
                                 "media_id": item.media_id,
                                 "snapshot_id": current_frame.snapshot_id,
+                                // Converting the first voice of a run converts the next ones by
+                                // itself; wait for that before clicking again.
+                                "await_seconds": if voices_done > 0 { 8 } else { 0 },
                             }),
                         )
                         .await
@@ -994,7 +998,10 @@ impl WorkerClient {
                         }),
                 };
                 let text = match transcript {
-                    Ok(text) => text,
+                    Ok(text) => {
+                        voices_done += 1;
+                        text
+                    }
                     Err(err) => {
                         let err_str = format!("{err:#}");
                         if action_interrupted(&err_str) {
@@ -2927,6 +2934,40 @@ mod tests {
         assert_eq!(files[0].content["kind"], "voice_transcript");
         assert_eq!(files[0].content["text"], "请问今天发货吗");
         assert!(ops.contains(&"transcribe_voice".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_later_voices_wait_for_the_chained_transcript() {
+        let temp = TestDir::new();
+        let sock = temp.path().join("bot-worker.sock");
+        let waits = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = waits.clone();
+        let _server = MockWorkerServer::spawn(sock.clone(), move |req| {
+            let id = req["id"].as_u64().unwrap_or(1);
+            if req["operation"] == "transcribe_voice" {
+                seen.lock().unwrap().push(req["params"]["await_seconds"].clone());
+                json!({"protocol_version": 1, "id": id, "ok": true, "result": {"transcript": "好的"}})
+            } else {
+                json!({"protocol_version": 1, "id": id, "ok": true, "result": {}})
+            }
+        })
+        .await;
+        let mut client = setup_test_client(&temp, sock, None);
+        client.connect(5).await.unwrap();
+        let first = test_bubble_helper("voice", &"7".repeat(64), None);
+        let second = test_bubble_helper("voice", &"8".repeat(64), None);
+        let (_, files, failed) = client
+            .attachments(&[first, second], &test_empty_frame())
+            .await
+            .unwrap();
+        assert!(failed.is_empty());
+        assert_eq!(files.len(), 2);
+        let waits = waits.lock().unwrap().clone();
+        assert_eq!(
+            waits,
+            vec![json!(0), json!(8)],
+            "only the first voice clicks right away"
+        );
     }
 
     #[tokio::test]
