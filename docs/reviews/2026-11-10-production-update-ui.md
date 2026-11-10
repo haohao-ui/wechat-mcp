@@ -124,3 +124,27 @@
   - `/tmp/update_ui_recovery_680w.png` (680x1250, 201KB)
 - 经实际图像排查与 `subviews_within_680w_bounds` 单测验证，680 宽下所有卡片子视图 `frame.maxX <= 680.0`，排版对齐无溢出截断。
 - 测试结果：`cargo test --test swift_update_ui`，69 项断言全部 PASS (0 FAIL)。
+
+---
+
+## 6. I5 生产者 commit 集成与端到端隔离联测闭环 (bc8812e)
+
+### 6.1 提交集成与版本溯源
+- **生产者提交 (Producer Commit)**：`bc8812e75c37debc79091558230b497380af107c` (在 `work/prod-update-ui` 分支 cherry-pick 为 `b71f54e`)。仅涉及 `src/core/control.rs` 与 `docs/design/production-updater-contract.md`，无冲突。
+- **消费者提交 (Consumer Commit)**：`b3f8eb8` (`fix(update-ui): 适配nullable release与防降级高水位隔离，独立核心编译标签与安全读模型`)。
+
+### 6.2 真实编译 Core + Swift Client 隔离联测实测结果
+通过真实编译的 `target/debug/wechat-mcp` 与 Swift `UpdateClient` 在隔离临时环境中完成端到端联测：
+1. **整套版本与核心编译版隔离**：真实 `control update-status` 返回 `release_id: null`、`sequence: null`、`status: "unknown"`、`source: "unknown"`、`core_version: "0.1.0"`。Swift 客户端正确映射，界面显示「当前整套版本: 整套版本无法核验 (未知)」，独立标签显示「核心编译版本: 0.1.0 (核心编译版)」，安装序列号显示「未知 (未标记)」，发布状态显示「状态未知 / 来源未知 (不可信)」，`isTrustedInstalledRelease == false`。
+2. **防降级高水位隔离断言**：在 `state_dir` 中写入持久高水位 `highest_accepted_sequence = 1001`。真实调用返回 `guard.highest_accepted_sequence = 1001`，Swift 呈现「防降级高水位: 1001 (防降级高水位，非安装版本)」，整套安装 `sequence` 仍为 `nil`，`release_id` 仍为 `nil`，绝不回填或冒充安装版本。
+3. **故障恢复与未知来源不可信**：
+   - 写入损坏的 `highest_accepted_sequence` 文件：真实调用返回 `status: "recovery_required"`，错误包含 `corrupt_sequence_file`，Swift 界面显示受控恢复指引与不可信状态。
+   - 写入损坏的 `update-journal.json` 文件：真实调用返回 `status: "recovery_required"`，错误包含 `corrupt_or_unreadable_journal`，Swift 界面展开恢复指引，状态明确标注不可信。
+4. **伪造 VERSION 免疫**：在 `state_dir` 与父级目录分别伪造 `VERSION` 文件（`8.8.8` / `9.9.9`），真实调用返回的 `release_id` 与 `sequence` 坚守为 `null`，核心版本不被篡改，绝不信任无签名保护的非受控文件。
+5. **离屏渲染与界面呈现人工检查**：
+   - 导出真实 720 宽与 680 宽全高度 PNG 图像（`/tmp/update_ui_approved_720w.png`、`/tmp/update_ui_approved_680w.png`、`/tmp/update_ui_recovery_full.png`、`/tmp/update_ui_recovery_680w.png` 等）；
+   - 人工核查确认文字折行完整、两行按钮排布整洁、恢复卡指引详尽、所有卡片均严格处于 680 宽以内（`subviews_within_680w_bounds` 校验通过）；
+   - 写操作（下载、安装、延期）物理禁用，只读拦截保护生效。
+6. **最终测试执行**：
+   - 执行命令：`cargo test --test swift_update_ui`
+   - 测试结果：`test test_swift_update_ui_selftest ... ok`，92 项集成断言全量通过，0 失败。
