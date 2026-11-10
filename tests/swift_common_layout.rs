@@ -193,6 +193,8 @@ fn test_default_layout_loads() {
         .as_array()
         .expect("save_as list");
     assert!(save_as.iter().any(|v| v.as_str() == Some("另存为…")));
+    // File messages have no 另存为 in their context menu, only 下载到… (observed 2026-11-06).
+    assert!(save_as.iter().any(|v| v.as_str() == Some("下载到…")));
 }
 
 #[test]

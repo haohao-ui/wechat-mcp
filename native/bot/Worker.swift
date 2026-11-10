@@ -560,6 +560,7 @@ final class CaptureWorker {
                 fileAttempts.insert(id)
                 try closingDialogsOnFailure { try saveAttachment(item,window:cachedWindow,destination:destination,maxBytes:maxBytes) }
                 try ensureWechatFrontmost()
+                if let app=wechatApplication() { closeDownloadWindows(app) }
             }
             try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:destination.path)
             try checkPrivate(destination,type:.typeRegular,mode:0o600)
@@ -670,6 +671,7 @@ final class CaptureWorker {
                 fileAttempts.insert(id)
                 try closingDialogsOnFailure { try saveAttachment(item,window:cachedWindow,destination:saved,checkSize:false,maxBytes:maxBytes) }
                 try ensureWechatFrontmost()
+                if let app=wechatApplication() { closeDownloadWindows(app) }
             }
             let head=try Data(contentsOf:saved).prefix(8)
             let ext = head.starts(with:[0x89,0x50,0x4E,0x47]) ? "png" : head.starts(with:[0xFF,0xD8,0xFF]) ? "jpg" : ""
@@ -751,6 +753,27 @@ func ensureWechatFrontmost() throws {
         if wechatFrontmost() { return }
     }
     throw Failure.invalid("save_panel_stuck")
+}
+
+func wechatApplication() -> NSRunningApplication? {
+    let ids = ["com.tencent.xinWeChat", "com.tencent.WeChat"]
+    return NSWorkspace.shared.runningApplications.first { ids.contains($0.bundleIdentifier ?? "") }
+}
+
+/// A file download leaves a small WeChat-owned window (about 360x124) that never closes itself and
+/// makes every later capture fail with screen_not_main:other_wechat_window (observed 2026-11-06 and
+/// again 2026-11-11). Close it by its own close button; the main window is much larger.
+func closeDownloadWindows(_ app: NSRunningApplication) {
+    let root = AXUIElementCreateApplication(app.processIdentifier)
+    let windows = attribute(root, kAXWindowsAttribute as String) as? [AXUIElement] ?? []
+    for window in windows {
+        guard let size = axValue(window, kAXSizeAttribute as String, .cgSize, CGSize.zero) else { continue }
+        guard size.width >= 200, size.width <= 460, size.height >= 80, size.height <= 200 else { continue }
+        if let close = axElement(window, kAXCloseButtonAttribute as String) {
+            AXUIElementPerformAction(close, kAXPressAction as CFString)
+            pauseUI(0.2)
+        }
+    }
 }
 
 func address(_ path: String) throws -> sockaddr_un {
