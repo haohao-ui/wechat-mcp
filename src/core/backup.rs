@@ -116,6 +116,20 @@ pub struct MediaManifestEntry {
     pub total_bytes: u64,
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
+pub struct BrainFileEntry {
+    pub relative_path: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
+pub struct BrainBackupManifest {
+    pub root_generation: u64,
+    pub files: Vec<BrainFileEntry>,
+    pub complete: bool,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct BackupManifest {
     pub version: u32,
@@ -124,6 +138,40 @@ pub struct BackupManifest {
     pub database_total_bytes: u64,
     pub databases: Vec<DatabaseManifestEntry>,
     pub media: MediaManifestEntry,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brain: Option<BrainBackupManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_snapshot: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_state: Option<Vec<String>>,
+}
+
+fn collect_brain_files_manifest(
+    root_dir: &Path,
+    current: &Path,
+    out: &mut Vec<(String, String, u64)>,
+) -> Result<()> {
+    if !current.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        if ft.is_dir() {
+            collect_brain_files_manifest(root_dir, &path, out)?;
+        } else if ft.is_file() {
+            let rel = path.strip_prefix(root_dir)?.to_string_lossy().to_string();
+            let size = entry.metadata()?.len();
+            let sha = file_sha256(&path)?;
+            out.push((rel, sha, size));
+        }
+    }
+    Ok(())
 }
 
 fn inspect_db(db_path: &Path, file_name: &str) -> Result<DatabaseManifestEntry> {
@@ -490,8 +538,66 @@ pub fn run_backup(config: &BotConfig, custom_out: Option<&Path>) -> Result<PathB
                 (0, 0)
             };
 
+        let bindings_file = config.state_dir.join("brain-bindings.json");
+        let mut brain_manifest = None;
+        if bindings_file.exists() {
+            let mut brain_files_info = Vec::new();
+            let size = bindings_file.metadata()?.len();
+            let sha = file_sha256(&bindings_file)?;
+            let root_content = fs::read_to_string(&bindings_file).unwrap_or_default();
+            let root_json: serde_json::Value =
+                serde_json::from_str(&root_content).unwrap_or_default();
+            let root_generation = root_json
+                .get("generation")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+
+            let target = temp_dir.join("brain-bindings.json");
+            fs::copy(&bindings_file, &target)?;
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o600))?;
+            brain_files_info.push(BrainFileEntry {
+                relative_path: "brain-bindings.json".into(),
+                sha256: sha,
+                size_bytes: size,
+            });
+
+            let profiles_dir = config.state_dir.join("brain-profiles");
+            if profiles_dir.exists() && profiles_dir.is_dir() {
+                let dst_profiles = temp_dir.join("brain-profiles");
+                copy_dir_all(&profiles_dir, &dst_profiles)?;
+                let mut entries = Vec::new();
+                collect_brain_files_manifest(&temp_dir, &dst_profiles, &mut entries)?;
+                for (rel, sha, size) in entries {
+                    brain_files_info.push(BrainFileEntry {
+                        relative_path: rel,
+                        sha256: sha,
+                        size_bytes: size,
+                    });
+                }
+            }
+
+            brain_manifest = Some(BrainBackupManifest {
+                root_generation,
+                files: brain_files_info,
+                complete: true,
+            });
+        }
+
+        let config_snapshot = if brain_manifest.is_some() {
+            Some(serde_json::json!({
+                "schema_version": config.schema_version,
+                "host": config.host,
+                "account_id": config.account_id,
+                "brain_mode": format!("{:?}", config.brain.mode),
+                "model_backend": config.model_config.backend,
+                "model_name": config.model_config.model,
+            }))
+        } else {
+            None
+        };
+
         let manifest = BackupManifest {
-            version: 2,
+            version: 3,
             created_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -503,6 +609,9 @@ pub fn run_backup(config: &BotConfig, custom_out: Option<&Path>) -> Result<PathB
                 file_count: media_file_count,
                 total_bytes: media_total_bytes,
             },
+            brain: brain_manifest,
+            config_snapshot,
+            execution_state: None,
         };
         let manifest_path = temp_dir.join("manifest.json");
         fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
@@ -613,8 +722,22 @@ pub fn run_restore(backup_dir: &Path, config: &BotConfig) -> Result<()> {
     let manifest: BackupManifest = serde_json::from_slice(&manifest_bytes)
         .with_context(|| "failed to parse backup manifest JSON")?;
 
+    if manifest.version < 2 || manifest.version > 3 {
+        bail!("Unsupported backup manifest version: {}", manifest.version);
+    }
+
     if manifest.databases.is_empty() {
         bail!("No databases recorded in backup manifest");
+    }
+
+    if manifest.version == 2 || manifest.brain.is_none() {
+        let current_has_brain = config.state_dir.join("brain-bindings.json").exists()
+            || config.state_dir.join("brain-profiles").exists();
+        if current_has_brain {
+            bail!(
+                "restore_incomplete: cannot restore legacy v2 backup over existing brain configuration without explicit legacy restore plan"
+            );
+        }
     }
 
     // 1. 校验 manifest 和 sha256
@@ -634,6 +757,45 @@ pub fn run_restore(backup_dir: &Path, config: &BotConfig) -> Result<()> {
                 db_entry.sha256,
                 actual_sha
             );
+        }
+    }
+
+    if let Some(brain) = &manifest.brain {
+        for f in &brain.files {
+            if f.relative_path.contains("..")
+                || f.relative_path.starts_with('/')
+                || f.relative_path.starts_with('\\')
+            {
+                bail!("Illegal relative path in backup: {}", f.relative_path);
+            }
+            let bak_file = backup_dir.join(&f.relative_path);
+            if !bak_file.exists() {
+                bail!(
+                    "Brain file {} recorded in manifest does not exist in backup",
+                    f.relative_path
+                );
+            }
+            let meta = fs::symlink_metadata(&bak_file)?;
+            if meta.file_type().is_symlink() {
+                bail!("Symlink rejected in backup: {}", f.relative_path);
+            }
+            let sha = file_sha256(&bak_file)?;
+            if sha != f.sha256 {
+                bail!(
+                    "SHA256 mismatch for {}: expected {}, got {}",
+                    f.relative_path,
+                    f.sha256,
+                    sha
+                );
+            }
+            if meta.len() != f.size_bytes {
+                bail!(
+                    "Size mismatch for {}: expected {}, got {}",
+                    f.relative_path,
+                    f.size_bytes,
+                    meta.len()
+                );
+            }
         }
     }
 
@@ -658,6 +820,23 @@ pub fn run_restore(backup_dir: &Path, config: &BotConfig) -> Result<()> {
     if has_old_history {
         fs::rename(&current_history_dir, old_backup_dir.join("history"))
             .with_context(|| "failed to move existing history to old backup dir")?;
+    }
+
+    let current_bindings = config.state_dir.join("brain-bindings.json");
+    let has_old_bindings = current_bindings.exists();
+    if has_old_bindings {
+        fs::rename(
+            &current_bindings,
+            old_backup_dir.join("brain-bindings.json"),
+        )
+        .with_context(|| "failed to move existing brain-bindings to old backup dir")?;
+    }
+
+    let current_profiles = config.state_dir.join("brain-profiles");
+    let has_old_profiles = current_profiles.exists();
+    if has_old_profiles {
+        fs::rename(&current_profiles, old_backup_dir.join("brain-profiles"))
+            .with_context(|| "failed to move existing brain-profiles to old backup dir")?;
     }
 
     // A stale -wal left beside the gateway database would be replayed onto the restored file,
@@ -685,6 +864,15 @@ pub fn run_restore(backup_dir: &Path, config: &BotConfig) -> Result<()> {
                 if has_old_history {
                     let _ = fs::rename(old_backup_dir.join("history"), &current_history_dir);
                 }
+                if has_old_bindings {
+                    let _ = fs::rename(
+                        old_backup_dir.join("brain-bindings.json"),
+                        &current_bindings,
+                    );
+                }
+                if has_old_profiles {
+                    let _ = fs::rename(old_backup_dir.join("brain-profiles"), &current_profiles);
+                }
                 return Err(e).with_context(|| {
                     format!("failed to move {} aside before restore", file.display())
                 });
@@ -699,6 +887,21 @@ pub fn run_restore(backup_dir: &Path, config: &BotConfig) -> Result<()> {
         }
         if has_old_history {
             let _ = fs::rename(old_backup_dir.join("history"), &current_history_dir);
+        }
+        if current_bindings.exists() {
+            let _ = fs::remove_file(&current_bindings);
+        }
+        if has_old_bindings {
+            let _ = fs::rename(
+                old_backup_dir.join("brain-bindings.json"),
+                &current_bindings,
+            );
+        }
+        if current_profiles.exists() {
+            let _ = fs::remove_dir_all(&current_profiles);
+        }
+        if has_old_profiles {
+            let _ = fs::rename(old_backup_dir.join("brain-profiles"), &current_profiles);
         }
         restore_gateway_files(&gw_moved);
     };
@@ -734,6 +937,26 @@ pub fn run_restore(backup_dir: &Path, config: &BotConfig) -> Result<()> {
         if bak_media_dir.exists() && bak_media_dir.is_dir() {
             let dst_media_dir = current_history_dir.join("media");
             copy_dir_all(&bak_media_dir, &dst_media_dir)?;
+        }
+
+        if let Some(brain) = &manifest.brain {
+            for f in &brain.files {
+                let src_file = backup_dir.join(&f.relative_path);
+                let target_file = config.state_dir.join(&f.relative_path);
+                if let Some(parent) = target_file.parent() {
+                    if !parent.exists() {
+                        fs::create_dir_all(parent)?;
+                        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+                    }
+                }
+                fs::copy(&src_file, &target_file).with_context(|| {
+                    format!(
+                        "failed to copy restored brain file to {}",
+                        target_file.display()
+                    )
+                })?;
+                fs::set_permissions(&target_file, fs::Permissions::from_mode(0o600))?;
+            }
         }
 
         for db_entry in &manifest.databases {
@@ -1569,5 +1792,170 @@ mod tests {
         let media_file_b = history_dir_b.join("media").join("cd").join("photo.png");
         assert!(media_file_b.exists());
         assert_eq!(fs::read(&media_file_b).unwrap(), b"png-binary-data-test");
+    }
+
+    #[test]
+    fn test_backup_v3_roundtrip_with_brain() {
+        let _env = crate::core::env_lock();
+        let temp = TempDir::new("backup_v3_roundtrip");
+        let _gw = isolate_gateway(&temp);
+
+        let state_dir_a = temp.0.join("state_a");
+        let history_dir_a = state_dir_a.join("history");
+        fs::create_dir_all(&history_dir_a).unwrap();
+
+        let db_a = history_dir_a.join("history.sqlite3");
+        {
+            let conn = Connection::open(&db_a).unwrap();
+            conn.execute_batch("CREATE TABLE t (id INT); INSERT INTO t VALUES (1);")
+                .unwrap();
+        }
+
+        // 创建 brain-bindings.json 与 brain-profiles
+        let bindings_path = state_dir_a.join("brain-bindings.json");
+        fs::write(&bindings_path, r#"{"schema_version":1,"generation":42}"#).unwrap();
+
+        let profile_role_dir = state_dir_a.join("brain-profiles/roles/role1");
+        fs::create_dir_all(&profile_role_dir).unwrap();
+        let role_file = profile_role_dir.join("rev1.json");
+        fs::write(&role_file, r#"{"role_id":"role1","name":"客服"}"#).unwrap();
+
+        let config_a = sample_config(&state_dir_a);
+        let backup_out = temp.0.join("custom_bak");
+        let out = run_backup(&config_a, Some(&backup_out)).unwrap();
+        assert_eq!(out, backup_out);
+
+        // 验证 manifest v3
+        let manifest_bytes = fs::read(out.join("manifest.json")).unwrap();
+        let manifest: BackupManifest = serde_json::from_slice(&manifest_bytes).unwrap();
+        assert_eq!(manifest.version, 3);
+        assert!(manifest.brain.is_some());
+        let brain_man = manifest.brain.as_ref().unwrap();
+        assert_eq!(brain_man.root_generation, 42);
+        assert_eq!(brain_man.files.len(), 2);
+
+        // 还原到 state_dir_b
+        let state_dir_b = temp.0.join("state_b");
+        let config_b = sample_config(&state_dir_b);
+        run_restore(&backup_out, &config_b).unwrap();
+
+        // 验证 state_dir_b 中 brain-bindings.json 和 brain-profiles 完整存在
+        assert!(state_dir_b.join("brain-bindings.json").exists());
+        assert_eq!(
+            fs::read_to_string(state_dir_b.join("brain-bindings.json")).unwrap(),
+            r#"{"schema_version":1,"generation":42}"#
+        );
+        assert!(
+            state_dir_b
+                .join("brain-profiles/roles/role1/rev1.json")
+                .exists()
+        );
+        assert_eq!(
+            fs::read_to_string(state_dir_b.join("brain-profiles/roles/role1/rev1.json")).unwrap(),
+            r#"{"role_id":"role1","name":"客服"}"#
+        );
+    }
+
+    #[test]
+    fn test_restore_v2_with_existing_brain_rejected() {
+        let _env = crate::core::env_lock();
+        let temp = TempDir::new("restore_v2_existing_brain");
+        let _gw = isolate_gateway(&temp);
+
+        // 构造一个 v2 格式的备份（无 brain）
+        let bak_dir = temp.0.join("v2_bak");
+        fs::create_dir_all(&bak_dir).unwrap();
+        let db = bak_dir.join("history.sqlite3");
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch("CREATE TABLE t (id INT);").unwrap();
+        }
+        let sha = file_sha256(&db).unwrap();
+        let manifest = serde_json::json!({
+            "version": 2,
+            "created_at": 1000,
+            "database_count": 1,
+            "database_total_bytes": 100,
+            "databases": [{
+                "file": "history.sqlite3",
+                "sha256": sha,
+                "user_version": 0,
+                "size_bytes": fs::metadata(&db).unwrap().len(),
+                "total_rows": 0,
+                "table_rows": {"t": 0}
+            }],
+            "media": {"file_count": 0, "total_bytes": 0}
+        });
+        fs::write(
+            bak_dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        // 目标目录已有 brain-bindings.json
+        let target_state = temp.0.join("target_state");
+        fs::create_dir_all(&target_state).unwrap();
+        fs::write(target_state.join("brain-bindings.json"), "{}").unwrap();
+
+        let cfg = sample_config(&target_state);
+        let err = run_restore(&bak_dir, &cfg).unwrap_err();
+        assert!(err.to_string().contains("restore_incomplete"));
+    }
+
+    #[test]
+    fn test_restore_symlink_rejected() {
+        let _env = crate::core::env_lock();
+        let temp = TempDir::new("restore_symlink");
+        let _gw = isolate_gateway(&temp);
+
+        let bak_dir = temp.0.join("symlink_bak");
+        fs::create_dir_all(&bak_dir).unwrap();
+        let db = bak_dir.join("history.sqlite3");
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch("CREATE TABLE t (id INT);").unwrap();
+        }
+        let sha = file_sha256(&db).unwrap();
+
+        // 创建一个真实文件和符号链接
+        let real_file = temp.0.join("real.json");
+        fs::write(&real_file, b"{}").unwrap();
+        let symlink_path = bak_dir.join("brain-bindings.json");
+        std::os::unix::fs::symlink(&real_file, &symlink_path).unwrap();
+
+        let manifest = serde_json::json!({
+            "version": 3,
+            "created_at": 1000,
+            "database_count": 1,
+            "database_total_bytes": 100,
+            "databases": [{
+                "file": "history.sqlite3",
+                "sha256": sha,
+                "user_version": 0,
+                "size_bytes": fs::metadata(&db).unwrap().len(),
+                "total_rows": 0,
+                "table_rows": {"t": 0}
+            }],
+            "media": {"file_count": 0, "total_bytes": 0},
+            "brain": {
+                "root_generation": 1,
+                "files": [{
+                    "relative_path": "brain-bindings.json",
+                    "sha256": file_sha256(&real_file).unwrap(),
+                    "size_bytes": 2
+                }],
+                "complete": true
+            }
+        });
+        fs::write(
+            bak_dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let target_state = temp.0.join("target_state");
+        let cfg = sample_config(&target_state);
+        let err = run_restore(&bak_dir, &cfg).unwrap_err();
+        assert!(err.to_string().contains("Symlink rejected"));
     }
 }
