@@ -1,5 +1,7 @@
 //! Integration and UI fixture tests for `UpdatePage`, `UpdateClient`, `Shell`, and `SettingsPage`.
+//! Covers real Rust control contract, unconfigured status, unverified trust roots, and offscreen full-height PNG fixtures.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -90,9 +92,45 @@ fn test_swift_update_ui_selftest() {
     let compile_status = cmd.status().expect("execute swiftc");
     assert!(compile_status.success(), "swiftc compilation failed");
 
-    // 运行测试可执行文件
-    let run_status = Command::new(&bin_path)
-        .status()
+    // 构造隔离的合成环境，用于真实 Rust control + Swift client 契约集成测试
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_update_ui_contract_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    let state_dir = temp_dir.join("state");
+    std::fs::create_dir_all(&state_dir).expect("create state_dir");
+    std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700))
+        .expect("chmod state_dir");
+
+    let cfg_path = temp_dir.join("config.json");
+    let cfg_json = serde_json::json!({
+        "schema_version": 1,
+        "host": "local",
+        "account_id": "update_contract_test_acct",
+        "state_dir": state_dir.to_str().unwrap(),
+        "allowlist": []
+    });
+    std::fs::write(&cfg_path, cfg_json.to_string()).expect("write config.json");
+
+    let wechat_mcp_bin = root.join("target").join("debug").join("wechat-mcp");
+
+    // 运行测试可执行文件（传入真实 Rust control 配置环境变量）
+    let run_output = Command::new(&bin_path)
+        .env("REAL_UPDATE_CONFIG", &cfg_path)
+        .env("WECHAT_MCP_BIN", &wechat_mcp_bin)
+        .output()
         .expect("execute update_ui_selftest binary");
-    assert!(run_status.success(), "update_ui_selftest binary failed");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    let stdout_str = String::from_utf8_lossy(&run_output.stdout);
+    let stderr_str = String::from_utf8_lossy(&run_output.stderr);
+    println!("=== Update UI Selftest Output ===\n{stdout_str}");
+    if !stderr_str.is_empty() {
+        eprintln!("=== Stderr ===\n{stderr_str}");
+    }
+
+    assert!(
+        run_output.status.success(),
+        "update_ui_selftest binary failed"
+    );
 }
