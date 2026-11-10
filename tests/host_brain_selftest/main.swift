@@ -305,56 +305,195 @@ func runTests() -> Int32 {
         check("isolated_ui_table_configured", brainController.numberOfRows(in: NSTableView()) == 0)
     }
 
-    // 12. Offscreen PNG Rendering & Visual Layout Checks
+    // 12. Offscreen Opaque PNG Rendering & Visual Layout Checks with Rich Synthetic Fixtures
     do {
         let fixtureDir = URL(fileURLWithPath: "target/brain_ui_fixtures")
         try? FileManager.default.createDirectory(at: fixtureDir, withIntermediateDirectories: true)
         
-        let mockExecutor: BrainClient.CommandExecutor = { cmd, args, timeout in
-            if args.contains("brain-list") {
-                let mockJson = """
-                {"ok":true,"data":{"generation":1,"execution_mode":"managed","roles":[{"role_id":"r1","draft_revision_id":"v1","name":"客服助手","archived":false,"active_binding_count":0}],"active":null,"draft":null,"model_summary":{"mode":"builtin"}}}
-                """
-                return ControlRun(status: 0, output: mockJson.data(using: .utf8)!, timedOut: false)
+        func renderOpaquePNG(view: NSView, size: NSSize, outputURL: URL) -> Bool {
+            let window = NSWindow(
+                contentRect: NSRect(origin: .zero, size: size),
+                styleMask: [.titled, .closable],
+                backing: .buffered,
+                defer: false
+            )
+            window.appearance = NSAppearance(named: .aqua)
+            window.backgroundColor = NSColor(calibratedRed: 0.95, green: 0.95, blue: 0.96, alpha: 1.0)
+            window.isOpaque = true
+            window.contentView = view
+            view.frame = NSRect(origin: .zero, size: size)
+            view.layoutSubtreeIfNeeded()
+            window.display()
+
+            guard let rep = NSBitmapImageRep(
+                bitmapDataPlanes: nil,
+                pixelsWide: Int(size.width),
+                pixelsHigh: Int(size.height),
+                bitsPerSample: 8,
+                samplesPerPixel: 4,
+                hasAlpha: true,
+                isPlanar: false,
+                colorSpaceName: .deviceRGB,
+                bytesPerRow: 0,
+                bitsPerPixel: 0
+            ) else {
+                return false
             }
-            return ControlRun(status: 0, output: Data(), timedOut: false)
-        }
-        let mockClient = BrainClient(configPath: "/tmp/mock_config.json", executor: mockExecutor)
-        let dummyContext = StatusPanelController(worker: SocketWorker())
-        let brainController = BrainPageController(context: dummyContext, client: mockClient)
-        
-        let bView = brainController.view
-        bView.frame = NSRect(x: 0, y: 0, width: 720, height: 760)
-        bView.layoutSubtreeIfNeeded()
-        
-        if let rep = bView.bitmapImageRepForCachingDisplay(in: bView.bounds) {
-            bView.cacheDisplay(in: bView.bounds, to: rep)
-            if let png = rep.representation(using: .png, properties: [:]) {
-                let pngURL = fixtureDir.appendingPathComponent("brain_page.png")
-                try? png.write(to: pngURL)
-                check("brain_page_png_written", FileManager.default.fileExists(atPath: pngURL.path))
-                check("brain_page_png_size_valid", png.count > 1024)
-                check("brain_page_pixel_dimensions", rep.pixelsWide == 720 && rep.pixelsHigh == 760)
-            } else {
-                check("brain_page_png_representation", false, "Failed to get PNG representation")
+
+            NSGraphicsContext.saveGraphicsState()
+            guard let context = NSGraphicsContext(bitmapImageRep: rep) else {
+                NSGraphicsContext.restoreGraphicsState()
+                return false
             }
-        } else {
-            check("brain_page_cache_display_rep", false, "Failed to create bitmap rep")
+            NSGraphicsContext.current = context
+
+            // 1. 显式填充不透明系统浅色窗体底色，彻底杜绝黑底/透明背景
+            NSColor(calibratedRed: 0.95, green: 0.95, blue: 0.96, alpha: 1.0).setFill()
+            NSRect(origin: .zero, size: size).fill()
+
+            // 2. 缓存绘制视图到位图
+            view.cacheDisplay(in: NSRect(origin: .zero, size: size), to: rep)
+            context.flushGraphics()
+            NSGraphicsContext.restoreGraphicsState()
+
+            guard let png = rep.representation(using: .png, properties: [:]) else {
+                return false
+            }
+            do {
+                try png.write(to: outputURL)
+                return true
+            } catch {
+                return false
+            }
         }
 
+        let dummyContext = StatusPanelController(worker: SocketWorker())
+        let mockClient = BrainClient(configPath: "/tmp/mock_config.json", executor: { _, _, _ in
+            ControlRun(status: 0, output: Data(), timedOut: false)
+        })
+        let brainController = BrainPageController(context: dummyContext, client: mockClient)
+
+        // 构造丰富完整的合成测试数据（含草稿/运行中版本、多角色、知识引用、自定义话术与白名单覆盖）
+        let mockPayload = BrainListPayload(
+            generation: 12,
+            executionMode: "managed",
+            roles: [
+                BrainRoleEntry(
+                    roleId: "role_vip_service",
+                    draftRevisionId: "rev_v2",
+                    activeRevisionId: "rev_v1",
+                    name: "VIP 售后专属顾问",
+                    archived: false,
+                    activeBindingCount: 1
+                ),
+                BrainRoleEntry(
+                    roleId: "role_pre_sales",
+                    draftRevisionId: "rev_p1",
+                    activeRevisionId: "rev_p1",
+                    name: "售前导购助手",
+                    archived: false,
+                    activeBindingCount: 0
+                )
+            ],
+            active: BrainBindingSet(
+                defaultRef: BrainRoleRef(roleId: "role_vip_service", revisionId: "rev_v1"),
+                overrides: [
+                    BrainOverride(contactId: "联系人_王经理", chatKind: "private", roleId: "role_vip_service", revisionId: "rev_v1")
+                ]
+            ),
+            draft: BrainBindingSet(
+                defaultRef: BrainRoleRef(roleId: "role_vip_service", revisionId: "rev_v2"),
+                overrides: [
+                    BrainOverride(contactId: "联系人_王经理", chatKind: "private", roleId: "role_vip_service", revisionId: "rev_v2")
+                ]
+            ),
+            modelSummary: BrainModelSummary(mode: "builtin", timeoutSeconds: 30)
+        )
+
+        let mockRole = BrainRoleRevision(
+            roleId: "role_vip_service",
+            revisionId: "rev_v2",
+            parentRevisionId: "rev_v1",
+            createdAt: 1700000000,
+            origin: "user",
+            name: "VIP 售后专属顾问",
+            persona: "负责企业客户售后咨询、技术答疑与退换货跟进，保持专业耐心态度。",
+            goals: ["30秒内首响应", "准确解答退换货政策", "疑难技术问题转接工程师"],
+            tone: "严谨、热情、简洁",
+            businessRules: ["退货须核对订单号", "不可虚构促销或承诺退款", "非工作时间告知响应时限"],
+            modelRef: "config.model_config",
+            knowledgeRefs: [
+                BrainKnowledgeRef(knowledgeId: "kn_product_guide", revisionId: "rev_k1", contentSha256: "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"),
+                BrainKnowledgeRef(knowledgeId: "kn_service_policy", revisionId: "rev_k2", contentSha256: "f1e2d3c4b5a697887766554433221100f1e2d3c4b5a697887766554433221100")
+            ],
+            templates: BrainTemplates(
+                greeting: "您好！我是您的 VIP 售后专属顾问，请问有什么可以帮您？",
+                insufficientInformation: "抱歉，您提供的信息不足以定位订单，请告知订单号或购买手机号。",
+                unreadable: [
+                    "unsupported_type": "收到文件格式暂不支持直接解析，请发送 PDF、文档或文字说明。",
+                    "too_large": "您发送的文件超过单次处理大小限制，请精简或分段发送。"
+                ]
+            ),
+            contextBudget: BrainContextBudget(maxInputBytes: 49152, knowledgeBytes: 16384, historyBytes: 16384, overflow: "truncate_tail"),
+            contentSha256: "11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff"
+        )
+
+        // 注入合成数据到大脑控制器
+        brainController.applyFixtureState(payload: mockPayload, role: mockRole, accountId: "corp_support_01")
+        
+        let brainSize = NSSize(width: 760, height: 780)
+        
+        // 12.1 渲染定义页并导出 brain_page.png 及 brain_page_definition.png
+        brainController.selectTab(index: 0)
+        let defURL = fixtureDir.appendingPathComponent("brain_page_definition.png")
+        let mainBrainURL = fixtureDir.appendingPathComponent("brain_page.png")
+        let defOK = renderOpaquePNG(view: brainController.view, size: brainSize, outputURL: defURL)
+        _ = renderOpaquePNG(view: brainController.view, size: brainSize, outputURL: mainBrainURL)
+        check("brain_page_definition_written", defOK && FileManager.default.fileExists(atPath: defURL.path))
+        check("brain_page_png_written", FileManager.default.fileExists(atPath: mainBrainURL.path))
+        check("brain_page_png_size_valid", ((try? Data(contentsOf: mainBrainURL))?.count ?? 0) > 10240)
+
+        // 12.2 渲染知识页
+        brainController.selectTab(index: 1)
+        let knowURL = fixtureDir.appendingPathComponent("brain_page_knowledge.png")
+        let knowOK = renderOpaquePNG(view: brainController.view, size: brainSize, outputURL: knowURL)
+        check("brain_page_knowledge_written", knowOK && FileManager.default.fileExists(atPath: knowURL.path))
+
+        // 12.3 渲染绑定页
+        brainController.selectTab(index: 3)
+        let bindURL = fixtureDir.appendingPathComponent("brain_page_bindings.png")
+        let bindOK = renderOpaquePNG(view: brainController.view, size: brainSize, outputURL: bindURL)
+        check("brain_page_bindings_written", bindOK && FileManager.default.fileExists(atPath: bindURL.path))
+
+        // 12.4 渲染版本管理页
+        brainController.selectTab(index: 4)
+        let verURL = fixtureDir.appendingPathComponent("brain_page_version.png")
+        let verOK = renderOpaquePNG(view: brainController.view, size: brainSize, outputURL: verURL)
+        check("brain_page_version_written", verOK && FileManager.default.fileExists(atPath: verURL.path))
+
+        // 12.5 渲染会话页（载入真实结构化合成 provenance）
         let sessController = SessionsPageController(context: dummyContext)
-        let sView = sessController.view
-        sView.frame = NSRect(x: 0, y: 0, width: 700, height: 720)
-        sView.layoutSubtreeIfNeeded()
-        if let rep = sView.bitmapImageRepForCachingDisplay(in: sView.bounds) {
-            sView.cacheDisplay(in: sView.bounds, to: rep)
-            if let png = rep.representation(using: .png, properties: [:]) {
-                let pngURL = fixtureDir.appendingPathComponent("sessions_page.png")
-                try? png.write(to: pngURL)
-                check("sessions_page_png_written", FileManager.default.fileExists(atPath: pngURL.path))
-                check("sessions_page_png_size_valid", png.count > 1024)
-            }
-        }
+        let dummyTurnDetail = BrainTurnDetail(
+            turnId: "turn_contract_real_101",
+            contactId: "联系人_王经理",
+            snapshotId: "snap_112233",
+            snapshot: ["role_id": AnyCodable("role_vip_service"), "compiled": AnyCodable("【合成快照】VIP 售后专属顾问已加载")],
+            decision: ["action": AnyCodable("send"), "text": AnyCodable("您好！已为您登记售后换货申请，专员将在2小时内与您联系。")],
+            model: ["provider": AnyCodable("openai"), "model": AnyCodable("gpt-4o")],
+            sendKey: "send_key_8891_vip",
+            execution: ["phase": AnyCodable("sent"), "delivery": AnyCodable("confirmed")]
+        )
+        sessController.applyFixtureState(
+            sessions: [
+                "联系人_王经理": SessionHealthInput(state: "listening"),
+                "技术支持群": SessionHealthInput(state: "handoff", handoff: true)
+            ],
+            selectedTurnDetail: dummyTurnDetail
+        )
+        let sessURL = fixtureDir.appendingPathComponent("sessions_page.png")
+        let sessOK = renderOpaquePNG(view: sessController.view, size: NSSize(width: 740, height: 760), outputURL: sessURL)
+        check("sessions_page_png_written", sessOK && FileManager.default.fileExists(atPath: sessURL.path))
+        check("sessions_page_png_size_valid", ((try? Data(contentsOf: sessURL))?.count ?? 0) > 10240)
     }
 
     // 13. Real Rust control + Swift client contract integration
