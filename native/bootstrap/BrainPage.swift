@@ -1576,26 +1576,27 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         overridesTableView.delegate = self
         overridesTableView.dataSource = self
         overridesTableView.headerView = NSTableHeaderView()
+        overridesTableView.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
 
         let colContact = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("col_contact"))
         colContact.title = "联系人/群 (白名单)"
-        colContact.width = 130
-        colContact.minWidth = 100
+        colContact.width = 105
+        colContact.minWidth = 70
 
         let colKind = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("col_kind"))
         colKind.title = "类型"
-        colKind.width = 50
-        colKind.minWidth = 40
+        colKind.width = 42
+        colKind.minWidth = 35
 
         let colRole = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("col_role"))
         colRole.title = "绑定角色"
-        colRole.width = 120
-        colRole.minWidth = 90
+        colRole.width = 95
+        colRole.minWidth = 70
 
         let colRev = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("col_rev"))
         colRev.title = "版本"
-        colRev.width = 60
-        colRev.minWidth = 50
+        colRev.width = 58
+        colRev.minWidth = 45
 
         overridesTableView.addTableColumn(colContact)
         overridesTableView.addTableColumn(colKind)
@@ -1607,7 +1608,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
         scroll.heightAnchor.constraint(equalToConstant: 90).isActive = true
-        scroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 380).isActive = true
+        scroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 310).isActive = true
         ovStack.addArrangedSubview(scroll)
 
         // 表单输入区：垂直流式分行（联系人一行、角色一行，在 680px 宿主宽度下各占整行，从容排布）
