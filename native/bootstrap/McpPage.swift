@@ -150,6 +150,10 @@ public struct McpPageLogic {
         return try JSONDecoder().decode(OpenApiCheckPayload.self, from: data)
     }
 
+    public static func brainPagePointerText() -> String {
+        return "角色定义、知识与话术请前往【大脑】页面管理；本页面仅管理大脑模式、外部超时与对外接口连接。"
+    }
+
     public static func getPrimaryNonLoopbackIPv4() -> String? {
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
@@ -285,6 +289,15 @@ public final class McpPageController: NSViewController {
         btnRow.addArrangedSubview(saveBrainButton)
         btnRow.addArrangedSubview(brainStatusMessageLabel)
         brainStack.addArrangedSubview(btnRow)
+
+        let pointerLabel = NSTextField(wrappingLabelWithString: McpPageLogic.brainPagePointerText())
+        pointerLabel.font = NSFont.systemFont(ofSize: 11)
+        pointerLabel.textColor = .secondaryLabelColor
+        let goToBrainBtn = NSButton(title: "前往大脑页面", target: self, action: #selector(handleGoToBrain))
+        let pointerRow = NSStackView(views: [pointerLabel, goToBrainBtn])
+        pointerRow.orientation = .horizontal
+        pointerRow.spacing = 8
+        brainStack.addArrangedSubview(pointerRow)
 
         brainBox.setContent(brainStack)
         contentStack.addArrangedSubview(brainBox)
@@ -548,6 +561,12 @@ public final class McpPageController: NSViewController {
         case .failure(let err):
             brainStatusMessageLabel.stringValue = "校验错误: \(err.message)"
             brainStatusMessageLabel.textColor = .systemRed
+        }
+    }
+
+    @objc private func handleGoToBrain() {
+        if let shell = view.window?.contentViewController as? ShellViewController {
+            shell.selectPage(id: "brain")
         }
     }
 

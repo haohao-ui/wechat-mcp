@@ -104,6 +104,12 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
         ])
     }
 
+    public func selectPage(id: String) {
+        if let idx = pages.firstIndex(where: { $0.id == id }) {
+            selectPage(at: idx)
+        }
+    }
+
     // MARK: - NSTableViewDataSource & Delegate
 
     public func numberOfRows(in tableView: NSTableView) -> Int {
