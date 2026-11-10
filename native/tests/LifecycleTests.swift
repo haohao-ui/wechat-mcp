@@ -16,6 +16,87 @@ struct LifecycleTests {
         do { return try supervisor.stopForMaintenance(transactionID: id) }
         catch { expect(false, "unexpected stop error: \(error)"); return .notConfirmed }
     }
+    static func completionFailureFixtures(root: URL) throws {
+        for fault in ["sync", "open", "unlink", "restore-unwritable", "sync-once"] {
+            let dir = root.appendingPathComponent("finish-" + fault)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            let enabled = dir.appendingPathComponent("enabled")
+            let marker = dir.appendingPathComponent("core.maintenance")
+            func makeSupervisor() -> CoreSupervisor {
+                CoreSupervisor(coreEnabledURL: enabled, binaryURL: URL(fileURLWithPath: "/usr/bin/true"), configURL: dir.appendingPathComponent("config"), logURL: dir.appendingPathComponent("log"), gracePeriod: 0.05, pythonLoadedChecker: { false })
+            }
+            let subject = makeSupervisor()
+            let id = UUID().uuidString
+            try subject.startProcess(binaryPath: "/bin/sh", arguments: ["-c", "while :; do :; done"])
+            try subject.beginMaintenance(transactionID: id)
+            expect(tryStop(subject, id) == .stopped, "finish fault fixture has held exit evidence: " + fault)
+            FileManager.default.createFile(atPath: enabled.path, contents: Data())
+            var observedRemovedMarker = false
+            if fault == "unlink" {
+                subject.maintenanceMarkerUnlink = { _ in errno = EACCES; return -1 }
+            } else if fault == "open" {
+                subject.maintenanceDirectoryOpen = { _ in
+                    observedRemovedMarker = observedRemovedMarker || !FileManager.default.fileExists(atPath: marker.path)
+                    errno = EMFILE
+                    return -1
+                }
+            } else {
+                var calls = 0
+                subject.maintenanceDirectorySync = { fd in
+                    observedRemovedMarker = observedRemovedMarker || !FileManager.default.fileExists(atPath: marker.path)
+                    calls += 1
+                    if fault == "sync-once" && calls > 1 { return fsync(fd) }
+                    if fault == "restore-unwritable" {
+                        _ = chmod(dir.path, 0o500)
+                    }
+                    errno = EIO
+                    return -1
+                }
+            }
+            do {
+                try subject.finishMaintenance(transactionID: id)
+                expect(false, "injected completion failure must throw: " + fault)
+            } catch CoreMaintenanceError.ioFailure(let code) {
+                let expected = fault == "unlink" ? EACCES : (fault == "open" ? EMFILE : EIO)
+                expect(code == expected, "completion preserves original IO error: " + fault)
+            }
+            if fault != "unlink" {
+                expect(observedRemovedMarker, "injected directory failure occurs after marker unlink: " + fault)
+            }
+            // Restore test directory access, but never clear the supervisor's recovery latch.
+            _ = chmod(dir.path, 0o700)
+            expect(subject.maintenanceStatus == .recoveryRequired, "completion IO failure stays recoveryRequired: " + fault)
+            expect(subject.maintenanceRecoveryPersistenceConfirmed == (fault == "unlink" || fault == "sync-once"), "restoration durability evidence matches injected outcome: " + fault)
+            subject.reset()
+            expect(subject.maintenanceStatus == .recoveryRequired, "reset cannot clear failed completion: " + fault)
+            expect(subject.checkAndReconcile() == .keep, "failed completion suppresses enabled tick: " + fault)
+            do { try subject.startProcess(arguments: []); expect(false, "failed completion blocks direct start") }
+            catch { print("PASS: failed completion blocks direct start: " + fault) }
+            // Removing the injected fault does not constitute recovery authorization.
+            subject.maintenanceMarkerUnlink = { unlink($0) }
+            subject.maintenanceDirectoryOpen = { open($0, O_RDONLY | O_NOFOLLOW) }
+            subject.maintenanceDirectorySync = { fsync($0) }
+            for transaction in [id, UUID().uuidString] {
+                do { try subject.beginMaintenance(transactionID: transaction); expect(false, "failed completion blocks begin") }
+                catch { print("PASS: failed completion blocks begin: " + fault) }
+                do { try subject.finishMaintenance(transactionID: transaction); expect(false, "failed completion blocks finish") }
+                catch { print("PASS: failed completion blocks finish: " + fault) }
+            }
+            let rebuilt = makeSupervisor()
+            if fault == "restore-unwritable" {
+                expect(!FileManager.default.fileExists(atPath: marker.path), "unwritable recovery cannot promise persisted marker")
+                expect(rebuilt.maintenanceStatus == .inactive, "rebuild without marker has no durable evidence; caller journal recovery required")
+            } else {
+                expect(rebuilt.maintenanceStatus == .active(transactionID: id), "retained or restored marker survives rebuild: " + fault)
+                expect(rebuilt.checkAndReconcile() == .keep, "rebuilt instance suppresses startup: " + fault)
+                expect(tryStop(rebuilt, id) == .notConfirmed, "rebuilt instance still requires held process evidence: " + fault)
+                do { try rebuilt.finishMaintenance(transactionID: id); expect(false, "rebuilt instance cannot finish on empty cache") }
+                catch { print("PASS: rebuilt instance refuses unconfirmed finish: " + fault) }
+                do { try rebuilt.beginMaintenance(transactionID: UUID().uuidString); expect(false, "rebuilt instance cannot replace interrupted transaction") }
+                catch { print("PASS: rebuilt instance refuses different transaction: " + fault) }
+            }
+        }
+    }
     static func main() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -211,6 +292,8 @@ struct LifecycleTests {
         expect(group.wait(timeout: .now() + 4) == .success, "racing tick completes without deadlock")
         expect(!FileManager.default.fileExists(atPath: raceLog.path), "begin between tick check and start prevents launch")
         expect(race.currentStatus == .notRunning, "race leaves no child running")
+        try completionFailureFixtures(root: root)
+
 
     }
 }

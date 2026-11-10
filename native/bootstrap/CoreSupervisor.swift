@@ -219,6 +219,13 @@ public final class CoreSupervisor {
     // Process identity retained after stop; a nil cache or a new PID is not exit proof.
     private var maintenanceStoppedProcess: Process?
     private var maintenanceStoppedTransaction: String?
+    private var maintenanceCompletionFailed = false
+    // Diagnostic evidence only: false means restoration durability could not be confirmed.
+    private(set) var maintenanceRecoveryPersistenceConfirmed: Bool?
+    // Internal syscall seams for isolated fault fixtures, not updater/control APIs.
+    var maintenanceDirectoryOpen: (String) -> Int32 = { open($0, O_RDONLY | O_NOFOLLOW) }
+    var maintenanceDirectorySync: (Int32) -> Int32 = { fsync($0) }
+    var maintenanceMarkerUnlink: (String) -> Int32 = { unlink($0) }
 
     public private(set) var gaveUp: Bool = false
     public private(set) var isConfigError: Bool = false
@@ -274,6 +281,7 @@ public final class CoreSupervisor {
     }
 
     private func readMaintenanceLocked() -> CoreMaintenanceStatus {
+        if maintenanceCompletionFailed { return .recoveryRequired }
         let fd = open(maintenanceURL.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
         if fd < 0 { return errno == ENOENT ? .inactive : .recoveryRequired }
         defer { close(fd) }
@@ -301,6 +309,12 @@ public final class CoreSupervisor {
         case .recoveryRequired: throw CoreMaintenanceError.recoveryRequired
         case .inactive: break
         }
+        try publishMaintenanceMarkerLocked(transactionID: transactionID)
+        maintenanceStoppedProcess = nil
+        maintenanceStoppedTransaction = nil
+    }
+
+    private func publishMaintenanceMarkerLocked(transactionID: String) throws {
         try checkMaintenanceDirectory()
         let temporary = maintenanceURL.deletingLastPathComponent().appendingPathComponent(".maintenance-" + UUID().uuidString)
         let fd = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
@@ -313,15 +327,13 @@ public final class CoreSupervisor {
         guard link(temporary.path, maintenanceURL.path) == 0 else { throw CoreMaintenanceError.ioFailure(errno) }
         guard unlink(temporary.path) == 0 else { throw CoreMaintenanceError.ioFailure(errno) }
         try syncMaintenanceDirectory()
-        maintenanceStoppedProcess = nil
-        maintenanceStoppedTransaction = nil
     }
 
     private func syncMaintenanceDirectory() throws {
-        let fd = open(maintenanceURL.deletingLastPathComponent().path, O_RDONLY | O_NOFOLLOW)
+        let fd = maintenanceDirectoryOpen(maintenanceURL.deletingLastPathComponent().path)
         guard fd >= 0 else { throw CoreMaintenanceError.ioFailure(errno) }
         defer { close(fd) }
-        guard fsync(fd) == 0 else { throw CoreMaintenanceError.ioFailure(errno) }
+        guard maintenanceDirectorySync(fd) == 0 else { throw CoreMaintenanceError.ioFailure(errno) }
     }
 
     private func requireMaintenanceOwner(_ id: String) throws {
@@ -362,8 +374,30 @@ public final class CoreSupervisor {
         guard maintenanceStoppedTransaction == transactionID,
               let held = maintenanceStoppedProcess, !held.isRunning,
               process == nil || process === held else { throw CoreMaintenanceError.notConfirmed }
-        guard unlink(maintenanceURL.path) == 0 else { throw CoreMaintenanceError.ioFailure(errno) }
-        try syncMaintenanceDirectory()
+        var removed = false
+        do {
+            guard maintenanceMarkerUnlink(maintenanceURL.path) == 0 else { throw CoreMaintenanceError.ioFailure(errno) }
+            removed = true
+            try syncMaintenanceDirectory()
+        } catch {
+            // Unlink is not the commit point: directory persistence must succeed too.
+            // Latch before recovery while holding the same lock as start/reconcile.
+            maintenanceCompletionFailed = true
+            maintenanceRecoveryPersistenceConfirmed = false
+            do {
+                if removed {
+                    try publishMaintenanceMarkerLocked(transactionID: transactionID)
+                } else {
+                    try syncMaintenanceDirectory()
+                }
+                maintenanceRecoveryPersistenceConfirmed = true
+            } catch {
+                // Disk/permissions may prevent restoring any marker. A rebuilt instance
+                // then needs the updater journal; memory alone cannot survive a restart.
+                fputs("CoreSupervisor maintenance completion failed; local recovery required; marker durability unconfirmed\n", stderr)
+            }
+            throw error // Preserve the completion error, not a later restoration error.
+        }
         maintenanceStoppedProcess = nil
         maintenanceStoppedTransaction = nil
     }
