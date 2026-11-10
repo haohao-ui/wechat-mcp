@@ -348,7 +348,7 @@ final class CaptureWorker {
     /// explained afterwards from the exact pixels; core logs the snapshot_id it decided on.
     /// 「转文字」 must be read the same at 2x and 3x (closed vocabulary of one word, edit distance ≤ 1);
     /// returns its box in window points from the 3x read, or nil when the reads disagree.
-    func voiceTranscribeButton(_ image: CGImage, _ area: CGRect) throws -> CGRect? {
+    func voiceTranscribeButton(_ image: CGImage, _ area: CGRect, maxDistanceY: Double = 6) throws -> CGRect? {
         let rect=area.integral.intersection(CGRect(x:0,y:0,width:image.width,height:image.height))
         guard !rect.isNull, let crop=image.cropping(to:rect) else { return nil }
         func distance(_ a:[Character],_ b:[Character]) -> Int {
@@ -376,8 +376,29 @@ final class CaptureWorker {
             found.append(CGRect(x:rect.minX+(h["x"] as? Double ?? 0)/s,y:rect.minY+(h["y"] as? Double ?? 0)/s,
                                 width:(h["w"] as? Double ?? 0)/s,height:(h["h"] as? Double ?? 0)/s))
         }
-        guard found.count==2, abs(found[0].midX-found[1].midX) < 8, abs(found[0].midY-found[1].midY) < 6 else { return nil }
+        guard found.count==2, abs(found[0].midX-found[1].midX) < 8, abs(found[0].midY-found[1].midY) < maxDistanceY else { return nil }
         return found[1]
+    }
+    /// The 转文字 row of the voice context menu (drawn outside the accessibility tree): read the popup
+    /// at 2x and 3x, require exactly one line within edit distance 1 of 「转文字」 at the same place in
+    /// both reads, click that row. Anything else clicks nothing (the menu also holds 删除).
+    func clickVoiceMenuItem(owner: pid_t, near point: CGPoint) throws -> Bool {
+        let rows=CGWindowListCopyWindowInfo([.optionOnScreenOnly,.excludeDesktopElements],kCGNullWindowID) as? [[String:Any]] ?? []
+        let popups:[(UInt32,CGRect)]=rows.compactMap { row in
+            guard row[kCGWindowOwnerPID as String] as? Int32 == owner, (row[kCGWindowLayer as String] as? Int ?? 0) != 0,
+                  let id=row[kCGWindowNumber as String] as? UInt32, let bounds=row[kCGWindowBounds as String] as? [String:Any],
+                  let rect=CGRect(dictionaryRepresentation:bounds as CFDictionary),
+                  rect.width>20, rect.height>20, rect.width<600, rect.height<900, rect.insetBy(dx:-40,dy:-40).contains(point) else { return nil }
+            return (id,rect)
+        }
+        guard popups.count==1, let (id,rect)=popups.first else { return false }
+        let image=try windowImage(["window_id":id])
+        let points=CGRect(x:0,y:0,width:image.width,height:image.height)
+        guard let row=try voiceTranscribeButton(image,points,maxDistanceY:8) else { return false }
+        // Image pixels to screen points.
+        let sy=rect.height/Double(image.height)
+        try act { try botActions.click(CGRect(x:rect.minX+8,y:rect.minY+row.midY*sy-6,width:rect.width-16,height:12)) }
+        return true
     }
     func keepDiagnosticFrame(_ image: CGImage, snapshot: String) {
         let directory=base.appendingPathComponent("tmp/frames")
@@ -585,10 +606,23 @@ final class CaptureWorker {
             let content=try currentLayout().region("chat_content")
             let image=try normalizedFrame(windowImage(window),window:window).image
             let area=CGRect(x:content.x+Double(bx+bw),y:content.y+Double(by)-4,width:140,height:Double(bh)+8)
-            guard let button=try voiceTranscribeButton(image,area) else { throw Failure.invalid("voice_transcribe_button_unknown") }
-            guard let wx=window["x"] as? Double,let wy=window["y"] as? Double,
-                  area.contains(CGPoint(x:button.midX,y:button.midY)) else { throw Failure.invalid("voice_transcribe_coordinates") }
-            try act { try botActions.click(CGRect(x:wx+button.midX-2,y:wy+button.midY-2,width:4,height:4)) }
+            guard let wx=window["x"] as? Double,let wy=window["y"] as? Double else { throw Failure.invalid("voice_transcribe_coordinates") }
+            if let button=try voiceTranscribeButton(image,area), area.contains(CGPoint(x:button.midX,y:button.midY)) {
+                try act { try botActions.click(CGRect(x:wx+button.midX-2,y:wy+button.midY-2,width:4,height:4)) }
+            } else {
+                // WeChat shows the inline button only on some voices (several in a row: later ones have
+                // none); the bubble's context menu always offers 转文字.
+                guard let app=NSWorkspace.shared.frontmostApplication,
+                      ["com.tencent.xinWeChat","com.tencent.WeChat"].contains(app.bundleIdentifier ?? "") else { throw Failure.invalid("wechat_not_foreground") }
+                let bubble=CGRect(x:wx+content.x+Double(bx),y:wy+content.y+Double(by),width:Double(bw),height:Double(bh))
+                var point=CGPoint(x:bubble.midX,y:bubble.midY)
+                try act { point=try botActions.rightClick(bubble) }
+                pauseUI(0.4)
+                guard try clickVoiceMenuItem(owner:app.processIdentifier,near:point) else {
+                    try? key(53)
+                    throw Failure.invalid("voice_transcribe_menu_unknown")
+                }
+            }
             // Transcription takes a moment; poll read-only for the transcript bubble.
             for _ in 0..<24 {
                 pauseUI(0.5)
