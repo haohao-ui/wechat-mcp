@@ -231,7 +231,8 @@
         "id": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 256
+          "maxLength": 274,
+          "description": "legacy-builtin-v1: (18 ASCII bytes) plus original account_id; Rust enforces at most 274 UTF-8 bytes independently of maxLength"
         },
         "owner_account_id": {
           "type": "string",
