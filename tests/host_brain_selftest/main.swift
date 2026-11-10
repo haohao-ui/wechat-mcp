@@ -608,10 +608,49 @@ func runTests() -> Int32 {
         check("brain_page_bindings_deleted_written", bindDelOK && FileManager.default.fileExists(atPath: bindDelURL.path))
 
         // 12.4.5 渲染来源不可用状态 (在 680px 宿主最小宽下验证表单禁用与错误提示排布)
+        let existingWithOverride = BrainBindingSet(
+            defaultRef: BrainRoleRef(roleId: "role_vip_service", revisionId: "rev_v2"),
+            overrides: [
+                BrainOverride(contactId: "联系人_王经理", chatKind: "private", roleId: "role_vip_service", revisionId: "rev_v2")
+            ]
+        )
+        brainController.updateDraftBindingsForTest(existingWithOverride)
         brainController.setAllowlistContacts([], status: "unavailable", error: "history_store_unavailable")
+        check("ui_bindings_unavailable_add_disabled", brainController.isAddOverrideButtonEnabled() == false)
+        check("ui_bindings_unavailable_update_disabled", brainController.isUpdateOverrideButtonEnabled() == false)
+        check("ui_bindings_unavailable_delete_enabled", brainController.isDeleteOverrideButtonEnabled() == true)
+
+        // 验证无法核验白名单时，既有覆盖可安全删除
+        brainController.deleteOverrideDraft(contactId: "联系人_王经理")
+        check("ui_bindings_unavailable_safe_delete", brainController.currentDraftBindings.overrides.isEmpty)
+        check("ui_bindings_unavailable_delete_disabled_after_all_deleted", brainController.isDeleteOverrideButtonEnabled() == false)
+
         let bindUnavailURL = fixtureDir.appendingPathComponent("brain_page_bindings_unavailable_680.png")
         let bindUnavailOK = renderOpaquePNG(view: brainController.view, size: minSize, outputURL: bindUnavailURL)
         check("brain_page_bindings_unavailable_written", bindUnavailOK && FileManager.default.fileExists(atPath: bindUnavailURL.path))
+
+        // 12.4.6 CAS 在途保存保护测试：真实触发 handleSaveBindingsDraft，并在异步返回前产生新输入，验证旧回调不覆写新草稿
+        let inFlightDraft = BrainBindingSet(
+            defaultRef: BrainRoleRef(roleId: "role_vip_service", revisionId: "rev_v99"),
+            overrides: [
+                BrainOverride(contactId: "c_contract", chatKind: "private", roleId: "role_vip_service", revisionId: "rev_v99")
+            ]
+        )
+        var saveFinished = false
+        brainController.onSaveBindingsFinished = {
+            saveFinished = true
+        }
+        brainController.triggerSaveBindingsDraftAction()
+        // 模拟在保存请求在途网络期间，用户修改了草稿并更新了令牌
+        brainController.updateDraftBindingsForTest(inFlightDraft)
+        brainController.bumpSaveTokenForTest()
+
+        // 运行 runloop 等待异步保存完成
+        let waitLimit = Date().addingTimeInterval(1.0)
+        while !saveFinished && Date() < waitLimit {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        check("ui_bindings_inflight_preserved", brainController.currentDraftBindings == inFlightDraft)
 
         // 12.5 渲染版本管理页
         brainController.selectTab(index: 4)

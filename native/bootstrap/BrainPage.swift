@@ -1120,6 +1120,26 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     public private(set) var allowlistContactsStatus: String = "ready"
     public private(set) var allowlistContactsError: String? = nil
     public private(set) var currentSaveToken: UInt64 = 0
+    public var onSaveBindingsFinished: (() -> Void)? = nil
+
+    public func isAddOverrideButtonEnabled() -> Bool {
+        return addOverrideButton.isEnabled
+    }
+    public func isUpdateOverrideButtonEnabled() -> Bool {
+        return updateOverrideButton.isEnabled
+    }
+    public func isDeleteOverrideButtonEnabled() -> Bool {
+        return deleteOverrideButton.isEnabled
+    }
+    public func bumpSaveTokenForTest() {
+        currentSaveToken += 1
+    }
+    public func triggerSaveBindingsDraftAction() {
+        handleSaveBindingsDraft()
+    }
+    public func updateDraftBindingsForTest(_ draft: BrainBindingSet) {
+        self.currentDraftBindings = draft
+    }
 
     private let defaultRolePopup = NSPopUpButton()
     private let overridesSummaryLabel = NSTextField(wrappingLabelWithString: "暂无特定联系人覆盖")
@@ -1915,6 +1935,9 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         } else {
             overridesSummaryLabel.stringValue = "暂无特定联系人覆盖（所有联系人均使用默认角色）"
         }
+        if allowlistContactsStatus == "unavailable" || allowlistContacts.isEmpty {
+            deleteOverrideButton.isEnabled = !currentDraftBindings.overrides.isEmpty
+        }
     }
 
     // MARK: - Bindings Form Actions & Fixtures
@@ -2110,6 +2133,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             do {
                 _ = try self.client.saveBindings(draft: draft, expectedGeneration: gen)
                 DispatchQueue.main.async {
+                    defer { self.onSaveBindingsFinished?() }
                     guard self.currentSaveToken == token else { return }
                     self.saveBindingsDraftButton.isEnabled = true
                     self.addOverrideButton.isEnabled = (self.allowlistContactsStatus == "ready" && !self.allowlistContacts.isEmpty)
@@ -2122,6 +2146,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
                 }
             } catch {
                 DispatchQueue.main.async {
+                    defer { self.onSaveBindingsFinished?() }
                     guard self.currentSaveToken == token else { return }
                     self.saveBindingsDraftButton.isEnabled = true
                     self.addOverrideButton.isEnabled = (self.allowlistContactsStatus == "ready" && !self.allowlistContacts.isEmpty)
