@@ -5,7 +5,7 @@
 - **基线 Commit**：`345dde5f73442d5580705ffe8d63d7ca0b296b70`
 - **I1 依赖集成**：已无冲突合入 I1 完整增量 commit `0bf4940`（包含 Root schema v2、`ExecutionMode`、`Store::initialize`、原子 activate/rollback）
 - **交付分支**：`work/prod-brain-runtime`
-- **状态**：阶段①、②、③ 及审查追加要求（`execution_mode`、`brain-initialize` 接线、`role_required`、损坏根阻断、模型快照注入、v2 reply 强制必填 `snapshot_id`、备份恢复 Manifest v3）全部完成，并行与单线程测试均通过。
+- **状态**：阶段①、②、③ 及审查追加要求（`execution_mode`、`brain-initialize` 接线、`role_required`、损坏根阻断、模型快照注入、v2 reply 强制必填 `snapshot_id`、备份恢复 Manifest v3）全部完成；且已根据最新审查意见彻底修复 4 项代码缺口（`upgrade_schema_from` 严格整型 1 拒绝截断、v2 reply 严格快照核验与 DB 失败保留 claim、`is_service` 依据配置 `mode` 确定防误种客服、模型重试固定初始快照版本防混合）。并行与单线程测试均通过（955 passed, 1 既有 failed）。
 
 ---
 
@@ -83,6 +83,39 @@
   - `src/core/backup.rs`：Manifest v3 结构，备份与恢复完整包含角色与绑定配置；
   - 测试：`test_backup_v3_roundtrip_with_brain`、`test_restore_v2_with_existing_brain_rejected`、`test_restore_symlink_rejected` 全部通过。
 
+### 3.4 审查缺口闭环（专项加固与证据链）
+
+#### 1. `brain-initialize` 的 `upgrade_schema_from` 严格整型检查与防绕过
+- **问题根因**：原先使用 `as_u64().map(|v| v as u32)`，导致 `4294967297` 会截断成 `1` 绕过规则，而负数/字符串/浮点数则变成 None 混淆。
+- **修复实现**（`src/core/control.rs`）：
+  - 严格检查 `upgrade_schema_from` 字段：缺失时为 `None`；存在时仅当为整数且值精确等于 1 时才为 `Some(1u32)`；其余任何非法类型或范围（`4294967297`、`-1`、`"1"`、`2`、`0`、`1.5`、`[1]` 等）一律拒绝为 `invalid_arguments`（退出码 2）。
+  - **测试断言**：在 `test_brain_initialize_control` 中对所有非法输入断言返回 `invalid_arguments`，且精确断言磁盘上 `brain-bindings.json` 的字节保持原状、完全未变。
+
+#### 2. v2 `reply` 快照严格校验与保留 Claim
+- **问题根因**：原实现当 DB 查无记录且内存无 snapshot 时，未能严格区分未知与匹配；DB 读取失败直接降级吞掉。
+- **修复实现**（`src/core/open_api/http.rs`）：
+  - 严格区分缺失与失败：DB 读失败（如文件损坏、IO 异常）返回 `internal`，绝不无声降级吞掉；DB 查无记录且内存无快照时返回 `snapshot_not_found`；快照不匹配返回 `snapshot_mismatch`。
+  - 在拒绝的同时，严格在内存中保留当前 turn 的 Claim 状态与 `claim_token`。
+  - **测试断言**：新增单测 `v2_reply_rejects_missing_snapshot_and_db_failure_preserving_claim`，分别验证无 snapshot 拒绝（`snapshot_not_found`）和数据库损坏拒绝（`internal`），并断言内存中 pending turn 的 `claimed_by` 和 `claim_token` 保持有效不变。
+
+#### 3. `brain-initialize` 中 `is_service` 来源依据已校验配置
+- **问题根因**：原先硬编码 `is_service = true`，导致非 service（如测试环境）误种成客服角色。
+- **修复实现**（`src/core/config.rs` & `src/core/control.rs`）：
+  - 在 `BotConfig` 中新增受白名单保护的 `mode: Option<String>` 字段，严格限制仅允许 `"service"` 或 `"test"`；
+  - `brain-initialize` 的 `is_service` 从已解析校验的 `cfg.mode` 获取：仅当明确配置为 `"service"` 时为 `true`，其余情况（包括未配置或 `"test"`）均为 `false`；
+  - **测试断言**：在 `test_brain_initialize_control` 中验证配置 `"mode": "test"` 在 `legacy_upgrade` 初始化后种出的角色 persona 是 `个人微信授权测试 Bot`，绝非客服。
+
+#### 4. 轮次固定版本机制与模型重试安全
+- **问题根因**：轮次模型调用失败重试（`failures < max_retries`）重新 cycle 时，若未保存快照则会重新执行 `store.resolve`，导致如果重试期间有管理员激活新角色 revision，轮次将混用新版本。
+- **修复实现**（`src/core/turns.rs`）：
+  - 在 `TurnData` 中增加 `fixed_snapshot: Option<Value>` 字段；
+  - 在 `run_generation_and_send` 中，若 `pending.fixed_snapshot` 存在，直接复用该快照，跳过 `store.resolve` 与 `snapshot::compile`；
+  - 模型调用失败触发重试时，将本次固定的快照存入 `retrying_turn.fixed_snapshot` 并持久化到 `turn.json`；
+  - **测试断言**：新增单测 `test_turn_model_retry_pins_initial_snapshot_version`，全调用链验证：
+    1. 第一次调用失败，记录 1 次模型失败并锁定 `fixed_snapshot` 为 role-v1；
+    2. 在重试前管理员在 Store 中创建并激活全新的 role-v2（当前 store resolve 为 v2）；
+    3. 推进时钟触发第二次 cycle 重试，断言二次传入模型的快照 `role.revision_id` 和 `snapshot_id` **仍然严格等于 role-v1**，绝无混用新激活的 revision 2，重试成功后正常调用 `send_message`。
+
 ---
 
 ## 4. 全量回归与代码质量检查
@@ -94,14 +127,14 @@
 ### 4.2 默认并行单元测试（多线程并发）
 - **执行命令**：`CARGO_TARGET_DIR=/tmp/cargo-target cargo test --bin wechat-mcp`
 - **退出码**：101（仅限 1 项既有失败）
-- **运行结果**：`test result: FAILED. 953 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.28s`
+- **运行结果**：`test result: FAILED. 955 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.48s`
 - **失败项比对**：
   - 唯一失败项为 `core::open_api::compat_tests::ops_tools_list_unchanged`（由历史 commit `7e41e7a` 桌面工具字段引入，严格保留）。
 
 ### 4.3 单线程单元测试（`--test-threads=1`）
 - **执行命令**：`CARGO_TARGET_DIR=/tmp/cargo-target cargo test --bin wechat-mcp -- --test-threads=1`
 - **退出码**：101（仅限 1 项既有失败）
-- **运行结果**：`test result: FAILED. 953 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 66.63s`
+- **运行结果**：`test result: FAILED. 955 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 67.17s`
 - **失败项比对**：与默认并行测试及既有基线完全一致。
 
 ---
@@ -116,8 +149,10 @@
   - `src/brain/mod.rs`：`Turn` 新增 `snapshot: Option<Value>`，注册 `pub mod snapshot;`。
   - `src/brain/builtin.rs`：`build_prompt` 优先使用快照中的 `compiled` 系统输入。
   - `src/brain/model_api.rs`：测试构造补充字段。
-  - `src/core/control.rs`：接线 `execution_mode` 输出与 `brain-initialize` 控制操作及测试。
-  - `src/core/turns.rs`：接入 `execution_mode`、损坏根 fail-closed 阻断、Managed 无角色记录 `role_required`、快照注入模型、单元测试补充。
+  - `src/core/config.rs`：`BotConfig` 增加受控字段 `mode` 支持并校验，用于安全解析运行模式。
+  - `src/core/control.rs`：接线 `execution_mode` 输出与 `brain-initialize` 控制操作，严格校验整型 `upgrade_schema_from` 与依据配置确定 `is_service`。
+  - `src/core/scheduler.rs`：测试构造补充 `mode: None`。
+  - `src/core/turns.rs`：接入 `execution_mode`、损坏根 fail-closed 阻断、Managed 无角色记录 `role_required`、快照注入模型、轮次模型重试版本固定（`fixed_snapshot`）及测试。
   - `src/core/history/store.rs`：migration 5 创建 `brain_turns` 表，实现 Provenance CRUD 与单测。
   - `src/core/external_brain.rs`：测试构造补充字段。
   - `src/core/open_api/session.rs`：增加 `api_version` 与 `capabilities`。
