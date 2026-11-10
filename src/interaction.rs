@@ -27,6 +27,18 @@ const MAX_TEXT_BYTES: usize = 16 * 1024;
 const MAX_SCROLL_TICKS: u32 = 40;
 const MAX_WAIT_SECONDS: f64 = 30.0;
 const HELPER_TIMEOUT_SECONDS: u64 = 90;
+const ACTION_RESPONSE_GRACE_SECONDS: f64 = 10.0;
+
+fn helper_timeout(input: &Value) -> std::time::Duration {
+    if input["operation"] == "act" {
+        let budget = input["timeout_seconds"]
+            .as_f64()
+            .unwrap_or(MAX_WAIT_SECONDS);
+        std::time::Duration::from_secs_f64(budget + ACTION_RESPONSE_GRACE_SECONDS)
+    } else {
+        std::time::Duration::from_secs(HELPER_TIMEOUT_SECONDS)
+    }
+}
 
 #[derive(Default)]
 struct State {
@@ -204,13 +216,13 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "desktop_act",
-            "Act on a control from desktop_observe. Rechecks PID/window/bounds and rendered/AX state before posting events. Reuses human-like trajectories. Consumes the observation even on failure: never retry with a new key blindly. focus is explicit; other actions require the application in front. Returns a fresh observation and separate verification; business success remains unknown. Use desktop_stop to interrupt.",
+            "Act on a control from desktop_observe. Rechecks PID/window/bounds and unique AX target identity/state; OCR targets also require matching local pixels. Reuses human-like trajectories. Consumes the observation even on failure: never retry with a new key blindly. focus is explicit; other actions require the application in front. Returns independent input_readback and verification fields; a fresh observation may be absent when the total budget expires. Business success remains unknown. Use desktop_stop to interrupt.",
             json!({
                 "observation_id":{"type":"string","minLength":1},"target_id":{"type":"string","minLength":1},
                 "action":{"type":"string","enum":["focus","click","right_click","double_click","drag","scroll","key","type_text"]},
                 "destination_id":{"type":"string"},"text":{"type":"string"},"keys":{"type":"string","description":"Shortcut such as cmd+shift+s, ctrl+left, tab; physical shortcut keys, not arbitrary Unicode text."},
                 "lines":{"type":"integer","minimum":-100,"maximum":100},"ticks":{"type":"integer","minimum":1,"maximum":MAX_SCROLL_TICKS},
-                "expected_text":{"type":"string","minLength":1},"timeout_seconds":{"type":"number","exclusiveMinimum":0,"maximum":MAX_WAIT_SECONDS}
+                "expected_text":{"type":"string","minLength":1},"timeout_seconds":{"type":"number","exclusiveMinimum":0,"maximum":MAX_WAIT_SECONDS,"default":MAX_WAIT_SECONDS,"description":"One total native action budget, including precheck, activation, input readback, refresh and expected-text verification; not a separate timeout for each phase."}
             }),
             json!(["observation_id", "target_id", "action"]),
         ),
@@ -298,13 +310,10 @@ impl DesktopTools {
                 .context("invalid desktop helper response; action outcome may be unknown")?;
             Ok::<_, anyhow::Error>(envelope)
         };
-        let response = tokio::time::timeout(
-            std::time::Duration::from_secs(HELPER_TIMEOUT_SECONDS),
-            exchange,
-        )
-        .await
-        .context("desktop helper timed out; action outcome unknown, observe before retry")
-        .and_then(|r| r);
+        let response = tokio::time::timeout(helper_timeout(input), exchange)
+            .await
+            .context("desktop helper timed out; action outcome unknown, observe before retry")
+            .and_then(|r| r);
         if response.is_err() {
             if let Some(permit) = input["permit_path"].as_str() {
                 let _ = std::fs::remove_file(permit);
@@ -745,5 +754,20 @@ mod tests {
         assert!(first_pid.is_some());
         assert_eq!(first_pid, second_pid);
         assert_ne!(first["observation_id"], second["observation_id"]);
+    }
+    #[test]
+    fn action_ipc_timeout_has_bounded_grace_instead_of_per_phase_budgets() {
+        assert_eq!(
+            helper_timeout(&json!({"operation":"act","timeout_seconds":30})),
+            std::time::Duration::from_secs(40)
+        );
+        assert_eq!(
+            helper_timeout(&json!({"operation":"act","timeout_seconds":5})),
+            std::time::Duration::from_secs(15)
+        );
+        assert_eq!(
+            helper_timeout(&json!({"operation":"observe"})),
+            std::time::Duration::from_secs(90)
+        );
     }
 }

@@ -17,8 +17,9 @@ private var recognizerWarmed = false
 
 func attribute(_ element: AXUIElement, _ key: String, deadline: InteractionDeadline? = nil) -> CFTypeRef? {
     if let deadline = deadline {
-        guard deadline.remaining > 0 else { return nil }
-        AXUIElementSetMessagingTimeout(element,min(axTimeout,Float(deadline.remaining)))
+        let remaining = Float(deadline.remaining)
+        guard remaining > 0 else { return nil }
+        AXUIElementSetMessagingTimeout(element,min(axTimeout,remaining))
     }
     var value: CFTypeRef?
     return AXUIElementCopyAttributeValue(element, key as CFString, &value) == .success ? value : nil
@@ -105,7 +106,8 @@ func collectControls(_ root: AXUIElement, window: WindowRect, budget: Interactio
             let label = (attribute(element,kAXTitleAttribute,deadline:budget) as? String)
                 ?? (attribute(element,kAXDescriptionAttribute,deadline:budget) as? String) ?? ""
             var names: CFArray?
-            if budget.remaining > 0 { AXUIElementSetMessagingTimeout(element,min(axTimeout,Float(budget.remaining))); AXUIElementCopyActionNames(element,&names) }
+            let remaining = Float(budget.remaining)
+            if remaining > 0 { AXUIElementSetMessagingTimeout(element,min(axTimeout,remaining)); AXUIElementCopyActionNames(element,&names) }
             var states: [String:String] = [:]
             for key in [kAXSelectedAttribute,kAXExpandedAttribute] {
                 if let value = attribute(element,key,deadline:budget) as? NSNumber { states[key] = value.stringValue }
@@ -208,10 +210,21 @@ func rect(_ b: WindowRect) -> CGRect { CGRect(x:b.x,y:b.y,width:b.w,height:b.h) 
 private let defaultActionTimeout: TimeInterval = 30
 
 /// Only the package's known click-through companion is exempt, never an arbitrary floating window.
+func processExecutable(_ pid: Int32) -> URL? {
+    var mib: [Int32] = [CTL_KERN,KERN_PROCARGS2,pid]
+    var size = 0
+    guard sysctl(&mib,3,nil,&size,nil,0) == 0, size > MemoryLayout<Int32>.size else { return nil }
+    var bytes = [UInt8](repeating:0,count:size)
+    guard sysctl(&mib,3,&bytes,&size,nil,0) == 0 else { return nil }
+    let start = MemoryLayout<Int32>.size
+    guard let end = bytes[start..<size].firstIndex(of:0), end > start,
+          let path = String(bytes:bytes[start..<end],encoding:.utf8) else { return nil }
+    return URL(fileURLWithPath:path)
+}
+
 func isPassiveCompanion(_ pid: Int32) -> Bool {
-    guard let executable = NSRunningApplication(processIdentifier:pid)?.executableURL?.resolvingSymlinksInPath() else { return false }
-    let own = URL(fileURLWithPath:CommandLine.arguments[0]).resolvingSymlinksInPath()
-    return executable == own.deletingLastPathComponent().appendingPathComponent("wechat_overlay")
+    let executable = NSRunningApplication(processIdentifier:pid)?.executableURL ?? processExecutable(pid)
+    return isPackagePassiveOverlay(executable:executable,helper:URL(fileURLWithPath:CommandLine.arguments[0]))
 }
 
 func frontWindowID(_ pid: Int32, windows: [[String:Any]]) -> UInt32? {
@@ -230,7 +243,7 @@ func act(_ command: DesktopCommand) throws -> [String:Any] {
     let current = try observe(bundle:saved.bundle_id,windowID:saved.window_id,screenshot:false,deadline:budget,includeOCR:needsOCR)
     let target = try validateBinding(saved:saved,current:current,target:targetID)
     let destination = try command.destination_id.map { try validateBinding(saved:saved,current:current,target:$0) }
-    let regions = action == "key" ? [] : [target.bounds] + (destination.map { [$0.bounds] } ?? [])
+    let regions = [target.bounds] + (destination.map { [$0.bounds] } ?? [])
     func checkCancellation() throws {
         try budget.check()
         guard FileManager.default.fileExists(atPath:permit), command.parent_pid == getppid() else { throw ActionError.cancelled }
@@ -280,12 +293,12 @@ func act(_ command: DesktopCommand) throws -> [String:Any] {
         try actions.drag(from:rect(target.bounds),to:rect(destination.bounds),within:rect(saved.bounds))
     case "scroll": try actions.scroll(in:rect(target.bounds),lines:command.lines ?? 0,ticks:command.ticks ?? 0)
     case "key":
-        guard target.focused || target.role == kAXWindowRole, let keys = command.keys else { throw InteractionFailure("focused_target_required") }
+        guard target.source == "accessibility", target.focused, let keys = command.keys else { throw InteractionFailure("focused_target_required") }
         try actions.key(keys)
     case "type_text":
         guard target.source == "accessibility", target.role == kAXTextFieldRole || target.role == kAXTextAreaRole || target.role == kAXComboBoxRole,
               let path = target.path, let root = axWindow(app,bounds:saved.bounds,deadline:budget), let element = resolveElement(root,path:path,deadline:budget),
-              isEditableValue(element), let text = command.text else { throw InteractionFailure("editable_target_required") }
+              isEditableValue(element,deadline:budget), let text = command.text else { throw InteractionFailure("editable_target_required") }
         try actions.click(rect(target.bounds),within:rect(saved.bounds))
         guard (attribute(element,kAXFocusedAttribute,deadline:budget) as? Bool) == true else { throw InteractionFailure("input_not_focused") }
         let pasteboard = NSPasteboard.general
@@ -300,7 +313,8 @@ func act(_ command: DesktopCommand) throws -> [String:Any] {
         inputReadback = "timeout"
         while budget.remaining > 0 {
             if (attribute(element,kAXValueAttribute,deadline:budget) as? String) == text { inputReadback = "passed"; break }
-            try checkCancellation()
+            do { try checkCancellation() }
+            catch { if budget.remaining <= 0 { break }; throw error }
             Thread.sleep(forTimeInterval:min(ActionProfile.current().dwell.lowerBound,budget.remaining))
         }
     default: throw InteractionFailure("unsupported_action")
@@ -311,16 +325,25 @@ func act(_ command: DesktopCommand) throws -> [String:Any] {
     repeat {
         guard budget.remaining > 0 else { observationError = "deadline_exceeded"; break }
         do { after = try observe(bundle:saved.bundle_id,windowID:saved.window_id,screenshot:false,deadline:budget) }
-        catch { observationError = String(describing:error); break }
+        catch {
+            after = nil
+            observationError = String(describing:error)
+            if command.expected_text != nil { verification = budget.remaining <= 0 ? "timeout" : "unverified" }
+            break
+        }
         guard let expected = command.expected_text else { break }
         if after?.controls.contains(where: { $0.label.contains(expected) || ($0.value?.contains(expected) ?? false) }) == true { verification = "passed"; break }
-        try checkCancellation()
+        do { try checkCancellation() }
+        catch { if budget.remaining <= 0 { break }; throw error }
         Thread.sleep(forTimeInterval:min(ActionProfile.current().dwell.lowerBound,budget.remaining))
     } while budget.remaining > 0
     return try actionResult(observation:after,verification:verification,inputReadback:inputReadback,activation:activation,observationError:observationError)
 }
 
-func isEditableValue(_ element: AXUIElement) -> Bool {
+func isEditableValue(_ element: AXUIElement, deadline: InteractionDeadline) -> Bool {
+    let remaining = Float(deadline.remaining)
+    guard remaining > 0 else { return false }
+    AXUIElementSetMessagingTimeout(element,min(axTimeout,remaining))
     var settable = DarwinBoolean(false)
     return AXUIElementIsAttributeSettable(element,kAXValueAttribute as CFString,&settable) == .success && settable.boolValue
 }

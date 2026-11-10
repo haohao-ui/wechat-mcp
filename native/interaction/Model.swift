@@ -67,7 +67,7 @@ func usable(_ bounds: WindowRect, within window: WindowRect) -> Bool {
 /// Rendering hashes remain diagnostic for AX targets: caret/focus animations are not identity changes.
 func validateBinding(saved: DesktopObservation, current: DesktopObservation, target: String) throws -> ObservedControl {
     guard saved.bundle_id == current.bundle_id, saved.pid == current.pid,
-          saved.window_id == current.window_id, saved.bounds == current.bounds else { throw InteractionFailure("stale_observation") }
+          saved.window_id == current.window_id, saved.title == current.title, saved.bounds == current.bounds else { throw InteractionFailure("stale_observation") }
     guard let original = saved.controls.first(where: { $0.id == target }) else { throw InteractionFailure("target_unavailable") }
     let candidates = current.controls.filter { control in
         guard control.source == original.source, control.role == original.role else { return false }
@@ -125,4 +125,10 @@ func awaitActivation(deadline: InteractionDeadline, check: () throws -> Bool, wa
         try deadline.check()
         wait()
     }
+}
+
+func isPackagePassiveOverlay(executable: URL?, helper: URL) -> Bool {
+    guard let executable = executable?.resolvingSymlinksInPath() else { return false }
+    let companion = helper.resolvingSymlinksInPath().deletingLastPathComponent().appendingPathComponent("wechat_overlay")
+    return executable == companion
 }

@@ -68,9 +68,57 @@ func observation(pid: Int32 = 1, fingerprint: String = "same", controls: [Observ
     DesktopObservation(bundle_id:"test.fixture",pid:pid,window_id:1,title:"Fixture",bounds:bounds,fingerprint:fingerprint,controls:controls,captured_at_ms:1,screenshot_base64:nil,accessibility_available:true,accessibility_truncated:false,coverage:"visible_window_only")
 }
 results["valid_binding"] = (try? validateBinding(saved:observation(),current:observation(),target:"test")) != nil
-results["stale_pixels_rejected"] = (try? validateBinding(saved:observation(),current:observation(fingerprint:"changed"),target:"test")) == nil
+results["caret_or_focus_render_changes_do_not_invalidate_ax_target"] = (try? validateBinding(saved:observation(),current:observation(fingerprint:"changed"),target:"test")) != nil
 results["replaced_process_rejected"] = (try? validateBinding(saved:observation(),current:observation(pid:2),target:"test")) == nil
 results["missing_target_rejected"] = (try? validateBinding(saved:observation(),current:observation(),target:"missing")) == nil
 results["invalid_geometry_rejected"] = !usable(WindowRect(x:790,y:10,w:50,h:30),within:bounds)
+
+let textField = ObservedControl(id:"field",source:"accessibility",role:"AXTextField",label:"Name",value:"before",enabled:true,focused:false,
+    bounds:WindowRect(x:10,y:10,w:80,h:30),path:[1],actions:[])
+let focusedField = ObservedControl(id:"new-field",source:"accessibility",role:"AXTextField",label:"Name",value:"before",enabled:true,focused:true,
+    bounds:textField.bounds,path:[1],actions:[])
+results["textfield_focus_ring_change_is_not_stale"] = (try? validateBinding(saved:observation(controls:[textField]),current:observation(fingerprint:"new-render",controls:[focusedField]),target:"field")) != nil
+let changedValue = ObservedControl(id:"field",source:"accessibility",role:"AXTextField",label:"Name",value:"edited",enabled:true,focused:true,
+    bounds:textField.bounds,path:[1],actions:[])
+results["changed_target_value_rejected"] = (try? validateBinding(saved:observation(controls:[textField]),current:observation(controls:[changedValue]),target:"field")) == nil
+let moved = ObservedControl(id:"test",source:"accessibility",role:"AXButton",label:"Synthetic",value:nil,enabled:true,focused:false,
+    bounds:WindowRect(x:110,y:10,w:50,h:30),path:[0],actions:[])
+results["moved_target_rejected"] = (try? validateBinding(saved:observation(),current:observation(controls:[moved]),target:"test")) == nil
+results["ambiguous_ax_path_rejected"] = (try? validateBinding(saved:observation(),current:observation(controls:[control,control]),target:"test")) == nil
+let ocr = ObservedControl(id:"ocr-old",source:"ocr",role:"text",label:"Label",value:nil,enabled:true,focused:false,
+    bounds:control.bounds,path:nil,actions:[],confidence:0.99,visual_fingerprint:"crop")
+let ocrLater = ObservedControl(id:"ocr-new",source:"ocr",role:"text",label:"Label",value:nil,enabled:true,focused:false,
+    bounds:control.bounds,path:nil,actions:[],confidence:0.95,visual_fingerprint:"crop")
+let ocrChanged = ObservedControl(id:"ocr-new",source:"ocr",role:"text",label:"Label",value:nil,enabled:true,focused:false,
+    bounds:control.bounds,path:nil,actions:[],visual_fingerprint:"changed-crop")
+results["ocr_confidence_jitter_and_other_window_pixels_ignored"] = (try? validateBinding(saved:observation(controls:[ocr]),current:observation(fingerprint:"changed",controls:[ocrLater]),target:"ocr-old")) != nil
+results["ocr_local_pixel_change_rejected"] = (try? validateBinding(saved:observation(controls:[ocr]),current:observation(controls:[ocrChanged]),target:"ocr-old")) == nil
+let readbackResult = try actionResult(observation:nil,verification:"timeout",inputReadback:"passed",activation:"not_applicable",observationError:"deadline_exceeded")
+results["readback_survives_expected_text_timeout"] = readbackResult["input_readback"] as? String == "passed" && readbackResult["verification"] as? String == "timeout"
+let samePackageOverlay = URL(fileURLWithPath:"/synthetic/bin/wechat_overlay")
+results["only_package_passive_overlay_is_trusted"] = isPackagePassiveOverlay(executable:samePackageOverlay,helper:URL(fileURLWithPath:"/synthetic/bin/desktop_helper")) && !isPackagePassiveOverlay(executable:URL(fileURLWithPath:"/other/bin/wechat_overlay"),helper:URL(fileURLWithPath:"/synthetic/bin/desktop_helper"))
+results["passive_overlay_does_not_occlude_target"] = !blocksAction(OcclusionCandidate(bounds:bounds,alpha:1,passive:true),regions:[control.bounds])
+results["unrelated_window_area_does_not_occlude_target"] = !blocksAction(OcclusionCandidate(bounds:WindowRect(x:300,y:0,w:200,h:200),alpha:1,passive:false),regions:[control.bounds])
+results["interactive_window_over_target_blocks"] = blocksAction(OcclusionCandidate(bounds:bounds,alpha:1,passive:false),regions:[control.bounds])
+var now: TimeInterval = 0
+let total = InteractionDeadline(seconds:30,clock:{now})
+now = 12
+let afterPrecheck = total.remaining
+now = 25
+let afterReadback = total.remaining
+now = 31
+results["deadline_is_shared_across_phases"] = afterPrecheck == 18 && afterReadback == 5 && total.remaining == 0
+do { try total.check(); results["expired_budget_stops_next_phase"] = false }
+catch { results["expired_budget_stops_next_phase"] = true }
+now = 0
+let activationDeadline = InteractionDeadline(seconds:3,clock:{now})
+do {
+    try awaitActivation(deadline:activationDeadline,check:{false},wait:{now += 1})
+    results["activation_request_without_foreground_fails"] = false
+} catch { results["activation_request_without_foreground_fails"] = true }
+now = 0
+var probes = 0
+try awaitActivation(deadline:InteractionDeadline(seconds:3,clock:{now}),check:{probes += 1;return probes >= 2},wait:{now += 1})
+results["activation_waits_for_actual_foreground"] = probes == 2
 print(String(decoding:try JSONSerialization.data(withJSONObject:results,options:.sortedKeys),as:UTF8.self))
 if results.values.contains(false) { exit(1) }
