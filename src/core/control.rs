@@ -2271,8 +2271,11 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
 
             let out_obj = json!({
                 "current_release": {
-                    "release_id": format!("{}-{}", env!("CARGO_PKG_VERSION"), std::env::consts::ARCH),
-                    "sequence": highest_seq_val,
+                    "release_id": Value::Null,
+                    "sequence": Value::Null,
+                    "status": "unknown",
+                    "source": "unknown",
+                    "core_version": env!("CARGO_PKG_VERSION"),
                     "architecture": std::env::consts::ARCH,
                     "components_consistent": Value::Null
                 },
@@ -6873,21 +6876,25 @@ mod tests {
         assert_eq!(role_ext.persona, "用户部署的个人微信AI客服助手");
     }
 
+    fn write_test_control_config(cfg_path: &Path, state_dir: &Path) {
+        let val = json!({
+            "schema_version": 1,
+            "host": "local",
+            "account_id": "acc-control-test",
+            "allowlist": [{"recipient": "午夜咖啡", "kind": "private"}],
+            "state_dir": state_dir.to_str().unwrap()
+        });
+        fs::write(cfg_path, serde_json::to_string_pretty(&val).unwrap()).unwrap();
+        fs::set_permissions(cfg_path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
     #[test]
     fn test_control_update_status_and_check() {
         let temp = TempDir::new();
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
-
-        let cfg = json!({
-            "schema_version": 1,
-            "host": "local",
-            "account_id": "acc-up-1",
-            "state_dir": state_dir.to_str().unwrap(),
-            "allowlist": []
-        });
         let cfg_path = temp.path().join("config.json");
-        fs::write(&cfg_path, serde_json::to_vec(&cfg).unwrap()).unwrap();
+        write_test_control_config(&cfg_path, &state_dir);
 
         // 1. update-status 默认状态
         let mut stdout = Vec::new();
@@ -6905,7 +6912,21 @@ mod tests {
         );
         assert_eq!(code, 0);
         let res: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(res["current_release"]["release_id"], Value::Null);
+        assert_eq!(res["current_release"]["sequence"], Value::Null);
+        assert_eq!(res["current_release"]["status"], "unknown");
+        assert_eq!(res["current_release"]["source"], "unknown");
+        assert_eq!(
+            res["current_release"]["core_version"],
+            env!("CARGO_PKG_VERSION")
+        );
+        assert_eq!(
+            res["current_release"]["architecture"],
+            std::env::consts::ARCH
+        );
+        assert_eq!(res["current_release"]["components_consistent"], Value::Null);
         assert_eq!(res["transaction"]["status"], "idle");
+        assert_eq!(res["guard"]["highest_accepted_sequence"], 0);
         assert_eq!(res["guard"]["maintenance_active"], false);
 
         // 2. update-check 未配置源
@@ -6925,5 +6946,176 @@ mod tests {
         assert_eq!(code_chk, 0);
         let res_chk: Value = serde_json::from_slice(&stdout_chk).unwrap();
         assert_eq!(res_chk["status"], "unconfigured");
+    }
+
+    #[test]
+    fn test_control_update_status_guard_sequence_not_installed() {
+        let temp = TempDir::new();
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let cfg_path = temp.path().join("config.json");
+        write_test_control_config(&cfg_path, &state_dir);
+
+        // 写入防降级高水位 sequence = 1001
+        crate::updater::journal::save_highest_accepted_sequence(&state_dir, 1001).unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "update-status".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(code, 0);
+        let res: Value = serde_json::from_slice(&stdout).unwrap();
+
+        // guard.highest_accepted_sequence 必须为 1001
+        assert_eq!(res["guard"]["highest_accepted_sequence"], 1001);
+        // 但已安装整套 release 的 sequence 仍为 null（防降级水位绝不能冒充当前安装版本）
+        assert_eq!(res["current_release"]["sequence"], Value::Null);
+        assert_eq!(res["current_release"]["release_id"], Value::Null);
+        assert_eq!(res["current_release"]["status"], "unknown");
+        assert_eq!(res["current_release"]["source"], "unknown");
+        assert_eq!(
+            res["current_release"]["core_version"],
+            env!("CARGO_PKG_VERSION")
+        );
+        assert_eq!(
+            res["current_release"]["architecture"],
+            std::env::consts::ARCH
+        );
+        assert_eq!(res["current_release"]["components_consistent"], Value::Null);
+    }
+
+    #[test]
+    fn test_control_update_status_corrupt_sequence_file() {
+        let temp = TempDir::new();
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let cfg_path = temp.path().join("config.json");
+        write_test_control_config(&cfg_path, &state_dir);
+
+        // 写入损坏的 sequence 文件
+        fs::write(
+            state_dir.join("highest_accepted_sequence"),
+            b"not_a_valid_u64\n",
+        )
+        .unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "update-status".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(code, 0);
+        let res: Value = serde_json::from_slice(&stdout).unwrap();
+
+        assert_eq!(res["transaction"]["status"], "recovery_required");
+        assert_eq!(res["transaction"]["recovery_required"], true);
+        assert!(
+            res["transaction"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("corrupt_sequence_file")
+        );
+        assert_eq!(res["guard"]["highest_accepted_sequence"], Value::Null);
+        assert_eq!(res["current_release"]["release_id"], Value::Null);
+        assert_eq!(res["current_release"]["sequence"], Value::Null);
+        assert_eq!(res["current_release"]["status"], "unknown");
+        assert_eq!(res["current_release"]["source"], "unknown");
+    }
+
+    #[test]
+    fn test_control_update_status_corrupt_journal_file() {
+        let temp = TempDir::new();
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let cfg_path = temp.path().join("config.json");
+        write_test_control_config(&cfg_path, &state_dir);
+
+        // 写入损坏的 journal
+        fs::write(state_dir.join("update-journal.json"), b"{not_valid_json").unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "update-status".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(code, 0);
+        let res: Value = serde_json::from_slice(&stdout).unwrap();
+
+        assert_eq!(res["transaction"]["status"], "recovery_required");
+        assert_eq!(res["transaction"]["recovery_required"], true);
+        assert!(
+            res["transaction"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("corrupt_or_unreadable_journal")
+        );
+        assert_eq!(res["current_release"]["release_id"], Value::Null);
+        assert_eq!(res["current_release"]["sequence"], Value::Null);
+        assert_eq!(res["current_release"]["status"], "unknown");
+        assert_eq!(res["current_release"]["source"], "unknown");
+    }
+
+    #[test]
+    fn test_control_update_status_untrusted_version_file_ignored() {
+        let temp = TempDir::new();
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let cfg_path = temp.path().join("config.json");
+        write_test_control_config(&cfg_path, &state_dir);
+
+        // 在各种路径伪造任意 VERSION 文本文件
+        fs::write(temp.path().join("VERSION"), b"9.9.9\n").unwrap();
+        fs::write(state_dir.join("VERSION"), b"8.8.8\n").unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "update-status".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(code, 0);
+        let res: Value = serde_json::from_slice(&stdout).unwrap();
+
+        // 绝不信任未受签名保护的任意文件，不冒充整套 release
+        assert_eq!(res["current_release"]["release_id"], Value::Null);
+        assert_eq!(res["current_release"]["sequence"], Value::Null);
+        assert_eq!(res["current_release"]["status"], "unknown");
+        assert_eq!(res["current_release"]["source"], "unknown");
+        assert_eq!(
+            res["current_release"]["core_version"],
+            env!("CARGO_PKG_VERSION")
+        );
     }
 }

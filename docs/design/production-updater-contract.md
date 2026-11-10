@@ -240,14 +240,18 @@ CandidateTesting (候选维护态自检：组件版本一致、配置 schema 兼
 
 ### 6.1 `wechat-mcp control update-status`
 - **输入**：`--config <config_path>`
+- **说明**：无批准闭合的整套 Release 安装元数据契约前，不信任未受签名保护的任意文本文件，区分 Core 自身编译版本与整套已安装 release。整套 release 的 `release_id` 与 `sequence` 均为 `null`，状态与来源为 `unknown`；`components_consistent` 保持 `null`（未知，不自动改 false）；防降级高水位 `guard.highest_accepted_sequence` 与已安装状态严格区分，绝不混用。
 - **输出 JSON**：
 ```json
 {
   "current_release": {
-    "release_id": "0.1.0-20261108",
-    "sequence": 1001,
-    "architecture": "arm64",
-    "components_consistent": true
+    "release_id": null,
+    "sequence": null,
+    "status": "unknown",
+    "source": "unknown",
+    "core_version": "0.1.0",
+    "architecture": "aarch64",
+    "components_consistent": null
   },
   "candidate_release": null,
   "transaction": {
