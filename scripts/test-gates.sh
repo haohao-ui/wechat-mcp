@@ -15,7 +15,20 @@ for file in .github/workflows/ci.yml .github/workflows/release.yml; do
     exit 1
   fi
 done
-grep -Fq 'continue-on-error: true' .github/workflows/ci.yml
+# fmt/clippy were intentionally made hard gates; never accept a soft test job.
+test_job=$(awk '/^  test:/{active=1; next} active && /^  [[:alnum:]_-]+:/{exit} active{print}' .github/workflows/ci.yml)
+for step in 'cargo fmt' 'cargo clippy'; do
+  if ! grep -Fq -- "- name: $step" <<< "$test_job"; then
+    echo "FAIL: missing $step gate" >&2
+    exit 1
+  fi
+done
+if grep -Eq '^[[:space:]]*continue-on-error:' <<< "$test_job"; then
+  echo 'FAIL: test job must keep fmt/clippy as hard gates' >&2
+  exit 1
+fi
+grep -Eq 'run: .*rustfmt .*--check|run: cargo fmt .*--check' <<< "$test_job"
+grep -Eq 'run: cargo clippy --all-targets --locked' <<< "$test_job"
 if grep -Fq 'needs: security' .github/workflows/ci.yml; then
   echo 'FAIL: test job still depends on security' >&2
   exit 1
