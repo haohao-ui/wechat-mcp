@@ -594,11 +594,24 @@ final class CaptureWorker {
             // Observed 2026-11-09: an unconverted voice shows a 「转文字」 button right of the bubble;
             // one click adds the transcript bubble just below it (folded into the voice by capture).
             guard let id=params["media_id"] as? String,let snapshot=params["snapshot_id"] as? String else { throw Failure.invalid("missing_voice_identity") }
-            func voice(_ frame:[String:Any]) -> [String:Any]? {
-                (frame["bubbles"] as? [[String:Any]])?.first { $0["media_id"] as? String==id && $0["kind"] as? String=="voice" }
+            // Voices of the same duration have identical pixels (same media_id): pick the one nearest the
+            // given y, then follow it by its rank from the bottom among those twins (new messages below
+            // and transcripts inserted above shift y, not that rank).
+            func twins(_ frame:[String:Any]) -> [[String:Any]] {
+                (frame["bubbles"] as? [[String:Any]] ?? []).filter { $0["media_id"] as? String==id && $0["kind"] as? String=="voice" }
             }
             let frame=try capture(recipient,accepted:accepted,manage:manage)
-            guard frame["snapshot_id"] as? String==snapshot,let item=voice(frame) else { throw Failure.invalid("voice_snapshot_changed") }
+            let first=twins(frame)
+            guard frame["snapshot_id"] as? String==snapshot, !first.isEmpty else { throw Failure.invalid("voice_snapshot_changed") }
+            let targetY=params["y"] as? Int ?? (first.last!["y"] as? Int ?? 0)
+            guard let chosen=first.indices.min(by:{ abs((first[$0]["y"] as? Int ?? 0)-targetY) < abs((first[$1]["y"] as? Int ?? 0)-targetY) }),
+                  abs((first[chosen]["y"] as? Int ?? 0)-targetY) <= 60 else { throw Failure.invalid("voice_position_unknown") }
+            let rank=first.count-1-chosen
+            func voice(_ frame:[String:Any]) -> [String:Any]? {
+                let all=twins(frame)
+                return all.count > rank ? all[all.count-1-rank] : nil
+            }
+            let item=first[chosen]
             if let text=item["transcript"] as? String, !text.isEmpty { return ["transcript":text] }
             // Several voices in a row: converting the first converts the following ones by itself
             // (user, 2026-11-10). After an earlier voice of this batch, wait read-only before clicking.
