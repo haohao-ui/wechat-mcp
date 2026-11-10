@@ -221,6 +221,92 @@ func runTests() -> Int32 {
         // 校验 Override 的 contactId 是否在 allowlist 中
         let valid = BrainPageLogic.validateOverridesAgainstAllowlist(overrides: bindings.overrides, allowlist: allowlist)
         check("binding_override_allowlist_valid", valid)
+
+        // 7.2 绑定草稿管理与白名单唯一来源校验 (RED 阶段)
+        let whiteListContacts = [
+            BrainAllowlistContact(contactId: "c_contract", displayName: "契约联系人", chatKind: "private"),
+            BrainAllowlistContact(contactId: "c_group_tech", displayName: "技术交流群", chatKind: "group")
+        ]
+        var draftBindings = bindings
+        
+        // 变更默认角色
+        let updatedDraft = BrainPageLogic.setDefaultRole(in: draftBindings, roleId: "role_group_helper", revisionId: "rev_1")
+        check("draft_bindings_update_default", updatedDraft.defaultRef?.roleId == "role_group_helper")
+
+        // 新增覆盖：必须源自白名单，不凭姓名构造ID，不扩allowlist
+        let addRes = BrainPageLogic.addOverride(
+            to: updatedDraft,
+            contact: whiteListContacts[0],
+            roleId: "role_sales",
+            revisionId: "rev_3",
+            allowlist: whiteListContacts
+        )
+        switch addRes {
+        case .success(let b):
+            draftBindings = b
+            check("draft_bindings_add_override_success", draftBindings.overrides.contains(where: { $0.contactId == "c_contract" }))
+        case .failure(let err):
+            check("draft_bindings_add_override_success", false, "Failed to add override: \(err)")
+        }
+
+        // 重复添加同一 contact_id 必须拒绝
+        let dupRes = BrainPageLogic.addOverride(
+            to: draftBindings,
+            contact: whiteListContacts[0],
+            roleId: "role_sales",
+            revisionId: "rev_3",
+            allowlist: whiteListContacts
+        )
+        switch dupRes {
+        case .success:
+            check("draft_bindings_reject_duplicate_contact", false, "Should reject duplicate override for same contact")
+        case .failure(let err):
+            check("draft_bindings_reject_duplicate_contact", err == .duplicateContact)
+        }
+
+        // 未授权的非法 contact_id 必须拒绝
+        let illegalContact = BrainAllowlistContact(contactId: "illegal_contact_666", displayName: "非法用户", chatKind: "private")
+        let illegalRes = BrainPageLogic.addOverride(
+            to: draftBindings,
+            contact: illegalContact,
+            roleId: "role_sales",
+            revisionId: "rev_3",
+            allowlist: whiteListContacts
+        )
+        switch illegalRes {
+        case .success:
+            check("draft_bindings_reject_unauthorized_contact", false, "Should reject unauthorized contact not in allowlist")
+        case .failure(let err):
+            check("draft_bindings_reject_unauthorized_contact", err == .notInAllowlist)
+        }
+
+        // 编辑已有覆盖
+        let updateRes = BrainPageLogic.updateOverride(
+            in: draftBindings,
+            contactId: "c_contract",
+            newRoleId: "role_group_helper",
+            newRevisionId: "rev_1"
+        )
+        switch updateRes {
+        case .success(let b):
+            draftBindings = b
+            let updatedItem = draftBindings.overrides.first(where: { $0.contactId == "c_contract" })
+            check("draft_bindings_update_override", updatedItem?.roleId == "role_group_helper")
+        case .failure(let err):
+            check("draft_bindings_update_override", false, "Failed to update override: \(err)")
+        }
+
+        // 删除覆盖
+        let delRes = BrainPageLogic.deleteOverride(from: draftBindings, contactId: "c_contract")
+        check("draft_bindings_delete_override", !delRes.overrides.contains(where: { $0.contactId == "c_contract" }))
+
+        // CAS 保存绑定冲突处理：保留用户未提交的草稿与未保存输入，冲突不覆盖
+        let bindingsConflictHandled = BrainPageLogic.handleBindingsConflict(
+            localDraft: draftBindings,
+            error: BrainControlError(code: "revision_conflict", message: "expected_generation mismatch: expected 12, actual 13")
+        )
+        check("bindings_cas_preserves_local_draft", bindingsConflictHandled.preservedBindings.defaultRef?.roleId == "role_group_helper")
+        check("bindings_cas_reports_conflict_message", bindingsConflictHandled.errorMessage.contains("expected_generation mismatch"))
     }
 
     // 8. Turn Provenance: Old records show legacy unrecorded, new records show phases
@@ -465,11 +551,38 @@ func runTests() -> Int32 {
         let templOK = renderOpaquePNG(view: brainController.view, size: brainSize, outputURL: templURL)
         check("brain_page_templates_written", templOK && FileManager.default.fileExists(atPath: templURL.path))
 
-        // 12.4 渲染绑定页
+        // 12.4 渲染绑定页 (完整表单、宿主最小宽680、CAS错误提示、删除状态)
         brainController.selectTab(index: 3)
+        let whiteListFixture = [
+            BrainAllowlistContact(contactId: "c_contract", displayName: "契约联系人", chatKind: "private"),
+            BrainAllowlistContact(contactId: "c_group_tech", displayName: "技术交流群", chatKind: "group")
+        ]
+        brainController.setAllowlistContacts(whiteListFixture)
+
+        // 12.4.1 标准 720 宽完整表单渲染
         let bindURL = fixtureDir.appendingPathComponent("brain_page_bindings.png")
         let bindOK = renderOpaquePNG(view: brainController.view, size: brainSize, outputURL: bindURL)
         check("brain_page_bindings_written", bindOK && FileManager.default.fileExists(atPath: bindURL.path))
+
+        // 12.4.2 宿主最小宽 680 完整表单渲染 (验证布局无截断、无裁切)
+        let minSize = NSSize(width: 680, height: 760)
+        let bind680URL = fixtureDir.appendingPathComponent("brain_page_bindings_680.png")
+        let bind680OK = renderOpaquePNG(view: brainController.view, size: minSize, outputURL: bind680URL)
+        check("brain_page_bindings_680_written", bind680OK && FileManager.default.fileExists(atPath: bind680URL.path))
+
+        // 12.4.3 渲染 CAS 冲突错误状态 (明确保存CAS并保留未提交输入、冲突不覆盖)
+        brainController.setBindingsConflictFixture(
+            message: "保存绑定冲突 [revision_conflict]：expected_generation mismatch: expected 12, actual 13。已保留未提交草稿与输入，请重试。"
+        )
+        let bindConflictURL = fixtureDir.appendingPathComponent("brain_page_bindings_conflict.png")
+        let bindConflictOK = renderOpaquePNG(view: brainController.view, size: brainSize, outputURL: bindConflictURL)
+        check("brain_page_bindings_conflict_written", bindConflictOK && FileManager.default.fileExists(atPath: bindConflictURL.path))
+
+        // 12.4.4 渲染删除规则后的状态
+        brainController.deleteOverrideDraft(contactId: "联系人_王经理")
+        let bindDelURL = fixtureDir.appendingPathComponent("brain_page_bindings_deleted.png")
+        let bindDelOK = renderOpaquePNG(view: brainController.view, size: brainSize, outputURL: bindDelURL)
+        check("brain_page_bindings_deleted_written", bindDelOK && FileManager.default.fileExists(atPath: bindDelURL.path))
 
         // 12.5 渲染版本管理页
         brainController.selectTab(index: 4)
@@ -577,20 +690,53 @@ func runTests() -> Int32 {
             let genAfterRef = try realClient.saveRole(role, expectedGeneration: savedKnowledge.generation)
             check("real_control_save_role_ref_gen", genAfterRef > savedKnowledge.generation)
             
-            // 13.7 绑定保存
-            let bindings = BrainBindingSet(
+            // 13.7 绑定保存与白名单/CAS隔离契约测试
+            // 13.7.1 尝试使用非白名单非法 contact_id 保存覆盖，必须严格被拒绝 (not_found/非法参数)
+            var illegalContactRejected = false
+            do {
+                let illegalBindings = BrainBindingSet(
+                    defaultRef: BrainRoleRef(roleId: "contract_role_1", revisionId: "rev_c2"),
+                    overrides: [
+                        BrainOverride(contactId: "illegal_contact_999", chatKind: "private", roleId: "contract_role_1", revisionId: "rev_c2")
+                    ]
+                )
+                _ = try realClient.saveBindings(draft: illegalBindings, expectedGeneration: genAfterRef)
+            } catch {
+                illegalContactRejected = true
+            }
+            check("real_control_reject_unauthorized_override", illegalContactRejected)
+
+            // 13.7.2 保存真实白名单联系人 c_contract 覆盖
+            let realBindings = BrainBindingSet(
                 defaultRef: BrainRoleRef(roleId: "contract_role_1", revisionId: "rev_c2"),
-                overrides: []
+                overrides: [
+                    BrainOverride(contactId: "c_contract", chatKind: "private", roleId: "contract_role_1", revisionId: "rev_c2")
+                ]
             )
-            let genAfterBind = try realClient.saveBindings(draft: bindings, expectedGeneration: genAfterRef)
+            let genAfterBind = try realClient.saveBindings(draft: realBindings, expectedGeneration: genAfterRef)
             check("real_control_save_bindings_gen", genAfterBind > genAfterRef)
+
+            // 13.7.3 校验草稿已持久化该 override 且未激活前仅作为草稿
+            let payloadAfterBind = try realClient.fetchList()
+            check("real_control_draft_has_c_contract", payloadAfterBind.draft?.overrides.first?.contactId == "c_contract")
+            check("real_control_active_still_empty_before_activate", payloadAfterBind.active?.overrides.isEmpty ?? true)
+
+            // 13.7.4 绑定保存 CAS 冲突测试：错误期望代次必须抛出异常
+            var bindingConflictCaught = false
+            do {
+                _ = try realClient.saveBindings(draft: realBindings, expectedGeneration: 99999)
+            } catch let err as NSError {
+                bindingConflictCaught = true
+                check("real_control_binding_conflict_code", err.userInfo["error_code"] as? String == "revision_conflict" || err.localizedDescription.contains("conflict"))
+            }
+            check("real_control_binding_conflict_caught", bindingConflictCaught)
             
             // 13.8 激活与回退
             let genAfterAct = try realClient.activate(expectedGeneration: genAfterBind)
             check("real_control_activate_gen", genAfterAct > genAfterBind)
             
             // 产生第二个激活历史世代以验证合法回退
-            let genAfterBind2 = try realClient.saveBindings(draft: bindings, expectedGeneration: genAfterAct)
+            let genAfterBind2 = try realClient.saveBindings(draft: realBindings, expectedGeneration: genAfterAct)
             let genAfterAct2 = try realClient.activate(expectedGeneration: genAfterBind2)
             check("real_control_activate2_gen", genAfterAct2 > genAfterAct)
             
