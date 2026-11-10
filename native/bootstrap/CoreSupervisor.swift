@@ -192,6 +192,22 @@ public func checkPythonLaunchdLoaded() -> Bool {
     }
 }
 
+/// Local host adapter only: no core drain, worker exit or maintenance-lock evidence.
+public enum CoreMaintenanceStatus: Equatable {
+    case inactive
+    case active(transactionID: String)
+    case recoveryRequired
+}
+
+public enum CoreMaintenanceStopResult: Equatable {
+    case stopped
+    case notConfirmed
+}
+
+public enum CoreMaintenanceError: Error {
+    case invalidTransaction, conflict, recoveryRequired, notConfirmed, ioFailure(Int32)
+}
+
 public final class CoreSupervisor {
     private let lock = NSLock()
     private let stopLock = NSLock()
@@ -199,6 +215,10 @@ public final class CoreSupervisor {
     private var process: Process?
     private var restartPolicy = RestartPolicy()
     private var manualStoppingPIDs = Set<Int32>()
+    private let maintenanceURL: URL
+    // Process identity retained after stop; a nil cache or a new PID is not exit proof.
+    private var maintenanceStoppedProcess: Process?
+    private var maintenanceStoppedTransaction: String?
 
     public private(set) var gaveUp: Bool = false
     public private(set) var isConfigError: Bool = false
@@ -215,6 +235,7 @@ public final class CoreSupervisor {
 
     public init(
         coreEnabledURL: URL? = nil,
+        maintenanceURL: URL? = nil,
         binaryURL: URL? = nil,
         configURL: URL? = nil,
         logURL: URL? = nil,
@@ -223,11 +244,128 @@ public final class CoreSupervisor {
     ) {
         let home = FileManager.default.homeDirectoryForCurrentUser
         self.coreEnabledURL = coreEnabledURL ?? home.appendingPathComponent(".wechat-rpa/core.enabled")
+        self.maintenanceURL = maintenanceURL ?? self.coreEnabledURL.deletingLastPathComponent().appendingPathComponent("core.maintenance")
         self.binaryURL = binaryURL ?? home.appendingPathComponent(".wechat-rpa/bin/wechat-mcp")
         self.configURL = configURL ?? home.appendingPathComponent(".WeChatRPABot/config.json")
         self.logURL = logURL ?? home.appendingPathComponent(".wechat-rpa/logs/core.log")
         self.gracePeriod = gracePeriod
         self.pythonLoadedChecker = pythonLoadedChecker
+    }
+
+    public var maintenanceStatus: CoreMaintenanceStatus {
+        lock.lock()
+        defer { lock.unlock() }
+        return readMaintenanceLocked()
+    }
+
+    private func validTransaction(_ value: String) -> Bool {
+        // Bounded ASCII UUIDs avoid arbitrary paths, unbounded records and ambiguous IDs.
+        return value.utf8.count == 36 && UUID(uuidString: value) != nil
+    }
+
+    private func checkMaintenanceDirectory() throws {
+        var info = stat()
+        let parent = maintenanceURL.deletingLastPathComponent().path
+        guard lstat(parent, &info) == 0 else { throw CoreMaintenanceError.ioFailure(errno) }
+        guard (info.st_mode & S_IFMT) == S_IFDIR,
+              info.st_uid == geteuid(), (info.st_mode & 0o077) == 0 else {
+            throw CoreMaintenanceError.recoveryRequired
+        }
+    }
+
+    private func readMaintenanceLocked() -> CoreMaintenanceStatus {
+        let fd = open(maintenanceURL.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        if fd < 0 { return errno == ENOENT ? .inactive : .recoveryRequired }
+        defer { close(fd) }
+        do { try checkMaintenanceDirectory() } catch { return .recoveryRequired }
+        var info = stat()
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_uid == geteuid(), (info.st_mode & 0o777) == 0o600,
+              info.st_nlink == 1, info.st_size == 36 else { return .recoveryRequired }
+        var bytes = [UInt8](repeating: 0, count: 37)
+        let count = bytes.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
+        guard count == 36, let id = String(bytes: bytes.prefix(count), encoding: .utf8),
+              validTransaction(id) else { return .recoveryRequired }
+        return .active(transactionID: id)
+    }
+
+    /// Persist suppression before any stop. This does not pause or drain core work.
+    public func beginMaintenance(transactionID: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard validTransaction(transactionID) else { throw CoreMaintenanceError.invalidTransaction }
+        switch readMaintenanceLocked() {
+        case .active(let owner):
+            guard owner == transactionID else { throw CoreMaintenanceError.conflict }
+            return
+        case .recoveryRequired: throw CoreMaintenanceError.recoveryRequired
+        case .inactive: break
+        }
+        try checkMaintenanceDirectory()
+        let temporary = maintenanceURL.deletingLastPathComponent().appendingPathComponent(".maintenance-" + UUID().uuidString)
+        let fd = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else { throw CoreMaintenanceError.ioFailure(errno) }
+        defer { close(fd); unlink(temporary.path) }
+        let bytes = Array(transactionID.utf8)
+        let written = bytes.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+        guard written == bytes.count, fsync(fd) == 0 else { throw CoreMaintenanceError.ioFailure(errno) }
+        // Exclusive publication: never replace another transaction or corrupt marker.
+        guard link(temporary.path, maintenanceURL.path) == 0 else { throw CoreMaintenanceError.ioFailure(errno) }
+        guard unlink(temporary.path) == 0 else { throw CoreMaintenanceError.ioFailure(errno) }
+        try syncMaintenanceDirectory()
+        maintenanceStoppedProcess = nil
+        maintenanceStoppedTransaction = nil
+    }
+
+    private func syncMaintenanceDirectory() throws {
+        let fd = open(maintenanceURL.deletingLastPathComponent().path, O_RDONLY | O_NOFOLLOW)
+        guard fd >= 0 else { throw CoreMaintenanceError.ioFailure(errno) }
+        defer { close(fd) }
+        guard fsync(fd) == 0 else { throw CoreMaintenanceError.ioFailure(errno) }
+    }
+
+    private func requireMaintenanceOwner(_ id: String) throws {
+        guard validTransaction(id) else { throw CoreMaintenanceError.invalidTransaction }
+        switch readMaintenanceLocked() {
+        case .active(let owner) where owner == id: return
+        case .recoveryRequired: throw CoreMaintenanceError.recoveryRequired
+        default: throw CoreMaintenanceError.conflict
+        }
+    }
+
+    /// Confirms only the exact child held by this supervisor, never all app processes.
+    public func stopForMaintenance(transactionID: String) throws -> CoreMaintenanceStopResult {
+        stopLock.lock()
+        defer { stopLock.unlock() }
+        lock.lock()
+        do { try requireMaintenanceOwner(transactionID) } catch { lock.unlock(); throw error }
+        let held = process ?? maintenanceStoppedProcess
+        lock.unlock()
+        guard let held = held else { return .notConfirmed }
+        _ = stopProcessUnlocked()
+        lock.lock()
+        defer { lock.unlock() }
+        try requireMaintenanceOwner(transactionID)
+        guard !held.isRunning, process == nil || process === held else { return .notConfirmed }
+        maintenanceStoppedProcess = held
+        maintenanceStoppedTransaction = transactionID
+        return .stopped
+    }
+
+    /// No implicit restart: only the existing supervisor reconcile may start afterwards.
+    public func finishMaintenance(transactionID: String) throws {
+        stopLock.lock()
+        defer { stopLock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
+        try requireMaintenanceOwner(transactionID)
+        guard maintenanceStoppedTransaction == transactionID,
+              let held = maintenanceStoppedProcess, !held.isRunning,
+              process == nil || process === held else { throw CoreMaintenanceError.notConfirmed }
+        guard unlink(maintenanceURL.path) == 0 else { throw CoreMaintenanceError.ioFailure(errno) }
+        try syncMaintenanceDirectory()
+        maintenanceStoppedProcess = nil
+        maintenanceStoppedTransaction = nil
     }
 
     public var currentStatus: CoreProcessStatus {
@@ -269,6 +407,8 @@ public final class CoreSupervisor {
     /// 核心生命周期协调函数：检查开关与互斥状态，执行启停
     @discardableResult
     public func checkAndReconcile(now: Date = Date()) -> CoreDecision {
+        // startProcess rechecks under the same lock used to publish the marker.
+        guard maintenanceStatus == .inactive else { return .keep }
         let enabled = FileManager.default.fileExists(atPath: coreEnabledURL.path)
         let pyLoaded = pythonLoadedChecker()
         let status = currentStatus
@@ -311,6 +451,7 @@ public final class CoreSupervisor {
         lock.lock()
         defer { lock.unlock() }
 
+        guard readMaintenanceLocked() == .inactive else { throw CoreMaintenanceError.recoveryRequired }
         if let proc = process, proc.isRunning {
             return
         }
@@ -403,6 +544,10 @@ public final class CoreSupervisor {
         stopLock.lock()
         defer { stopLock.unlock() }
 
+        return stopProcessUnlocked(gracePeriod: gracePeriod)
+    }
+
+    private func stopProcessUnlocked(gracePeriod: TimeInterval? = nil) -> String {
         let (proc, timeout) = { () -> (Process?, TimeInterval) in
             lock.lock()
             defer { lock.unlock() }
