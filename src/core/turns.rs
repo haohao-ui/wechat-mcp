@@ -1109,6 +1109,14 @@ impl BotService {
 
         if self.cursor.is_none() || self.cursor.as_ref().unwrap().bubbles.is_empty() || legacy {
             self.advance(frame)?;
+            // An empty chat has no bubbles to remember, so the cursor alone cannot tell later rounds
+            // that this chat was already opened once (device 2026-11-10: 示例联系人乙 was reopened every
+            // sweep, interrupting replies to 示例联系人甲). The marker makes "once per chat ever" hold for
+            // empty chats too.
+            let _ = write_private(
+                &self.root.join("baseline-established.json"),
+                &json!({"at": (self.clock)()}),
+            );
             let mut d = Map::new();
             d.insert("historical_messages_ignored".to_string(), json!(true));
             self.health("watching", d)?;
@@ -4718,6 +4726,27 @@ mod tests {
             .cloned()
             .collect();
         assert_eq!(sends.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_service_empty_chat_marks_its_baseline_established() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        let empty = test_frame(Vec::new(), "示例联系人甲");
+        let mut cap = MockCapture::new(vec![empty; 2]);
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        assert!(svc.cursor.is_some());
+        assert!(
+            svc.cursor.as_ref().unwrap().bubbles.is_empty(),
+            "an empty chat has no bubbles to remember"
+        );
+        assert!(
+            svc.root.join("baseline-established.json").exists(),
+            "the marker is what records that this empty chat was opened once"
+        );
     }
 
     #[tokio::test]
