@@ -70,7 +70,57 @@
 
 ## 4. 范围局限声明 (Partial 范围)
 
-- **I6 目标在限定阶段保持 partial**：
-  - 本任务严格限于只读更新状态呈现、自适应界面布局、本地检查与隔离 fixture 验证；
-  - 真实更新下载、安装切换（`apply`）、回退（`rollback`）、排空协调及专用机钥匙串重签/TCC权限保持在底层保持 unsupported 状态，未接入生产运行；
-  - 真实安装能力的落地须待专用机试点与信任公钥体系建立后专项推进。
+---
+
+## 5. Q1 缺陷整改与 I5 生产者契约适配 (task_3476eac7b178 / ctx_e1e8040bbd70)
+
+### 5.1 背景与根本原因
+在 Q1 审查中发现，原有 `control` 控制接口误将单二进制的编译版本当做整套安装版（将编译版本拼接填入 `release_id`，并将防降级高水位填补到已安装 `sequence`），导致 Swift 界面呈现不求实的“假已安装”状态。
+已批准 I5 生产者（owner `ctx_9d52c93c838d`）精确契约：
+```json
+{
+  "current_release": {
+    "release_id": null,
+    "sequence": null,
+    "status": "unknown",
+    "source": "unknown",
+    "core_version": "CARGO_PKG_VERSION",
+    "architecture": "ARCH",
+    "components_consistent": null
+  },
+  "guard": {
+    "highest_accepted_sequence": null,
+    "maintenance_active": false
+  }
+}
+```
+其中 `guard.highest_accepted_sequence` 仅为防降级高水位线，不是整套已安装序列。
+
+### 5.2 Swift 消费端模型与界面适配
+1. **模型重构 (`UpdateReleaseInfo`)**：
+   - `releaseId` 调整为 `String?`，`sequence` 调整为 `UInt64?`；
+   - 增加 `status: String?`、`source: String?`、`coreVersion: String?`；
+   - 当前整套版本无法核验时如实展示“整套版本无法核验 (未知)”，绝不把 `null` 误当未安装或解码失败；
+   - 绝不使用 `coreVersion` 或 `guard.highestAcceptedSequence` 填补 `releaseId` 或 `sequence`。
+2. **读模型标签清晰分离**：
+   - 「当前整套版本」：展示 `userFacingReleaseDescription`（null 时为 `整套版本无法核验 (未知)`）；
+   - 「核心编译版本」：独立标签！展示 `userFacingCoreVersionDescription`（例如 `0.1.0 (核心编译版)`），明确标明为独立核心编译版；
+   - 「整套安装序列」：展示 `userFacingSequenceDescription`（null 时为 `未知 (未标记)`），不拿高水位冒充；
+   - 「防降级高水位」：独立呈现 `highestAcceptedSequence`，注明 `(防降级高水位，非安装版本)`；
+   - 「发布状态与来源」：展示 `userFacingTrustDescription`。兼容缺失 status/source 的旧 shape 且标记为旧源不可信；遇到未知枚举或 `unknown` 明确标为不可信，绝不默认正常；
+   - 「宿主运行架构」、「组件一致性」、「维护抑制状态」按实际读模型准确映射。
+3. **安全防线守卫**：
+   - 写操作（下载、安装、延期）保持全部物理禁用 (`isEnabled = false`)，点击时触发只读保护拦截提示；
+   - 异步刷新与查询遵循真实响应，失败保留具体错误。
+
+### 5.3 离屏渲染与验证证据
+- 新增 1b (批准的新 shape)、1c (防降级高水位隔离)、1d (未知枚举不可信防御) 单元测试；
+- 渲染生成真实离屏 PNG 证据：
+  - `/tmp/update_ui_approved_720w.png` (720x1250, 145KB)
+  - `/tmp/update_ui_approved_680w.png` (680x1250, 144KB)
+  - `/tmp/update_ui_unconfigured_full.png` (720x1250, 141KB)
+  - `/tmp/update_ui_unconfigured_680w.png` (680x1250, 140KB)
+  - `/tmp/update_ui_recovery_full.png` (720x1250, 202KB)
+  - `/tmp/update_ui_recovery_680w.png` (680x1250, 201KB)
+- 经实际图像排查与 `subviews_within_680w_bounds` 单测验证，680 宽下所有卡片子视图 `frame.maxX <= 680.0`，排版对齐无溢出截断。
+- 测试结果：`cargo test --test swift_update_ui`，69 项断言全部 PASS (0 FAIL)。
