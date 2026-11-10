@@ -651,10 +651,14 @@ final class CaptureWorker {
             let window=try readyWindow(manage:manage).window
             try screenGate(window)
             guard let id=params["media_id"] as? String,let snapshot=params["snapshot_id"] as? String else { throw Failure.invalid("missing_image_identity") }
+            // The caller's snapshot can legitimately move between the turn frame and this call (a tall
+            // consecutive image scrolls the viewport; device 2026-11-10 23:37). Bubble identity is the
+            // media id (the image's own pixel digest), so a fresh frame that still shows this image is
+            // enough; only a missing bubble is an error.
             let frame=try capture(recipient,accepted:accepted,manage:manage)
-            guard frame["snapshot_id"] as? String==snapshot,
-                  let item=(frame["bubbles"] as? [[String:Any]])?.first(where:{ $0["media_id"] as? String==id && $0["kind"] as? String=="image" })
+            guard let item=(frame["bubbles"] as? [[String:Any]])?.first(where:{ $0["media_id"] as? String==id && $0["kind"] as? String=="image" })
             else { throw Failure.invalid("image_snapshot_changed") }
+            _ = snapshot
             let directory=media.appendingPathComponent(id)
             try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
             try checkPrivate(directory,type:.typeDirectory,mode:0o700)

@@ -904,45 +904,67 @@ impl WorkerClient {
                 let mut source = "original".to_string();
                 let media_id = item.media_id.clone().unwrap_or_default();
 
-                let prep_res = self
-                    .call(
-                        "prepare_image",
-                        json!({
-                            "media_id": media_id,
-                            "snapshot_id": current_frame.snapshot_id,
-                            "max_bytes": self.max_bytes,
-                        }),
-                    )
-                    .await;
-
-                match prep_res {
-                    Ok(_) => {
-                        self.clear_folder_permission();
-                        let f = self.frame().await?;
-                        current_frame = f;
-                        if index + 1 < items.len() {
-                            let relocated = crate::core::policy::relocate(
-                                &items[index + 1..],
-                                &current_frame.bubbles,
-                            );
-                            items.splice(index + 1.., relocated);
+                // Save-as needs a live frame for this bubble. Consecutive tall images move the
+                // viewport between the turn frame and this call (device 2026-11-10 23:37: the first of
+                // two images failed the snapshot check, so only its thumbnail reached the model), so
+                // refresh the frame and retry once before falling back to the thumbnail.
+                let mut prepared = false;
+                let mut prep_err: Option<String> = None;
+                for attempt in 0..2 {
+                    if attempt > 0 {
+                        if let Ok(f) = self.frame().await {
+                            current_frame = f;
                         }
                     }
-                    Err(err) => {
-                        let err_str = err.to_string();
-                        if action_interrupted(&err_str) {
-                            return Err(err);
-                        }
-                        source = "chat_thumbnail".to_string();
-                        self.note_folder_permission(&err_str);
-                        self.log_event(
-                            "image_original_unavailable",
+                    let prep = self
+                        .call(
+                            "prepare_image",
                             json!({
-                                "reason": media_reason(&err_str),
-                                "detail": worker_code(&err_str),
+                                "media_id": media_id,
+                                "snapshot_id": current_frame.snapshot_id,
+                                "max_bytes": self.max_bytes,
                             }),
-                        );
+                        )
+                        .await;
+                    match prep {
+                        Ok(_) => {
+                            prepared = true;
+                            break;
+                        }
+                        Err(err) => {
+                            let err_str = err.to_string();
+                            if action_interrupted(&err_str) {
+                                return Err(err);
+                            }
+                            if attempt == 0 && err_str.contains("image_snapshot_changed") {
+                                continue;
+                            }
+                            prep_err = Some(err_str);
+                            break;
+                        }
                     }
+                }
+                if prepared {
+                    self.clear_folder_permission();
+                    let f = self.frame().await?;
+                    current_frame = f;
+                    if index + 1 < items.len() {
+                        let relocated = crate::core::policy::relocate(
+                            &items[index + 1..],
+                            &current_frame.bubbles,
+                        );
+                        items.splice(index + 1.., relocated);
+                    }
+                } else if let Some(err_str) = prep_err {
+                    source = "chat_thumbnail".to_string();
+                    self.note_folder_permission(&err_str);
+                    self.log_event(
+                        "image_original_unavailable",
+                        json!({
+                            "reason": media_reason(&err_str),
+                            "detail": worker_code(&err_str),
+                        }),
+                    );
                 }
 
                 match self.download(&media_id, "image").await {
@@ -1610,6 +1632,70 @@ mod tests {
 
         let res = client.calibrate().await.unwrap();
         assert_eq!(res["wechat_version"], "4.1.15");
+    }
+
+    #[tokio::test]
+    async fn test_image_snapshot_mismatch_is_retried_before_the_thumbnail() {
+        // Device 2026-11-10 23:37: the first of two tall images failed the save-as snapshot check and
+        // only its thumbnail reached the model. One refresh + retry recovers the original.
+        let temp = TestDir::new();
+        let sock = temp.path().join("bot-worker.sock");
+        let prepare_calls = Arc::new(StdMutex::new(0usize));
+        let pc = prepare_calls.clone();
+        let img_id = "1".repeat(64);
+        let img_bytes = b"\x89PNG\r\n\x1a\nfakeimagebytes";
+
+        let _server = MockWorkerServer::spawn(sock.clone(), move |req| {
+            let op = req["operation"].as_str().unwrap_or("");
+            let id = req["id"].as_u64().unwrap_or(1);
+            let params = &req["params"];
+            if op == "prepare_image" {
+                let mut count = pc.lock().unwrap();
+                *count += 1;
+                if *count == 1 {
+                    return json!({
+                        "protocol_version": 1,
+                        "id": id,
+                        "ok": false,
+                        "error": "private visual operation failed: invalid(\"image_snapshot_changed\")",
+                    });
+                }
+            }
+            let result = if op == "prepare_image" {
+                json!({"media_id": params["media_id"], "extension": "png"})
+            } else if op == "capture" {
+                serde_json::to_value(test_sample_frame()).unwrap()
+            } else if op == "read_media" {
+                json!({
+                    "offset": 0,
+                    "size": img_bytes.len(),
+                    "bytes": test_b64_encode(img_bytes),
+                    "eof": true,
+                    "sha256": sha256(img_bytes),
+                    "extension": "png",
+                })
+            } else {
+                json!({})
+            };
+            json!({"protocol_version": 1, "id": id, "ok": true, "result": result})
+        })
+        .await;
+
+        let mut client = setup_test_client(&temp, sock, None);
+        client.connect(5).await.unwrap();
+        let bubble = test_bubble_helper("image", &img_id, None);
+        let frame = test_empty_frame();
+        let (images, files, failed) = client.attachments(&[bubble], &frame).await.unwrap();
+
+        assert_eq!(
+            *prepare_calls.lock().unwrap(),
+            2,
+            "the snapshot mismatch is retried once"
+        );
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].source, "original", "the original is kept, not a thumbnail");
+        assert!(files.is_empty());
+        assert!(failed.is_empty());
     }
 
     // --- test_bot_documents.py ---
