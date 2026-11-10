@@ -7,23 +7,122 @@ import AppKit
 // MARK: - Update Data Models
 
 public struct UpdateReleaseInfo: Codable, Equatable {
-    public let releaseId: String
+    public let releaseId: String?
     public let sequence: UInt64?
+    public let status: String?
+    public let source: String?
+    public let coreVersion: String?
     public let architecture: String
     public let componentsConsistent: Bool?
 
     enum CodingKeys: String, CodingKey {
         case releaseId = "release_id"
         case sequence
+        case status
+        case source
+        case coreVersion = "core_version"
         case architecture
         case componentsConsistent = "components_consistent"
     }
 
-    public init(releaseId: String, sequence: UInt64?, architecture: String, componentsConsistent: Bool?) {
+    public init(
+        releaseId: String? = nil,
+        sequence: UInt64? = nil,
+        status: String? = nil,
+        source: String? = nil,
+        coreVersion: String? = nil,
+        architecture: String = "unknown",
+        componentsConsistent: Bool? = nil
+    ) {
         self.releaseId = releaseId
         self.sequence = sequence
+        self.status = status
+        self.source = source
+        self.coreVersion = coreVersion
         self.architecture = architecture
         self.componentsConsistent = componentsConsistent
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.releaseId = try container.decodeIfPresent(String.self, forKey: .releaseId)
+        self.sequence = try container.decodeIfPresent(UInt64.self, forKey: .sequence)
+        self.status = try container.decodeIfPresent(String.self, forKey: .status)
+        self.source = try container.decodeIfPresent(String.self, forKey: .source)
+        self.coreVersion = try container.decodeIfPresent(String.self, forKey: .coreVersion)
+        self.architecture = (try container.decodeIfPresent(String.self, forKey: .architecture)) ?? "unknown"
+        self.componentsConsistent = try container.decodeIfPresent(Bool.self, forKey: .componentsConsistent)
+    }
+
+    /// 整套版本可信度判定：必须有明确已安装/已验证状态与合法发布源，缺失或 unknown 均不可信
+    public var isTrustedInstalledRelease: Bool {
+        guard let rid = releaseId, !rid.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+        guard let st = status?.lowercased(), st == "installed" || st == "verified" else {
+            return false
+        }
+        guard let src = source?.lowercased(), src == "signed_package" else {
+            return false
+        }
+        return true
+    }
+
+    /// 用户友好的整套版本描述（空值/null 均明确显示无法核验/未知，不当做未安装或解码失败）
+    public var userFacingReleaseDescription: String {
+        guard let rid = releaseId, !rid.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return "整套版本无法核验 (未知)"
+        }
+        return rid
+    }
+
+    /// 用户友好的核心编译版本描述（独立呈现）
+    public var userFacingCoreVersionDescription: String {
+        guard let cv = coreVersion, !cv.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return "未知 (未报告)"
+        }
+        return "\(cv) (核心编译版)"
+    }
+
+    /// 用户友好的安装序列号描述（绝不拿 guard.highestAcceptedSequence 填补）
+    public var userFacingSequenceDescription: String {
+        if let s = sequence {
+            return "\(s)"
+        }
+        return "未知 (未标记)"
+    }
+
+    /// 用户友好的状态与来源描述：缺失或未知均明确标注不可信，不默认正常
+    public var userFacingTrustDescription: String {
+        let st = status?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let src = source?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        if st.isEmpty && src.isEmpty {
+            return "未提供状态/来源 (旧数据源，不可信)"
+        }
+
+        let stDesc: String
+        switch st.lowercased() {
+        case "unknown": stDesc = "状态未知"
+        case "installed": stDesc = "已安装"
+        case "verified": stDesc = "已验证"
+        case "": stDesc = "无状态"
+        default: stDesc = "未知状态 [\(st)]"
+        }
+
+        let srcDesc: String
+        switch src.lowercased() {
+        case "unknown": srcDesc = "来源未知"
+        case "signed_package": srcDesc = "签名发布包"
+        case "": srcDesc = "无来源"
+        default: srcDesc = "未知来源 [\(src)]"
+        }
+
+        if isTrustedInstalledRelease {
+            return "\(stDesc) (\(srcDesc))"
+        } else {
+            return "\(stDesc) / \(srcDesc) (不可信)"
+        }
     }
 }
 
@@ -92,6 +191,13 @@ public struct UpdateGuardInfo: Codable, Equatable {
     public init(highestAcceptedSequence: UInt64?, maintenanceActive: Bool) {
         self.highestAcceptedSequence = highestAcceptedSequence
         self.maintenanceActive = maintenanceActive
+    }
+
+    public var userFacingGuardDescription: String {
+        if let s = highestAcceptedSequence {
+            return "\(s) (防降级高水位，非安装版本)"
+        }
+        return "无 (null)"
     }
 }
 
@@ -367,7 +473,10 @@ public final class UpdatePageController: NSViewController {
 
     // UI - 当前版本卡片 (全部使用 wrappingLabelWithString 并设受限宽度)
     private let currentReleaseLabel = NSTextField(wrappingLabelWithString: "加载中...")
-    private let currentSeqLabel = NSTextField(wrappingLabelWithString: "未校验")
+    private let coreVersionLabel = NSTextField(wrappingLabelWithString: "未知")
+    private let currentSeqLabel = NSTextField(wrappingLabelWithString: "未知 (未标记)")
+    private let guardSeqLabel = NSTextField(wrappingLabelWithString: "无 (null)")
+    private let releaseTrustLabel = NSTextField(wrappingLabelWithString: "未校验")
     private let architectureLabel = NSTextField(wrappingLabelWithString: "未知")
     private let consistencyBadge = NSTextField(wrappingLabelWithString: "未校验 (未知)")
     private let supervisorStatusLabel = NSTextField(wrappingLabelWithString: "检查中...")
@@ -451,18 +560,24 @@ public final class UpdatePageController: NSViewController {
         let currentBox = createSectionBox(title: "当前运行环境 (真实读模型)")
         let currentGrid = NSGridView(views: [
             [NSTextField(labelWithString: "当前整套版本:"), currentReleaseLabel],
-            [NSTextField(labelWithString: "序列号 (Sequence):"), currentSeqLabel],
+            [NSTextField(labelWithString: "核心编译版本:"), coreVersionLabel],
+            [NSTextField(labelWithString: "整套安装序列:"), currentSeqLabel],
+            [NSTextField(labelWithString: "防降级高水位:"), guardSeqLabel],
+            [NSTextField(labelWithString: "发布状态与来源:"), releaseTrustLabel],
             [NSTextField(labelWithString: "宿主运行架构:"), architectureLabel],
             [NSTextField(labelWithString: "组件一致性:"), consistencyBadge],
             [NSTextField(labelWithString: "维护抑制状态:"), supervisorStatusLabel]
         ])
         currentGrid.rowSpacing = 6
         currentGrid.columnSpacing = 12
-        currentReleaseLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
-        currentSeqLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
-        architectureLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
-        consistencyBadge.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
-        supervisorStatusLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
+        currentReleaseLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 440).isActive = true
+        coreVersionLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 440).isActive = true
+        currentSeqLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 440).isActive = true
+        guardSeqLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 440).isActive = true
+        releaseTrustLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 440).isActive = true
+        architectureLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 440).isActive = true
+        consistencyBadge.widthAnchor.constraint(lessThanOrEqualToConstant: 440).isActive = true
+        supervisorStatusLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 440).isActive = true
         currentBox.setContent(currentGrid)
         contentStack.addArrangedSubview(currentBox)
 
@@ -677,13 +792,25 @@ public final class UpdatePageController: NSViewController {
     public func applyStatusPayload(_ payload: UpdateStatusPayload) {
         self.currentStatusPayload = payload
 
-        // 当前版本信息：严格展示实际读模型，不臆造
-        currentReleaseLabel.stringValue = payload.currentRelease.releaseId.isEmpty ? "未知" : payload.currentRelease.releaseId
-        if let s = payload.currentRelease.sequence {
-            currentSeqLabel.stringValue = "\(s)"
+        // 当前版本信息：严格展示实际读模型，不臆造，不用 core_version 或 guard 高水位填补 installed 字段
+        currentReleaseLabel.stringValue = payload.currentRelease.userFacingReleaseDescription
+        if payload.currentRelease.releaseId == nil || payload.currentRelease.releaseId?.isEmpty == true {
+            currentReleaseLabel.textColor = .systemOrange
         } else {
-            currentSeqLabel.stringValue = "未标记 (null)"
+            currentReleaseLabel.textColor = .labelColor
         }
+
+        coreVersionLabel.stringValue = payload.currentRelease.userFacingCoreVersionDescription
+        currentSeqLabel.stringValue = payload.currentRelease.userFacingSequenceDescription
+        guardSeqLabel.stringValue = payload.guardInfo.userFacingGuardDescription
+
+        releaseTrustLabel.stringValue = payload.currentRelease.userFacingTrustDescription
+        if payload.currentRelease.isTrustedInstalledRelease {
+            releaseTrustLabel.textColor = .systemGreen
+        } else {
+            releaseTrustLabel.textColor = .secondaryLabelColor
+        }
+
         architectureLabel.stringValue = payload.currentRelease.architecture.isEmpty ? "未知" : payload.currentRelease.architecture
 
         if let c = payload.currentRelease.componentsConsistent {

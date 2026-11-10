@@ -19,7 +19,7 @@ func runTests() -> Int32 {
 
     print("=== Running Update UI & Host Integration Selftests ===")
 
-    // 1. 数据模型与 JSON 解析测试
+    // 1. 数据模型与 JSON 解析测试（兼容旧 shape，无 status/source/core_version）
     do {
         let statusJson = """
         {
@@ -54,10 +54,133 @@ func runTests() -> Int32 {
         check("status_current_sequence", payload.currentRelease.sequence == 1)
         check("status_architecture", payload.currentRelease.architecture == "aarch64")
         check("status_components_consistent", payload.currentRelease.componentsConsistent == true)
+        check("status_old_shape_core_version_nil", payload.currentRelease.coreVersion == nil)
+        // 旧 shape 缺失 status/source 时，严格不可信，不默认正常
+        check("status_old_shape_not_trusted", payload.currentRelease.isTrustedInstalledRelease == false)
+        check("status_old_shape_trust_desc", payload.currentRelease.userFacingTrustDescription.contains("不可信"))
         check("status_candidate_release_id", payload.candidateRelease?.releaseId == "0.2.0-aarch64")
         check("status_candidate_sequence", payload.candidateRelease?.sequence == 2)
         check("status_transaction_status", payload.transaction.status == .idle)
         check("status_guard_maintenance", payload.guardInfo.maintenanceActive == false)
+    }
+
+    // 1b. 批准的 I5 生产新 shape 专项测试 (nullable releaseId 与 sequence, 独立 core_version, status/source 为 unknown)
+    do {
+        let approvedJson = """
+        {
+            "current_release": {
+                "release_id": null,
+                "sequence": null,
+                "status": "unknown",
+                "source": "unknown",
+                "core_version": "0.1.0",
+                "architecture": "aarch64",
+                "components_consistent": null
+            },
+            "candidate_release": null,
+            "transaction": {
+                "status": "idle",
+                "transaction_id": null,
+                "stage": null,
+                "error": null,
+                "recovery_required": false
+            },
+            "guard": {
+                "highest_accepted_sequence": null,
+                "maintenance_active": false
+            }
+        }
+        """
+        guard let payload = try? UpdatePageLogic.parseStatusPayload(jsonString: approvedJson) else {
+            check("approved_shape_parse", false, "Failed to parse approved status shape")
+            return 1
+        }
+        check("approved_release_id_is_nil", payload.currentRelease.releaseId == nil)
+        check("approved_sequence_is_nil", payload.currentRelease.sequence == nil)
+        check("approved_status_unknown", payload.currentRelease.status == "unknown")
+        check("approved_source_unknown", payload.currentRelease.source == "unknown")
+        check("approved_core_version", payload.currentRelease.coreVersion == "0.1.0")
+        check("approved_architecture", payload.currentRelease.architecture == "aarch64")
+        check("approved_components_consistent_nil", payload.currentRelease.componentsConsistent == nil)
+        // 安全核验：未经验证整套包，绝对不可判定为可信
+        check("approved_not_trusted", payload.currentRelease.isTrustedInstalledRelease == false)
+        check("approved_release_desc_unknown", payload.currentRelease.userFacingReleaseDescription == "整套版本无法核验 (未知)")
+        check("approved_core_desc_independent", payload.currentRelease.userFacingCoreVersionDescription == "0.1.0 (核心编译版)")
+        check("approved_seq_desc_unknown", payload.currentRelease.userFacingSequenceDescription == "未知 (未标记)")
+        check("approved_trust_desc_untrusted", payload.currentRelease.userFacingTrustDescription.contains("不可信"))
+    }
+
+    // 1c. 防降级高水位隔离测试：guard.highest_accepted_sequence 仅为防降级高水位，绝不填补 installed release
+    do {
+        let guardSeqJson = """
+        {
+            "current_release": {
+                "release_id": null,
+                "sequence": null,
+                "status": "unknown",
+                "source": "unknown",
+                "core_version": "0.1.0",
+                "architecture": "aarch64",
+                "components_consistent": null
+            },
+            "candidate_release": null,
+            "transaction": {
+                "status": "idle",
+                "transaction_id": null,
+                "stage": null,
+                "error": null,
+                "recovery_required": false
+            },
+            "guard": {
+                "highest_accepted_sequence": 1001,
+                "maintenance_active": false
+            }
+        }
+        """
+        guard let payload = try? UpdatePageLogic.parseStatusPayload(jsonString: guardSeqJson) else {
+            check("guard_sequence_isolation_parse", false, "Failed to parse guard sequence JSON")
+            return 1
+        }
+        check("guard_sequence_value", payload.guardInfo.highestAcceptedSequence == 1001)
+        check("guard_sequence_does_not_leak_to_release_id", payload.currentRelease.releaseId == nil)
+        check("guard_sequence_does_not_leak_to_installed_sequence", payload.currentRelease.sequence == nil)
+        check("guard_desc_contains_anti_downgrade", payload.guardInfo.userFacingGuardDescription.contains("防降级高水位"))
+    }
+
+    // 1d. 未知枚举与恶意伪造状态测试：未知枚举不默认正常，明确标为不可信
+    do {
+        let weirdJson = """
+        {
+            "current_release": {
+                "release_id": "0.9.9-bogus",
+                "sequence": 999,
+                "status": "compromised_or_strange",
+                "source": "untrusted_network",
+                "core_version": "0.1.0",
+                "architecture": "aarch64",
+                "components_consistent": false
+            },
+            "candidate_release": null,
+            "transaction": {
+                "status": "idle",
+                "transaction_id": null,
+                "stage": null,
+                "error": null,
+                "recovery_required": false
+            },
+            "guard": {
+                "highest_accepted_sequence": 999,
+                "maintenance_active": false
+            }
+        }
+        """
+        guard let payload = try? UpdatePageLogic.parseStatusPayload(jsonString: weirdJson) else {
+            check("weird_enum_parse", false, "Failed to parse weird enum JSON")
+            return 1
+        }
+        check("weird_enum_not_trusted", payload.currentRelease.isTrustedInstalledRelease == false)
+        check("weird_enum_trust_desc_untrusted", payload.currentRelease.userFacingTrustDescription.contains("不可信"))
+        check("weird_enum_contains_details", payload.currentRelease.userFacingTrustDescription.contains("compromised_or_strange"))
     }
 
     // 2. 检查更新 - 未配置更新源状态（Unconfigured）
@@ -264,7 +387,7 @@ func runTests() -> Int32 {
             verification: nil
         ))
         
-        let fullSize720 = NSSize(width: 720, height: 1150)
+        let fullSize720 = NSSize(width: 720, height: 1250)
         updateVC.view.frame = NSRect(origin: .zero, size: fullSize720)
         updateVC.contentStack.layoutSubtreeIfNeeded()
         updateVC.view.layoutSubtreeIfNeeded()
@@ -275,7 +398,7 @@ func runTests() -> Int32 {
         }
         rep720.colorSpaceName = .calibratedRGB
         updateVC.view.cacheDisplay(in: updateVC.view.bounds, to: rep720)
-        check("offscreen_render_unconfigured_720", rep720.pixelsWide == 720 && rep720.pixelsHigh == 1150)
+        check("offscreen_render_unconfigured_720", rep720.pixelsWide == 720 && rep720.pixelsHigh == 1250)
 
         let outPath1 = "/tmp/update_ui_unconfigured_full.png"
         if let pngData1 = rep720.representation(using: .png, properties: [:]) {
@@ -284,7 +407,7 @@ func runTests() -> Int32 {
         }
 
         // 验证宿主实际最小宽度 680 宽
-        let fullSize680 = NSSize(width: 680, height: 1150)
+        let fullSize680 = NSSize(width: 680, height: 1250)
         updateVC.view.frame = NSRect(origin: .zero, size: fullSize680)
         updateVC.contentStack.layoutSubtreeIfNeeded()
         updateVC.view.layoutSubtreeIfNeeded()
@@ -294,7 +417,7 @@ func runTests() -> Int32 {
         }
         rep680.colorSpaceName = .calibratedRGB
         updateVC.view.cacheDisplay(in: updateVC.view.bounds, to: rep680)
-        check("offscreen_render_unconfigured_680", rep680.pixelsWide == 680 && rep680.pixelsHigh == 1150)
+        check("offscreen_render_unconfigured_680", rep680.pixelsWide == 680 && rep680.pixelsHigh == 1250)
         let outPath680_1 = "/tmp/update_ui_unconfigured_680w.png"
         if let pngData680_1 = rep680.representation(using: .png, properties: [:]) {
             try? pngData680_1.write(to: URL(fileURLWithPath: outPath680_1))
@@ -332,6 +455,47 @@ func runTests() -> Int32 {
         if let pngData680_2 = rep680.representation(using: .png, properties: [:]) {
             try? pngData680_2.write(to: URL(fileURLWithPath: outPath680_2))
             check("offscreen_recovery_680w_saved", FileManager.default.fileExists(atPath: outPath680_2))
+        }
+
+        // 11.3 批准的 I5 生产新 shape 渲染（整套版本未知、独立核心编译版、状态未知不可信）
+        updateVC.applyStatusPayload(UpdateStatusPayload(
+            currentRelease: UpdateReleaseInfo(
+                releaseId: nil,
+                sequence: nil,
+                status: "unknown",
+                source: "unknown",
+                coreVersion: "0.1.0",
+                architecture: "aarch64",
+                componentsConsistent: nil
+            ),
+            candidateRelease: nil,
+            transaction: UpdateTransactionInfo(
+                status: .idle,
+                transactionId: nil,
+                stage: nil,
+                error: nil,
+                recoveryRequired: false
+            ),
+            guardInfo: UpdateGuardInfo(highestAcceptedSequence: 1001, maintenanceActive: false)
+        ))
+        // 720 宽
+        updateVC.view.frame = NSRect(origin: .zero, size: fullSize720)
+        updateVC.view.layoutSubtreeIfNeeded()
+        updateVC.view.cacheDisplay(in: updateVC.view.bounds, to: rep720)
+        let outPathApproved720 = "/tmp/update_ui_approved_720w.png"
+        if let pngDataAppr720 = rep720.representation(using: .png, properties: [:]) {
+            try? pngDataAppr720.write(to: URL(fileURLWithPath: outPathApproved720))
+            check("offscreen_approved_720w_png_saved", FileManager.default.fileExists(atPath: outPathApproved720))
+        }
+
+        // 680 宽
+        updateVC.view.frame = NSRect(origin: .zero, size: fullSize680)
+        updateVC.view.layoutSubtreeIfNeeded()
+        updateVC.view.cacheDisplay(in: updateVC.view.bounds, to: rep680)
+        let outPathApproved680 = "/tmp/update_ui_approved_680w.png"
+        if let pngDataAppr680 = rep680.representation(using: .png, properties: [:]) {
+            try? pngDataAppr680.write(to: URL(fileURLWithPath: outPathApproved680))
+            check("offscreen_approved_680w_png_saved", FileManager.default.fileExists(atPath: outPathApproved680))
         }
 
         // 验证所有卡片与子视图均严格限制在 680 宽画幅内，无任何右侧越界
