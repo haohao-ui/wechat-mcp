@@ -25,6 +25,13 @@ public struct BrainContextBudget: Codable, Equatable {
     }
 }
 
+struct DynamicCodingKey: CodingKey {
+    var stringValue: String
+    var intValue: Int?
+    init(stringValue: String) { self.stringValue = stringValue; self.intValue = nil }
+    init?(intValue: Int) { self.stringValue = "\(intValue)"; self.intValue = intValue }
+}
+
 public struct BrainTemplates: Codable, Equatable {
     public static let allowedReasons = [
         "unsupported_type",
@@ -93,16 +100,20 @@ public struct BrainTemplates: Codable, Equatable {
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(greeting, forKey: .greeting)
-        try container.encode(insufficientInformation, forKey: .insufficientInformation)
-        try container.encode(unreadableMissingLabels, forKey: .unreadableMissingLabels)
-        try container.encode(unreadableManyItems, forKey: .unreadableManyItems)
+        if let g = greeting { try container.encode(g, forKey: .greeting) } else { try container.encodeNil(forKey: .greeting) }
+        if let inf = insufficientInformation { try container.encode(inf, forKey: .insufficientInformation) } else { try container.encodeNil(forKey: .insufficientInformation) }
+        if let m = unreadableMissingLabels { try container.encode(m, forKey: .unreadableMissingLabels) } else { try container.encodeNil(forKey: .unreadableMissingLabels) }
+        if let mi = unreadableManyItems { try container.encode(mi, forKey: .unreadableManyItems) } else { try container.encodeNil(forKey: .unreadableManyItems) }
 
-        var fullMap: [String: String?] = [:]
+        var unreadableContainer = container.nestedContainer(keyedBy: DynamicCodingKey.self, forKey: .unreadable)
         for reason in BrainTemplates.allowedReasons {
-            fullMap[reason] = unreadable[reason]
+            let key = DynamicCodingKey(stringValue: reason)
+            if let val = unreadable[reason] {
+                try unreadableContainer.encode(val, forKey: key)
+            } else {
+                try unreadableContainer.encodeNil(forKey: key)
+            }
         }
-        try container.encode(fullMap, forKey: .unreadable)
     }
 }
 
@@ -229,6 +240,31 @@ public struct BrainRoleRevision: Codable, Equatable {
     public mutating func removeKnowledgeRef(knowledgeId: String) {
         knowledgeRefs.removeAll(where: { $0.knowledgeId == knowledgeId })
     }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(ownerAccountId, forKey: .ownerAccountId)
+        try container.encode(roleId, forKey: .roleId)
+        try container.encode(revisionId, forKey: .revisionId)
+        if let pid = parentRevisionId {
+            try container.encode(pid, forKey: .parentRevisionId)
+        } else {
+            try container.encodeNil(forKey: .parentRevisionId)
+        }
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(origin, forKey: .origin)
+        try container.encode(name, forKey: .name)
+        try container.encode(persona, forKey: .persona)
+        try container.encode(goals, forKey: .goals)
+        try container.encode(tone, forKey: .tone)
+        try container.encode(businessRules, forKey: .businessRules)
+        try container.encode(modelRef, forKey: .modelRef)
+        try container.encode(knowledgeRefs, forKey: .knowledgeRefs)
+        try container.encode(templates, forKey: .templates)
+        try container.encode(contextBudget, forKey: .contextBudget)
+        try container.encode(contentSha256, forKey: .contentSha256)
+    }
 }
 
 public struct BrainKnowledgeRevision: Codable, Equatable {
@@ -278,6 +314,24 @@ public struct BrainKnowledgeRevision: Codable, Equatable {
         self.text = text
         self.sourceLabel = sourceLabel
         self.contentSha256 = contentSha256
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(ownerAccountId, forKey: .ownerAccountId)
+        try container.encode(knowledgeId, forKey: .knowledgeId)
+        try container.encode(revisionId, forKey: .revisionId)
+        if let pid = parentRevisionId {
+            try container.encode(pid, forKey: .parentRevisionId)
+        } else {
+            try container.encodeNil(forKey: .parentRevisionId)
+        }
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(title, forKey: .title)
+        try container.encode(text, forKey: .text)
+        try container.encode(contentSha256, forKey: .contentSha256)
+        try container.encode(sourceLabel, forKey: .sourceLabel)
     }
 }
 
@@ -353,6 +407,16 @@ public struct BrainBindingSet: Codable, Equatable {
         self.defaultRef = defaultRef
         self.overrides = overrides
     }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        if let d = defaultRef {
+            try container.encode(d, forKey: .defaultRef)
+        } else {
+            try container.encodeNil(forKey: .defaultRef)
+        }
+        try container.encode(overrides, forKey: .overrides)
+    }
 }
 
 public struct BrainModelSummary: Codable, Equatable {
@@ -414,32 +478,43 @@ public struct BrainControlResponse<T: Codable>: Codable {
 }
 
 public struct BrainPreviewBudget: Codable, Equatable {
-    public var originalBytes: UInt64?
+    public var algorithm: String?
+    public var maxInputBytes: UInt64?
     public var includedBytes: UInt64?
-    public var truncated: Bool?
+    public var omittedHistoryCount: Int?
 
     enum CodingKeys: String, CodingKey {
-        case originalBytes = "original_bytes"
+        case algorithm
+        case maxInputBytes = "max_input_bytes"
         case includedBytes = "included_bytes"
-        case truncated
+        case omittedHistoryCount = "omitted_history_count"
     }
+
+    public var originalBytes: UInt64? { return maxInputBytes }
+    public var truncated: Bool? { return (omittedHistoryCount ?? 0) > 0 }
 }
 
 public struct BrainPreviewSnapshot: Codable, Equatable {
     public var assemblySha256: String?
     public var systemConstraints: String?
     public var persona: String?
-    public var knowledge: [String]?
-    public var inputText: String?
+    public var compiled: String?
     public var budget: BrainPreviewBudget?
 
     enum CodingKeys: String, CodingKey {
         case assemblySha256 = "assembly_sha256"
         case systemConstraints = "system_constraints"
         case persona
-        case knowledge
-        case inputText = "input_text"
+        case compiled
         case budget
+    }
+
+    public var compiledText: String {
+        return compiled ?? ""
+    }
+
+    public static func == (lhs: BrainPreviewSnapshot, rhs: BrainPreviewSnapshot) -> Bool {
+        return lhs.assemblySha256 == rhs.assemblySha256 && lhs.persona == rhs.persona && lhs.compiled == rhs.compiled
     }
 }
 
@@ -657,101 +732,129 @@ public final class BrainClient {
         return role
     }
 
-    public func saveRole(_ role: BrainRoleRevision, expectedGeneration: UInt64, requestId: String = UUID().uuidString) throws -> UInt64 {
+    private func parseGenerationResponse(_ run: ControlRun, actionName: String) throws -> UInt64 {
+        guard run.status == 0 else {
+            if let errResp = try? JSONDecoder().decode(BrainControlResponse<[String: AnyCodable]>.self, from: run.output),
+               let err = errResp.error {
+                throw NSError(domain: "BrainClient", code: Int(run.status), userInfo: [NSLocalizedDescriptionKey: err.message, "error_code": err.code])
+            }
+            let errStr = String(data: run.output, encoding: .utf8) ?? "\(actionName)失败 (exit \(run.status))"
+            throw NSError(domain: "BrainClient", code: Int(run.status), userInfo: [NSLocalizedDescriptionKey: errStr])
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: run.output) as? [String: Any],
+              json["ok"] as? Bool == true,
+              let data = json["data"] as? [String: Any],
+              let gen = (data["generation"] as? NSNumber)?.uint64Value else {
+            throw NSError(domain: "BrainClient", code: 2, userInfo: [NSLocalizedDescriptionKey: "\(actionName)返回无效数据，无法获取 generation"])
+        }
+        return gen
+    }
+
+    public func initialize(installation: String = "fresh") throws -> UInt64 {
+        let req: [String: Any] = ["installation": installation]
+        let run = executeAction("brain-initialize", requestObj: req)
+        return try parseGenerationResponse(run, actionName: "初始化大脑")
+    }
+
+    public func saveRole(_ role: BrainRoleRevision, expectedGeneration: UInt64, requestId: String = UUID().uuidString.lowercased()) throws -> UInt64 {
         let roleData = try JSONEncoder().encode(role)
         let roleDict = try JSONSerialization.jsonObject(with: roleData)
         let req: [String: Any] = [
             "expected_generation": expectedGeneration,
-            "request_id": requestId,
+            "request_id": requestId.lowercased(),
             "role": roleDict
         ]
         let run = executeAction("brain-save-role", requestObj: req)
-        guard run.status == 0 else {
-            if let errResp = try? JSONDecoder().decode(BrainControlResponse<[String: AnyCodable]>.self, from: run.output), let err = errResp.error {
-                throw NSError(domain: "BrainClient", code: Int(run.status), userInfo: [NSLocalizedDescriptionKey: err.message, "error_code": err.code])
-            }
-            let errStr = String(data: run.output, encoding: .utf8) ?? "保存角色失败"
-            throw NSError(domain: "BrainClient", code: Int(run.status), userInfo: [NSLocalizedDescriptionKey: errStr])
-        }
-        if let json = try? JSONSerialization.jsonObject(with: run.output) as? [String: Any],
-           let data = json["data"] as? [String: Any],
-           let gen = data["generation"] as? UInt64 {
-            return gen
-        }
-        return expectedGeneration + 1
+        return try parseGenerationResponse(run, actionName: "保存角色")
     }
 
-    public func copyRole(roleId: String, revisionId: String, newRoleId: String? = nil, expectedGeneration: UInt64, requestId: String = UUID().uuidString) throws -> UInt64 {
+    public struct SavedKnowledgeResult {
+        public let generation: UInt64
+        public let knowledgeId: String
+        public let revisionId: String
+        public let contentSha256: String
+    }
+
+    public func saveKnowledge(_ knowledge: BrainKnowledgeRevision, expectedGeneration: UInt64, requestId: String = UUID().uuidString.lowercased()) throws -> SavedKnowledgeResult {
+        let kData = try JSONEncoder().encode(knowledge)
+        let kDict = try JSONSerialization.jsonObject(with: kData)
+        let req: [String: Any] = [
+            "expected_generation": expectedGeneration,
+            "request_id": requestId.lowercased(),
+            "knowledge": kDict
+        ]
+        let run = executeAction("brain-save-knowledge", requestObj: req)
+        guard run.status == 0 else {
+            if let errResp = try? JSONDecoder().decode(BrainControlResponse<[String: AnyCodable]>.self, from: run.output),
+               let err = errResp.error {
+                throw NSError(domain: "BrainClient", code: Int(run.status), userInfo: [NSLocalizedDescriptionKey: err.message, "error_code": err.code])
+            }
+            let errStr = String(data: run.output, encoding: .utf8) ?? "保存知识失败"
+            throw NSError(domain: "BrainClient", code: Int(run.status), userInfo: [NSLocalizedDescriptionKey: errStr])
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: run.output) as? [String: Any],
+              json["ok"] as? Bool == true,
+              let data = json["data"] as? [String: Any],
+              let gen = (data["generation"] as? NSNumber)?.uint64Value,
+              let kid = data["knowledge_id"] as? String,
+              let rev = data["revision_id"] as? String,
+              let sha = data["content_sha256"] as? String else {
+            throw NSError(domain: "BrainClient", code: 2, userInfo: [NSLocalizedDescriptionKey: "保存知识返回无效响应"])
+        }
+        return SavedKnowledgeResult(generation: gen, knowledgeId: kid, revisionId: rev, contentSha256: sha)
+    }
+
+    public func copyRole(roleId: String, revisionId: String, newRoleId: String? = nil, expectedGeneration: UInt64, requestId: String = UUID().uuidString.lowercased()) throws -> UInt64 {
         var req: [String: Any] = [
             "expected_generation": expectedGeneration,
-            "request_id": requestId,
+            "request_id": requestId.lowercased(),
             "role_id": roleId,
             "revision_id": revisionId
         ]
         if let nid = newRoleId { req["new_role_id"] = nid }
         let run = executeAction("brain-copy-role", requestObj: req)
-        guard run.status == 0 else {
-            let errStr = String(data: run.output, encoding: .utf8) ?? "复制角色失败"
-            throw NSError(domain: "BrainClient", code: Int(run.status), userInfo: [NSLocalizedDescriptionKey: errStr])
-        }
-        return expectedGeneration + 1
+        return try parseGenerationResponse(run, actionName: "复制角色")
     }
 
-    public func archiveRole(roleId: String, expectedGeneration: UInt64, requestId: String = UUID().uuidString) throws -> UInt64 {
+    public func archiveRole(roleId: String, expectedGeneration: UInt64, requestId: String = UUID().uuidString.lowercased()) throws -> UInt64 {
         let req: [String: Any] = [
             "expected_generation": expectedGeneration,
-            "request_id": requestId,
+            "request_id": requestId.lowercased(),
             "role_id": roleId
         ]
         let run = executeAction("brain-archive-role", requestObj: req)
-        guard run.status == 0 else {
-            let errStr = String(data: run.output, encoding: .utf8) ?? "归档角色失败"
-            throw NSError(domain: "BrainClient", code: Int(run.status), userInfo: [NSLocalizedDescriptionKey: errStr])
-        }
-        return expectedGeneration + 1
+        return try parseGenerationResponse(run, actionName: "归档角色")
     }
 
-    public func saveBindings(draft: BrainBindingSet, expectedGeneration: UInt64, requestId: String = UUID().uuidString) throws -> UInt64 {
+    public func saveBindings(draft: BrainBindingSet, expectedGeneration: UInt64, requestId: String = UUID().uuidString.lowercased()) throws -> UInt64 {
         let draftData = try JSONEncoder().encode(draft)
         let draftDict = try JSONSerialization.jsonObject(with: draftData)
         let req: [String: Any] = [
             "expected_generation": expectedGeneration,
-            "request_id": requestId,
+            "request_id": requestId.lowercased(),
             "draft": draftDict
         ]
         let run = executeAction("brain-save-bindings", requestObj: req)
-        guard run.status == 0 else {
-            let errStr = String(data: run.output, encoding: .utf8) ?? "保存绑定失败"
-            throw NSError(domain: "BrainClient", code: Int(run.status), userInfo: [NSLocalizedDescriptionKey: errStr])
-        }
-        return expectedGeneration + 1
+        return try parseGenerationResponse(run, actionName: "保存绑定")
     }
 
-    public func activate(expectedGeneration: UInt64, requestId: String = UUID().uuidString) throws -> UInt64 {
+    public func activate(expectedGeneration: UInt64, requestId: String = UUID().uuidString.lowercased()) throws -> UInt64 {
         let req: [String: Any] = [
             "expected_generation": expectedGeneration,
-            "request_id": requestId
+            "request_id": requestId.lowercased()
         ]
         let run = executeAction("brain-activate", requestObj: req)
-        guard run.status == 0 else {
-            let errStr = String(data: run.output, encoding: .utf8) ?? "启用配置失败"
-            throw NSError(domain: "BrainClient", code: Int(run.status), userInfo: [NSLocalizedDescriptionKey: errStr])
-        }
-        return expectedGeneration + 1
+        return try parseGenerationResponse(run, actionName: "启用配置")
     }
 
-    public func rollback(targetGeneration: UInt64, expectedGeneration: UInt64, requestId: String = UUID().uuidString) throws -> UInt64 {
+    public func rollback(targetGeneration: UInt64, expectedGeneration: UInt64, requestId: String = UUID().uuidString.lowercased()) throws -> UInt64 {
         let req: [String: Any] = [
             "expected_generation": expectedGeneration,
-            "request_id": requestId,
+            "request_id": requestId.lowercased(),
             "target_generation": targetGeneration
         ]
         let run = executeAction("brain-rollback", requestObj: req)
-        guard run.status == 0 else {
-            let errStr = String(data: run.output, encoding: .utf8) ?? "回退配置失败"
-            throw NSError(domain: "BrainClient", code: Int(run.status), userInfo: [NSLocalizedDescriptionKey: errStr])
-        }
-        return expectedGeneration + 1
+        return try parseGenerationResponse(run, actionName: "回退配置")
     }
 
     public func preview(roleId: String, revisionId: String? = nil, text: String, chatKind: String = "private") throws -> BrainPreviewResult {
@@ -838,6 +941,13 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     private let toneField = NSTextField()
     private let goalsField = NSTextField()
     private let rulesField = NSTextField()
+
+    // Form Inputs - Knowledge
+    private let knowledgeTitleField = NSTextField()
+    private let knowledgeSourceField = NSTextField()
+    private let knowledgeContentField = NSTextView()
+    private let importKnowledgeButton = NSButton(title: "导入并关联至角色", target: nil, action: nil)
+    private let knowledgeRefsSummaryLabel = NSTextField(wrappingLabelWithString: "当前角色未引用任何知识")
 
     // Form Inputs - Templates
     private let greetingField = NSTextField()
@@ -1125,10 +1235,47 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let intro = NSTextField(wrappingLabelWithString: "业务知识 (Markdown/纯文本)。启用/停用通过在当前角色引用中添加或移除。版本与摘要自动固定。")
+        let intro = NSTextField(wrappingLabelWithString: "业务知识 (Markdown/纯文本)。通过核心 brain-save-knowledge 控制接口保存，自动计算 SHA256 摘要并固定版本。")
         intro.font = NSFont.systemFont(ofSize: 12)
         intro.textColor = .secondaryLabelColor
         stack.addArrangedSubview(intro)
+
+        stack.addArrangedSubview(NSTextField(labelWithString: "当前角色引用的知识列表:"))
+        knowledgeRefsSummaryLabel.font = NSFont.systemFont(ofSize: 12)
+        stack.addArrangedSubview(knowledgeRefsSummaryLabel)
+
+        let addBox = NSBox()
+        addBox.title = "导入/新建知识"
+        let addStack = NSStackView()
+        addStack.orientation = .vertical
+        addStack.alignment = .leading
+        addStack.spacing = 8
+
+        let titleRow = NSStackView(views: [NSTextField(labelWithString: "知识标题:"), knowledgeTitleField])
+        knowledgeTitleField.widthAnchor.constraint(equalToConstant: 240).isActive = true
+        addStack.addArrangedSubview(titleRow)
+
+        let srcRow = NSStackView(views: [NSTextField(labelWithString: "来源标识:"), knowledgeSourceField])
+        knowledgeSourceField.placeholderString = "例如 faq.md 或 manual.txt"
+        knowledgeSourceField.widthAnchor.constraint(equalToConstant: 240).isActive = true
+        addStack.addArrangedSubview(srcRow)
+
+        addStack.addArrangedSubview(NSTextField(labelWithString: "知识正文 (Markdown):"))
+        let textScroll = NSScrollView()
+        textScroll.hasVerticalScroller = true
+        knowledgeContentField.isRichText = false
+        knowledgeContentField.font = NSFont.userFixedPitchFont(ofSize: 11)
+        textScroll.documentView = knowledgeContentField
+        textScroll.heightAnchor.constraint(equalToConstant: 120).isActive = true
+        textScroll.widthAnchor.constraint(equalToConstant: 440).isActive = true
+        addStack.addArrangedSubview(textScroll)
+
+        importKnowledgeButton.target = self
+        importKnowledgeButton.action = #selector(handleImportKnowledge)
+        addStack.addArrangedSubview(importKnowledgeButton)
+
+        addBox.setContent(addStack, inset: 8)
+        stack.addArrangedSubview(addBox)
 
         knowledgeView.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -1374,6 +1521,59 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         let activeRev = entry.activeRevisionId ?? "未启用"
         revisionStatusLabel.stringValue = "角色: \(role.name) · 草稿: \(role.revisionId) · 运行: \(activeRev)"
         archiveRoleButton.isEnabled = BrainPageLogic.canArchiveRole(entry)
+
+        if role.knowledgeRefs.isEmpty {
+            knowledgeRefsSummaryLabel.stringValue = "当前角色未引用任何知识"
+        } else {
+            let refTexts = role.knowledgeRefs.map { "\($0.knowledgeId) (\($0.revisionId), sha:\($0.contentSha256.prefix(8))...)" }
+            knowledgeRefsSummaryLabel.stringValue = refTexts.joined(separator: "\n")
+        }
+    }
+
+    @objc private func handleImportKnowledge() {
+        guard var role = currentDraftRole, let payload = listPayload else { return }
+        let title = knowledgeTitleField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = knowledgeContentField.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        let src = knowledgeSourceField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, !text.isEmpty else {
+            statusMessageLabel.stringValue = "导入知识失败：标题与正文不能为空"
+            return
+        }
+
+        let newKnowledge = BrainKnowledgeRevision(
+            knowledgeId: "kn_\(UUID().uuidString.prefix(8))",
+            revisionId: "rev_1",
+            title: title,
+            text: text,
+            sourceLabel: src.isEmpty ? "manual" : src
+        )
+
+        statusMessageLabel.stringValue = "正在通过核心接口保存知识..."
+        let gen = payload.generation
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            do {
+                let saved = try self.client.saveKnowledge(newKnowledge, expectedGeneration: gen)
+                DispatchQueue.main.async {
+                    role.knowledgeRefs.append(BrainKnowledgeRef(
+                        knowledgeId: saved.knowledgeId,
+                        revisionId: saved.revisionId,
+                        contentSha256: saved.contentSha256
+                    ))
+                    self.currentDraftRole = role
+                    let refTexts = role.knowledgeRefs.map { "\($0.knowledgeId) (\($0.revisionId), sha:\($0.contentSha256.prefix(8))...)" }
+                    self.knowledgeRefsSummaryLabel.stringValue = refTexts.joined(separator: "\n")
+                    self.knowledgeTitleField.stringValue = ""
+                    self.knowledgeContentField.string = ""
+                    self.knowledgeSourceField.stringValue = ""
+                    self.statusMessageLabel.stringValue = "知识已成功保存至核心并关联到当前草稿！"
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.statusMessageLabel.stringValue = "保存知识失败: \(error.localizedDescription)"
+                }
+            }
+        }
     }
 
     @objc private func handleNewRole() {

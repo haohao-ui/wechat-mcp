@@ -305,6 +305,164 @@ func runTests() -> Int32 {
         check("isolated_ui_table_configured", brainController.numberOfRows(in: NSTableView()) == 0)
     }
 
+    // 12. Offscreen PNG Rendering & Visual Layout Checks
+    do {
+        let fixtureDir = URL(fileURLWithPath: "target/brain_ui_fixtures")
+        try? FileManager.default.createDirectory(at: fixtureDir, withIntermediateDirectories: true)
+        
+        let mockExecutor: BrainClient.CommandExecutor = { cmd, args, timeout in
+            if args.contains("brain-list") {
+                let mockJson = """
+                {"ok":true,"data":{"generation":1,"execution_mode":"managed","roles":[{"role_id":"r1","draft_revision_id":"v1","name":"客服助手","archived":false,"active_binding_count":0}],"active":null,"draft":null,"model_summary":{"mode":"builtin"}}}
+                """
+                return ControlRun(status: 0, output: mockJson.data(using: .utf8)!, timedOut: false)
+            }
+            return ControlRun(status: 0, output: Data(), timedOut: false)
+        }
+        let mockClient = BrainClient(configPath: "/tmp/mock_config.json", executor: mockExecutor)
+        let dummyContext = StatusPanelController(worker: SocketWorker())
+        let brainController = BrainPageController(context: dummyContext, client: mockClient)
+        
+        let bView = brainController.view
+        bView.frame = NSRect(x: 0, y: 0, width: 720, height: 760)
+        bView.layoutSubtreeIfNeeded()
+        
+        if let rep = bView.bitmapImageRepForCachingDisplay(in: bView.bounds) {
+            bView.cacheDisplay(in: bView.bounds, to: rep)
+            if let png = rep.representation(using: .png, properties: [:]) {
+                let pngURL = fixtureDir.appendingPathComponent("brain_page.png")
+                try? png.write(to: pngURL)
+                check("brain_page_png_written", FileManager.default.fileExists(atPath: pngURL.path))
+                check("brain_page_png_size_valid", png.count > 1024)
+                check("brain_page_pixel_dimensions", rep.pixelsWide == 720 && rep.pixelsHigh == 760)
+            } else {
+                check("brain_page_png_representation", false, "Failed to get PNG representation")
+            }
+        } else {
+            check("brain_page_cache_display_rep", false, "Failed to create bitmap rep")
+        }
+
+        let sessController = SessionsPageController(context: dummyContext)
+        let sView = sessController.view
+        sView.frame = NSRect(x: 0, y: 0, width: 700, height: 720)
+        sView.layoutSubtreeIfNeeded()
+        if let rep = sView.bitmapImageRepForCachingDisplay(in: sView.bounds) {
+            sView.cacheDisplay(in: sView.bounds, to: rep)
+            if let png = rep.representation(using: .png, properties: [:]) {
+                let pngURL = fixtureDir.appendingPathComponent("sessions_page.png")
+                try? png.write(to: pngURL)
+                check("sessions_page_png_written", FileManager.default.fileExists(atPath: pngURL.path))
+                check("sessions_page_png_size_valid", png.count > 1024)
+            }
+        }
+    }
+
+    // 13. Real Rust control + Swift client contract integration
+    if let realCfgPath = ProcessInfo.processInfo.environment["REAL_CONTROL_CONFIG"],
+       FileManager.default.fileExists(atPath: realCfgPath) {
+        print("--> Running Real Rust control + Swift client contract integration tests...")
+        let realClient = BrainClient(configPath: realCfgPath, executor: runControlCommand)
+        
+        do {
+            // 13.1 初始化 fresh 模式
+            let initGen = try realClient.initialize(installation: "fresh")
+            check("real_control_init", initGen >= 1, "generation should be >= 1")
+            
+            // 13.2 列表查询与模式验证
+            let listPayload = try realClient.fetchList()
+            check("real_control_list_mode", listPayload.executionMode == "managed")
+            check("real_control_list_gen", listPayload.generation == initGen)
+            
+            // 13.3 角色新建与保存
+            var role = BrainRoleRevision(
+                roleId: "contract_role_1",
+                revisionId: "rev_c1",
+                origin: "user",
+                name: "契约测试角色",
+                persona: "真实契约助手"
+            )
+            let genAfterSave = try realClient.saveRole(role, expectedGeneration: initGen)
+            check("real_control_save_role_gen", genAfterSave > initGen)
+            
+            // 13.4 角色获取与真实解码
+            let fetchedRole = try realClient.getRole(roleId: "contract_role_1")
+            check("real_control_fetch_role_persona", fetchedRole.persona == "真实契约助手")
+            check("real_control_fetch_role_name", fetchedRole.name == "契约测试角色")
+            
+            // 13.5 知识保存与修订/hash真实返回
+            let knowledge = BrainKnowledgeRevision(
+                knowledgeId: "k_contract_1",
+                revisionId: "k_rev_1",
+                title: "服务条款",
+                text: "# 服务条款\n请勿违反规范。",
+                sourceLabel: "docs"
+            )
+            let savedKnowledge = try realClient.saveKnowledge(knowledge, expectedGeneration: genAfterSave)
+            check("real_control_save_knowledge_id", savedKnowledge.knowledgeId == "k_contract_1")
+            check("real_control_save_knowledge_sha", savedKnowledge.contentSha256.count == 64)
+            check("real_control_save_knowledge_gen", savedKnowledge.generation > genAfterSave)
+            
+            // 13.6 角色引用知识后再次保存
+            role.knowledgeRefs = [BrainKnowledgeRef(
+                knowledgeId: savedKnowledge.knowledgeId,
+                revisionId: savedKnowledge.revisionId,
+                contentSha256: savedKnowledge.contentSha256
+            )]
+            role.revisionId = "rev_c2"
+            role.parentRevisionId = "rev_c1"
+            let genAfterRef = try realClient.saveRole(role, expectedGeneration: savedKnowledge.generation)
+            check("real_control_save_role_ref_gen", genAfterRef > savedKnowledge.generation)
+            
+            // 13.7 绑定保存
+            let bindings = BrainBindingSet(
+                defaultRef: BrainRoleRef(roleId: "contract_role_1", revisionId: "rev_c2"),
+                overrides: []
+            )
+            let genAfterBind = try realClient.saveBindings(draft: bindings, expectedGeneration: genAfterRef)
+            check("real_control_save_bindings_gen", genAfterBind > genAfterRef)
+            
+            // 13.8 激活与回退
+            let genAfterAct = try realClient.activate(expectedGeneration: genAfterBind)
+            check("real_control_activate_gen", genAfterAct > genAfterBind)
+            
+            // 产生第二个激活历史世代以验证合法回退
+            let genAfterBind2 = try realClient.saveBindings(draft: bindings, expectedGeneration: genAfterAct)
+            let genAfterAct2 = try realClient.activate(expectedGeneration: genAfterBind2)
+            check("real_control_activate2_gen", genAfterAct2 > genAfterAct)
+            
+            // 回退到前一个已激活的世代 genAfterAct
+            let genAfterRoll = try realClient.rollback(targetGeneration: genAfterAct, expectedGeneration: genAfterAct2)
+            check("real_control_rollback_gen", genAfterRoll > genAfterAct2)
+            
+            // 13.9 assemble_only 合成预览
+            let previewRes = try realClient.preview(roleId: "contract_role_1", text: "请问服务条款是什么？")
+            check("real_control_preview_cost", previewRes.costIncurred == false)
+            check("real_control_preview_content", previewRes.snapshot?.compiledText.contains("真实契约助手") == true)
+            
+            // 13.10 真实轮次详情查询与字段解码
+            if let testTurnId = ProcessInfo.processInfo.environment["REAL_CONTROL_TEST_TURN_ID"] {
+                let turnDetail = try realClient.turnDetail(turnId: testTurnId)
+                check("real_control_turn_id", turnDetail.turnId == testTurnId)
+                check("real_control_turn_contact", !turnDetail.contactId.isEmpty)
+                check("real_control_turn_decision", turnDetail.decision != nil)
+                check("real_control_turn_snapshot", turnDetail.snapshot != nil)
+            }
+            
+            // 13.11 CAS 冲突验证：期望错误世代，必须抛出异常并保留数据
+            var conflictCaught = false
+            do {
+                _ = try realClient.saveRole(role, expectedGeneration: 99999)
+            } catch let err as NSError {
+                conflictCaught = true
+                check("real_control_conflict_code", err.userInfo["error_code"] as? String == "revision_conflict" || err.localizedDescription.contains("conflict") || err.localizedDescription.contains("revision_conflict"))
+            }
+            check("real_control_conflict_caught", conflictCaught)
+            
+        } catch {
+            check("real_control_pipeline_success", false, "Pipeline failed with error: \(error)")
+        }
+    }
+
     print("\nTotal passed: \(passed), failed: \(failed)")
     return failed == 0 ? 0 : 1
 }

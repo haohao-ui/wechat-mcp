@@ -479,6 +479,9 @@ public func runControlCommand(executable: String, arguments: [String], timeout: 
 
 /// 宿主调用的 wechat-mcp 路径
 public func controlBinaryPath() -> String {
+    if let envBin = ProcessInfo.processInfo.environment["WECHAT_MCP_BIN"], FileManager.default.isExecutableFile(atPath: envBin) {
+        return envBin
+    }
     let rpaBin = (NSHomeDirectory() as NSString).appendingPathComponent(".wechat-rpa/bin/wechat-mcp")
     return FileManager.default.isExecutableFile(atPath: rpaBin) ? rpaBin : "/usr/local/bin/wechat-mcp"
 }
