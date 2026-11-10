@@ -24,3 +24,4 @@ gateway.local.json
 *.mobileprovision
 *.log
 .DS_Store
+!src/bin/

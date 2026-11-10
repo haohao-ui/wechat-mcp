@@ -9,6 +9,7 @@ swiftc -O -target "$(uname -m)-apple-macos12" native/interaction/*.swift native/
 swiftc native/wechat_window.swift -o target/release/wechat_window
 swiftc -O -parse-as-library native/wechat_bubbles.swift native/common/*.swift native/eyes/*.swift -o target/release/wechat_bubbles
 target/release/wechat_window --self-test
+target/release/wechat-updater --version
 swiftc -parse-as-library native/macos/*.swift -o target/release/wechat_runtime
 target/release/wechat_runtime --self-test
 swiftc native/overlay/main.swift -o target/release/wechat_overlay

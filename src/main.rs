@@ -18,6 +18,7 @@ mod service_tests;
 mod service_tools;
 mod storage;
 mod tools;
+pub mod updater;
 mod wechat;
 
 use std::{collections::HashMap, sync::Arc};

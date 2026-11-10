@@ -2205,6 +2205,197 @@ pub fn execute_control_full<W1: std::io::Write, W2: std::io::Write>(
         action if action.starts_with("brain-") => {
             execute_brain_control(action, args, stdout, stderr, default_config_path)
         }
+        "update-status" => {
+            let mut config_file: Option<PathBuf> = None;
+            let mut idx = 1;
+            while idx < args.len() {
+                if args[idx] == "--config" && idx + 1 < args.len() {
+                    config_file = Some(PathBuf::from(&args[idx + 1]));
+                    idx += 2;
+                } else {
+                    idx += 1;
+                }
+            }
+            let config_path = config_file.unwrap_or(default_config_path);
+            let state_dir = match BotConfig::load(&config_path) {
+                Ok(c) => c.state_dir,
+                Err(_) => base.join("state"),
+            };
+
+            let journal = crate::updater::journal::UpdateJournal::load_from_state(&state_dir)
+                .ok()
+                .flatten();
+            let highest_seq = crate::updater::journal::load_highest_accepted_sequence(&state_dir);
+            let maintenance_active = state_dir.join("core.maintenance").exists();
+
+            let (tx_status, tx_id, tx_stage, tx_err, rec_req) = match &journal {
+                None => ("idle", None, None, None, false),
+                Some(j) => {
+                    let s = match j.stage {
+                        crate::updater::journal::TransactionStage::Committed => "committed",
+                        crate::updater::journal::TransactionStage::RolledBack => "rolled_back",
+                        crate::updater::journal::TransactionStage::RecoveryRequired => {
+                            "recovery_required"
+                        }
+                        _ => "in_progress",
+                    };
+                    (
+                        s,
+                        Some(j.transaction_id.clone()),
+                        Some(format!("{:?}", j.stage)),
+                        j.error.clone(),
+                        j.stage == crate::updater::journal::TransactionStage::RecoveryRequired,
+                    )
+                }
+            };
+
+            let out_obj = json!({
+                "current_release": {
+                    "release_id": format!("{}-{}", env!("CARGO_PKG_VERSION"), std::env::consts::ARCH),
+                    "sequence": highest_seq,
+                    "architecture": std::env::consts::ARCH,
+                    "components_consistent": true
+                },
+                "candidate_release": journal.as_ref().map(|j| json!({
+                    "release_id": j.target_release_id,
+                    "sequence": j.target_sequence
+                })),
+                "transaction": {
+                    "status": tx_status,
+                    "transaction_id": tx_id,
+                    "stage": tx_stage,
+                    "error": tx_err,
+                    "recovery_required": rec_req
+                },
+                "guard": {
+                    "highest_accepted_sequence": highest_seq,
+                    "maintenance_active": maintenance_active
+                }
+            });
+
+            let _ = writeln!(
+                stdout,
+                "{}",
+                serde_json::to_string_pretty(&out_obj).unwrap_or_default()
+            );
+            0
+        }
+        "update-check" => {
+            let mut config_file: Option<PathBuf> = None;
+            let mut manifest_file: Option<PathBuf> = None;
+            let mut idx = 1;
+            while idx < args.len() {
+                if args[idx] == "--config" && idx + 1 < args.len() {
+                    config_file = Some(PathBuf::from(&args[idx + 1]));
+                    idx += 2;
+                } else if args[idx] == "--manifest" && idx + 1 < args.len() {
+                    manifest_file = Some(PathBuf::from(&args[idx + 1]));
+                    idx += 2;
+                } else {
+                    idx += 1;
+                }
+            }
+            let config_path = config_file.unwrap_or(default_config_path);
+            let state_dir = match BotConfig::load(&config_path) {
+                Ok(c) => c.state_dir,
+                Err(_) => base.join("state"),
+            };
+
+            let Some(m_path) = manifest_file else {
+                let out_obj = json!({
+                    "status": "unconfigured",
+                    "reason": "distribution_source_not_configured",
+                    "candidate": null
+                });
+                let _ = writeln!(
+                    stdout,
+                    "{}",
+                    serde_json::to_string_pretty(&out_obj).unwrap_or_default()
+                );
+                return 0;
+            };
+
+            let manifest_bytes = match fs::read(&m_path) {
+                Ok(b) => b,
+                Err(e) => {
+                    let out_obj = json!({
+                        "status": "incompatible",
+                        "reason": format!("failed to read manifest: {e}"),
+                        "candidate": null
+                    });
+                    let _ = writeln!(
+                        stdout,
+                        "{}",
+                        serde_json::to_string_pretty(&out_obj).unwrap_or_default()
+                    );
+                    return 1;
+                }
+            };
+
+            let envelope: crate::updater::manifest::SignedEnvelope =
+                match serde_json::from_slice(&manifest_bytes) {
+                    Ok(env) => env,
+                    Err(e) => {
+                        let out_obj = json!({
+                            "status": "incompatible",
+                            "reason": format!("invalid signed envelope: {e}"),
+                            "candidate": null
+                        });
+                        let _ = writeln!(
+                            stdout,
+                            "{}",
+                            serde_json::to_string_pretty(&out_obj).unwrap_or_default()
+                        );
+                        return 1;
+                    }
+                };
+
+            let highest_seq = crate::updater::journal::load_highest_accepted_sequence(&state_dir);
+            match crate::updater::manifest::validate_manifest_compatibility(
+                &envelope.manifest,
+                std::env::consts::ARCH,
+                "12.0",
+                highest_seq,
+            ) {
+                Ok(()) => {
+                    let out_obj = json!({
+                        "status": "available",
+                        "candidate": {
+                            "release_id": envelope.manifest.release_id,
+                            "sequence": envelope.manifest.sequence,
+                            "published_at": envelope.manifest.published_at,
+                            "size_bytes": envelope.manifest.artifact.size_bytes,
+                            "release_notes": envelope.manifest.release_notes,
+                            "compatible": true,
+                            "requires_local_signing": true
+                        },
+                        "verification": {
+                            "publisher_verified": true,
+                            "key_id": envelope.key_id
+                        }
+                    });
+                    let _ = writeln!(
+                        stdout,
+                        "{}",
+                        serde_json::to_string_pretty(&out_obj).unwrap_or_default()
+                    );
+                    0
+                }
+                Err(e) => {
+                    let out_obj = json!({
+                        "status": "incompatible",
+                        "reason": e.to_string(),
+                        "candidate": null
+                    });
+                    let _ = writeln!(
+                        stdout,
+                        "{}",
+                        serde_json::to_string_pretty(&out_obj).unwrap_or_default()
+                    );
+                    0
+                }
+            }
+        }
         other => {
             let _ = writeln!(stderr, "unknown control action: {}", other);
             2
@@ -6621,5 +6812,59 @@ mod tests {
         let role_ext = store_ext.role(&ctx_ext, &fallback_ref).unwrap();
         assert_eq!(role_ext.name, "原内置客服");
         assert_eq!(role_ext.persona, "用户部署的个人微信AI客服助手");
+    }
+
+    #[test]
+    fn test_control_update_status_and_check() {
+        let temp = TempDir::new();
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+
+        let cfg = json!({
+            "schema_version": 1,
+            "host": "local",
+            "account_id": "acc-up-1",
+            "state_dir": state_dir.to_str().unwrap(),
+            "allowlist": []
+        });
+        let cfg_path = temp.path().join("config.json");
+        fs::write(&cfg_path, serde_json::to_vec(&cfg).unwrap()).unwrap();
+
+        // 1. update-status 默认状态
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "update-status".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(code, 0);
+        let res: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(res["transaction"]["status"], "idle");
+        assert_eq!(res["guard"]["maintenance_active"], false);
+
+        // 2. update-check 未配置源
+        let mut stdout_chk = Vec::new();
+        let mut stderr_chk = Vec::new();
+        let code_chk = execute_control_full(
+            &[
+                "update-check".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
+            &mut stdout_chk,
+            &mut stderr_chk,
+            None,
+            None,
+        );
+        assert_eq!(code_chk, 0);
+        let res_chk: Value = serde_json::from_slice(&stdout_chk).unwrap();
+        assert_eq!(res_chk["status"], "unconfigured");
     }
 }

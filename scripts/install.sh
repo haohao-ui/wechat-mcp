@@ -43,7 +43,7 @@ VERSION_FILE="$INSTALL_HOME/VERSION"
 SKILL_NAME="wechat-operator"
 SKILL_NAMES=(wechat-operator wechat-article)
 SKILL_HOME="$INSTALL_HOME/skills/$SKILL_NAME"
-TOOLS=(wechat-mcp wechat_ocr wechat_click wechat_window)
+TOOLS=(wechat-mcp wechat-updater wechat_ocr wechat_click wechat_window)
 AGENT_IDS=(claude-code codex gemini cursor windsurf cline opencode claude-desktop)
 
 ACTION="install"

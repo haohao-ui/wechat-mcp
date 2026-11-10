@@ -1,0 +1,314 @@
+use anyhow::{Result, bail};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+pub const MANIFEST_DOMAIN_PREFIX: &[u8] = b"WECHAT_MCP_UPDATE_MANIFEST_V1\n";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SignedEnvelope {
+    pub envelope_schema: u32,
+    pub key_id: String,
+    pub signature_algorithm: String,
+    pub signature: String,
+    pub manifest: ReleaseManifest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseManifest {
+    pub manifest_schema: u32,
+    pub release_id: String,
+    pub sequence: u64,
+    pub channel: String,
+    pub published_at: u64,
+    pub expires_at: u64,
+    pub target: TargetSpec,
+    pub artifact: ArtifactSpec,
+    pub components: Vec<ComponentSpec>,
+    pub compatibility: CompatibilitySpec,
+    pub release_notes: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TargetSpec {
+    pub os: String,
+    pub arch: String,
+    pub min_os_version: String,
+    pub max_os_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactSpec {
+    pub filename: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub max_unpacked_bytes: u64,
+    pub max_file_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ComponentSpec {
+    pub path: String,
+    pub kind: String,
+    pub file_mode: u32,
+    pub sha256: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CompatibilitySpec {
+    pub config_schema_min: u32,
+    pub config_schema_max: u32,
+    pub profile_schema_min: u32,
+    pub profile_schema_max: u32,
+    pub history_schema_min: u32,
+    pub history_schema_max: u32,
+    pub min_updater_version: u32,
+    pub in_place_rollback_supported: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct TrustedKeyStore {
+    // key_id -> ed25519 public key bytes (32 bytes)
+    pub keys: HashMap<String, Vec<u8>>,
+}
+
+impl Default for TrustedKeyStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TrustedKeyStore {
+    pub fn new() -> Self {
+        Self {
+            keys: HashMap::new(),
+        }
+    }
+
+    pub fn with_key(mut self, key_id: impl Into<String>, public_key: &[u8]) -> Self {
+        self.keys.insert(key_id.into(), public_key.to_vec());
+        self
+    }
+
+    /// 验证签名封套：
+    /// 1. 查找 key_id 是否在受信根公钥表中（拒绝未知 key_id，严禁信任包自带密钥）
+    /// 2. 检查 signature_algorithm 是否为 ed25519
+    /// 3. RFC 8785 规范化序列化 manifest
+    /// 4. 添加域分离前缀 "WECHAT_MCP_UPDATE_MANIFEST_V1\n"
+    /// 5. ring::signature::ED25519 验签
+    pub fn verify_envelope(&self, envelope: &SignedEnvelope) -> Result<()> {
+        let pubkey_bytes = match self.keys.get(&envelope.key_id) {
+            Some(k) => k,
+            None => bail!(
+                "untrusted_key_id: key '{}' not found in trusted root keystore",
+                envelope.key_id
+            ),
+        };
+
+        if envelope.signature_algorithm != "ed25519" {
+            bail!(
+                "unsupported_signature_algorithm: '{}', only 'ed25519' is accepted",
+                envelope.signature_algorithm
+            );
+        }
+
+        let sig_bytes = match hex_or_base64_decode(&envelope.signature) {
+            Ok(b) => b,
+            Err(e) => bail!("invalid_signature_encoding: {}", e),
+        };
+
+        // RFC 8785 规范化
+        let manifest_val = serde_json::to_value(&envelope.manifest)?;
+        let canonical_bytes = serde_json_canonicalizer::to_vec(&manifest_val)?;
+
+        // 拼接域分离前缀
+        let mut message = Vec::with_capacity(MANIFEST_DOMAIN_PREFIX.len() + canonical_bytes.len());
+        message.extend_from_slice(MANIFEST_DOMAIN_PREFIX);
+        message.extend_from_slice(&canonical_bytes);
+
+        let peer_public_key =
+            ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, pubkey_bytes);
+        peer_public_key.verify(&message, &sig_bytes).map_err(|_| {
+            anyhow::anyhow!("signature_verification_failed: cryptographic signature mismatch")
+        })?;
+
+        Ok(())
+    }
+}
+
+fn hex_or_base64_decode(s: &str) -> Result<Vec<u8>> {
+    let trimmed = s.trim();
+    if trimmed.len() == 128 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        let mut bytes = Vec::with_capacity(64);
+        for i in (0..128).step_by(2) {
+            let byte = u8::from_str_radix(&trimmed[i..i + 2], 16)?;
+            bytes.push(byte);
+        }
+        return Ok(bytes);
+    }
+    // base64 decode
+    // 纯手动/简洁 base64 解码，避免引入额外 crate
+    base64_decode_standard(trimmed)
+}
+
+fn base64_decode_standard(input: &str) -> Result<Vec<u8>> {
+    const B64_CHARS: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut lookup = [255u8; 256];
+    for (i, &c) in B64_CHARS.iter().enumerate() {
+        lookup[c as usize] = i as u8;
+    }
+
+    let clean: Vec<u8> = input
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace() && *b != b'=')
+        .collect();
+    let mut out = Vec::with_capacity((clean.len() * 3) / 4);
+
+    let chunks = clean.chunks_exact(4);
+    let remainder = chunks.remainder();
+
+    for chunk in chunks {
+        let (a, b, c, d) = (
+            lookup[chunk[0] as usize],
+            lookup[chunk[1] as usize],
+            lookup[chunk[2] as usize],
+            lookup[chunk[3] as usize],
+        );
+        if a == 255 || b == 255 || c == 255 || d == 255 {
+            bail!("invalid base64 character");
+        }
+        out.push((a << 2) | (b >> 4));
+        out.push((b << 4) | (c >> 2));
+        out.push((c << 6) | d);
+    }
+
+    match remainder.len() {
+        2 => {
+            let (a, b) = (lookup[remainder[0] as usize], lookup[remainder[1] as usize]);
+            if a == 255 || b == 255 {
+                bail!("invalid base64 character");
+            }
+            out.push((a << 2) | (b >> 4));
+        }
+        3 => {
+            let (a, b, c) = (
+                lookup[remainder[0] as usize],
+                lookup[remainder[1] as usize],
+                lookup[remainder[2] as usize],
+            );
+            if a == 255 || b == 255 || c == 255 {
+                bail!("invalid base64 character");
+            }
+            out.push((a << 2) | (b >> 4));
+            out.push((b << 4) | (c >> 2));
+        }
+        1 => bail!("invalid base64 length"),
+        _ => {}
+    }
+
+    Ok(out)
+}
+
+/// 架构、系统版本与防降级校验
+pub fn validate_manifest_compatibility(
+    manifest: &ReleaseManifest,
+    host_arch: &str,
+    host_os_ver: &str,
+    highest_accepted_seq: u64,
+) -> Result<()> {
+    if manifest.target.os != "macos" {
+        bail!(
+            "os_incompatible: manifest target OS is '{}', host is macos",
+            manifest.target.os
+        );
+    }
+
+    if canonicalize_arch(&manifest.target.arch) != canonicalize_arch(host_arch) {
+        bail!(
+            "architecture_mismatch: manifest arch '{}' does not match host arch '{}'",
+            manifest.target.arch,
+            host_arch
+        );
+    }
+
+    if compare_version_strings(host_os_ver, &manifest.target.min_os_version) < 0 {
+        bail!(
+            "os_version_too_low: host os {} < required min os {}",
+            host_os_ver,
+            manifest.target.min_os_version
+        );
+    }
+
+    if let Some(ref max_os) = manifest.target.max_os_version {
+        if compare_version_strings(host_os_ver, max_os) > 0 {
+            bail!(
+                "os_version_too_high: host os {} > verified max os {}",
+                host_os_ver,
+                max_os
+            );
+        }
+    }
+
+    if manifest.sequence <= highest_accepted_seq {
+        bail!(
+            "downgrade_rejected: candidate sequence {} is not greater than highest accepted sequence {}",
+            manifest.sequence,
+            highest_accepted_seq
+        );
+    }
+
+    // 组件白名单与合理性初步检查
+    if manifest.components.is_empty() {
+        bail!("manifest_components_empty: at least one component required");
+    }
+
+    let mut seen_paths = std::collections::HashSet::new();
+    for comp in &manifest.components {
+        if comp.path.starts_with('/') || comp.path.contains("..") || comp.path.contains('\0') {
+            bail!("invalid_component_path: '{}'", comp.path);
+        }
+        if !seen_paths.insert(&comp.path) {
+            bail!("duplicate_component_path: '{}'", comp.path);
+        }
+        if comp.sha256.len() != 64 || !comp.sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+            bail!(
+                "invalid_component_sha256: '{}' for '{}'",
+                comp.sha256,
+                comp.path
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn canonicalize_arch(arch: &str) -> &str {
+    match arch {
+        "arm64" | "aarch64" => "arm64",
+        "x86_64" | "amd64" => "x86_64",
+        other => other,
+    }
+}
+
+fn compare_version_strings(v1: &str, v2: &str) -> i32 {
+    let p1: Vec<u64> = v1.split('.').filter_map(|s| s.parse().ok()).collect();
+    let p2: Vec<u64> = v2.split('.').filter_map(|s| s.parse().ok()).collect();
+    let max_len = p1.len().max(p2.len());
+    for i in 0..max_len {
+        let n1 = p1.get(i).copied().unwrap_or(0);
+        let n2 = p2.get(i).copied().unwrap_or(0);
+        if n1 < n2 {
+            return -1;
+        } else if n1 > n2 {
+            return 1;
+        }
+    }
+    0
+}
