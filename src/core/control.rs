@@ -2582,22 +2582,30 @@ fn execute_write<W: std::io::Write>(
 pub(crate) fn compute_allowlist_contacts_projection(
     cfg: &BotConfig,
     db_path: &Path,
-    conn: Option<&rusqlite::Connection>,
-    brain_access: Option<&crate::core::open_api::access::BrainAccess>,
 ) -> (Value, &'static str, Option<&'static str>) {
     if !db_path.exists() {
         return (json!([]), "unavailable", Some("history_store_unavailable"));
     }
-    let conn = match conn {
-        Some(c) => c,
-        None => return (json!([]), "unavailable", Some("history_store_unavailable")),
-    };
-    let brain_access = match brain_access {
-        Some(ba) => ba,
-        None => return (json!([]), "unavailable", Some("access_resolution_failed")),
+    let mut conn = match rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    ) {
+        Ok(c) => c,
+        Err(_) => return (json!([]), "unavailable", Some("history_store_unavailable")),
     };
 
-    let mut stmt = match conn.prepare(
+    // 在同一个只读事务隔离快照内，原子执行 BrainAccess 授权解析与候选联系人枚举过滤
+    let tx = match conn.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred) {
+        Ok(t) => t,
+        Err(_) => return (json!([]), "unavailable", Some("history_store_unavailable")),
+    };
+
+    let brain_access = match crate::core::open_api::access::BrainAccess::load(cfg, &tx) {
+        Ok(ba) => ba,
+        Err(_) => return (json!([]), "unavailable", Some("access_resolution_failed")),
+    };
+
+    let mut stmt = match tx.prepare(
         "SELECT contact_id, display_name, kind FROM contacts WHERE account_id = ?1 AND merged_into IS NULL ORDER BY rowid",
     ) {
         Ok(s) => s,
@@ -2757,12 +2765,7 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
             };
 
             let (allowlist_contacts, allowlist_status, allowlist_err) =
-                compute_allowlist_contacts_projection(
-                    &cfg,
-                    &db_path,
-                    access.conn.as_ref(),
-                    access.brain_access.as_ref(),
-                );
+                compute_allowlist_contacts_projection(&cfg, &db_path);
 
             let data = json!({
                 "generation": generation,
@@ -7729,5 +7732,272 @@ mod tests {
         assert_eq!(out["data"]["allowlist_contacts_status"], "ready");
         assert!(out["data"]["allowlist_contacts_error"].is_null());
         assert_eq!(out["data"]["allowlist_contacts"], json!([]));
+    }
+
+    #[test]
+    fn test_control_fail_closed_access_across_operations_without_db() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::new();
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        // 构造配置：故意不创建 history.sqlite3 数据库
+        let cfg = json!({
+            "schema_version": 1,
+            "host": "local",
+            "account_id": "acc_fail_closed_test",
+            "state_dir": state_dir.to_str().unwrap(),
+            "allowlist": [{"recipient": "某联系人", "kind": "private"}]
+        });
+        let cfg_path = temp.path().join("config.json");
+        fs::write(&cfg_path, serde_json::to_string(&cfg).unwrap()).unwrap();
+
+        // 1. 无 history 时：fresh 初始化可用
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-initialize".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+                "--request-json".into(),
+                json!({ "installation": "fresh" }).to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(code, 0, "fresh init should succeed without history db");
+        let init_out: Value = serde_json::from_slice(&stdout).unwrap();
+        let cur_gen = init_out["data"]["generation"].as_u64().unwrap();
+
+        // 2. 无 history 时：brain-save-role 可用（角色定义与 contact 授权无关）
+        let ctx = crate::core::brain_profiles::AccountContext::new("acc_fail_closed_test".into())
+            .unwrap();
+        let mut r = crate::core::brain_profiles::legacy_seed(&ctx, true, 1).unwrap();
+        r.role_id = "role_fail_closed".into();
+        r.revision_id = "rev_fc_1".into();
+        r.name = "测试角色".into();
+        r.persona = "persona".into();
+        let r_val = serde_json::to_value(&r).unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-save-role".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+                "--request-json".into(),
+                json!({
+                    "expected_generation": cur_gen,
+                    "request_id": uuid::Uuid::new_v4().to_string(),
+                    "role": r_val
+                })
+                .to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(
+            code,
+            0,
+            "save-role stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
+        let role_out: Value = serde_json::from_slice(&stdout).unwrap();
+        let cur_gen = role_out["data"]["generation"].as_u64().unwrap();
+
+        // 3. 无 history 时：brain-save-knowledge 可用（知识与 contact 授权无关）
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-save-knowledge".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+                "--request-json".into(),
+                json!({
+                    "expected_generation": cur_gen,
+                    "request_id": uuid::Uuid::new_v4().to_string(),
+                    "knowledge": {
+                        "schema_version": 1,
+                        "owner_account_id": "acc_fail_closed_test",
+                        "knowledge_id": "kn_fc_1",
+                        "revision_id": "rev_k_1",
+                        "parent_revision_id": null,
+                        "created_at": 100,
+                        "title": "测试知识",
+                        "text": "内容",
+                        "content_sha256": "",
+                        "source_label": "manual"
+                    }
+                })
+                .to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(code, 0, "save-knowledge should succeed without history db");
+        let kn_out: Value = serde_json::from_slice(&stdout).unwrap();
+        let cur_gen = kn_out["data"]["generation"].as_u64().unwrap();
+
+        // 4. 无 history 时：保存无覆盖的绑定草稿（overrides: []）可用
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-save-bindings".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+                "--request-json".into(),
+                json!({
+                    "expected_generation": cur_gen,
+                    "request_id": uuid::Uuid::new_v4().to_string(),
+                    "draft": {
+                        "default": {
+                            "role_id": "role_fail_closed",
+                            "revision_id": "rev_fc_1"
+                        },
+                        "overrides": []
+                    }
+                })
+                .to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(code, 0, "save-bindings with empty overrides should succeed");
+        let bind_out: Value = serde_json::from_slice(&stdout).unwrap();
+        let gen_after_bind = bind_out["data"]["generation"].as_u64().unwrap();
+
+        // 5. 无 history 时：激活无覆盖的草稿（brain-activate）可用
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-activate".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+                "--request-json".into(),
+                json!({
+                    "expected_generation": gen_after_bind,
+                    "request_id": uuid::Uuid::new_v4().to_string()
+                })
+                .to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(
+            code,
+            0,
+            "activate stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
+        let act_out: Value = serde_json::from_slice(&stdout).unwrap();
+        let gen_act_1 = act_out["data"]["generation"].as_u64().unwrap();
+
+        // 6. 核心契约加固：当存在 contact 覆盖但无 history db 时，保存绑定草稿必须被严格拒绝 (fail-closed，返回 not_found)
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-save-bindings".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+                "--request-json".into(),
+                json!({
+                    "expected_generation": gen_act_1,
+                    "request_id": uuid::Uuid::new_v4().to_string(),
+                    "draft": {
+                        "default": {
+                            "role_id": "role_fail_closed",
+                            "revision_id": "rev_fc_1"
+                        },
+                        "overrides": [
+                            {
+                                "contact_id": "c_unauthorized_user",
+                                "chat_kind": "private",
+                                "role_id": "role_fail_closed",
+                                "revision_id": "rev_fc_1"
+                            }
+                        ]
+                    }
+                })
+                .to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(
+            code, 2,
+            "overrides must be rejected when history db is unavailable (exit code 2)"
+        );
+        let err_out: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(err_out["error"]["code"], "not_found");
+
+        // 7. 无 history 时：第二次无覆盖激活并回退到 gen_act_1 可用
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-activate".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+                "--request-json".into(),
+                json!({
+                    "expected_generation": gen_act_1,
+                    "request_id": uuid::Uuid::new_v4().to_string()
+                })
+                .to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(code, 0);
+        let act2_out: Value = serde_json::from_slice(&stdout).unwrap();
+        let gen_act_2 = act2_out["data"]["generation"].as_u64().unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-rollback".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+                "--request-json".into(),
+                json!({
+                    "expected_generation": gen_act_2,
+                    "request_id": uuid::Uuid::new_v4().to_string(),
+                    "target_generation": gen_act_1
+                })
+                .to_string(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(
+            code, 0,
+            "rollback to non-override generation should succeed"
+        );
     }
 }
