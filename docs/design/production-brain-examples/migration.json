@@ -1,0 +1,165 @@
+{
+  "fixture_only": true,
+  "description": "旧配置片段，非可运行 BotConfig；无真实账号或路径；source_config_sha256 为此合成片段 JSON.stringify 字节的摘要，实际迁移计算完整原 config 文件字节摘要",
+  "before": {
+    "schema_version": 1,
+    "account_id": "fixture_account",
+    "brain": {
+      "mode": "builtin",
+      "external": {
+        "timeout_seconds": 120,
+        "timeout_action": "skip",
+        "queue_minutes": 30
+      }
+    },
+    "model_config": {
+      "backend": "codex-exec"
+    },
+    "allowlist": [
+      {
+        "recipient": "合成联系人",
+        "kind": "private"
+      }
+    ]
+  },
+  "after": {
+    "config": {
+      "schema_version": 1,
+      "account_id": "fixture_account",
+      "brain": {
+        "mode": "builtin",
+        "external": {
+          "timeout_seconds": 120,
+          "timeout_action": "skip",
+          "queue_minutes": 30
+        }
+      },
+      "model_config": {
+        "backend": "codex-exec"
+      },
+      "allowlist": [
+        {
+          "recipient": "合成联系人",
+          "kind": "private"
+        }
+      ]
+    },
+    "role": {
+      "schema_version": 1,
+      "role_id": "legacy_service_fixture",
+      "revision_id": "r1",
+      "parent_revision_id": null,
+      "created_at": 0,
+      "origin": "legacy_builtin_v1",
+      "name": "原内置客服（合成迁移）",
+      "persona": "用户部署的个人微信AI客服助手",
+      "goals": [
+        "友好简洁地回应当前联系人，回复不超过100字",
+        "首次自我介绍时说明你是AI客服助手",
+        "信息不足时说明并询问"
+      ],
+      "tone": "友好简洁",
+      "business_rules": [],
+      "model_ref": "config.model_config",
+      "knowledge_refs": [],
+      "templates": {
+        "greeting": "你好，我是AI客服助手。",
+        "insufficient_information": "信息不足，请补充说明。",
+        "unreadable": {
+          "unsupported_type": "这种格式暂时读不了（能读{supported_formats}），请对方转成这些格式再发",
+          "too_large": "文件超过{max_mb}MB上限，请对方压缩、拆分或截图关键部分再发",
+          "download_failed": "这次没能取到文件，请对方重发一次",
+          "snapshot_changed": "取文件时聊天画面变了，没取到，请对方重发一次",
+          "extract_failed": "文件打不开或已加密，读不出内容，请对方另存为普通格式再发",
+          "empty": "文件里没有可读的文字（可能是扫描件或空文件），请对方发文字版或截图",
+          "transcribe_failed": "这条语音没能转成文字，请对方打字再说一次",
+          "unknown": "这次没能取到文件，请对方重发一次"
+        },
+        "unreadable_missing_labels": "{labels}打不开，麻烦重发一下。",
+        "unreadable_many_items": "有{count}个文件或图片打不开，麻烦重发一下。"
+      },
+      "context_budget": {
+        "max_input_bytes": 49152,
+        "knowledge_bytes": 16384,
+        "history_bytes": 16384,
+        "overflow": "truncate_tail"
+      },
+      "content_sha256": "e7220db44af774cef4a35e7e0989a1711d37a45fe797a2542a3c856eff57b754"
+    },
+    "root": {
+      "schema_version": 1,
+      "generation": 1,
+      "roles": [
+        {
+          "role_id": "legacy_service_fixture",
+          "draft_revision_id": "r1",
+          "archived": false
+        }
+      ],
+      "accounts": [
+        {
+          "account_id": "fixture_account",
+          "active": {
+            "default": {
+              "role_id": "legacy_service_fixture",
+              "revision_id": "r1"
+            },
+            "overrides": []
+          },
+          "draft": {
+            "default": {
+              "role_id": "legacy_service_fixture",
+              "revision_id": "r1"
+            },
+            "overrides": []
+          },
+          "legacy_fallback": null
+        }
+      ],
+      "migrations": [
+        {
+          "id": "legacy-builtin-v1:fixture_account",
+          "completed_generation": 1,
+          "seed_content_sha256": "e7220db44af774cef4a35e7e0989a1711d37a45fe797a2542a3c856eff57b754",
+          "source_config_sha256": "d7f961e02d965edf90ede92e7ffb12c4b20a7c1e4428110307afa91b46652121"
+        }
+      ],
+      "activation_history": [
+        {
+          "account_id": "fixture_account",
+          "generation": 1,
+          "active": {
+            "default": {
+              "role_id": "legacy_service_fixture",
+              "revision_id": "r1"
+            },
+            "overrides": []
+          },
+          "at": 0
+        }
+      ],
+      "request_results": []
+    }
+  },
+  "rerun_expected": {
+    "generation": 1,
+    "revision_id": "r1",
+    "same_content_sha256": true
+  },
+  "external_case": {
+    "before": {
+      "mode": "external",
+      "timeout_seconds": 60,
+      "timeout_action": "builtin",
+      "queue_minutes": 15
+    },
+    "after": {
+      "mode": "external",
+      "timeout_seconds": 60,
+      "timeout_action": "builtin",
+      "queue_minutes": 15
+    },
+    "active_external_role": null,
+    "fallback_revision": "legacy_service_fixture/r1"
+  }
+}
