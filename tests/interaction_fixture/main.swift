@@ -4,6 +4,8 @@ import AppKit
 final class FixtureDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
     let status = NSTextField(labelWithString:"Fixture ready")
+    let input = NSTextField(string:"fixture input")
+    var clicks = 0
     func applicationDidFinishLaunching(_ notification: Notification) {
         window = NSWindow(contentRect:NSRect(x:180,y:200,width:440,height:260),styleMask:[.titled,.closable],backing:.buffered,defer:false)
         window.title = "Desktop interaction acceptance fixture"
@@ -12,13 +14,16 @@ final class FixtureDelegate: NSObject, NSApplicationDelegate {
         status.frame = NSRect(x:100,y:170,width:240,height:30)
         window.contentView!.addSubview(status)
         window.contentView!.addSubview(button)
+        input.frame = NSRect(x:100,y:45,width:230,height:30)
+        input.setAccessibilityIdentifier("fixture-input")
+        window.contentView!.addSubview(input)
         window.initialFirstResponder = button
         window.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps:true)
         print("fixture_ready")
         fflush(stdout)
     }
-    @objc func runFixture() { status.stringValue = "Fixture completed" }
+    @objc func runFixture() { clicks += 1; status.stringValue = "Fixture completed \(clicks)" }
 }
 let delegate = FixtureDelegate()
 let app = NSApplication.shared
