@@ -295,11 +295,11 @@ public enum UpdatePageLogic {
         - 中断阶段: \(stage)
         - 错误原因: \(err)
 
-        只读说明与恢复指引:
-        1. 核心自动处理已被安全抑制，原旧版本及客户会话未受污染。
-        2. 当前界面处于严格只读受控阶段，禁止通过界面清除维护标志或篡改状态。
-        3. 请核对 ~/.wechat-rpa/logs/core.log 与 host.log 获取详细故障上下文。
-        4. 需恢复旧版时，请由管理员核实独立 update-journal.json 后通过专用命令行执行受控回退。
+        只读说明与受控恢复指引:
+        1. 维护标志文件已记录；实际核心进程存活状态与业务数据完整性未知。
+        2. 当前界面处于严格只读受控阶段，禁止通过界面清除维护标志或进行破坏性写入。
+        3. 真实版本回退能力当前处于 unsupported 禁用状态，不可直接回退；需要专门受控恢复。
+        4. 请核对 ~/.wechat-rpa/logs/core.log 与 host.log 获取详细故障上下文并联系管理员。
         """
     }
 
@@ -365,37 +365,37 @@ public final class UpdatePageController: NSViewController {
     private var signingStatus = UpdateSigningStatus(keychainAvailable: true, localCertificateFound: true)
     private var isChecking = false
 
-    // UI - 当前版本卡片
-    private let currentReleaseLabel = NSTextField(labelWithString: "加载中...")
-    private let currentSeqLabel = NSTextField(labelWithString: "未校验")
-    private let architectureLabel = NSTextField(labelWithString: "未知")
-    private let consistencyBadge = NSTextField(labelWithString: "未校验 (未知)")
-    private let supervisorStatusLabel = NSTextField(labelWithString: "检查中...")
+    // UI - 当前版本卡片 (全部使用 wrappingLabelWithString 并设受限宽度)
+    private let currentReleaseLabel = NSTextField(wrappingLabelWithString: "加载中...")
+    private let currentSeqLabel = NSTextField(wrappingLabelWithString: "未校验")
+    private let architectureLabel = NSTextField(wrappingLabelWithString: "未知")
+    private let consistencyBadge = NSTextField(wrappingLabelWithString: "未校验 (未知)")
+    private let supervisorStatusLabel = NSTextField(wrappingLabelWithString: "检查中...")
 
     // UI - 候选更新卡片
     private let candidateStatusLabel = NSTextField(wrappingLabelWithString: "尚未检查更新")
-    private let candidateVersionLabel = NSTextField(labelWithString: "-")
-    private let candidatePublishedLabel = NSTextField(labelWithString: "-")
-    private let candidateSizeLabel = NSTextField(labelWithString: "-")
-    private let publisherVerificationBadge = NSTextField(labelWithString: "-")
-    private let localSigningLabel = NSTextField(labelWithString: "-")
+    private let candidateVersionLabel = NSTextField(wrappingLabelWithString: "-")
+    private let candidatePublishedLabel = NSTextField(wrappingLabelWithString: "-")
+    private let candidateSizeLabel = NSTextField(wrappingLabelWithString: "-")
+    private let publisherVerificationBadge = NSTextField(wrappingLabelWithString: "-")
+    private let localSigningLabel = NSTextField(wrappingLabelWithString: "-")
     private let compatibilityLabel = NSTextField(wrappingLabelWithString: "-")
     private let releaseNotesView = NSTextView()
 
     // UI - 流程流水线与进度
-    private let pipelineStepsLabel = NSTextField(labelWithString: "检查 → 下载 → 验证 → 本机签名 → 等待排空 → 备份 → 安装 → 自检")
-    private let currentStageLabel = NSTextField(labelWithString: "只读监控中")
+    private let pipelineStepsLabel = NSTextField(wrappingLabelWithString: "检查 → 下载 → 验证 → 本机签名 → 等待排空 → 备份 → 安装 → 自检")
+    private let currentStageLabel = NSTextField(wrappingLabelWithString: "只读监控中")
     private let progressBar = NSProgressIndicator()
-    private let progressDetailLabel = NSTextField(labelWithString: "")
+    private let progressDetailLabel = NSTextField(wrappingLabelWithString: "")
     private let drainWarningLabel = NSTextField(wrappingLabelWithString: "")
     private let permissionsNoteLabel = NSTextField(wrappingLabelWithString: "提示：专用机应用更新后将由本地自签名钥匙串重签名，若系统权限重置需在「设置」中重新授权。")
 
-    // UI - 操作按钮 (只读阶段全部禁用写操作)
+    // UI - 操作按钮 (只读阶段全部禁用写操作，分行排布)
     private let checkButton = NSButton(title: "检查更新", target: nil, action: nil)
-    private let downloadButton = NSButton(title: "下载更新 (本阶段未支持)", target: nil, action: nil)
-    private let installButton = NSButton(title: "安装并重启 (本阶段未支持)", target: nil, action: nil)
-    private let deferButton = NSButton(title: "延期更新 (本阶段未支持)", target: nil, action: nil)
     private let refreshStatusButton = NSButton(title: "刷新状态", target: nil, action: nil)
+    private let downloadButton = NSButton(title: "下载更新 (未启用)", target: nil, action: nil)
+    private let installButton = NSButton(title: "安装并重启 (未启用)", target: nil, action: nil)
+    private let deferButton = NSButton(title: "延期更新 (未启用)", target: nil, action: nil)
     private let actionFeedbackLabel = NSTextField(wrappingLabelWithString: "当前处于只读状态查看阶段；真实下载、安装、排空延期与恢复写入均已安全禁用。")
 
     // UI - 恢复卡片 (当出现 recovery_required 时高亮)
@@ -458,6 +458,11 @@ public final class UpdatePageController: NSViewController {
         ])
         currentGrid.rowSpacing = 6
         currentGrid.columnSpacing = 12
+        currentReleaseLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
+        currentSeqLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
+        architectureLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
+        consistencyBadge.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
+        supervisorStatusLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
         currentBox.setContent(currentGrid)
         contentStack.addArrangedSubview(currentBox)
 
@@ -470,6 +475,7 @@ public final class UpdatePageController: NSViewController {
 
         candStack.addArrangedSubview(candidateStatusLabel)
         candidateStatusLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        candidateStatusLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 580).isActive = true
 
         let candGrid = NSGridView(views: [
             [NSTextField(labelWithString: "目标版本:"), candidateVersionLabel],
@@ -481,6 +487,12 @@ public final class UpdatePageController: NSViewController {
         ])
         candGrid.rowSpacing = 6
         candGrid.columnSpacing = 12
+        candidateVersionLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
+        candidatePublishedLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
+        candidateSizeLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
+        publisherVerificationBadge.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
+        localSigningLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
+        compatibilityLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
         candStack.addArrangedSubview(candGrid)
 
         let notesTitle = NSTextField(labelWithString: "版本发布说明:")
@@ -563,39 +575,47 @@ public final class UpdatePageController: NSViewController {
         recoveryBox.isHidden = true
         contentStack.addArrangedSubview(recoveryBox)
 
-        // 6. 操作按钮行 (严格只读，所有写操作永久禁用)
+        // 6. 操作按钮行 (严格只读，所有写操作永久禁用；分两行排布自适应宽度)
         let actionBox = createSectionBox(title: "操作与维护 (只读受控)")
         let actStack = NSStackView()
         actStack.orientation = .vertical
         actStack.alignment = .leading
         actStack.spacing = 10
 
-        let btnRow = NSStackView()
-        btnRow.orientation = .horizontal
-        btnRow.spacing = 10
+        // 第1行：状态检查与刷新查询操作
+        let queryBtnRow = NSStackView()
+        queryBtnRow.orientation = .horizontal
+        queryBtnRow.spacing = 12
 
         checkButton.target = self
         checkButton.action = #selector(handleCheckUpdate)
+        refreshStatusButton.target = self
+        refreshStatusButton.action = #selector(handleRefreshStatus)
+
+        queryBtnRow.addArrangedSubview(checkButton)
+        queryBtnRow.addArrangedSubview(refreshStatusButton)
+        actStack.addArrangedSubview(queryBtnRow)
+
+        // 第2行：写操作受控入口 (本阶段永久禁用)
+        let writeBtnRow = NSStackView()
+        writeBtnRow.orientation = .horizontal
+        writeBtnRow.spacing = 10
+
         downloadButton.target = self
         downloadButton.action = #selector(handleDisabledWriteAction)
         installButton.target = self
         installButton.action = #selector(handleDisabledWriteAction)
         deferButton.target = self
         deferButton.action = #selector(handleDisabledWriteAction)
-        refreshStatusButton.target = self
-        refreshStatusButton.action = #selector(handleRefreshStatus)
 
-        // 核心约束：下载/安装/延期在生产代码中始终禁用
         downloadButton.isEnabled = false
         installButton.isEnabled = false
         deferButton.isEnabled = false
 
-        btnRow.addArrangedSubview(checkButton)
-        btnRow.addArrangedSubview(downloadButton)
-        btnRow.addArrangedSubview(installButton)
-        btnRow.addArrangedSubview(deferButton)
-        btnRow.addArrangedSubview(refreshStatusButton)
-        actStack.addArrangedSubview(btnRow)
+        writeBtnRow.addArrangedSubview(downloadButton)
+        writeBtnRow.addArrangedSubview(installButton)
+        writeBtnRow.addArrangedSubview(deferButton)
+        actStack.addArrangedSubview(writeBtnRow)
 
         actionFeedbackLabel.font = NSFont.systemFont(ofSize: 12)
         actionFeedbackLabel.textColor = .secondaryLabelColor
@@ -891,8 +911,27 @@ public final class UpdatePageController: NSViewController {
     }
 
     @objc private func handleRefreshStatus() {
-        loadInitialStatus()
-        actionFeedbackLabel.stringValue = "状态已刷新 (只读)。"
-        actionFeedbackLabel.textColor = .secondaryLabelColor
+        actionFeedbackLabel.stringValue = "正在刷新状态..."
+        actionFeedbackLabel.textColor = .systemBlue
+        refreshStatusButton.isEnabled = false
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            do {
+                let payload = try self.client.fetchStatus()
+                DispatchQueue.main.async {
+                    self.applyStatusPayload(payload)
+                    self.refreshStatusButton.isEnabled = true
+                    self.actionFeedbackLabel.stringValue = "状态已刷新 (只读)。"
+                    self.actionFeedbackLabel.textColor = .secondaryLabelColor
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.refreshStatusButton.isEnabled = true
+                    self.actionFeedbackLabel.stringValue = "状态刷新失败: \(error.localizedDescription)"
+                    self.actionFeedbackLabel.textColor = .systemRed
+                }
+            }
+        }
     }
 }

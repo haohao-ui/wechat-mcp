@@ -204,7 +204,8 @@ func runTests() -> Int32 {
         check("recovery_status_error", payload.transaction.error?.contains("self-test verification failed") == true)
         
         let guide = UpdatePageLogic.recoveryGuide(for: payload.transaction)
-        check("recovery_guide_contains_instructions", guide.contains("旧版本") && guide.contains("只读说明"))
+        check("recovery_guide_contains_instructions", guide.contains("维护标志文件已记录") && guide.contains("专门受控恢复"))
+        check("recovery_guide_no_false_guarantee", !guide.contains("未受污染"))
     }
 
     // 9. 生产写操作禁用与只读守卫测试（关键防御验证）
@@ -247,15 +248,15 @@ func runTests() -> Int32 {
         }
     }
 
-    // 11. 离屏 UI 完整高度渲染夹具（不透明 Aqua，包含完整卡片流与底部按钮）
+    // 11. 离屏 UI 完整高度渲染夹具（不透明 Aqua，包含完整卡片流与底部按钮，验证720宽及宿主最小680宽）
     do {
         let dummyWorker = SocketWorker()
         let dummySupervisor = CoreSupervisor()
         let statusPanel = StatusPanelController(worker: dummyWorker, coreSupervisor: dummySupervisor)
         let updateVC = UpdatePageController(context: statusPanel)
-
-        // 11.1 未配置更新源状态渲染（完整高度）
         _ = updateVC.view
+
+        // 11.1 未配置更新源状态渲染（720宽与680宽分别验证）
         updateVC.applyCheckResult(UpdateCheckResult(
             status: .unconfigured,
             reason: "尚未配置授权更新清单；禁止任意未经验证的网络下载",
@@ -263,27 +264,44 @@ func runTests() -> Int32 {
             verification: nil
         ))
         
-        let fullSize = NSSize(width: 720, height: 1150)
-        updateVC.view.frame = NSRect(origin: .zero, size: fullSize)
+        let fullSize720 = NSSize(width: 720, height: 1150)
+        updateVC.view.frame = NSRect(origin: .zero, size: fullSize720)
         updateVC.contentStack.layoutSubtreeIfNeeded()
         updateVC.view.layoutSubtreeIfNeeded()
 
-        guard let rep1 = updateVC.view.bitmapImageRepForCachingDisplay(in: updateVC.view.bounds) else {
+        guard let rep720 = updateVC.view.bitmapImageRepForCachingDisplay(in: updateVC.view.bounds) else {
             check("offscreen_rep_created", false, "Failed to create bitmap rep")
             return 1
         }
-        // 填充不透明 Aqua 背景
-        rep1.colorSpaceName = .calibratedRGB
-        updateVC.view.cacheDisplay(in: updateVC.view.bounds, to: rep1)
-        check("offscreen_render_unconfigured", rep1.pixelsWide == 720 && rep1.pixelsHigh == 1150)
+        rep720.colorSpaceName = .calibratedRGB
+        updateVC.view.cacheDisplay(in: updateVC.view.bounds, to: rep720)
+        check("offscreen_render_unconfigured_720", rep720.pixelsWide == 720 && rep720.pixelsHigh == 1150)
 
         let outPath1 = "/tmp/update_ui_unconfigured_full.png"
-        if let pngData1 = rep1.representation(using: .png, properties: [:]) {
+        if let pngData1 = rep720.representation(using: .png, properties: [:]) {
             try? pngData1.write(to: URL(fileURLWithPath: outPath1))
             check("offscreen_unconfigured_png_saved", FileManager.default.fileExists(atPath: outPath1))
         }
 
-        // 11.2 故障恢复状态渲染（展开恢复卡、错误信息、事务 ID、禁用按钮）
+        // 验证宿主实际最小宽度 680 宽
+        let fullSize680 = NSSize(width: 680, height: 1150)
+        updateVC.view.frame = NSRect(origin: .zero, size: fullSize680)
+        updateVC.contentStack.layoutSubtreeIfNeeded()
+        updateVC.view.layoutSubtreeIfNeeded()
+        guard let rep680 = updateVC.view.bitmapImageRepForCachingDisplay(in: updateVC.view.bounds) else {
+            check("offscreen_rep680_created", false, "Failed to create 680w rep")
+            return 1
+        }
+        rep680.colorSpaceName = .calibratedRGB
+        updateVC.view.cacheDisplay(in: updateVC.view.bounds, to: rep680)
+        check("offscreen_render_unconfigured_680", rep680.pixelsWide == 680 && rep680.pixelsHigh == 1150)
+        let outPath680_1 = "/tmp/update_ui_unconfigured_680w.png"
+        if let pngData680_1 = rep680.representation(using: .png, properties: [:]) {
+            try? pngData680_1.write(to: URL(fileURLWithPath: outPath680_1))
+            check("offscreen_unconfigured_680w_saved", FileManager.default.fileExists(atPath: outPath680_1))
+        }
+
+        // 11.2 故障恢复状态渲染（720宽与680宽分别展开恢复卡、受控说明、事务 ID、两行禁用按钮）
         updateVC.applyStatusPayload(UpdateStatusPayload(
             currentRelease: UpdateReleaseInfo(releaseId: "0.1.0-aarch64", sequence: 1, architecture: "aarch64", componentsConsistent: false),
             candidateRelease: UpdateCandidateSummary(releaseId: "0.2.0-aarch64", sequence: 2),
@@ -296,14 +314,35 @@ func runTests() -> Int32 {
             ),
             guardInfo: UpdateGuardInfo(highestAcceptedSequence: 1, maintenanceActive: true)
         ))
+        // 720 宽
+        updateVC.view.frame = NSRect(origin: .zero, size: fullSize720)
         updateVC.view.layoutSubtreeIfNeeded()
-        updateVC.view.cacheDisplay(in: updateVC.view.bounds, to: rep1)
-
+        updateVC.view.cacheDisplay(in: updateVC.view.bounds, to: rep720)
         let outPath2 = "/tmp/update_ui_recovery_full.png"
-        if let pngData2 = rep1.representation(using: .png, properties: [:]) {
+        if let pngData2 = rep720.representation(using: .png, properties: [:]) {
             try? pngData2.write(to: URL(fileURLWithPath: outPath2))
             check("offscreen_recovery_png_saved", FileManager.default.fileExists(atPath: outPath2))
         }
+
+        // 680 宽
+        updateVC.view.frame = NSRect(origin: .zero, size: fullSize680)
+        updateVC.view.layoutSubtreeIfNeeded()
+        updateVC.view.cacheDisplay(in: updateVC.view.bounds, to: rep680)
+        let outPath680_2 = "/tmp/update_ui_recovery_680w.png"
+        if let pngData680_2 = rep680.representation(using: .png, properties: [:]) {
+            try? pngData680_2.write(to: URL(fileURLWithPath: outPath680_2))
+            check("offscreen_recovery_680w_saved", FileManager.default.fileExists(atPath: outPath680_2))
+        }
+
+        // 验证所有卡片与子视图均严格限制在 680 宽画幅内，无任何右侧越界
+        var allWithinBounds = true
+        for subview in updateVC.contentStack.subviews {
+            if subview.frame.maxX > 680.0 {
+                allWithinBounds = false
+                print("Subview exceeded bounds: \(subview)")
+            }
+        }
+        check("subviews_within_680w_bounds", allWithinBounds)
     }
 
     // 12. Shell 与 SettingsPage 导航联动验证
