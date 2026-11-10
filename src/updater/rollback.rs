@@ -56,9 +56,10 @@ pub fn rollback_release_atomic(app_root: &Path) -> Result<PathBuf> {
     Ok(prev_target)
 }
 
-/// 检查切换后是否已产生新业务数据。
-/// 严格安全准则：对数据库不存在、权限异常、损坏、未知 schema 或查询 SQL 失败一律返回 Err，拒绝回退。
-/// 绝不吞掉错误或假定为 0。
+/// 检查切换后是否已产生新业务数据（仅限合成 fixture 探测）。
+/// 严格安全准则：对数据库不存在、权限异常、损坏、未知 schema 或查询 SQL 失败一律返回 Err。
+/// 注意：该函数仅检查 messages/turns 时间戳，不能证明完整业务 schema（如 contacts、sessions 等）无数据变更；
+/// 在无全量一致快照证明前，不得将 false 解释为可安全自动覆盖恢复旧数据库。
 pub fn has_new_data_since_backup(db_path: &Path, backup_time: u64) -> Result<bool> {
     if !db_path.exists() {
         bail!("database_file_not_found: {}", db_path.display());
@@ -109,4 +110,12 @@ pub fn has_new_data_since_backup(db_path: &Path, backup_time: u64) -> Result<boo
     }
 
     Ok(false)
+}
+
+/// 数据库自动恢复守卫：
+/// 在缺乏全量 WAL 快照与完整 schema 证明前，自动覆盖恢复旧 DB 必须明确返回 unsupported 并拒绝执行。
+pub fn restore_database_backup_guarded(_backup_file: &Path, _target_db: &Path) -> Result<()> {
+    bail!(
+        "unsupported_db_rollback: automated database restoration without cryptographic write-ahead-log snapshot proof is unsupported to prevent silent data loss"
+    );
 }
