@@ -969,15 +969,9 @@ impl WorkerClient {
                 // The transcript is the customer's words: hand it to the model as a text item.
                 let seconds = item.extra.get("voice_seconds").and_then(Value::as_i64);
                 let label = seconds.map_or("语音".to_string(), |s| format!("语音（{s}秒）"));
-                let known = item
-                    .extra
-                    .get("transcript")
-                    .and_then(Value::as_str)
-                    .filter(|t| !t.trim().is_empty())
-                    .map(str::to_string);
-                let transcript = match known {
-                    Some(text) => Ok(text),
-                    None => self
+                // Always ask the worker: a transcript seen in the frame may still be WeChat's loading
+                // glyph; the worker returns it only once settled and never clicks a converted voice.
+                let transcript = self
                         .call(
                             "transcribe_voice",
                             json!({
@@ -998,8 +992,7 @@ impl WorkerClient {
                                 .filter(|t| !t.trim().is_empty())
                                 .map(str::to_string)
                                 .context("voice_transcript_empty")
-                        }),
-                };
+                        });
                 let text = match transcript {
                     Ok(text) => {
                         voices_done += 1;
@@ -2974,12 +2967,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_already_transcribed_voice_is_not_clicked_again() {
-        let never = json!({"protocol_version": 1, "ok": false, "error": "should_not_be_called"});
-        let (files, failed, ops) = voice_attachment(never, Some("你好你好")).await;
+    async fn test_transcript_seen_in_frame_is_confirmed_by_the_worker() {
+        // The frame's transcript may be WeChat's loading glyph ("Q"); the worker's settled text wins.
+        let settled =
+            json!({"protocol_version": 1, "ok": true, "result": {"transcript": "你好，你好。"}});
+        let (files, failed, ops) = voice_attachment(settled, Some("Q")).await;
         assert!(failed.is_empty());
-        assert_eq!(files[0].content["text"], "你好你好");
-        assert!(!ops.contains(&"transcribe_voice".to_string()));
+        assert_eq!(files[0].content["text"], "你好，你好。");
+        assert!(ops.contains(&"transcribe_voice".to_string()));
     }
 
     #[tokio::test]
