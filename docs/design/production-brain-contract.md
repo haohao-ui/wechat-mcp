@@ -25,7 +25,7 @@
 
 ## 2. 唯一数据模型（proposed）
 
-采用 state_dir 下不可变对象 + 单一原子根清单；不新建角色 SQLite。目录 0700、文件 0600；ID 仅 `[a-zA-Z0-9_-]{1,80}`，路径由核心生成，禁止用户传绝对路径、`..`、符号链接。账号由既有 effective_account_id 决定，不能由请求自由切换。
+采用 state_dir 下不可变对象 + 单一原子根清单；不新建角色 SQLite。目录 0700、文件 0600；ID 仅 `[a-zA-Z0-9_-]{1,80}`，路径由核心生成，禁止用户传绝对路径、`..`、符号链接。账号由既有 effective_account_id 决定，不能由请求自由切换。首版所有本地角色和知识严格按账号所有权隔离，不提供跨账号共享、导入引用或复制；owner_account_id 由可信核心上下文写入，不能采用请求正文提供的 owner。
 
 - `brain-profiles/roles/<role_id>/<revision_id>.json`：RoleRevision。
 - `brain-profiles/knowledge/<knowledge_id>/<revision_id>.json`：KnowledgeRevision。
@@ -36,7 +36,7 @@
 
 ### RoleRevision 字段
 
-`role_id, revision_id` 字符串；`parent_revision_id` nullable；`created_at` UTC 秒；`origin`=`user|legacy_builtin_v1`；`name` 1..80 字；`persona` 0..8000 字；`goals` 字符串数组（最多20条、每条500字）；`tone` 0..2000 字；`business_rules` 数组同 goals；`model_ref` **仅 `config.model_config`**；`knowledge_refs` 为 `{knowledge_id,revision_id,content_sha256}` 有序数组；`templates` 如下；`context_budget` 如下；`content_sha256` 为排除该字段后 RFC8785 canonical JSON 的 SHA256（小写 hex64）。所有不可变修订不提供 update/delete，编辑即新修订；回退只是将 active 指向历史修订，不改旧对象。
+`owner_account_id` 必填、不可变；`role_id, revision_id` 字符串；`parent_revision_id` nullable；`created_at` UTC 秒；`origin`=`user|legacy_builtin_v1`；`name` 1..80 字；`persona` 0..8000 字；`goals` 字符串数组（最多20条、每条500字）；`tone` 0..2000 字；`business_rules` 数组同 goals；`model_ref` **仅 `config.model_config`**；`knowledge_refs` 为 `{knowledge_id,revision_id,content_sha256}` 有序数组；`templates` 如下；`context_budget` 如下；`content_sha256` 为排除该字段后 RFC8785 canonical JSON 的 SHA256（小写 hex64）。所有不可变修订不提供 update/delete，编辑即新修订；回退只是将 active 指向历史修订，不改旧对象。
 
 `templates` 是完整必填 map：`greeting`、`insufficient_information`、`unreadable`（unsupported_type/too_large/download_failed/snapshot_changed/extract_failed/empty/transcribe_failed/unknown）、`unreadable_missing_labels`、`unreadable_many_items`。每条可为 null 表示“无自定义表达”；模板可用变量只有 `{label}`、`{labels}`、`{count}`、`{max_mb}`、`{supported_formats}`。不执行表达式、不读文件、不动态网络；未识别变量报 template_invalid。null 不等于启用通用商业回复；必需事实仍由不可编辑系统规则表达，但系统层只能要求忠于事实，不得在空模板时重建写死业务人设、问候或商业兜底句。空模板且无法生成合规内容时安全失败，不发送默认商业回复。迁移修订所有 legacy 模板为显式文本。
 
@@ -44,7 +44,7 @@
 
 ### KnowledgeRevision 字段与预算
 
-`knowledge_id, revision_id, parent_revision_id, created_at, title, text, content_sha256, source_label`；纯 UTF-8 文本、单项最大 1 MiB、每角色最多32项；source_label 是人工说明，不授权抓取 URL/路径。首版无在线 RAG、无隐式模型摘要；摘要若用户提供，作为独立不可变知识正文保存并明确来源，不伪装为完整原文。
+`schema_version, owner_account_id, knowledge_id, revision_id, parent_revision_id, created_at, title, text, content_sha256, source_label`；纯 UTF-8 文本、单项最大 1 MiB、每角色最多32项；source_label 是人工说明，不授权抓取 URL/路径。首版无在线 RAG、无隐式模型摘要；摘要若用户提供，作为独立不可变知识正文保存并明确来源，不伪装为完整原文。
 
 预算 `context_budget={max_input_bytes:49152,knowledge_bytes:16384,history_bytes:16384,overflow:"truncate_tail"}`；均为去本地路径后的 UTF-8 JSON **序列化字节**预算，非精确 token 数，不改变模型配置。max_input_bytes 4096..1048576；分区之和不得超过总额；固定系统约束、角色、当前消息、失败事实及当前附件说明先占额，禁止裁掉。超出总额返回 context_budget_exceeded（不调模型、不发送、不把消息当已处理），由现有失败/重试上限策略处理并显示需调整，不另造等待状态机。
 
@@ -52,15 +52,39 @@
 
 ### 根清单与绑定
 
-根 `schema_version,generation,roles,accounts,migrations,activation_history,request_results`。activation_history 保留所有激活记录 `{account_id,generation,active,at}`，直到显式受审的历史保留策略允许清理；request_results 是有序 `{request_id,request_sha256,result}` 数组。账号项还含 nullable `legacy_fallback` 引用，仅用于旧配置已启用的 builtin 超时兜底，不替代 active 或改变 timeout_action。存储层主键、CAS、读取和修订寻址不得依赖可变显示名，名字只供展示。roles 数组项 `{role_id,draft_revision_id,archived}`；draft 可与 active 相同，保存草稿不影响 active；archive 仅允许无 active 引用角色，有引用返回 role_in_use；不物理删除已被历史引用对象。
+根完整字段白名单仅为下表；所有字段必填（nullable 字段也必须出现），每一层拒绝未知字段，不存在隐含的扩展 map。下表和 production-brain-examples/root-schema.json 是同一结构，migration.json 的 after.root 直接按该 schema 检查。
 
-accounts 数组项 `{account_id,active:{default,overrides},draft:{default,overrides}}`；default 为 nullable `{role_id,revision_id}`；overrides 数组 `{contact_id,chat_kind,role_id,revision_id}`。联系人/群稳定 ID 来自现有 contacts，绝不按显示名保存绑定；chat_kind 验证与 contacts 一致。active 解析优先精确 contact 覆盖，其次账号默认；无角色返回 role_required，禁止隐式旧人设。账号可用默认角色覆盖私聊/群，但群规则始终强制；用户可另配群覆盖。
+| 对象 | 精确字段与类型 |
+|---|---|
+| 根 | schema_version:整数1；generation:0..2^53-1整数；roles:RoleEntry[]；knowledge:KnowledgeEntry[]；accounts:AccountEntry[]；migrations:MigrationEntry[]；activation_history:ActivationEntry[]；request_results:RequestEntry[] |
+| RoleEntry | owner_account_id:string；role_id:string；draft_revision_id:string；archived:bool |
+| KnowledgeEntry | owner_account_id:string；knowledge_id:string；draft_revision_id:string |
+| AccountEntry | account_id:string；active:BindingSet；draft:BindingSet；legacy_fallback:RoleRef或null |
+| BindingSet | default:RoleRef或null；overrides:Override[] |
+| RoleRef | role_id:string；revision_id:string |
+| Override | contact_id:string；chat_kind:private或group；role_id:string；revision_id:string |
+| MigrationEntry | id:string；owner_account_id:string；source_config_sha256:hex64；seed_content_sha256:hex64；completed_generation:整数 |
+| ActivationEntry | account_id:string；generation:整数；active:BindingSet；at:UTC秒整数 |
+| RequestEntry | account_id:string；operation:写操作枚举；request_id:UUID；request_sha256:hex64；result:WriteResult；at:UTC秒整数 |
+| WriteResult | generation:整数；role_id:string或null；knowledge_id:string或null；revision_id:string或null；content_sha256:hex64或null；archived:bool或null |
+
+WriteResult 为去重缓存的紧凑成功结果，所有字段显式出现；写操作对外 data 统一为该 WriteResult，额外的绑定/激活详情由后续只读操作取得，避免历史淘汰后无法精确重放旧响应，不在缓存保存角色正文、知识、其他账号摘要或任意 envelope。写失败不缓存；完成结果与根原子提交。操作枚举为 brain-save-role、brain-save-knowledge、brain-copy-role、brain-archive-role、brain-save-bindings、brain-activate、brain-rollback；预览和只读操作不进入写去重缓存。
+
+根 limits：最多16个账号；每账号128个 RoleEntry（含归档）、128个 KnowledgeEntry，每个 BindingSet 最多200个覆盖且 contact_id 唯一；每账号每种迁移 ID 唯一、最多4条迁移记录。RoleRevision 完整序列化最大128 KiB；每个模板最大2000 Unicode字符；KnowledgeRevision 完整JSON最大2 MiB（正文仍最大1 MiB，title/source_label各最多500字符）；ID 80字符，账号标识为可信原始值但最多256 UTF-8字节、不得作为路径片段。对象/引用必须满足目录全局ID唯一且归属一致；generation/时间戳均限非负安全整数。根完整序列化最大128 MiB，任何细项或总额超限均在提交前返回 storage_capacity_exceeded、保留旧根；不得静默清除其他账号记录腾空间。
+
+activation_history 每账号只保留最近100次成功激活/回退记录，超额在同一原子提交内移除该账号最旧记录；排序按 generation。当前 active 永远保留，回退只允许仍保留的当前账号 generation，否则 not_found；不承诺无限回退。修订对象不因该保留策略自动删除，历史快照仍可审计。request_results 每账号只保留最近1000次成功写结果，WriteResult最大4 KiB，按提交generation排序；同账号可跨操作复用UUID，但去重主键必须为 (可信account_id, operation, request_id)，哈希覆盖操作、可信账号及完整规范化请求（包括 expected_generation）。同键同hash重放，同键异hash为 request_conflict；跨账号同UUID绝不能读到对方结果。淘汰后只适用正常CAS，不保证永久去重。账号总不可变对象占用上限1 GiB，达到上限拒绝新增，不自动删除历史引用；后续清理必须单独设计。首版无删除账号操作，migration记录不自动过期。
+
+所有 list/get/save/copy/reference/archive/preview/activate/rollback 和幂等缓存查找必须先从可信上下文取得账号，再检查根目录项 owner、不可变对象 owner、父修订 owner 和所有知识引用 owner 均相等；不允许仅凭 role_id/knowledge_id 打开正文。请求中伪造 owner/account、跨账号ID、跨账号parent或knowledge ref均返回相同 not_found，校验顺序在CAS详情/缓存命中之前，禁止以冲突信息或缓存命中泄漏对象存在。损坏存储导致根/object owner不一致时停止该对象使用并记录不含正文的 integrity_mismatch，外部仍返回 not_found；list只返回当前账号目录。复制仅限本账号源，生成新ID并保持本账号owner，绝不以复制隐式共享。全局 generation 仅作CAS令牌，不能用它查询其他账号历史。
+
+draft 可与 active 相同，保存草稿不影响 active；archive 仅允许无 active、draft绑定或 legacy_fallback 引用角色，有引用返回 role_in_use；不物理删除已被历史引用对象。存储层主键、CAS、读取和修订寻址不得依赖可变显示名，名字只供展示。
+
+联系人/群稳定 ID 来自现有 contacts，绝不按显示名保存绑定；chat_kind 验证与 contacts 一致。active 解析优先精确 contact 覆盖，其次账号默认；无角色返回 role_required，禁止隐式旧人设。账号可用默认角色覆盖私聊/群，但群规则始终强制；用户可另配群覆盖。
 
 白名单唯一来源是 **config.allowlist/ignorelist 经 BrainAccess 解析**；绑定不复制清单，也不授予访问。保存覆盖须账号匹配且当前 permit；后来撤白名单仅令覆盖 dormant，不删除修订、不恢复权限。改名不失绑定；merge 不自动重写稳定 ID，沿 family 获取候选，多个不同覆盖返回 binding_ambiguous，必须显式解决，不能随机取一个；unmerge 恢复各原 ID。账号默认只应用当前有权限的联系人。
 
 ## 3. 原子性与控制接口（proposed）
 
-本地 `control brain-* --config <explicit-path> --request-json <JSON>` 经 execute_control_full 分派；输出单 JSON、退出码 0 成功/2 请求或冲突/1 IO。不能绕过原有配置路径与当前账号权限。所有写操作必填 `expected_generation`；读取返回 `generation`。请求共用 `schema_version:1,account_id`（必须等于当前账号）、`request_id`（UUID）；同 request_id + 同 canonical 请求重放原结果，不同内容返回 request_conflict；根保存最近1000项请求结果，淘汰后的旧 request_id 仅按 CAS 处理，不承诺永久幂等。
+本地 `control brain-* --config <explicit-path> --request-json <JSON>` 经 execute_control_full 分派；输出单 JSON、退出码 0 成功/2 请求或冲突/1 IO。不能绕过原有配置路径与当前账号权限。所有写操作必填 `expected_generation`；读取返回 `generation`。请求共用 `schema_version:1,account_id`（只作当前可信账号的等值断言，不能选择账号）、写操作必填 `request_id`（UUID）；去重键、缓存结构和保留上限严格采用§2，必须先授权再查缓存、再CAS；不得只按UUID查结果。
 
 | 操作名 | 请求专有字段 | 成功 data |
 |---|---|---|
@@ -70,8 +94,8 @@ accounts 数组项 `{account_id,active:{default,overrides},draft:{default,overri
 | brain-save-knowledge | expected_generation, knowledge | knowledge_id,revision_id,content_sha256,generation |
 | brain-copy-role | expected_generation,role_id,revision_id,name | 新 role_id/revision_id；不复制 active 绑定 |
 | brain-archive-role | expected_generation,role_id | archived:true,generation |
-| brain-save-bindings | expected_generation,draft:{default,overrides} | draft,generation；全量替换当前账号草稿，其他账号不变 |
-| brain-activate | expected_generation；无任意 role 参数 | 把当前账号完整 draft 原子复制至 active，generation，previous_active；验证所有引用及权限 |
+| brain-save-bindings | expected_generation,draft:{default,overrides} | WriteResult；全量替换当前账号草稿，其他账号不变 |
+| brain-activate | expected_generation；无任意 role 参数 | WriteResult；把当前账号完整 draft 原子复制至 active；验证所有引用及权限 |
 | brain-rollback | expected_generation,target_generation | 从保留的该账号激活历史重建 draft+active，产生新 generation；不是全局根倒退 |
 | brain-preview | role_id,revision_id,input,execution:"assemble_only" | preview_id,snapshot,decision:null,cost:{incurred:false} |
 | brain-preview | 同上，execution:"execute",cost_consent:true | preview_id,snapshot_id,decision,model,cost:{incurred:"unknown",provider_reported:null} |
@@ -116,9 +140,9 @@ accounts 数组项 `{account_id,active:{default,overrides},draft:{default,overri
 
 ## 5. 升级、全新安装与快照
 
-迁移仅核心执行一次，UI 不能猜旧版。旧部署判定：安装/升级入口显式 `upgrade_from_legacy:true` 且已有有效 config；全新 init 标记 fresh。单纯缺少 brain-bindings.json 不足以判升级；入口无法判定则 migration_required，人工选择，不静默种子。不得读取真实 DB 来推断本设计。
+I1 仅提供显式调用的纯存储/迁移函数，输入为可信 AccountContext、已解析的旧配置值、upgrade/fresh 判定与受限 StoreRoot；除该显式目标目录外无副作用，不读取全局 HOME/config、不连接模型/GUI、不注册启动钩子。I1 不在 serve、BotConfig::load 或现有 config strict reader 自动执行迁移，不修改严格字段规则；运行触发、暂停/升级事务和真实上下文适配全部归 I2，并须通过后续gate。迁移仅由 I2 接入后的核心显式执行一次，UI 不能猜旧版。旧部署判定：安装/升级入口显式 `upgrade_from_legacy:true` 且已有有效 config；全新 init 标记 fresh。单纯缺少 brain-bindings.json 不足以判升级；入口无法判定则 migration_required，人工选择，不静默种子。不得读取真实 DB 来推断本设计。
 
-迁移标识 `legacy-builtin-v1:<account_id>` 在根 migrations 内，内含 source_config_sha256、seed_content_sha256、completed_generation。已完成即 no-op，不覆盖后来编辑。旧 builtin service 迁出 legacy-service role；非 service 使用显式 legacy-test role。旧外部模式仍为 external，不改 timeout/action/queue/model；可创建标为 inactive 的 legacy fallback 修订供原 timeout_action=builtin 使用，只有旧配置确实启用 builtin fallback 时绑定该 fallback 引用，不隐式让外部执行角色。新安装未配置角色时 role_required；旧未完成迁移的运行不能悄悄切换空角色。
+迁移标识 `legacy-builtin-v1:<account_id>` 在根 migrations 内，含可信 owner_account_id，并内含 source_config_sha256、seed_content_sha256、completed_generation。已完成即 no-op，不覆盖后来编辑。旧 builtin service 迁出 legacy-service role；非 service 使用显式 legacy-test role。旧外部模式仍为 external，不改 timeout/action/queue/model；可创建标为 inactive 的 legacy fallback 修订供原 timeout_action=builtin 使用，仅在旧 brain.mode=external 且 timeout_action=builtin 时把该账号 legacy_fallback 固定为迁移生成的 legacy-service 修订；否则为null，迁移重跑不改。I2 在 external 超时分支选择：该轮已固定的 active角色引用（若有）优先，否则使用该轮固定的 legacy_fallback；都无则明确 role_required并走既有失败处理，不生成隐式角色。fallback引用在首次图片理解/排队前随轮次固定，不能超时才读最新根；后续激活角色不改变在途fallback。Skip/Handoff从不解析或调用该fallback，原 mode、模型、timeout_seconds、queue_minutes和timeout_action均不被角色存储改写；仍只在原本允许builtin fallback的超时分支调用，不隐式让外部执行角色。新安装未配置角色时 role_required；旧未完成迁移的运行不能悄悄切换空角色。
 
 迁移顺序：停接新配置写入 → 备份旧配置（不含密钥正文）→ 生成固定 legacy 角色/空知识引用与话术 → 原子提交根及迁移标记 → 校验读取/hash → 接入新 snapshot 编译器 → 不修改 config 原模式。迁移失败保留旧版可启动，升级事务不激活新二进制；不得把损坏角色根当未迁移再生成。旧格式 config reader 兼容；旧二进制忽略 sidecar，会回到旧硬编码，故组件回退需显式提示“角色配置不受支持”，不能声称相同行为。
 
@@ -182,8 +206,8 @@ execution_json `{phase,error_code,delivery:"unknown",echo_observed,handoff:{reas
 
 | 任务 | 独占文件/范围 |
 |---|---|
-| I1 | 新 `src/core/brain_profiles/{mod,store,schema,migrate,tests}.rs`；`src/core/config.rs` 仅兼容入口；`src/core/mod.rs` 仅模块注册。实现存储/CAS/迁移/只读快照解析函数，无 turns/history/Swift；模块内测试不新建共享 integration 文件 |
-| I2 | `src/brain/{mod,builtin,model_api,understanding}.rs`（不改 documents 解析算法）；新 `src/brain/snapshot.rs`；`src/core/turns.rs`、`external_brain.rs`、`brain_tools.rs`、`control.rs`、`backup.rs`；`src/core/open_api/{mod,contract,http,session,ledger,history,turn_tests,compat_tests}.rs` 及 snapshots 下新增 v2 文件（旧 v1 snapshots不重写）；`src/core/history/{store,query,serve,mcp_tools}.rs`；`src/core/serve.rs` 仅启动迁移/注册接入，不改调度算法。I1模块若需扩接口先 ask，不自行改其文件；access.rs 现有授权逻辑不改 |
+| I1 | 新 `src/core/brain_profiles/{mod,store,schema,migrate,tests}.rs`；`src/core/mod.rs` 仅模块注册；不修改 `src/core/config.rs`、serve或现有config strict reader。仅实现显式纯存储/CAS/迁移/只读快照解析函数，无 turns/history/Swift；模块内测试不新建共享 integration 文件 |
+| I2 | `src/brain/{mod,builtin,model_api,understanding}.rs`（不改 documents 解析算法）；新 `src/brain/snapshot.rs`；`src/core/turns.rs`、`external_brain.rs`、`brain_tools.rs`、`control.rs`、`backup.rs`；`src/core/open_api/{mod,contract,http,session,ledger,history,turn_tests,compat_tests}.rs` 及 snapshots 下新增 v2 文件（旧 v1 snapshots不重写）；`src/core/history/{store,query,serve,mcp_tools}.rs`；`src/core/config.rs` 若运行适配需要修改必须在I2 gate明确批准且保留strict reader；`src/core/serve.rs` 仅显式启动迁移/注册接入，不改调度算法。I1模块若需扩接口先 ask，不自行改其文件；access.rs 现有授权逻辑不改 |
 | I3 | 新 `native/bootstrap/BrainPage.swift`；`native/bootstrap/{ConfigForm,Shell,StatusPanel,McpPage,SessionsPage}.swift`；`native/bootstrap/main.swift` 仅大脑页注册与必要局部接线，不改启动/信号/supervisor；新增纯逻辑 fixture 测试 `native/tests/BrainContractTests.swift` 与合成 fixtures `native/tests/fixtures/brain/`（须核对 D2 最终测试目录）；若编译注册需要脚本，先协调，不默认授权。不修改 Rust、不自写角色存储/迁移 |
 
 D2 可设计页面与更新，但上述运行字段唯一事实源在本文件；模型/模式/超时仅 MCP 页面拥有编辑权。I6 在 I3 集成后串行修改 main.swift 注册更新页，不能与 I3 并行编辑。更新任务 I5 读取 v3 backup 契约但不与 I2 同时改 backup.rs。现有手/眼 native/bot、policy、worker 动作不归这三个任务。
@@ -218,3 +242,11 @@ D2 可设计页面与更新，但上述运行字段唯一事实源在本文件�
 - `git diff --check`：退出0；首次和审校后均未发现空白错误。此命令在新增文件暂存后再运行一次覆盖新增内容。
 - `orca orchestration check --from ...` 曾退出1（该 check 子命令不接受 --from）；按 CLI 错误指引改用 `--terminal ... --json` 后退出0并读到协调者审批。ask 退出0，批准仅限 proposed 设计交付。
 - Rust/Swift 运行时测试、fmt/clippy、真实模型及真机测试未运行：设计范围无生产源码变更；运行时基线仍归 Q0，不能将本次文档检查记为实现 RED/GREEN。
+
+### D1 补充审校（账号所有权与实现边界）
+
+补充起点 HEAD `6e626930101d5721b7b817b4ce78a74da69a16ee`，工作区干净；本补充仍仅设计。RFC8785不能用普通serde_json排序冒充完整实现；合成JSON只含安全整数及简单键，其Node排序摘要仅作该受限夹具确定性检查。I1若现有依赖不能满足RFC8785，必须先通过Orca ask提出具体crate/精确版本、Cargo.toml单依赖行及Cargo.lock必要传递变更/许可证/离线可用性，再由协调者批准最小Cargo文件扩权；未批准前不修改Cargo文件、不换成不兼容hash算法、不宣布RFC8785已实现。本轮不申请或增加任何依赖。
+
+新增合成 root-schema.json 定义根及嵌套闭合字段，account-isolation.json 给出跨账号读写/复制/引用/归档/预览与账号操作去重的拒绝向量；它们是拟实现契约，合成校验不是Rust实现验收。补充前Node断言RoleRevision.owner_account_id存在失败（退出1），补充后检查完整根字段、所有权引用、同UUID不同账号/操作隔离及hash一致性通过；这里RED/GREEN仅指设计夹具检查，不表示存储或权限实现已通过。
+
+补充检查实际结果：Node受限合成校验退出0，5份JSON可解析、2份根通过闭合schema、未知/缺字段拒绝、11个跨账号/不存在对象拒绝向量、3个账号+操作去重键互异、owner/hash及旧配置一致性通过；git diff --check退出0。root-schema.json只表达字段/基础类型及总数组上限，账号内配额、owner一致性、引用完整性和唯一性是§2强制语义校验，不能因JSON Schema通过而省略。本轮没有运行模型、GUI、业务DB或新增Cargo依赖。

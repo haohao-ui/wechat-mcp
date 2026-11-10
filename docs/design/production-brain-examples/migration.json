@@ -84,7 +84,8 @@
         "history_bytes": 16384,
         "overflow": "truncate_tail"
       },
-      "content_sha256": "e7220db44af774cef4a35e7e0989a1711d37a45fe797a2542a3c856eff57b754"
+      "owner_account_id": "fixture_account",
+      "content_sha256": "159ac33d7bdad0ebbe2f98df6f6af5a6df84803dc53d32b1198520150dc09774"
     },
     "root": {
       "schema_version": 1,
@@ -93,7 +94,8 @@
         {
           "role_id": "legacy_service_fixture",
           "draft_revision_id": "r1",
-          "archived": false
+          "archived": false,
+          "owner_account_id": "fixture_account"
         }
       ],
       "accounts": [
@@ -120,8 +122,9 @@
         {
           "id": "legacy-builtin-v1:fixture_account",
           "completed_generation": 1,
-          "seed_content_sha256": "e7220db44af774cef4a35e7e0989a1711d37a45fe797a2542a3c856eff57b754",
-          "source_config_sha256": "d7f961e02d965edf90ede92e7ffb12c4b20a7c1e4428110307afa91b46652121"
+          "seed_content_sha256": "159ac33d7bdad0ebbe2f98df6f6af5a6df84803dc53d32b1198520150dc09774",
+          "source_config_sha256": "d7f961e02d965edf90ede92e7ffb12c4b20a7c1e4428110307afa91b46652121",
+          "owner_account_id": "fixture_account"
         }
       ],
       "activation_history": [
@@ -138,7 +141,8 @@
           "at": 0
         }
       ],
-      "request_results": []
+      "request_results": [],
+      "knowledge": []
     }
   },
   "rerun_expected": {

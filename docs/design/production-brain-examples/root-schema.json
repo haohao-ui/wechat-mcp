@@ -1,0 +1,414 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "roles": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RoleEntry"
+      },
+      "maxItems": 2048
+    },
+    "knowledge": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/KnowledgeEntry"
+      },
+      "maxItems": 2048
+    },
+    "accounts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/AccountEntry"
+      },
+      "maxItems": 16
+    },
+    "migrations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/MigrationEntry"
+      },
+      "maxItems": 64
+    },
+    "activation_history": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ActivationEntry"
+      },
+      "maxItems": 1600
+    },
+    "request_results": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RequestEntry"
+      },
+      "maxItems": 16000
+    }
+  },
+  "required": [
+    "schema_version",
+    "generation",
+    "roles",
+    "knowledge",
+    "accounts",
+    "migrations",
+    "activation_history",
+    "request_results"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "RoleRef": {
+      "type": "object",
+      "properties": {
+        "role_id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]{1,80}$"
+        },
+        "revision_id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]{1,80}$"
+        }
+      },
+      "required": [
+        "role_id",
+        "revision_id"
+      ],
+      "additionalProperties": false
+    },
+    "Override": {
+      "type": "object",
+      "properties": {
+        "contact_id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]{1,80}$"
+        },
+        "chat_kind": {
+          "enum": [
+            "private",
+            "group"
+          ]
+        },
+        "role_id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]{1,80}$"
+        },
+        "revision_id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]{1,80}$"
+        }
+      },
+      "required": [
+        "contact_id",
+        "chat_kind",
+        "role_id",
+        "revision_id"
+      ],
+      "additionalProperties": false
+    },
+    "BindingSet": {
+      "type": "object",
+      "properties": {
+        "default": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RoleRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "overrides": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Override"
+          },
+          "maxItems": 200
+        }
+      },
+      "required": [
+        "default",
+        "overrides"
+      ],
+      "additionalProperties": false
+    },
+    "RoleEntry": {
+      "type": "object",
+      "properties": {
+        "owner_account_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "role_id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]{1,80}$"
+        },
+        "draft_revision_id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]{1,80}$"
+        },
+        "archived": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "owner_account_id",
+        "role_id",
+        "draft_revision_id",
+        "archived"
+      ],
+      "additionalProperties": false
+    },
+    "KnowledgeEntry": {
+      "type": "object",
+      "properties": {
+        "owner_account_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "knowledge_id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]{1,80}$"
+        },
+        "draft_revision_id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]{1,80}$"
+        }
+      },
+      "required": [
+        "owner_account_id",
+        "knowledge_id",
+        "draft_revision_id"
+      ],
+      "additionalProperties": false
+    },
+    "AccountEntry": {
+      "type": "object",
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "active": {
+          "$ref": "#/$defs/BindingSet"
+        },
+        "draft": {
+          "$ref": "#/$defs/BindingSet"
+        },
+        "legacy_fallback": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RoleRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "account_id",
+        "active",
+        "draft",
+        "legacy_fallback"
+      ],
+      "additionalProperties": false
+    },
+    "MigrationEntry": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "owner_account_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "source_config_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "seed_content_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "completed_generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "id",
+        "owner_account_id",
+        "source_config_sha256",
+        "seed_content_sha256",
+        "completed_generation"
+      ],
+      "additionalProperties": false
+    },
+    "ActivationEntry": {
+      "type": "object",
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "active": {
+          "$ref": "#/$defs/BindingSet"
+        },
+        "at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "account_id",
+        "generation",
+        "active",
+        "at"
+      ],
+      "additionalProperties": false
+    },
+    "WriteResult": {
+      "type": "object",
+      "properties": {
+        "generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "role_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9_-]{1,80}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "knowledge_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9_-]{1,80}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9_-]{1,80}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "content_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "archived": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "generation",
+        "role_id",
+        "knowledge_id",
+        "revision_id",
+        "content_sha256",
+        "archived"
+      ],
+      "additionalProperties": false
+    },
+    "RequestEntry": {
+      "type": "object",
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "operation": {
+          "enum": [
+            "brain-save-role",
+            "brain-save-knowledge",
+            "brain-copy-role",
+            "brain-archive-role",
+            "brain-save-bindings",
+            "brain-activate",
+            "brain-rollback"
+          ]
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$"
+        },
+        "request_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "result": {
+          "$ref": "#/$defs/WriteResult"
+        },
+        "at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "account_id",
+        "operation",
+        "request_id",
+        "request_sha256",
+        "result",
+        "at"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
