@@ -2,7 +2,7 @@
   "fixture_only": true,
   "description": "纯合成契约向量，不调用实际权限实现",
   "root": {
-    "schema_version": 1,
+    "schema_version": 2,
     "generation": 2,
     "roles": [
       {
@@ -35,7 +35,8 @@
           },
           "overrides": []
         },
-        "legacy_fallback": null
+        "legacy_fallback": null,
+        "execution_mode": "managed"
       },
       {
         "account_id": "fixture_other",
@@ -50,7 +51,8 @@
           "default": null,
           "overrides": []
         },
-        "legacy_fallback": null
+        "legacy_fallback": null,
+        "execution_mode": "legacy"
       }
     ],
     "migrations": [

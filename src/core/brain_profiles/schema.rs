@@ -203,6 +203,7 @@ pub struct AccountEntry {
     pub draft: BindingSet,
     #[serde(deserialize_with = "required_option")]
     pub legacy_fallback: Option<RoleRef>,
+    pub execution_mode: ExecutionMode,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -261,7 +262,7 @@ pub struct Root {
 impl Default for Root {
     fn default() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             generation: 0,
             roles: vec![],
             knowledge: vec![],
@@ -406,6 +407,214 @@ impl KnowledgeRevision {
     }
 }
 pub(crate) fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+    let v: Value = serde_json::from_slice(bytes)?;
+    require(
+        v.get("schema_version") == Some(&Value::from(1)),
+        "schema_unsupported",
+    )?;
+    Ok(serde_json::from_value(v)?)
+}
+
+pub(crate) fn decode_root<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+    let v: Value = serde_json::from_slice(bytes)?;
+    require(
+        v.get("schema_version") == Some(&Value::from(2)),
+        "schema_unsupported",
+    )?;
+    Ok(serde_json::from_value(v)?)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    Legacy,
+    Managed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AccountEntryV1 {
+    pub account_id: String,
+    pub active: BindingSet,
+    pub draft: BindingSet,
+    #[serde(deserialize_with = "required_option")]
+    pub legacy_fallback: Option<RoleRef>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RootV1 {
+    pub schema_version: u32,
+    pub generation: u64,
+    pub roles: Vec<RoleEntry>,
+    pub knowledge: Vec<KnowledgeEntry>,
+    pub accounts: Vec<AccountEntryV1>,
+    pub migrations: Vec<MigrationEntry>,
+    pub activation_history: Vec<ActivationEntry>,
+    pub request_results: Vec<RequestEntry>,
+}
+
+impl RootV1 {
+    pub(crate) fn validate(&self) -> Result<()> {
+        require(self.schema_version == 1, "schema_unsupported")?;
+        require(self.generation <= SAFE_INT, "invalid_arguments")?;
+        require(
+            self.accounts.len() <= 16
+                && self.roles.len() <= 2048
+                && self.knowledge.len() <= 2048
+                && self.migrations.len() <= 64
+                && self.activation_history.len() <= 1600
+                && self.request_results.len() <= 16000,
+            "storage_capacity_exceeded",
+        )?;
+        let mut accounts = std::collections::HashSet::new();
+        for a in &self.accounts {
+            require(
+                account(&a.account_id) && accounts.insert(&a.account_id),
+                "invalid_arguments",
+            )?;
+            a.active.validate()?;
+            a.draft.validate()?;
+            if let Some(r) = &a.legacy_fallback {
+                require(id(&r.role_id) && id(&r.revision_id), "invalid_arguments")?;
+            }
+        }
+        let mut ids = std::collections::HashSet::new();
+        for e in &self.roles {
+            require(
+                accounts.contains(&e.owner_account_id)
+                    && id(&e.role_id)
+                    && id(&e.draft_revision_id)
+                    && ids.insert(&e.role_id),
+                "integrity_mismatch",
+            )?;
+        }
+        ids.clear();
+        for e in &self.knowledge {
+            require(
+                accounts.contains(&e.owner_account_id)
+                    && id(&e.knowledge_id)
+                    && id(&e.draft_revision_id)
+                    && ids.insert(&e.knowledge_id),
+                "integrity_mismatch",
+            )?;
+        }
+        for a in &self.accounts {
+            require(
+                self.roles
+                    .iter()
+                    .filter(|r| r.owner_account_id == a.account_id)
+                    .count()
+                    <= 128
+                    && self
+                        .knowledge
+                        .iter()
+                        .filter(|r| r.owner_account_id == a.account_id)
+                        .count()
+                        <= 128
+                    && self
+                        .migrations
+                        .iter()
+                        .filter(|r| r.owner_account_id == a.account_id)
+                        .count()
+                        <= 4
+                    && self
+                        .activation_history
+                        .iter()
+                        .filter(|r| r.account_id == a.account_id)
+                        .count()
+                        <= 100
+                    && self
+                        .request_results
+                        .iter()
+                        .filter(|r| r.account_id == a.account_id)
+                        .count()
+                        <= 1000,
+                "storage_capacity_exceeded",
+            )?;
+            for b in [&a.active, &a.draft] {
+                self.validate_refs(&a.account_id, b)?;
+            }
+            if let Some(r) = &a.legacy_fallback {
+                self.validate_ref(&a.account_id, r)?;
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        for m in &self.migrations {
+            require(
+                accounts.contains(&m.owner_account_id)
+                    && !m.id.is_empty()
+                    && m.id.len() <= 274
+                    && hex(&m.source_config_sha256)
+                    && hex(&m.seed_content_sha256)
+                    && m.completed_generation <= self.generation
+                    && seen.insert((&m.owner_account_id, &m.id)),
+                "integrity_mismatch",
+            )?;
+        }
+        let mut seen = std::collections::HashSet::new();
+        for h in &self.activation_history {
+            require(
+                accounts.contains(&h.account_id)
+                    && h.generation <= self.generation
+                    && h.at <= SAFE_INT
+                    && seen.insert((&h.account_id, h.generation)),
+                "integrity_mismatch",
+            )?;
+            h.active.validate()?;
+            self.validate_refs(&h.account_id, &h.active)?;
+        }
+        let mut seen = std::collections::HashSet::new();
+        for r in &self.request_results {
+            require(
+                accounts.contains(&r.account_id)
+                    && [
+                        "brain-save-role",
+                        "brain-save-knowledge",
+                        "brain-copy-role",
+                        "brain-archive-role",
+                        "brain-save-bindings",
+                        "brain-activate",
+                        "brain-rollback",
+                    ]
+                    .contains(&r.operation.as_str())
+                    && uuid::Uuid::parse_str(&r.request_id)
+                        .is_ok_and(|u| u.to_string() == r.request_id)
+                    && hex(&r.request_sha256)
+                    && r.at <= SAFE_INT
+                    && r.result.generation <= self.generation
+                    && seen.insert((&r.account_id, &r.operation, &r.request_id)),
+                "integrity_mismatch",
+            )?;
+        }
+        Ok(())
+    }
+    fn validate_ref(&self, account: &str, r: &RoleRef) -> Result<()> {
+        require(
+            self.roles
+                .iter()
+                .any(|e| e.owner_account_id == account && e.role_id == r.role_id),
+            "integrity_mismatch",
+        )
+    }
+    fn validate_refs(&self, account: &str, b: &BindingSet) -> Result<()> {
+        if let Some(r) = &b.default {
+            self.validate_ref(account, r)?;
+        }
+        for o in &b.overrides {
+            self.validate_ref(
+                account,
+                &RoleRef {
+                    role_id: o.role_id.clone(),
+                    revision_id: o.revision_id.clone(),
+                },
+            )?;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn decode_v1_root(bytes: &[u8]) -> Result<RootV1> {
     let v: Value = serde_json::from_slice(bytes)?;
     require(
         v.get("schema_version") == Some(&Value::from(1)),
