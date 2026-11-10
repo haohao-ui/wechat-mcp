@@ -600,7 +600,20 @@ final class CaptureWorker {
             let frame=try capture(recipient,accepted:accepted,manage:manage)
             guard frame["snapshot_id"] as? String==snapshot,let item=voice(frame) else { throw Failure.invalid("voice_snapshot_changed") }
             if let text=item["transcript"] as? String, !text.isEmpty { return ["transcript":text] }
-            guard let bx=item["x"] as? Int,let by=item["y"] as? Int,let bw=item["width"] as? Int,let bh=item["height"] as? Int else { throw Failure.invalid("voice_geometry_missing") }
+            // Several voices in a row: converting the first converts the following ones by itself
+            // (user, 2026-11-10). After an earlier voice of this batch, wait read-only before clicking.
+            let awaitSeconds=min(20.0,max(0.0,params["await_seconds"] as? Double ?? Double(params["await_seconds"] as? Int ?? 0)))
+            var waited=0.0
+            while waited < awaitSeconds {
+                pauseUI(0.5); waited += 0.5
+                if let text=voice(try capture(recipient,accepted:accepted,manage:manage))?["transcript"] as? String, !text.isEmpty {
+                    return ["transcript":text,"converted_by":"chain"]
+                }
+            }
+            // Re-read the position: an earlier transcript may have moved this voice.
+            guard let current=voice(try capture(recipient,accepted:accepted,manage:manage)) else { throw Failure.invalid("voice_snapshot_changed") }
+            if let text=current["transcript"] as? String, !text.isEmpty { return ["transcript":text,"converted_by":"chain"] }
+            guard let bx=current["x"] as? Int,let by=current["y"] as? Int,let bw=current["width"] as? Int,let bh=current["height"] as? Int else { throw Failure.invalid("voice_geometry_missing") }
             let window=try readyWindow(manage:manage).window
             try screenGate(window)
             let content=try currentLayout().region("chat_content")
