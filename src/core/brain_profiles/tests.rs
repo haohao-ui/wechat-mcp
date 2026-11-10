@@ -1,5 +1,8 @@
 use super::*;
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 struct Fixture {
     path: PathBuf,
     store: Store,
@@ -890,7 +893,41 @@ fn cas_state_root_replacement_is_rejected() {
 #[test]
 fn cas_error_releases_locks_and_file_descriptors() {
     let mut f = Fixture::new();
-    let descriptors = || fs::read_dir("/dev/fd").unwrap().count();
+    let target_dir = fs::canonicalize(&f.path).unwrap();
+    let descriptors = || {
+        let mut count = 0;
+        if let Ok(entries) = fs::read_dir("/dev/fd") {
+            for entry in entries.flatten() {
+                if let Ok(fd) = entry.file_name().to_string_lossy().parse::<i32>() {
+                    let mut buf = [0u8; 1024];
+                    let res = unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) };
+                    if res != -1 {
+                        if let Ok(s) = std::ffi::CStr::from_bytes_until_nul(&buf) {
+                            if let Ok(path_str) = s.to_str() {
+                                if Path::new(path_str).starts_with(&target_dir) {
+                                    count += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    if let Ok(target) = fs::read_link(entry.path()) {
+                        if target.starts_with(&target_dir) || target.starts_with(&f.path) {
+                            count += 1;
+                            continue;
+                        }
+                    }
+                    if let Ok(target) = fs::read_link(format!("/proc/self/fd/{fd}")) {
+                        if target.starts_with(&target_dir) || target.starts_with(&f.path) {
+                            count += 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        count
+    };
     let before = descriptors();
     let request = req(0, Mutation::SaveRole(seed(&f)));
     for _ in 0..30 {
