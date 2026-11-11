@@ -25,6 +25,7 @@
   6. **全局锁消除范围限定**：严格限定于 `src/core/control.rs`（9 处）与 `src/core/backup.rs`（13 处），不泛化其他模块。
   7. **updater 测试环境绑定**：显式执行 `cargo build --locked --bin wechat-updater` 构建当前 worktree 的最新产物，并通过 `env CARGO_BIN_EXE_wechat-updater=...` 显式指向当前构建，不修改 updater 源码。
   8. **默认并发验证**：连续 3 轮默认并发全量测试（989 项测试）全部通过，退出码均为 0。
+  9. **Locale 生产语义保留与全局环境隔离**：定位并消除 `test_ensure_locale_sets_vars` 在 `LANG=C.UTF-8` 下的断言失败（`left C.UTF-8 right en_US.UTF-8`）；抽象纯函数 `required_locale_defaults`，严格保留仅在 `LANG` 缺失/空值时回退到 `en_US.UTF-8` 的生产语义，在已有 `C.UTF-8` 等有效配置时保持不覆盖；单测通过纯函数覆盖缺失、空值与已有值全边界，彻底消除测试中残余的全局环境写入与竞态污染。
 
 ---
 
@@ -83,6 +84,15 @@
 - **`src/core/backup.rs`**：消除了 13 处 `crate::core::env_lock()`，测试改用 `run_backup_isolated` 与 `run_restore_isolated` 显式注入；
 - **其他模块范围限定**：本任务未改动其他模块，例如 `src/core/scheduler.rs`（`TempHome` 内部仍持有一处环境锁）与 `src/gateway.rs`（2 处单测内部持有环境锁）仍维持其独立局部环境依赖，不得泛化宣称全仓或所有模块均无环境变量依赖。
 
+### 2.4 Locale 生产语义与纯函数决策
+
+- **原生产语义**：基线 `1e120b5:src/core/serve.rs` 中 `ensure_locale()` 的逻辑为：仅当 `std::env::var("LANG").is_err()`（即系统未配置 `LANG`）时，才回退设置 `LANG="en_US.UTF-8"` 与 `LC_ALL="en_US.UTF-8"`；当系统环境已配置有效 `LANG`（包含空串、纯空白、`C.UTF-8`、`zh_CN.UTF-8`）时，`var("LANG")` 均为 `Ok`，生产行为是严格保持原值，绝不强制覆盖。
+- **重构方案**：
+  - 提取纯函数内部 helper `required_locale_defaults(lang: Option<&str>) -> Option<(&'static str, &'static str)>`；
+  - 严格保持 `is_err()` 原语义：仅缺失（`None`）返回 `Some(("en_US.UTF-8", "en_US.UTF-8"))`，所有 `Some`（包含空串与空白）均返回 `None`；
+  - 公开入口 `ensure_locale()` 保留完全兼容签名，仅在返回 `Some` 时设置；
+  - 单测完全移除测试内真实 `ensure_locale()` 调用与全局环境变量读取断言，直接针对纯函数做无副作用测试，根除在并发测试中修改全局环境变量的残余竞态副作用。
+
 ---
 
 ## 3. RED / GREEN 证据与修复对比
@@ -117,6 +127,30 @@
     7. `test_serve_paths_from_values_semantics_and_comparison_with_baseline` **PASS**；
     8. `test_control_paths_from_values_semantics_and_comparison_with_baseline` **PASS**。
 
+### 3.4 `test_ensure_locale_sets_vars` 生产语义与全局环境隔离
+
+- **RED 阶段**：
+  - 复现命令：`env LANG="C.UTF-8" cargo test --bin wechat-mcp test_ensure_locale_sets_vars`；
+  - 退出码：`101`（断言 panic）；
+  - 证据：
+    ```
+    thread 'core::serve::tests::test_ensure_locale_sets_vars' panicked at src/core/serve.rs:757:9:
+    assertion `left == right` failed
+      left: "C.UTF-8"
+     right: "en_US.UTF-8"
+    ```
+  - 根因：系统环境已配置 `LANG=C.UTF-8` 时，生产 `ensure_locale()` 遵循 `is_err()` 逻辑保留现有值并未调用 `set_var`，但原单测硬编码断言必须等于 `"en_US.UTF-8"`；同时测试直接调用全局 `ensure_locale()` 存在向进程环境变量写入 `set_var` 的残余竞态风险。
+- **GREEN 阶段**：
+  - 将决策提取为纯函数 `required_locale_defaults`（仅 `None` 回退，所有 `Some` 保持不覆盖）；
+  - 彻底删除测试内 `ensure_locale()` 真实调用与全局读取断言，纯函数全边界覆盖：
+    - `None` -> `Some(("en_US.UTF-8", "en_US.UTF-8"))` **PASS**
+    - `Some("")` -> `None`（空串严格保持不覆盖）**PASS**
+    - `Some("   ")` -> `None`（空白串严格保持不覆盖）**PASS**
+    - `Some("C.UTF-8")` -> `None`（证明保持现有 C.UTF-8 不被覆盖）**PASS**
+    - `Some("zh_CN.UTF-8")` -> `None` **PASS**
+    - `Some("en_US.UTF-8")` -> `None` **PASS**
+  - 在 `env LANG="C.UTF-8"` 与 `env -u LANG` 下复测，退出码均为 `0` **PASS**。
+
 ---
 
 ## 4. 实际准备命令、环境与测试验证结果
@@ -143,7 +177,7 @@
 | :--- | :--- | :---: | :--- | :--- |
 | **第 1 轮** | `env CARGO_BIN_EXE_wechat-updater="$(pwd)/target/debug/wechat-updater" cargo test --lib` | `0` | **986 passed; 0 failed; 0 ignored** | 24.65s |
 | **第 2 轮** | `env CARGO_BIN_EXE_wechat-updater="$(pwd)/target/debug/wechat-updater" cargo test --bin wechat-mcp` | `0` | **989 passed; 0 failed; 0 ignored** | 24.76s |
-| **第 3 轮** | `env CARGO_BIN_EXE_wechat-updater="$(pwd)/target/debug/wechat-updater" cargo test --bin wechat-mcp` | `0` | **989 passed; 0 failed; 0 ignored** | 24.52s |
+| **第 3 轮** | `env CARGO_BIN_EXE_wechat-updater="$(pwd)/target/debug/wechat-updater" cargo test --bin wechat-mcp` | `0` | **989 passed; 0 failed; 0 ignored** | 26.98s |
 
 ---
 
@@ -156,7 +190,8 @@
    - 增加纯函数解析器 `ServePaths::from_values` 并保留 `from_env()` 公开签名；
    - 引入 `OwnedSocketDir`（记录 `dev` 与 `ino`，Drop 校验防误删外部目录）；
    - `isolated` 与 `try_isolated` 标注 `#[cfg(test)]`，生产环境完全零清理字段与行为；
-   - 新增 7 项清理边界、身份校验与解析语义单元测试；
+   - 抽象纯函数 `required_locale_defaults`，严格保留 locale 生产决策语义并杜绝测试全局环境写入；
+   - 新增 8 项清理边界、身份校验、解析语义与 locale 全边界单元测试；
 4. `src/core/control.rs`：
    - 引入 `ControlPaths` 结构体及 `from_values` 纯函数解析器；
    - 彻底移除全部 9 处 `crate::core::env_lock()` 与环境变量写入；

@@ -39,11 +39,21 @@ fn install_signals() {
     }
 }
 
+/// 纯函数决策：对齐原 std::env::var("LANG").is_err() 语义，仅缺失 (None) 补默认，所有 Some 保持不覆盖。
+pub(crate) fn required_locale_defaults(lang: Option<&str>) -> Option<(&'static str, &'static str)> {
+    if lang.is_none() {
+        Some(("en_US.UTF-8", "en_US.UTF-8"))
+    } else {
+        None
+    }
+}
+
 pub fn ensure_locale() {
-    if std::env::var("LANG").is_err() {
+    let current_lang = std::env::var("LANG").ok();
+    if let Some((lang, lc_all)) = required_locale_defaults(current_lang.as_deref()) {
         unsafe {
-            std::env::set_var("LANG", "en_US.UTF-8");
-            std::env::set_var("LC_ALL", "en_US.UTF-8");
+            std::env::set_var("LANG", lang);
+            std::env::set_var("LC_ALL", lc_all);
         }
     }
 }
@@ -753,9 +763,16 @@ mod tests {
 
     #[test]
     fn test_ensure_locale_sets_vars() {
-        ensure_locale();
-        assert_eq!(std::env::var("LANG").unwrap(), "en_US.UTF-8");
-        assert_eq!(std::env::var("LC_ALL").unwrap(), "en_US.UTF-8");
+        // 纯函数隔离验证：仅缺失 (None) 触发回退，所有 Some（含空串、空白与有效值）严格保留原语义不覆盖
+        assert_eq!(
+            required_locale_defaults(None),
+            Some(("en_US.UTF-8", "en_US.UTF-8"))
+        );
+        assert_eq!(required_locale_defaults(Some("")), None);
+        assert_eq!(required_locale_defaults(Some("   ")), None);
+        assert_eq!(required_locale_defaults(Some("C.UTF-8")), None);
+        assert_eq!(required_locale_defaults(Some("zh_CN.UTF-8")), None);
+        assert_eq!(required_locale_defaults(Some("en_US.UTF-8")), None);
     }
 
     #[test]
