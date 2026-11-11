@@ -86,12 +86,12 @@
 
 ### 2.4 Locale 生产语义与纯函数决策
 
-- **原生产语义**：基线 `1e120b5:src/core/serve.rs` 中 `ensure_locale()` 的逻辑为：仅当 `std::env::var("LANG").is_err()`（即系统未配置 `LANG`）时，才回退设置 `LANG="en_US.UTF-8"` 与 `LC_ALL="en_US.UTF-8"`；当系统环境已配置有效 `LANG`（如 `C.UTF-8`、`zh_CN.UTF-8`）时，生产行为是保持该值，绝不强制覆盖。
+- **原生产语义**：基线 `1e120b5:src/core/serve.rs` 中 `ensure_locale()` 的逻辑为：仅当 `std::env::var("LANG").is_err()`（即系统未配置 `LANG`）时，才回退设置 `LANG="en_US.UTF-8"` 与 `LC_ALL="en_US.UTF-8"`；当系统环境已配置有效 `LANG`（包含空串、纯空白、`C.UTF-8`、`zh_CN.UTF-8`）时，`var("LANG")` 均为 `Ok`，生产行为是严格保持原值，绝不强制覆盖。
 - **重构方案**：
   - 提取纯函数内部 helper `required_locale_defaults(lang: Option<&str>) -> Option<(&'static str, &'static str)>`；
-  - `None` 或空白字符串返回 `Some(("en_US.UTF-8", "en_US.UTF-8"))`，有效字符串返回 `None`；
+  - 严格保持 `is_err()` 原语义：仅缺失（`None`）返回 `Some(("en_US.UTF-8", "en_US.UTF-8"))`，所有 `Some`（包含空串与空白）均返回 `None`；
   - 公开入口 `ensure_locale()` 保留完全兼容签名，仅在返回 `Some` 时设置；
-  - 单测直接针对纯函数做无副作用测试，消除了单测在并发测试中修改全局环境变量的残余副作用。
+  - 单测完全移除测试内真实 `ensure_locale()` 调用与全局环境变量读取断言，直接针对纯函数做无副作用测试，根除在并发测试中修改全局环境变量的残余竞态副作用。
 
 ---
 
@@ -139,12 +139,13 @@
       left: "C.UTF-8"
      right: "en_US.UTF-8"
     ```
-  - 根因：系统环境已配置 `LANG=C.UTF-8` 时，生产 `ensure_locale()` 保留现有值并未调用 `set_var`，但原单测硬编码断言必须等于 `"en_US.UTF-8"`；同时测试直接调用全局 `ensure_locale()` 存在修改进程环境变量的残余竞态风险。
+  - 根因：系统环境已配置 `LANG=C.UTF-8` 时，生产 `ensure_locale()` 遵循 `is_err()` 逻辑保留现有值并未调用 `set_var`，但原单测硬编码断言必须等于 `"en_US.UTF-8"`；同时测试直接调用全局 `ensure_locale()` 存在向进程环境变量写入 `set_var` 的残余竞态风险。
 - **GREEN 阶段**：
-  - 将决策提取为纯函数 `required_locale_defaults`；
-  - 单测重构为纯函数边界断言：
+  - 将决策提取为纯函数 `required_locale_defaults`（仅 `None` 回退，所有 `Some` 保持不覆盖）；
+  - 彻底删除测试内 `ensure_locale()` 真实调用与全局读取断言，纯函数全边界覆盖：
     - `None` -> `Some(("en_US.UTF-8", "en_US.UTF-8"))` **PASS**
-    - `Some("")` / `Some("   ")` -> `Some(("en_US.UTF-8", "en_US.UTF-8"))` **PASS**
+    - `Some("")` -> `None`（空串严格保持不覆盖）**PASS**
+    - `Some("   ")` -> `None`（空白串严格保持不覆盖）**PASS**
     - `Some("C.UTF-8")` -> `None`（证明保持现有 C.UTF-8 不被覆盖）**PASS**
     - `Some("zh_CN.UTF-8")` -> `None` **PASS**
     - `Some("en_US.UTF-8")` -> `None` **PASS**
@@ -176,7 +177,7 @@
 | :--- | :--- | :---: | :--- | :--- |
 | **第 1 轮** | `env CARGO_BIN_EXE_wechat-updater="$(pwd)/target/debug/wechat-updater" cargo test --lib` | `0` | **986 passed; 0 failed; 0 ignored** | 24.65s |
 | **第 2 轮** | `env CARGO_BIN_EXE_wechat-updater="$(pwd)/target/debug/wechat-updater" cargo test --bin wechat-mcp` | `0` | **989 passed; 0 failed; 0 ignored** | 24.76s |
-| **第 3 轮** | `env CARGO_BIN_EXE_wechat-updater="$(pwd)/target/debug/wechat-updater" cargo test --bin wechat-mcp` | `0` | **989 passed; 0 failed; 0 ignored** | 24.52s |
+| **第 3 轮** | `env CARGO_BIN_EXE_wechat-updater="$(pwd)/target/debug/wechat-updater" cargo test --bin wechat-mcp` | `0` | **989 passed; 0 failed; 0 ignored** | 26.98s |
 
 ---
 
