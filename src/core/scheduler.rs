@@ -2331,6 +2331,7 @@ mod tests {
             allowlist,
             ignorelist: None,
             state_dir,
+            install_root: None,
             poll_seconds: 2,
             cooldown_seconds: 15,
             max_replies_per_hour: 20,

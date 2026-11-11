@@ -309,6 +309,19 @@ pub(crate) struct StartupGuardPaths {
 }
 
 impl StartupGuardPaths {
+    pub(crate) fn from_config(config: &BotConfig) -> Self {
+        let (releases_dir, current_link) = match &config.install_root {
+            Some(root) => (Some(root.join("releases")), Some(root.join("current"))),
+            None => (None, None),
+        };
+        Self {
+            state_dir: config.state_dir.clone(),
+            releases_dir,
+            current_link,
+        }
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn from_state_dir(state_dir: &Path) -> Self {
         Self {
             state_dir: state_dir.to_path_buf(),
@@ -431,7 +444,7 @@ async fn run_serve_core_internal(
         .with_context(|| format!("state lock error in {}", config.state_dir.display()))?;
 
     // 3. 锁内核验启动双检查 Guard（在任何微信探测、Worker 或业务 DB 副作用之前）
-    let gp = guard_paths.unwrap_or_else(|| StartupGuardPaths::from_state_dir(&config.state_dir));
+    let gp = guard_paths.unwrap_or_else(|| StartupGuardPaths::from_config(&config));
     let _core_lock = verify_serve_core_startup_guard_in_lock(&gp, core_lock)?;
 
     let detector: AccountDetector = custom_detector.unwrap_or_else(|| {
@@ -1452,6 +1465,87 @@ mod tests {
         assert!(
             res.is_ok(),
             "committed release with verified install root must succeed: {:?}",
+            res.err()
+        );
+        assert_eq!(res.unwrap(), 0);
+
+        let lock_check = acquire_core_lock(&state_dir);
+        assert!(
+            lock_check.is_ok(),
+            "core.lock must be released after normal shutdown"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_serve_core_with_configured_install_root_in_config_allows_startup() {
+        let dir = TempDir::new();
+        let install_root = dir.path().join("install");
+        let releases_dir = install_root.join("releases");
+        let release_1 = releases_dir.join("1.0.1");
+        fs::create_dir_all(&release_1).unwrap();
+        let current_link = install_root.join("current");
+        std::os::unix::fs::symlink(&release_1, &current_link).unwrap();
+
+        let state_dir = dir.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let port = get_free_port();
+        let cfg = json!({
+            "schema_version": 1,
+            "host": "local",
+            "account_id": "test-account",
+            "allowlist": [{"recipient": "test_user", "kind": "private"}],
+            "state_dir": state_dir.to_string_lossy().to_string(),
+            "install_root": install_root.to_string_lossy().to_string(),
+            "poll_seconds": 1,
+            "cooldown_seconds": 15,
+            "max_replies_per_hour": 20,
+            "history_http": {
+                "bind": "127.0.0.1",
+                "port": port,
+            }
+        });
+        let cfg_path = dir.path().join("config.json");
+        fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+
+        let serve_paths = ServePaths::isolated(dir.path());
+
+        let tx_id = "00000000-0000-4000-8000-000000000004";
+        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let mut journal =
+            crate::updater::journal::UpdateJournal::new(tx_id, "1.0.0", "1.0.1", 2, 1000);
+        journal.stage = crate::updater::journal::TransactionStage::Committed;
+        journal.manifest_digest = Some(digest.to_string());
+        journal.persist_atomic(&state_dir).unwrap();
+
+        let record = crate::updater::journal::CurrentReleaseCommitRecord {
+            record_schema: 1,
+            tx_id: tx_id.to_string(),
+            release_id: "1.0.1".to_string(),
+            sequence: 2,
+            channel: "stable".to_string(),
+            manifest_digest: digest.to_string(),
+            installed_at: 1000,
+        };
+        crate::updater::journal::atomic_commit_release_record(&state_dir, &record).unwrap();
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let _ = tx.send(true);
+        });
+
+        // 调用生产 run_serve_core_with_paths（不传 guard_paths，自动从 config.install_root 派生）
+        let res = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_serve_core_with_paths(&cfg_path, Some(rx), AccountSource::Config, &serve_paths),
+        )
+        .await
+        .expect("test timed out");
+
+        assert!(
+            res.is_ok(),
+            "committed release with configured install_root in config must succeed: {:?}",
             res.err()
         );
         assert_eq!(res.unwrap(), 0);
