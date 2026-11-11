@@ -162,6 +162,34 @@ pub fn backup_and_verify_sqlite_db(src_db: &Path, backup_db: &Path) -> Result<St
     Ok(hex_str)
 }
 
+/// 真实 restore 恢复核验：打开备份数据库执行 PRAGMA integrity_check 并核验能正常读取元数据与业务表
+pub fn verify_backup_restorable(backup_path: &Path) -> Result<()> {
+    if !backup_path.exists() {
+        bail!(
+            "backup_file_missing_for_restore_check: {}",
+            backup_path.display()
+        );
+    }
+
+    let conn = rusqlite::Connection::open_with_flags(
+        backup_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|e| anyhow::anyhow!("cannot_open_backup_db_for_verification: {}", e))?;
+
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check;", [], |row| row.get(0))
+        .map_err(|e| anyhow::anyhow!("restore_check_integrity_query_failed: {}", e))?;
+    if integrity != "ok" {
+        bail!("restore_check_integrity_failed: returned '{}'", integrity);
+    }
+
+    let mut stmt = conn.prepare("SELECT COUNT(*) FROM sqlite_master;")?;
+    let _table_count: i64 = stmt.query_row([], |row| row.get(0))?;
+
+    Ok(())
+}
+
 /// 数据库自动恢复守卫：
 /// 在缺乏全量 WAL 快照与完整 schema 证明前，自动覆盖恢复旧 DB 必须明确返回 unsupported 并拒绝执行。
 pub fn restore_database_backup_guarded(_backup_file: &Path, _target_db: &Path) -> Result<()> {

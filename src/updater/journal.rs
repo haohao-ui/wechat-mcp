@@ -33,6 +33,12 @@ pub struct UpdateJournal {
     pub backup_path: Option<String>,
     pub error: Option<String>,
     pub maintenance_marker_confirmed: bool,
+    #[serde(default)]
+    pub drain_proof: Option<String>,
+    #[serde(default)]
+    pub backup_proof: Option<String>,
+    #[serde(default)]
+    pub candidate_proof: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +59,27 @@ pub struct UpdateLockGuard {
     pub lock_path: PathBuf,
 }
 
+/// 在指定父目录 FD 下通过 openat(dir_fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW) 验证子目录真实存在且不是软链接
+pub fn verify_subdir_secure_at(parent_fd: std::os::unix::io::RawFd, name: &str) -> Result<()> {
+    use std::ffi::CString;
+    let c_name = CString::new(name)?;
+    let child_fd = unsafe {
+        libc::openat(
+            parent_fd,
+            c_name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if child_fd < 0 {
+        let err = std::io::Error::last_os_error();
+        bail!("target_subdir_not_found_or_symlink: '{}' ({})", name, err);
+    }
+    unsafe {
+        libc::close(child_fd);
+    }
+    Ok(())
+}
+
 impl UpdateJournal {
     pub fn new(
         transaction_id: impl Into<String>,
@@ -71,6 +98,9 @@ impl UpdateJournal {
             backup_path: None,
             error: None,
             maintenance_marker_confirmed: false,
+            drain_proof: None,
+            backup_proof: None,
+            candidate_proof: None,
         }
     }
 
@@ -136,34 +166,71 @@ impl UpdateJournal {
                 // 检查实际 current 指向（必须受限在 releases_dir 内，且精确匹配）
                 match fs::read_link(current_link) {
                     Ok(target) => {
-                        let target_str = target.to_string_lossy().to_string();
-                        let target_leaf = target
-                            .file_name()
-                            .map(|s| s.to_string_lossy().to_string())
-                            .unwrap_or_default();
+                        let expected_target = releases_dir.join(&self.target_release_id);
+                        let expected_source = releases_dir.join(&self.source_release_id);
 
-                        // 验证目标必须在 releases_dir 真实存在且为目录
-                        let target_dir = releases_dir.join(&target_leaf);
-                        if !target_dir.is_dir() {
-                            return RecoveryAction::ManualInterventionRequired(format!(
-                                "current_target_not_a_directory: '{}'",
-                                target_dir.display()
-                            ));
+                        let is_matching_target = target == expected_target
+                            || target == Path::new("releases").join(&self.target_release_id)
+                            || target == Path::new(&self.target_release_id);
+                        let is_matching_source = target == expected_source
+                            || target == Path::new("releases").join(&self.source_release_id)
+                            || target == Path::new(&self.source_release_id);
+
+                        use std::ffi::CString;
+                        let c_releases =
+                            match CString::new(releases_dir.to_str().unwrap_or_default()) {
+                                Ok(c) => c,
+                                Err(_) => {
+                                    return RecoveryAction::ManualInterventionRequired(
+                                        "invalid_releases_path".into(),
+                                    );
+                                }
+                            };
+                        let r_fd = unsafe {
+                            libc::open(
+                                c_releases.as_ptr(),
+                                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                            )
+                        };
+                        if r_fd < 0 {
+                            return RecoveryAction::ManualInterventionRequired(
+                                "unreadable_releases_dir_fd".into(),
+                            );
                         }
 
-                        if target_leaf == self.target_release_id
-                            || target_str.ends_with(&format!("/{}", self.target_release_id))
-                        {
-                            RecoveryAction::TestCandidate
-                        } else if target_leaf == self.source_release_id
-                            || target_str.ends_with(&format!("/{}", self.source_release_id))
-                        {
-                            RecoveryAction::ResumeOldRelease
+                        if is_matching_target {
+                            let verified_target =
+                                verify_subdir_secure_at(r_fd, &self.target_release_id);
+                            unsafe {
+                                libc::close(r_fd);
+                            }
+                            if verified_target.is_ok() {
+                                RecoveryAction::TestCandidate
+                            } else {
+                                RecoveryAction::ManualInterventionRequired(
+                                    "target_subdir_in_releases_dir_invalid".into(),
+                                )
+                            }
+                        } else if is_matching_source {
+                            let verified_source =
+                                verify_subdir_secure_at(r_fd, &self.source_release_id);
+                            unsafe {
+                                libc::close(r_fd);
+                            }
+                            if verified_source.is_ok() {
+                                RecoveryAction::ResumeOldRelease
+                            } else {
+                                RecoveryAction::ManualInterventionRequired(
+                                    "source_subdir_in_releases_dir_invalid".into(),
+                                )
+                            }
                         } else {
-                            // 未知 current 目标：严格 fail closed，绝不静默当作旧版
+                            unsafe {
+                                libc::close(r_fd);
+                            }
                             RecoveryAction::ManualInterventionRequired(format!(
-                                "unknown_current_target: current symlink points to '{}', which matches neither target '{}' nor source '{}'",
-                                target_str, self.target_release_id, self.source_release_id
+                                "foreign_or_unknown_current_target: current symlink points to '{}', which matches neither target nor source in releases_dir",
+                                target.display()
                             ))
                         }
                     }
@@ -181,7 +248,72 @@ impl UpdateJournal {
                 RecoveryAction::TestCandidate
             }
             TransactionStage::RollbackStarted => RecoveryAction::RollbackToPrevious,
-            TransactionStage::Committed => RecoveryAction::CommitSuccess,
+            TransactionStage::Committed => {
+                // 全要素严格核验：proof、受限 target 目录全要素匹配；若缺失证明严格保持人工介入
+                if self.drain_proof.is_none() || self.candidate_proof.is_none() {
+                    return RecoveryAction::ManualInterventionRequired(
+                        "committed_journal_missing_drain_or_candidate_proof".into(),
+                    );
+                }
+
+                match fs::read_link(current_link) {
+                    Ok(target) => {
+                        let expected_target = releases_dir.join(&self.target_release_id);
+                        let is_matching_target = target == expected_target
+                            || target == Path::new("releases").join(&self.target_release_id)
+                            || target == Path::new(&self.target_release_id);
+                        if !is_matching_target {
+                            return RecoveryAction::ManualInterventionRequired(format!(
+                                "committed_journal_target_mismatch: current points to '{}', expected '{}'",
+                                target.display(),
+                                self.target_release_id
+                            ));
+                        }
+
+                        use std::ffi::CString;
+                        let c_releases =
+                            match CString::new(releases_dir.to_str().unwrap_or_default()) {
+                                Ok(c) => c,
+                                Err(_) => {
+                                    return RecoveryAction::ManualInterventionRequired(
+                                        "invalid_releases_path".into(),
+                                    );
+                                }
+                            };
+                        let r_fd = unsafe {
+                            libc::open(
+                                c_releases.as_ptr(),
+                                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                            )
+                        };
+                        if r_fd < 0 {
+                            return RecoveryAction::ManualInterventionRequired(
+                                "unreadable_releases_dir_fd".into(),
+                            );
+                        }
+
+                        let verified_target =
+                            verify_subdir_secure_at(r_fd, &self.target_release_id);
+                        unsafe {
+                            libc::close(r_fd);
+                        }
+
+                        if verified_target.is_err() {
+                            return RecoveryAction::ManualInterventionRequired(
+                                "committed_target_dir_missing_or_symlink".into(),
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        return RecoveryAction::ManualInterventionRequired(format!(
+                            "unreadable_current_symlink_on_committed: {}",
+                            e
+                        ));
+                    }
+                }
+
+                RecoveryAction::CommitSuccess
+            }
             TransactionStage::RolledBack => RecoveryAction::ResumeOldRelease,
             TransactionStage::RecoveryRequired => RecoveryAction::ManualInterventionRequired(
                 self.error
@@ -358,20 +490,42 @@ pub fn sync_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// 写入或核对持久 highest_accepted_sequence。文件损坏时严格返回 Err，禁止静默重置为 0。
-pub fn load_highest_accepted_sequence(state_dir: &Path) -> Result<u64> {
+/// 读取旧版原始 highest_accepted_sequence 文件
+pub fn load_raw_highest_accepted_sequence(state_dir: &Path) -> Result<Option<u64>> {
     let seq_path = state_dir.join("highest_accepted_sequence");
     if !seq_path.exists() {
-        return Ok(0);
+        return Ok(None);
     }
     let content = fs::read_to_string(&seq_path)?;
     match content.trim().parse::<u64>() {
-        Ok(val) => Ok(val),
+        Ok(val) => Ok(Some(val)),
         Err(e) => bail!(
             "corrupt_highest_accepted_sequence_file: '{}' ({})",
             seq_path.display(),
             e
         ),
+    }
+}
+
+/// 写入或核对最高水位：统一核对单一权威 current_release.json 与旧版文件，冲突/损坏时严格 fail closed，绝不高水位回 0
+pub fn load_highest_accepted_sequence(state_dir: &Path) -> Result<u64> {
+    let record_opt = load_current_release_record(state_dir)?;
+    let old_seq_opt = load_raw_highest_accepted_sequence(state_dir)?;
+
+    match (record_opt, old_seq_opt) {
+        (Some(record), Some(old_seq)) => {
+            if record.sequence != old_seq {
+                bail!(
+                    "sequence_conflict_detected: current_release.json sequence {} != highest_accepted_sequence file {}",
+                    record.sequence,
+                    old_seq
+                );
+            }
+            Ok(record.sequence)
+        }
+        (Some(record), None) => Ok(record.sequence),
+        (None, Some(old_seq)) => Ok(old_seq),
+        (None, None) => Ok(0),
     }
 }
 
