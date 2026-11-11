@@ -114,13 +114,16 @@ COMPONENTS_JSON=""
 TOTAL_UNPACKED_BYTES=0
 TOTAL_FILE_COUNT=0
 
-# 查找所有常规文件
+# 仅枚举 payload 目标子目录中的所有文件（包含 JSON 资源，排除元数据文件靠其位于 payload 外部而非扩展名过滤）
+PAYLOAD_DIRS=()
+for d in bin Apps resources; do
+  if [ -d "$OUT_DIR/$d" ]; then
+    PAYLOAD_DIRS+=("$OUT_DIR/$d")
+  fi
+done
+
 while IFS= read -r f; do
   rel_path="${f#$OUT_DIR/}"
-  # 跳过刚生成的 tar.gz 本身及任何 json
-  if [[ "$rel_path" == *.tar.gz || "$rel_path" == *.json || "$rel_path" == *.hex ]]; then
-    continue
-  fi
 
   f_size=$(stat -f %z "$f" 2>/dev/null || stat -c %s "$f")
   f_sha=$(shasum -a 256 "$f" | awk '{print $1}')
@@ -152,7 +155,7 @@ EOF
     COMPONENTS_JSON="$COMPONENTS_JSON,
 $comp_entry"
   fi
-done < <(find "$OUT_DIR" -type f | sort)
+done < <(find "${PAYLOAD_DIRS[@]}" -type f | sort)
 
 # 上限设为展开大小的 1.5 倍与条目数的 2 倍以作为受控解包边界，且不超过硬上限
 MAX_UNPACKED=$((TOTAL_UNPACKED_BYTES * 3 / 2))
