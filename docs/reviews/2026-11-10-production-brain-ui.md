@@ -1,15 +1,15 @@
-# I3 大脑配置与对话追溯界面实现 技术审查报告 (V7 收尾版)
+# I3 大脑配置与对话追溯界面实现 技术审查报告 (V8 核心回归修复版)
 
 - **日期**：2026-11-11
-- **任务编号**：I3（当前派发：`task_802e58faf577` / `ctx_e2c8f59d0bab`，前序：`task_c2bbf88549ee`、`task_c9618a210184`、`task_02daa1ecaee1`、`task_65419b44ff9f`、`task_23a5854df5b2`、`task_86a24d0cb23c`、`task_48f9bde2b511`）
-- **基线 Commit**：`d9dbea0`
+- **任务编号**：I3（当前派发：`task_2c2e54da855a` / `ctx_ad89d9c4e6b4`，前序：`task_802e58faf577`、`task_c2bbf88549ee`、`task_c9618a210184`、`task_02daa1ecaee1`、`task_65419b44ff9f`、`task_23a5854df5b2`、`task_86a24d0cb23c`、`task_48f9bde2b511`）
+- **基线 Commit**：`70d02e5`（前序集成分支：`56d34d0` / `e585431`）
 - **交付分支**：`work/prod-brain-ui`
-- **状态**：依据协调者最新审查指令，完成授权快照事务一致性、fail-closed 全链路回归与 680 表格版本列紧凑微调收尾：
-  1. **授权与候选枚举同一只读事务快照**：`compute_allowlist_contacts_projection` 在同一个只读连接与事务（`conn.transaction_with_behavior(Deferred)`）内原子加载 `BrainAccess::load` 并枚举过滤候选联系人，杜绝并发读取竞态，失败严格返回 unavailable；
-  2. **`ControlContactAccess.permits` fail-closed 全链路回归**：在 `test_control_fail_closed_access_across_operations_without_db` 中验证无 DB 时 Fresh 初始化、`brain-save-role`、`brain-save-knowledge`、无覆盖绑定保存、激活、回退均完全可用；而当包含 contact 覆盖时，DB 不可读严格拒绝报错（`code: 2, not_found`），证明零静默降级、零越权；
-  3. **680 宿主最小宽表格版本列自适应微调**：表格列宽紧凑微调为 105/42/95/58（总宽 300px），设置 `uniformColumnAutoresizingStyle`，确保“版本”列完全展示在视口内部，彻底解决被右边缘截住问题；
-  4. 真实控制通道断言、Swift UI 契约测试（102 项断言）及 74 项宿主回归测试均以退出码 0 完全通过；
-  5. 提交本地技术审查，非自行宣布整个项目验收通过。
+- **状态**：依据协调者最新审查指令（msg_427475814813），修复 Q1 集成测试中暴露的 2 项核心测试失败：
+  1. **生产代码零修改**：`Store::resolve`、`ControlContactAccess None => false`、运行时白名单授权算法一律未变，绝不为了让测试通过而恢复 `None => true` 或因 `defaultRef` 绕过 contact 授权；
+  2. **`test_brain_initialize_control` 最小测试 Fixture 修复**：使用 `HistoryStore::open` 运行完整迁移生成真实 SQLite 数据库（严格限制临时目录权限 0700/0600，绝不触碰真实 HOME）；配置 `recipient` 姓名（`"客户张三"`）与 `contact_id`（`"c_legacy_cust"`）严格不同；通过真实 `BrainAccess` 验证默认角色解析，并追加未知联系人（`c_unknown`）、未授权联系人（`c_unauth`）、跨账号联系人（`c_other_acc`）及跨账号 Context 的严格拒绝断言；
+  3. **`test_turn_model_retry_pins_initial_snapshot_version` 彻底移除 `DummyAccess`**：补齐隔离完整迁移 history 数据库，通过真实 `ControlContactAccess` 进行所有 `store.write` 与 `store.resolve` 调用；验证第一次真实 cycle 锁定初始快照 v1，管理员写入并激活 v2 后，第二次真实 cycle 重试依然锁定 v1 且两次快照的 `snapshot_id` 完全一致；
+  4. **全量单线程核心回归验证**：除既有预期失败 `core::open_api::compat_tests::ops_tools_list_unchanged` 外，全部 960 项核心单元测试、Swift UI 契约测试（102 项断言）及 74 项宿主回归测试均以退出码 0 完全通过；
+  5. 提交独立 commit 供 Q1 团队单独 cherry-pick，非自行宣布整个项目验收通过。
 
 ---
 
@@ -106,7 +106,17 @@ pub(crate) fn compute_allowlist_contacts_projection(
 
 ## 4. 测试套件与契约执行证据
 
-### 4.1 Rust 控制投影与 fail-closed 单元测试套件
+### 4.1 Q1 核心回归测试修复（本次修复重点）
+- **`core::control::tests::test_brain_initialize_control`**：
+  - 测试命令：`cargo test --bin wechat-mcp core::control::tests::test_brain_initialize_control`
+  - 退出码：**0**（PASS，1 passed; 0 failed）
+  - 验证逻辑：使用真实 `HistoryStore::open` 迁移 DB 填入白名单联系人（recipient 姓名 `"客户张三"` 与 ID `"c_legacy_cust"` 严格不同）；通过真实 `BrainAccess` 成功解析默认角色（`"原内置客服"`）；追加未知（`c_unknown`）、未授权（`c_unauth`）、跨账号（`c_other_acc`）及跨账号 Context 的 4 项强制拒绝断言。
+- **`core::turns::tests::test_turn_model_retry_pins_initial_snapshot_version`**：
+  - 测试命令：`cargo test --bin wechat-mcp core::turns::tests::test_turn_model_retry_pins_initial_snapshot_version`
+  - 退出码：**0**（PASS，1 passed; 0 failed）
+  - 验证逻辑：彻底移除 `DummyAccess`；为 `fixture_config` 初始化隔离 `history.sqlite3` 数据库，使用真实 `ControlContactAccess` 证明权限并驱动生产 `svc.cycle`；验证首次 cycle 失败锁定初始快照 v1，管理员写入并激活 v2 后，第二次 cycle 重试依然锁定 v1 且两次快照的 `snapshot_id` 完全一致。
+
+### 4.2 控制投影与 fail-closed 专项测试套件
 - **测试命令**：
   `cargo test --bin wechat-mcp core::control::tests::test_control_brain_list && cargo test --bin wechat-mcp core::control::tests::test_control_fail_closed_access_across_operations_without_db`
 - **实际退出码**：**0**（PASS，5 passed; 0 failed）
@@ -117,26 +127,18 @@ pub(crate) fn compute_allowlist_contacts_projection(
   4. `test_control_brain_list_projection_group_private_and_revocation`：私聊和群聊的正确识别与映射；白名单撤销后输出 `ready` + `error: null` + `[]`（已成功计算但无可授权项）；
   5. `test_control_fail_closed_access_across_operations_without_db`：无 DB 时验证全操作链路行为（初始化、角色保存、知识保存、无覆盖草稿保存/激活/回退放行；含 contact 覆盖时严格拒绝并返回 `not_found`）。
 
-### 4.2 Swift 隔离契约与 UI 自检测试套件
+### 4.3 Swift 隔离契约与 UI 自检测试套件
 - **测试命令**：`cargo test --test swift_brain_ui`
-- **实际退出码**：**0**（PASS，耗时 23.11s）
+- **实际退出码**：**0**（PASS，耗时 23.58s）
 - **测试断言统计**：**全部 102 项断言 100% 通过**（Total passed: 102, failed: 0）。
-- **核心断言覆盖**：
-  - `ui_bindings_unavailable_add_disabled`：白名单 unavailable 时禁用新增按钮；
-  - `ui_bindings_unavailable_update_disabled`：白名单 unavailable 时禁用更新按钮；
-  - `ui_bindings_unavailable_delete_enabled`：白名单 unavailable 且存在覆盖时启用删除按钮；
-  - `ui_bindings_unavailable_safe_delete`：触发真实 `deleteOverrideDraft` 安全删除选定覆盖；
-  - `ui_bindings_unavailable_delete_disabled_after_all_deleted`：全部覆盖删除后自动置灰删除按钮；
-  - `ui_bindings_inflight_preserved`：真实触发 `handleSaveBindingsDraft`，在异步在途期间产生新草稿输入与令牌自增，旧回调返回后断言新草稿未被冲刷覆写；
-  - `real_control_list_allowlist_status`：真实控制通道白名单投影状态为 ready；
-  - `real_control_list_allowlist_id_exact`：真实控制通道联系人 ID 精确为 `c_contract`；
-  - `real_control_list_allowlist_id_ne_name`：验证 `contact_id != displayName`，绝不凭姓名构造 ID；
-  - `real_control_reject_unauthorized_override`：保存非法联系人（`illegal_contact_999`）时控制命令严格拒绝报错。
 
-### 4.3 宿主回归测试与静态代码规范
+### 4.4 宿主回归测试与静态代码规范
 - **宿主回归测试**：
   - 命令：`cargo test --test swift_host`
-  - 退出码：**0**（PASS，74 passed; 0 failed，耗时 20.86s）
+  - 退出码：**0**（PASS，74 passed; 0 failed，耗时 18.35s）
+- **单线程全核心回归测试**：
+  - 命令：`cargo test --bin wechat-mcp -- --test-threads=1`
+  - 结果：**960 passed; 1 failed**（耗时 67.21s，唯一失败为协调者确认的既有预期失败 `core::open_api::compat_tests::ops_tools_list_unchanged`）
 - **代码格式化检查**：
   - 命令：`cargo fmt --all -- --check`
   - 退出码：**0**
@@ -149,16 +151,15 @@ pub(crate) fn compute_allowlist_contacts_projection(
 ## 5. 修改文件清单
 
 - **`src/core/control.rs`**：
-  - `compute_allowlist_contacts_projection` 实现在同一只读事务（`Deferred`）内完成 `BrainAccess::load` 与联系人候选枚举，强一致且杜绝竞态；
-  - 新增 `test_control_fail_closed_access_across_operations_without_db` 单元测试，全面验证无 DB 时各操作的授权行为。
-- **`native/bootstrap/BrainPage.swift`**：
-  - 紧凑微调覆盖表格列宽（105/42/95/58），设置 `uniformColumnAutoresizingStyle`，确保 680px 宽度下版本列完全展示无截断。
+  - `test_brain_initialize_control`：使用完整迁移的隔离 history 数据库与真实 `BrainAccess` 验证默认角色解析，追加未知、未授权、跨账号联系人及跨账号上下文的严格拒绝断言。
+- **`src/core/turns.rs`**：
+  - `test_turn_model_retry_pins_initial_snapshot_version`：彻底移除 `DummyAccess`，通过真实迁移的隔离 history 数据库与真实 `ControlContactAccess` 验证重试快照锁定 v1 与原子激活隔离。
 - **`docs/reviews/2026-11-10-production-brain-ui.md`**：
-  - 编写 V7 收尾技术审查报告，详细记录只读事务快照、fail-closed 行为影响面、列宽微调及测试证据。
+  - 编写 V8 技术审查报告，记录精确测试退出码、断言数与回归验证证据。
 
 ---
 
 ## 6. 风险与限制说明
 
-1. **真实环境安全隔离**：所有测试与渲染均在离屏与隔离 SQLite/JSON fixture 中完成，未触碰真实生产环境，未产生微信模型交互或外网通信；
-2. **提交性质**：本次交付代表开发工程师根据协调者要求完成只读事务一致性、fail-closed 全链路测试与 680 表格版本列展示微调，提交本地技术审查，非自行宣布整个项目验收通过。
+1. **真实环境安全隔离**：所有测试与渲染均在离屏与隔离 SQLite/JSON fixture 中完成，临时目录权限严格 0700/0600，未触碰真实生产环境，未产生微信模型交互或外网通信；
+2. **提交性质**：本次交付代表开发工程师根据协调者最新指令完成 Q1 集成测试中两项核心测试失败的最小 fixture 修复，全核心单线程回归仅保留既有 ops_tools 失败，提交独立 commit 供 Q1 cherry-pick，非自行宣布整个项目验收通过。

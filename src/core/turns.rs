@@ -8674,21 +8674,33 @@ mod tests {
             AccountContext, BindingSet, Installation, Mutation, Store, WriteRequest,
         };
 
-        struct DummyAccess;
-        impl crate::core::brain_profiles::ContactAccess for DummyAccess {
-            fn permits(&self, _: &str, _: &str, _: &crate::core::brain_profiles::ChatKind) -> bool {
-                true
-            }
-            fn family(&self, _: &str, c: &str) -> Vec<String> {
-                vec![c.into()]
-            }
-        }
-
         let td = TestDir::new();
         let cfg = fixture_config(td.path());
         let state_dir = cfg.state_dir.clone();
         std::fs::create_dir_all(&state_dir).unwrap();
         std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let history_dir = state_dir.join("history");
+        std::fs::create_dir_all(&history_dir).unwrap();
+        std::fs::set_permissions(&history_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _history_store = crate::core::history::store::HistoryStore::open(&state_dir).unwrap();
+        let db_path = history_dir.join("history.sqlite3");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            -- recipient 姓名 "示例联系人甲" 与 contact_id "c1" 严格不同
+            INSERT INTO contacts VALUES('c1', 'fixture', 'private', '示例联系人甲真实名', NULL, 100, 100);
+            INSERT INTO contact_names VALUES(1, 'c1', 'fixture', '示例联系人甲', '示例联系人甲', 'config', 100, 100);
+            "#,
+        )
+        .unwrap();
+
+        let brain_access = crate::core::open_api::access::BrainAccess::load(&cfg, &conn).unwrap();
+        let access = crate::core::control::ControlContactAccess {
+            account_id: "fixture".into(),
+            brain_access: Some(brain_access),
+            conn: Some(conn),
+        };
 
         let ctx = AccountContext::new("fixture".into()).unwrap();
         let store = Store::open(&state_dir).unwrap();
@@ -8704,7 +8716,7 @@ mod tests {
                 &ctx,
                 "c1",
                 &crate::core::brain_profiles::ChatKind::Private,
-                &DummyAccess,
+                &access,
             )
             .unwrap();
         let r1_rev = r1.revision_id.clone();
@@ -8780,7 +8792,7 @@ mod tests {
                     request_id: uuid::Uuid::new_v4().to_string(),
                     mutation: Mutation::SaveRole(r2.clone()),
                 },
-                &DummyAccess,
+                &access,
                 0,
             )
             .unwrap();
@@ -8796,7 +8808,7 @@ mod tests {
                     request_id: uuid::Uuid::new_v4().to_string(),
                     mutation: Mutation::SaveBindings(b2),
                 },
-                &DummyAccess,
+                &access,
                 0,
             )
             .unwrap();
@@ -8808,7 +8820,7 @@ mod tests {
                     request_id: uuid::Uuid::new_v4().to_string(),
                     mutation: Mutation::Activate,
                 },
-                &DummyAccess,
+                &access,
                 0,
             )
             .unwrap();
@@ -8818,7 +8830,7 @@ mod tests {
                 &ctx,
                 "c1",
                 &crate::core::brain_profiles::ChatKind::Private,
-                &DummyAccess,
+                &access,
             )
             .unwrap();
         assert_eq!(
