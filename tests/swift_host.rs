@@ -3051,3 +3051,212 @@ fn test_main_window_largest_on_screen() {
     assert_eq!(res["x"], 10.0);
     assert_eq!(res["y"], 183.0);
 }
+
+#[test]
+fn test_swift_core_supervisor_dual_check_guard_and_uuid_contract() {
+    if !has_swiftc() {
+        eprintln!("swiftc not available, skipping test");
+        return;
+    }
+    let temp = TempDir::new("swift_dual_guard_test");
+    let state_dir = temp.path.join("state");
+    let releases_dir = temp.path.join("releases");
+    let current_link = temp.path.join("current");
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::create_dir_all(&releases_dir).unwrap();
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&releases_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let root = repo_root();
+    let swift_test_source = temp.path.join("main.swift");
+    let swift_test_bin = temp.path.join("dual_guard_bin");
+
+    let swift_code = r#"
+import Foundation
+
+func checkMode() -> String {
+    let args = CommandLine.arguments
+    guard args.count >= 5 else { return "ERR_ARGS" }
+    let statePath = args[1]
+    let releasesPath = args[2]
+    let currentPath = args[3]
+    let expectedMode = args[4]
+
+    let stateURL = URL(fileURLWithPath: statePath)
+    let releasesURL = URL(fileURLWithPath: releasesPath)
+    let currentURL = URL(fileURLWithPath: currentPath)
+    let maintURL = stateURL.appendingPathComponent("core.maintenance")
+    let journalURL = stateURL.appendingPathComponent("update-journal.json")
+
+    let supervisor = CoreSupervisor(
+        coreEnabledURL: stateURL.appendingPathComponent("core.enabled"),
+        maintenanceURL: maintURL,
+        journalURL: journalURL,
+        releasesDirURL: releasesURL,
+        currentLinkURL: currentURL
+    )
+
+    let status = supervisor.maintenanceStatus
+    switch status {
+    case .inactive:
+        return "INACTIVE"
+    case .active(let txID):
+        return "ACTIVE:\(txID)"
+    case .recoveryRequired:
+        return "RECOVERY_REQUIRED"
+    }
+}
+
+print(checkMode())
+"#;
+
+    fs::write(&swift_test_source, swift_code).unwrap();
+
+    let files_to_compile = [
+        root.join("native")
+            .join("bootstrap")
+            .join("Supervisor.swift"),
+        root.join("native")
+            .join("bootstrap")
+            .join("CoreSupervisor.swift"),
+        swift_test_source.clone(),
+    ];
+
+    let mut compile_cmd = Command::new("swiftc");
+    compile_cmd.arg("-O");
+    for f in &files_to_compile {
+        compile_cmd.arg(f);
+    }
+    compile_cmd.arg("-o").arg(&swift_test_bin);
+    let comp_res = compile_cmd.output().expect("failed to run swiftc");
+    assert!(
+        comp_res.status.success(),
+        "swiftc compilation failed: {}",
+        String::from_utf8_lossy(&comp_res.stderr)
+    );
+
+    let run_guard = |expected: &str| -> String {
+        let output = Command::new(&swift_test_bin)
+            .arg(state_dir.to_str().unwrap())
+            .arg(releases_dir.to_str().unwrap())
+            .arg(current_link.to_str().unwrap())
+            .arg(expected)
+            .output()
+            .expect("failed to run dual_guard_bin");
+        assert!(
+            output.status.success(),
+            "run failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+
+    // 场景 A: 初始空目录 -> INACTIVE
+    assert_eq!(run_guard("INACTIVE"), "INACTIVE");
+
+    // 场景 B: 写入 Rust 规范的 36 字节 UUID -> ACTIVE:<uuid>
+    let raw_maint = state_dir.join("core.maintenance");
+    let test_uuid = "12345678-1234-4234-8234-123456789abc";
+    fs::write(&raw_maint, test_uuid.as_bytes()).unwrap();
+    fs::set_permissions(&raw_maint, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(run_guard("ACTIVE"), format!("ACTIVE:{}", test_uuid));
+
+    // 场景 C: 损坏的 core.maintenance (小于 36 字节) -> RECOVERY_REQUIRED
+    fs::write(&raw_maint, b"too_short").unwrap();
+    fs::set_permissions(&raw_maint, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(run_guard("RECOVERY_REQUIRED"), "RECOVERY_REQUIRED");
+
+    // 清理 core.maintenance
+    fs::remove_file(&raw_maint).unwrap();
+    assert_eq!(run_guard("INACTIVE"), "INACTIVE");
+
+    // 场景 D: 存在中间状态 update-journal.json (Draining) -> ACTIVE:<tx_id>
+    let journal_path = state_dir.join("update-journal.json");
+    let journal_draining = serde_json::json!({
+        "transaction_id": "tx-88d447d2-749e-4e89-a5c3-1d89851148e6",
+        "stage": "Draining",
+        "source_release_id": "0.1.0",
+        "target_release_id": "0.2.0-test",
+        "target_sequence": 1002,
+        "timestamp": 1794300000,
+        "maintenance_marker_confirmed": true
+    });
+    fs::write(
+        &journal_path,
+        serde_json::to_vec_pretty(&journal_draining).unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        run_guard("ACTIVE"),
+        "ACTIVE:tx-88d447d2-749e-4e89-a5c3-1d89851148e6"
+    );
+
+    // 场景 E: journal 为 Committed 但缺少 current_release.json -> RECOVERY_REQUIRED (严格拒绝盲猜放行)
+    let journal_committed = serde_json::json!({
+        "transaction_id": "tx-88d447d2-749e-4e89-a5c3-1d89851148e6",
+        "stage": "Committed",
+        "source_release_id": "0.1.0",
+        "target_release_id": "0.2.0-test",
+        "target_sequence": 1002,
+        "manifest_digest": "6b3a2f1c",
+        "timestamp": 1794300000,
+        "maintenance_marker_confirmed": true
+    });
+    fs::write(
+        &journal_path,
+        serde_json::to_vec_pretty(&journal_committed).unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(run_guard("RECOVERY_REQUIRED"), "RECOVERY_REQUIRED");
+
+    // 场景 F: 提供 current_release.json 但要素不一致 (sequence 篡改) -> RECOVERY_REQUIRED
+    let record_path = state_dir.join("current_release.json");
+    let commit_record_tampered = serde_json::json!({
+        "record_schema": 1,
+        "tx_id": "tx-88d447d2-749e-4e89-a5c3-1d89851148e6",
+        "release_id": "0.2.0-test",
+        "sequence": 9999,
+        "channel": "stable",
+        "manifest_digest": "6b3a2f1c",
+        "installed_at": 1794300000
+    });
+    fs::write(
+        &record_path,
+        serde_json::to_vec_pretty(&commit_record_tampered).unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(&record_path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(run_guard("RECOVERY_REQUIRED"), "RECOVERY_REQUIRED");
+
+    // 场景 G: 修正 current_release.json 要素，建立正确的 releases 目录与 current 软链接 -> INACTIVE 放行
+    let commit_record_correct = serde_json::json!({
+        "record_schema": 1,
+        "tx_id": "tx-88d447d2-749e-4e89-a5c3-1d89851148e6",
+        "release_id": "0.2.0-test",
+        "sequence": 1002,
+        "channel": "stable",
+        "manifest_digest": "6b3a2f1c",
+        "installed_at": 1794300000
+    });
+    fs::write(
+        &record_path,
+        serde_json::to_vec_pretty(&commit_record_correct).unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(&record_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let target_release_dir = releases_dir.join("0.2.0-test");
+    fs::create_dir_all(&target_release_dir).unwrap();
+    std::os::unix::fs::symlink(&target_release_dir, &current_link).unwrap();
+
+    assert_eq!(run_guard("INACTIVE"), "INACTIVE");
+
+    // 场景 H: 篡改 current 软链接指向非预期目录 -> RECOVERY_REQUIRED
+    fs::remove_file(&current_link).unwrap();
+    let foreign_dir = releases_dir.join("0.9.9-foreign");
+    fs::create_dir_all(&foreign_dir).unwrap();
+    std::os::unix::fs::symlink(&foreign_dir, &current_link).unwrap();
+    assert_eq!(run_guard("RECOVERY_REQUIRED"), "RECOVERY_REQUIRED");
+}
