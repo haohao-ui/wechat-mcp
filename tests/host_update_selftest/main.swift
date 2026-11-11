@@ -472,16 +472,33 @@ func runTests() -> Int32 {
             verification: nil
         ))
         
+        // 隔离固定 1x Viewport 渲染器（解耦宿主显示器 Retina/非 Retina 分辨率依赖）
+        func makeIsolatedViewportRep(size: NSSize) -> NSBitmapImageRep? {
+            let rep = NSBitmapImageRep(
+                bitmapDataPlanes: nil,
+                pixelsWide: Int(size.width),
+                pixelsHigh: Int(size.height),
+                bitsPerSample: 8,
+                samplesPerPixel: 4,
+                hasAlpha: true,
+                isPlanar: false,
+                colorSpaceName: .calibratedRGB,
+                bytesPerRow: 0,
+                bitsPerPixel: 0
+            )
+            rep?.size = size
+            return rep
+        }
+
         let fullSize720 = NSSize(width: 720, height: 1250)
         updateVC.view.frame = NSRect(origin: .zero, size: fullSize720)
         updateVC.contentStack.layoutSubtreeIfNeeded()
         updateVC.view.layoutSubtreeIfNeeded()
 
-        guard let rep720 = updateVC.view.bitmapImageRepForCachingDisplay(in: updateVC.view.bounds) else {
+        guard let rep720 = makeIsolatedViewportRep(size: fullSize720) else {
             check("offscreen_rep_created", false, "Failed to create bitmap rep")
             return 1
         }
-        rep720.colorSpaceName = .calibratedRGB
         updateVC.view.cacheDisplay(in: updateVC.view.bounds, to: rep720)
         check("offscreen_render_unconfigured_720", rep720.pixelsWide == 720 && rep720.pixelsHigh == 1250)
 
@@ -496,11 +513,10 @@ func runTests() -> Int32 {
         updateVC.view.frame = NSRect(origin: .zero, size: fullSize680)
         updateVC.contentStack.layoutSubtreeIfNeeded()
         updateVC.view.layoutSubtreeIfNeeded()
-        guard let rep680 = updateVC.view.bitmapImageRepForCachingDisplay(in: updateVC.view.bounds) else {
+        guard let rep680 = makeIsolatedViewportRep(size: fullSize680) else {
             check("offscreen_rep680_created", false, "Failed to create 680w rep")
             return 1
         }
-        rep680.colorSpaceName = .calibratedRGB
         updateVC.view.cacheDisplay(in: updateVC.view.bounds, to: rep680)
         check("offscreen_render_unconfigured_680", rep680.pixelsWide == 680 && rep680.pixelsHigh == 1250)
         let outPath680_1 = "/tmp/update_ui_unconfigured_680w.png"
