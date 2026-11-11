@@ -178,6 +178,7 @@
 | **第 1 轮** | `env CARGO_BIN_EXE_wechat-updater="$(pwd)/target/debug/wechat-updater" cargo test --lib` | `0` | **986 passed; 0 failed; 0 ignored** | 24.65s |
 | **第 2 轮** | `env CARGO_BIN_EXE_wechat-updater="$(pwd)/target/debug/wechat-updater" cargo test --bin wechat-mcp` | `0` | **989 passed; 0 failed; 0 ignored** | 24.76s |
 | **第 3 轮** | `env CARGO_BIN_EXE_wechat-updater="$(pwd)/target/debug/wechat-updater" cargo test --bin wechat-mcp` | `0` | **989 passed; 0 failed; 0 ignored** | 26.98s |
+| **协调者代跑复验** | `cargo test --locked --bin wechat-mcp`（指定 updater 产物） | `0` | **989 passed; 0 failed; 0 ignored**（日志 `/tmp/wechat-t1-locale-revised.log`） | 24.51s |
 
 ---
 
