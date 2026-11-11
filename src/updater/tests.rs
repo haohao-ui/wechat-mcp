@@ -54,6 +54,13 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
+fn calculate_sha256_bytes(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex_encode(&hasher.finalize())
+}
+
 fn sample_manifest(sequence: u64, arch: &str) -> ReleaseManifest {
     ReleaseManifest {
         manifest_schema: 1,
@@ -163,23 +170,238 @@ fn test_manifest_compatibility_and_downgrade_prevention() {
 }
 
 #[test]
-fn test_safe_unpack_archive_is_disabled_and_unsupported() {
-    let temp = TempTestDir::new("unpack_disabled");
+fn test_safe_unpack_and_verify_valid_and_adversarial() {
+    let temp = TempTestDir::new("unpack_adversarial");
     let staging = temp.0.join("staging");
-    let fake_archive = temp.0.join("fake.tar.gz");
-    fs::write(&fake_archive, b"fake").unwrap();
+    fs::create_dir_all(&staging).unwrap();
+
+    let valid_archive = temp.0.join("valid.tar.gz");
+    let content = b"hello binary content";
+    let content_sha = calculate_sha256_bytes(content);
+
+    // 构造合法的 tar.gz 归档
+    {
+        let file = fs::File::create(&valid_archive).unwrap();
+        let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(enc);
+
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "bin/wechat-mcp", &content[..])
+            .unwrap();
+
+        let enc = builder.into_inner().unwrap();
+        enc.finish().unwrap();
+    }
+
+    let meta = fs::metadata(&valid_archive).unwrap();
+    let archive_sha = calculate_sha256_bytes(&fs::read(&valid_archive).unwrap());
 
     let artifact = ArtifactSpec {
-        filename: "fake.tar.gz".into(),
-        sha256: "00".repeat(32),
-        size_bytes: 4,
-        max_unpacked_bytes: 1000,
-        max_file_count: 5,
+        filename: "valid.tar.gz".into(),
+        sha256: archive_sha.clone(),
+        size_bytes: meta.len(),
+        max_unpacked_bytes: 10000,
+        max_file_count: 10,
     };
 
-    let res = safe_unpack_and_verify(&fake_archive, &staging, &artifact, &[]);
-    assert!(res.is_err());
-    assert!(res.unwrap_err().to_string().contains("unsupported_archive"));
+    let components = vec![ComponentSpec {
+        path: "bin/wechat-mcp".into(),
+        kind: "executable".into(),
+        file_mode: 0o755,
+        sha256: content_sha,
+        size_bytes: content.len() as u64,
+    }];
+
+    // 1. 验证正常解包通过
+    let stage_valid = temp.0.join("stage_valid");
+    let res = safe_unpack_and_verify(&valid_archive, &stage_valid, &artifact, &components);
+    assert!(res.is_ok(), "Expected valid unpack to succeed: {:?}", res.err());
+
+    // 2. 对抗包测试：软链接注入拒绝
+    let symlink_archive = temp.0.join("symlink_evil.tar.gz");
+    {
+        let file = fs::File::create(&symlink_archive).unwrap();
+        let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(enc);
+
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        header.set_mode(0o777);
+        header.set_cksum();
+        builder
+            .append_link(&mut header, "bin/evil_symlink", "/etc/passwd")
+            .unwrap();
+
+        let enc = builder.into_inner().unwrap();
+        enc.finish().unwrap();
+    }
+    let sym_meta = fs::metadata(&symlink_archive).unwrap();
+    let sym_sha = calculate_sha256_bytes(&fs::read(&symlink_archive).unwrap());
+    let sym_artifact = ArtifactSpec {
+        filename: "symlink_evil.tar.gz".into(),
+        sha256: sym_sha,
+        size_bytes: sym_meta.len(),
+        max_unpacked_bytes: 10000,
+        max_file_count: 10,
+    };
+    let sym_res = safe_unpack_and_verify(&symlink_archive, &staging, &sym_artifact, &components);
+    assert!(sym_res.is_err());
+    assert!(sym_res.unwrap_err().to_string().contains("symlink_rejected"));
+
+    // 3. 对抗包测试：路径穿越逃逸拒绝 (../escaped)
+    let traversal_archive = temp.0.join("traversal_evil.tar.gz");
+    {
+        let file = fs::File::create(&traversal_archive).unwrap();
+        let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(enc);
+
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o755);
+        let evil_name = b"../evil_escape\0";
+        header.as_mut_bytes()[..evil_name.len()].copy_from_slice(evil_name);
+        header.set_cksum();
+        builder.append(&header, &content[..]).unwrap();
+
+        let enc = builder.into_inner().unwrap();
+        enc.finish().unwrap();
+    }
+    let tr_meta = fs::metadata(&traversal_archive).unwrap();
+    let tr_sha = calculate_sha256_bytes(&fs::read(&traversal_archive).unwrap());
+    let tr_artifact = ArtifactSpec {
+        filename: "traversal_evil.tar.gz".into(),
+        sha256: tr_sha,
+        size_bytes: tr_meta.len(),
+        max_unpacked_bytes: 10000,
+        max_file_count: 10,
+    };
+    let tr_res = safe_unpack_and_verify(&traversal_archive, &staging, &tr_artifact, &components);
+    assert!(tr_res.is_err());
+    assert!(tr_res.unwrap_err().to_string().contains("invalid_relative_path"));
+
+    // 4. 对抗包测试：大小写冲突攻击
+    let collision_archive = temp.0.join("collision_evil.tar.gz");
+    {
+        let file = fs::File::create(&collision_archive).unwrap();
+        let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(enc);
+
+        let mut h1 = tar::Header::new_gnu();
+        h1.set_size(content.len() as u64);
+        h1.set_mode(0o755);
+        h1.set_cksum();
+        builder.append_data(&mut h1, "bin/wechat-mcp", &content[..]).unwrap();
+
+        let mut h2 = tar::Header::new_gnu();
+        h2.set_size(content.len() as u64);
+        h2.set_mode(0o755);
+        h2.set_cksum();
+        builder.append_data(&mut h2, "bin/WeChat-MCP", &content[..]).unwrap();
+
+        let enc = builder.into_inner().unwrap();
+        enc.finish().unwrap();
+    }
+    let col_meta = fs::metadata(&collision_archive).unwrap();
+    let col_sha = calculate_sha256_bytes(&fs::read(&collision_archive).unwrap());
+    let col_artifact = ArtifactSpec {
+        filename: "collision_evil.tar.gz".into(),
+        sha256: col_sha,
+        size_bytes: col_meta.len(),
+        max_unpacked_bytes: 10000,
+        max_file_count: 10,
+    };
+    let stage_col = temp.0.join("stage_col");
+    let col_res = safe_unpack_and_verify(&collision_archive, &stage_col, &col_artifact, &components);
+    assert!(col_res.is_err());
+    let err_str = col_res.unwrap_err().to_string();
+    assert!(err_str.contains("case_collision_detected"), "Actual error was: {}", err_str);
+
+    // 5. 对抗包测试：解压大小炸弹攻击 (超出 max_unpacked_bytes)
+    let bomb_artifact = ArtifactSpec {
+        filename: "valid.tar.gz".into(),
+        sha256: archive_sha.clone(),
+        size_bytes: meta.len(),
+        max_unpacked_bytes: 5, // 仅允许 5 字节，文件为 20 字节
+        max_file_count: 10,
+    };
+    let bomb_res = safe_unpack_and_verify(&valid_archive, &staging, &bomb_artifact, &components);
+    assert!(bomb_res.is_err());
+    assert!(bomb_res.unwrap_err().to_string().contains("unpacked_size_limit_exceeded"));
+
+    // 6. 对抗包测试：条目数超限
+    let count_bomb_artifact = ArtifactSpec {
+        filename: "valid.tar.gz".into(),
+        sha256: archive_sha.clone(),
+        size_bytes: meta.len(),
+        max_unpacked_bytes: 10000,
+        max_file_count: 0, // 允许 0 个文件
+    };
+    let count_res = safe_unpack_and_verify(&valid_archive, &staging, &count_bomb_artifact, &components);
+    assert!(count_res.is_err());
+    assert!(count_res.unwrap_err().to_string().contains("file_count_limit_exceeded"));
+
+    // 7. 对抗包测试：未在 components 清单声明的未知文件
+    let unknown_archive = temp.0.join("unknown_evil.tar.gz");
+    {
+        let file = fs::File::create(&unknown_archive).unwrap();
+        let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(enc);
+
+        let mut h1 = tar::Header::new_gnu();
+        h1.set_size(content.len() as u64);
+        h1.set_mode(0o755);
+        h1.set_cksum();
+        builder.append_data(&mut h1, "bin/unknown_backdoor", &content[..]).unwrap();
+
+        let enc = builder.into_inner().unwrap();
+        enc.finish().unwrap();
+    }
+    let unk_meta = fs::metadata(&unknown_archive).unwrap();
+    let unk_sha = calculate_sha256_bytes(&fs::read(&unknown_archive).unwrap());
+    let unk_artifact = ArtifactSpec {
+        filename: "unknown_evil.tar.gz".into(),
+        sha256: unk_sha,
+        size_bytes: unk_meta.len(),
+        max_unpacked_bytes: 10000,
+        max_file_count: 10,
+    };
+    let unk_res = safe_unpack_and_verify(&unknown_archive, &staging, &unk_artifact, &components);
+    assert!(unk_res.is_err());
+    assert!(unk_res.unwrap_err().to_string().contains("unexpected_file_in_archive"));
+
+    // 8. 对抗包测试：非法权限位 (setuid)
+    let setuid_archive = temp.0.join("setuid_evil.tar.gz");
+    {
+        let file = fs::File::create(&setuid_archive).unwrap();
+        let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(enc);
+
+        let mut h1 = tar::Header::new_gnu();
+        h1.set_size(content.len() as u64);
+        h1.set_mode(0o4755); // setuid
+        h1.set_cksum();
+        builder.append_data(&mut h1, "bin/wechat-mcp", &content[..]).unwrap();
+
+        let enc = builder.into_inner().unwrap();
+        enc.finish().unwrap();
+    }
+    let su_meta = fs::metadata(&setuid_archive).unwrap();
+    let su_sha = calculate_sha256_bytes(&fs::read(&setuid_archive).unwrap());
+    let su_artifact = ArtifactSpec {
+        filename: "setuid_evil.tar.gz".into(),
+        sha256: su_sha,
+        size_bytes: su_meta.len(),
+        max_unpacked_bytes: 10000,
+        max_file_count: 10,
+    };
+    let su_res = safe_unpack_and_verify(&setuid_archive, &staging, &su_artifact, &components);
+    assert!(su_res.is_err());
+    assert!(su_res.unwrap_err().to_string().contains("forbidden_special_permissions"));
 }
 
 #[test]
