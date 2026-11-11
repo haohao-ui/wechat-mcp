@@ -1,25 +1,23 @@
 # 2026-11-11 更新运行时接线契约设计与安全实施规范
 
 - **文档标识**：`docs/design/2026-11-11-update-runtime-contract.md`
-- **日期**：2026-11-11
-- **基线提交**：`f0c9ecf`（分支 `work/update-runtime-contract`）
-- **状态**：运行时接线架构设计与可审查方案（只设计，待 Tech Lead / 协调者审查批准，未放行生产修改）
+- **日期**：2026-11-11（根据协调者意见修订版）
+- **基线提交**：`758a07b`（分支 `work/update-runtime-contract`）
+- **状态**：阶段 1 实施范围获批（仅限 36 字节 UUID 格式与 Rust/Swift 启动双检查只读 guard 及隔离测试；阶段 2 真实排空与生产变更暂不实施）
 
 ---
 
 ## 1. 概述与核心目标
 
-当前 `wechat-mcp` 项目已在 U1 阶段完成了受限解码、规范化封套验签、防降级高水位检查、原子提交协议顺序重构（Commit `883cb5f`）以及进程组回收/孤儿管道防挂死（Commit `90918b5`）等核心隔离沙箱机制，全部 24 项沙箱测试均在本地验证通过。
+当前 `wechat-mcp` 项目已在 U1 阶段完成了受限解码、规范化封套验签、防降级高水位检查、原子提交协议顺序重构（Commit `883cb5f`）以及自有进程组全组回收/孤儿管道防挂死（Commit `90918b5`）等核心隔离沙箱机制，全部 24 项沙箱测试均在本地验证通过。
 
-然而，在生产环境下：
-1. **生产信任根**尚未正式注入，CLI 处于严格 fail-closed 状态；
-2. **下载分发源**（CDN、存储桶或版本服务器）尚未最终敲定；
-3. **真实主动排空（Drain）**、跨进程停机退出、启动前双检查（Dual-check Guard）以及 launchd 重启协调等运行时接线仍未打通。
-
-本设计文档的目标是**基于第一性原理，设计一套能安全实施和隔离验证的最小生产接线方案**：
-- 严格遵循 KISS 原则，拒绝过度设计，优先复用现有 `CoreSupervisor`、`core.maintenance` 规范、`core.lock` 与 `UpdateJournal` 机制；
-- 绝不把 UI 状态当作真实排空，建立基于内核级物理锁与进程退出的硬证据链；
-- 明确划分「本地代码可完成」、「必须用户提供的生产信任根/分发/证书」与「必须专用机授权实测」三类边界，确保开发与测试资产与生产环境绝对隔离。
+针对协调者在审查提交 `758a07b` 时指出的事实与安全边界问题，本文档进行针对性修订：
+1. **调用方身份与同 UID 威胁边界**：明确指出环境变量与同 UID 检查不是安全授权凭据；
+2. **锁与排空证据界限**：明确 `core.lock` 仅代表 core 主进程未持锁，不能证明 worker 或副作用已退出；排空超时需保持抑制，不能承诺旧版安全恢复；
+3. **启动双检查只读性与终态核验**：启动 guard 严格只读，未知/损坏/异常均 Fail-Closed，`Committed` 必须核验实际 record 与指针全要素；
+4. **真实包与组件规范**：对齐已有契约 `production-updater-contract.md`，使用现有真实二进制（`wechat-mcp`、`wechat-updater`、`wechat_bot_worker`、`wechat_click`），严禁虚构组件；规范 tx UUID 映射；
+5. **进程组与自检边界**：承认 `setpgid` 无法收割 `setsid` 逃逸进程；明确 `--check-config` 仅为配置静态语法校验，非应用级自检；
+6. **验签顺序与 Codesign 区分**：验签必须在解包之前完成；重签名必须区分发布原始 hash 与本地签后 hash；阶段 1 保持生产操作 unsupported。
 
 ---
 
@@ -28,21 +26,21 @@
 ### 2.1 参与组件与职责边界
 
 系统由以下四个关键组件构成：
-1. **Swift 宿主应用（WeChat CS Host App）**：用户图形操作界面与基础状态监测面板，负责通过只读接口查询更新状态、展示进度与向管理员提示更新，但**不直接执行版本切换或解包操作**。
+1. **Swift 宿主应用（WeChat RPA Host App）**：用户图形操作界面与基础状态监测面板，负责通过只读接口查询更新状态、展示进度与向管理员提示更新，**不直接执行版本切换或解包操作**。
 2. **核心业务服务（`serve-core` / `wechat-mcp`）**：负责微信业务调度、对话轮次（Turns）流转、SQLite 业务库操作与 Worker 驱动。运行时持有 `state/core.lock`。
 3. **CoreSupervisor（Swift 宿主内置守护机制）**：管理 `serve-core` 子进程的启停、退避重启与故障状态，监听 `core.maintenance` 文件并根据其内容决定是否抑制启动。
-4. **独立更新器（`wechat-updater` 二进制）**：**系统更新事务的唯一执行方（Single Execution Authority）**。独立于宿主与 Core 运行，持有 `state/update.lock`，负责从解包、验签、重签名、排空协调、版本指针切换到候选自检的整个事务流。
+4. **独立更新器（`wechat-updater` 二进制）**：**系统更新事务的唯一执行方（Single Execution Authority）**。独立于宿主与 Core 运行，持有 `state/update.lock`，负责从封套验签、受控解包、排空协调、版本指针切换到候选自检的整个事务流。
 
 ```mermaid
 flowchart TD
-    subgraph UI ["Swift 宿主 (WeChat CS Host App)"]
+    subgraph UI ["Swift 宿主 (WeChat RPA Host App)"]
         UP["UpdatePage / UpdateClient (只读查询)"]
         CS["CoreSupervisor (子进程守护与维护抑制)"]
     end
 
     subgraph Updater ["唯一更新执行方 (wechat-updater)"]
         ULock["update.lock (排他更新锁)"]
-        Exec["SandboxUpdateExecutor / ProductionExecutor"]
+        Exec["SandboxUpdateExecutor"]
         Journal["update-journal.json (事务状态机)"]
     end
 
@@ -54,8 +52,8 @@ flowchart TD
 
     UP -->|只读 CLI/IPC| Updater
     Updater -->|写入| ULock
-    Updater -->|发布 36 字节 UUID| Maint["core.maintenance"]
-    Maint -->|抑制启动| CS
+    Updater -->|发布严格 36 字节 UUID| Maint["core.maintenance"]
+    Maint -->|只读抑制启动| CS
     Updater -->|有界等待并获取| CLock
     CoreService -->|退出释放| CLock
     CS -->|拉起或停止| CoreService
@@ -74,10 +72,7 @@ flowchart TD
 ## 3. 真实排空（Drain）与停机退出契约
 
 ### 3.1 为什么不能用 UI 状态代替真实排空
-若仅靠 UI 将按钮变灰或将某个变量置为 false，底层的 `serve-core` 可能仍在处理正在进行的对话、向微信客户端发送点击或正处于 SQLite 事务中。强行切换可执行文件或强杀进程将导致：
-- 微信消息发送中断或重复发送；
-- 数据库事务损坏或 WAL 文件残留在未合并状态；
-- 新旧组件二进制混跑。
+若仅靠 UI 将按钮变灰或将某个变量置为 false，底层的 `serve-core` 可能仍在处理正在进行的对话、向微信客户端发送点击或正处于 SQLite 事务中。强行切换可执行文件或强杀进程将导致微信消息异常与数据撕裂。
 
 ### 3.2 核心服务排空三原则
 核心服务 `serve-core` 必须支持平滑排空协议，严格遵循以下三条准则：
@@ -88,16 +83,20 @@ flowchart TD
 2. **在途任务（In-flight Turns）状态明确与未知绝不重发**：
    - 对于正在等待大模型返回的在途任务，允许最多有界等待（例如 10 秒）；
    - **防重复发送红线**：若消息已经尝试通过 Worker 发送往微信界面，但未收到明确成功回报（状态为 `unknown`），**绝对禁止自动重发**，防止向真实客户造成骚扰甚至引发微信风控封号。排空结束时，在途状态持久化标记为 `drained_unknown`。
-3. **排空超时严格放弃切换（Timeout Abort）**：
+3. **排空超时严格放弃切换（Timeout Abort）与不可信恢复**：
    - 排空总超时硬上限设为 30 秒；
-   - 若 30 秒内在途任务仍未完成或子进程无法退出，排空失败，更新器**严格放弃版本切换**，事务回滚并保持旧版本运行，绝对禁止在排空未完成时强行切指针。
+   - 若 30 秒内在途任务仍未完成或子进程无法退出，更新器**严格放弃版本切换**；
+   - **安全边界修正**：排空超时后必须保持维护抑制态（Fail-Closed），**绝对不能轻易承诺“旧版本已安全恢复”**，因为此时残余 worker 仍可能存活并产生并发冲突，需人工排查清理。
 
-### 3.3 进程退出与锁释放证明（内核物理硬证据）
-- 进程对象在内存中被置为 nil 或无法通过 PID 探测，均不能作为进程已退出的确凿证据。
-- **排空与退出成功的唯一物理证明**：
-  1. `serve-core` 正常退出后，内核会自动释放其持有的 `core.lock` 文件锁；
-  2. 更新器调用 `acquire_core_lock_for_maintenance(&state_dir)`，**且实际成功获取到了 `core.lock` 的独占排他锁**；
-  3. 持有该锁直到更新完成，保证在更新器操作期间没有任何外部力量可以意外启动 `serve-core`。
+### 3.3 进程退出与锁释放证明（安全边界界定）
+- **关于 `core.lock` 的严格安全边界界定**：
+  - 成功获取 `core.lock` **仅证明遵守该锁的 `serve-core` 主进程当前未持有该锁**；
+  - **`core.lock` 根本不能证明由 core 派生的 worker 进程（如 `wechat_bot_worker`、`wechat_click`）、孙进程或在途的系统硬件副作用已经退出或终止**！
+- **排空退出的完整证据链要求**：
+  1. `serve-core` 主进程退出释放 `core.lock`；
+  2. 必须存在独立的 worker 退出证据（例如对 worker 进程的显式 waitpid、worker 专属互斥锁或进程监控表清空）；
+  3. 更新器调用 `acquire_core_lock_for_maintenance(&state_dir)` 成功获取排他锁；
+  4. 缺失上述任一证据时，更新器拒绝进行版本软链切换。
 
 ---
 
@@ -114,69 +113,69 @@ flowchart TD
   - 这会导致 Swift Supervisor 读取后因不是 36 字节 UUID 而误判为 `recoveryRequired`！
 
 **统一接线契约规范**：
-1. `core.maintenance` 的内容**严格且仅允许包含 36 字符的标准 UUID 字符串**（即当前更新事务的 `tx_id` 中纯 UUID 部分，或符合 RFC 4122 的 36 字节 ASCII 字符串），末尾不带换行，文件大小严格等于 36 字节，文件权限严格设置为 `0600`。
+1. **精确 UUID 映射**：
+   - 事务标识 `tx_id` 统一格式为 `tx-<36-byte-uuid>`；
+   - 写入 `core.maintenance` 标志时，**必须严格提取其中的 36 字节标准小写 UUID 字符串**（即去除 `tx-` 前缀，格式为 `8-4-4-4-12` 的 ASCII 字符），严禁写入任意 reason 字符串，严禁携带换行符，文件大小严格为 36 字节，权限为 `0600`。
 2. 同目录下写入可选的辅助诊断文件 `core.maintenance.json`（权限 `0600`），记录详细上下文（包括 `tx_id`、`reason`、`timestamp`、`target_release_id` 等），供 UI 和日志做只读呈现，但**以纯文本 36 字节 `core.maintenance` 作为唯一互斥权威**。
-3. 清除维护标志时，更新器必须校验 `core.maintenance` 中的 UUID 是否与当前 `tx_id` 精确一致；若不一致或文件损坏，严禁擅自删除，报错退出。
+3. 清除维护标志时，更新器必须校验 `core.maintenance` 中的 UUID 是否与当前 `tx_id` 剥离前缀后的 UUID 精确一致；若不一致或文件损坏，严禁擅自删除，报错退出。
 
-### 4.2 启动前双检查（Dual-check Guard）与 Fail-Closed 原则
+### 4.2 启动前双检查（Dual-check Guard）严格只读与 Fail-Closed 闭环
 
-任何组件（Swift 宿主、CoreSupervisor、`wechat-mcp` 自身）在启动执行任何业务前，必须执行启动前双检查：
+任何组件（Swift 宿主、CoreSupervisor、`wechat-mcp` 自身）在启动执行任何业务前，必须执行启动前双检查。
+
+**核心准则：启动 Guard 必须严格只读（Read-Only）**：
+- 启动 Guard 严禁在检查期间因发现 journal 损坏或不存在而擅自创建新 UUID、写入文件或清理已有终态；
+- 它的唯一职责是评估当前系统状态是否安全可启动。
+
+**双检查核验流**：
 1. **第一检查源**：`core.maintenance`
-   - 不存在：表示无维护标志；
-   - 存在且内容为合法 36 字节 UUID：处于维护抑制态；
-   - 存在但格式损坏、大小不符、权限非 0600：触发 `recoveryRequired`。
+   - 不存在：无外部维护标志；
+   - 存在且内容为合法 36 字节标准 UUID：处于维护抑制态（返回 `.active(uuid)`）；
+   - 存在但格式损坏、大小不为 36、存在软链接、权限非 0600、UID 不符：判定为 `.recoveryRequired`。
 2. **第二检查源**：`state/update-journal.json`
-   - 不存在：表示无更新事务进行；
-   - 存在且阶段为 `Committed` 或 `RolledBack`：事务已结，可正常清理；
-   - 存在且阶段为 `Staged`、`PublisherVerified`、`LocalSigned`、`Draining`、`BackupVerified`、`Switching`、`CandidateTesting`、`CandidateTestingPassed`：事务尚未完成或处于崩溃恢复窗口；
-   - 文件损坏、反序列化失败：触发 `recoveryRequired`。
+   - 不存在：表示无进行中的更新事务；
+   - 存在且阶段为 `Staged`、`PublisherVerified`、`LocalSigned`、`Draining`、`BackupVerified`、`Switching`、`CandidateTesting`、`CandidateTestingPassed`：事务尚未完成或处于崩溃恢复窗口，判定为维护态；
+   - 文件损坏、反序列化失败、存在未知 stage、为软链接、权限非 0600、UID 不符：判定为 `.recoveryRequired`；
+   - **`Committed` 终态的全要素二次校验红线**：
+     - **严禁仅凭 journal 中出现 `Committed` 标签就直接放行！**
+     - 必须进一步只读核对：
+       a. `state/current_release.json` 权威提交记录必须真实存在；
+       b. 记录中的 `tx_id`、`release_id`、`sequence`、`manifest_digest` 必须与 journal 对应字段完全一致；
+       c. `current` 软链接的目标目录名称必须等于该 `release_id`，且该目录真实存在为目录（非损坏链接）；
+     - 若上述全要素任一不符，说明提交记录与文件系统脱节，**坚决判定为 `.recoveryRequired` 并抑制启动**。
 
-**Fail-Closed 闭环规则**：
-- 只要任一检查源出现异常或处于未完成状态，**严禁启动核心服务**；
-- 若 `update-journal.json` 损坏，系统必须主动创建/保持 `core.maintenance` 标记，确保即使宿主崩溃重启，CoreSupervisor 也绝不会盲目拉起核心；
-- 必须保持维护抑制态，直到管理员运行 `wechat-updater recover` 或执行显式的人工修复指令。
+**Fail-Closed 闭环**：
+- 只要任一检查源指示处于未完成事务、数据损坏或不一致，**严禁启动核心服务**，保持抑制态待人工排查。
 
 ---
 
-## 5. Updater 独立进程、父子身份校验与 Transaction 绑定
+## 5. Updater 独立进程与调用安全边界
 
 ### 5.1 独立进程存活与生命周期
 `wechat-updater` 作为独立的命令行二进制文件存在，存放于受控目录。它不依赖宿主 UI 进程的存活，在宿主退出或重启时能独立完成剩下的原子提交与维护清理。
 
-### 5.2 安全启动约束与身份防伪造
-为防止外部非授权进程滥用更新器修改系统，`wechat-updater` 实施严格的身份防伪造与 Transaction 绑定契约：
-1. **命令行参数强制要求**：
-   - `wechat-updater apply --config <path> --manifest <path> --tx-id <UUID>`
-   - 启动时校验传入的 `--tx-id` 必须为有效 36 字节 UUID。
-2. **父子进程关系与 UID 约束**：
-   - `getuid()` 与 `geteuid()` 必须与配置文件和 state 目录拥有者完全一致，禁止跨用户提权；
-   - 启动时通过环境变量 `WECHAT_CALLER_PID` 传递父进程 PID，并通过系统调用核实该 PID 属于同一用户，防止任意未知来源调用。
-3. **Transaction 独占绑定**：
-   - 更新器创建的 journal、维护文件 `core.maintenance` 以及候选测试证据中，必须全链路携带此 `tx_id`；
-   - 若发现 state 目录下已存在属于其他 `tx_id` 的未完成事务，立即拒绝启动。
+### 5.2 调用方身份鉴权与同 UID 威胁边界（安全修正）
+- **同 UID 威胁边界声明**：
+  - 在 POSIX / macOS 语义中，环境变量（如 `WECHAT_CALLER_PID`）完全可在同 UID 下被任意派生子进程或同用户下的未受信脚本伪造；
+  - `getuid()` 与 `geteuid()` 仅能证明调用方与运行方同属一个本地用户，**根本不能作为强安全凭据或鉴权依据**；
+  - 不能假设同 UID 内的所有进程均完全受信。
+- **阶段 1 与生产安全控制**：
+  - 阶段 1 中，`wechat-updater` 保持生产写命令 `apply` / `rollback` / `recover` 处于 `unsupported`（退出码 1）；
+  - 生产受控调用通道必须另行基于内核级 peer 凭据（如 Unix domain socket 的 `LOCAL_PEERPID` / `LOCAL_PEERCRED`）、受保护的 IPC 握手或系统级签名校验实现，不得在环境变量中传递未经证明的信任。
 
 ---
 
-## 6. 完整应用版本包结构、Manifest Schema 与安装元数据
+## 6. 完整应用版本包规范、Manifest Schema 与安装元数据
 
-### 6.1 完整应用包目录形态（.App 与辅助组件）
-
-在 macOS 生产环境下，完整应用支持以下组件的整体打包：
+### 6.1 真实组件目录形态（基于已有契约，拒绝虚构）
+严格引用已有契约 `production-updater-contract.md` 中的规范目录结构，严禁虚构不存在的 app bundle 或桌面辅助工具：
 ```text
 wechat-mcp-release/
 ├── bin/
 │   ├── wechat-mcp          # 核心服务 (0755)
 │   ├── wechat-updater      # 独立更新器 (0755)
 │   ├── wechat_bot_worker   # RPA 操作 Worker (0755)
-│   ├── wechat_click        # 原生点击与窗口辅助 (0755)
-│   └── desktop_helper      # 桌面辅助组件 (0755)
-├── resources/
-│   └── gateway.example.json
-└── WeChatCS.app/           # Swift 宿主 UI 完整 Bundle (可选一体化分发)
-    └── Contents/
-        ├── Info.plist
-        ├── MacOS/WeChatCS
-        └── Resources/
+│   └── wechat_click        # 原生点击与窗口辅助 (0755)
 ```
 
 ### 6.2 发布清单 Manifest Schema v1 规范
@@ -186,192 +185,58 @@ wechat-mcp-release/
 - 资源硬上限：`max_unpacked_bytes`、`max_file_count`（防压缩炸弹）；
 - 组件白名单：逐一列出相对路径、kind（`executable` / `regular_file`）、权限位（`0755` 或 `0644`）、SHA-256 与字节数，解包后禁止有多余或缺失文件。
 
-### 6.3 严格顺序：验签 -> 本机重签名 -> 切换
-所有文件操作必须严格遵守以下顺序：
-1. **解包至独立暂存区**：`staging/<tx_id>/`（权限 `0700`），严禁直接解包到正式目录；
-2. **发布者签名验证**：逐文件计算 SHA-256 并使用生产公钥根核验发布者 Ed25519 签名；
-3. **本机 codesign 重签名**：
-   - 仅对白名单中的可执行文件执行本机重签名；
-   - 调用系统 `codesign --force --sign <Identity> ...`；
-   - 紧接着执行 `codesign --verify --verbose=2` 验证签名有效性；
-   - 若重签名失败，**全量销毁暂存区并终止事务**，现有稳定版本不受任何影响；
-4. **原子发布到版本目录**：`rename(staging/<tx_id>, releases/<release_id>)`；
-5. **切换版本指针**：排空与备份确认后，原子修改软链 `current -> releases/<release_id>`。
-
-### 6.4 权威提交记录（Authoritative Commit Record）
-版本的正式安装状态以 `state/current_release.json` 为单一权威事实源：
-```json
-{
-  "record_schema": 1,
-  "tx_id": "tx-88d447d2-749e-4e89-a5c3-1d89851148e6",
-  "release_id": "0.2.0-20261110",
-  "sequence": 1002,
-  "channel": "stable",
-  "manifest_digest": "6b3a...64hex",
-  "installed_at": 1794300000
-}
-```
-**原子落盘协议**：
-- 候选自检通过后 -> 持久化 `CandidateTestingPassed` 到 journal -> 原子写入 `current_release.json`（写临时文件 -> fsync -> rename -> 父目录 fsync）-> 持久化 `Committed` 到 journal -> 清理 `core.maintenance`。
-- 绝不将防降级高水位 `highest_accepted_sequence` 误当作已安装版本。
+### 6.3 验签先于解包与 Codesign 变更后哈希区分（安全修正）
+1. **验签先于解包（Verify Before Unpack）**：
+   - 原始发布包解包前，必须首先在内存中对未解包的 `manifest` 签名封套及 `artifact` 压缩包整体 SHA-256 执行发布者 Ed25519 签名验证；
+   - 验证通过前，**严禁创建任何解包目录或执行解压操作**，防止解压未签名的恶意压缩炸弹包。
+2. **Codesign 前后哈希区分**：
+   - 本机 codesign 重签名会直接修改 Mach-O 二进制文件的 `__LINKEDIT` 等段，导致重签后的二进制 SHA-256 与原始发布包不再相同；
+   - 元数据中必须清晰区分：
+     - `publisher_sha256`：发布者签名清单中对应的原始哈希；
+     - `local_signed_sha256`：本机重签后的实际本地哈希；
+   - 阶段 1 中不实现生产 codesign 重签名，保持其隔离验证特性。
 
 ---
 
-## 7. 候选自检（Candidate Testing）受信可执行约束
+## 7. 候选自检（Candidate Testing）受信可执行约束与边界
 
-版本指针指向新版本后，在解除维护前必须进行候选自检，验证新版本能够在当前环境下正常工作：
-1. **受信命令约束（No Arbitrary Shell）**：
-   - 生产环境中**绝对禁止**外部传入任意 shell 命令；
-   - 仅允许调用候选版本中硬编码的自检入口，例如：
-     `releases/<release_id>/bin/wechat-mcp --check-config --config <path>`；
-   - 执行前验证二进制路径为绝对路径且无路径穿越。
-2. **自有进程组与全组回收机制（Setpgid & Group Kill）**：
-   - 复用 Commit `90918b5` 已验证机制：通过 `libc::setpgid(0, 0)` 将子进程设置为独立进程组 leader；
-   - 退出或超时时，使用 `kill(-pgid, SIGKILL)` 向进程组发送信号，彻底收割所有派生的子孙进程，杜绝孤儿进程长期占用系统资源。
-3. **消除无界 Join 挂死与洪泛硬上限**：
-   - 标准输出与标准错误读取设置单次缓冲上限（64 KB）与总读取硬上限（512 KB）；
-   - 一旦超出硬上限，立即杀组报错，防止恶意或异常进程持续打印耗尽内存与 CPU；
-   - 直接子进程退出后，短暂等待并在关闭写端后收割读线程，保证 `stdout_handle.join()` 在毫秒级安全返回。
+### 7.1 setpgid 逃逸边界（安全修正）
+- **边界说明**：
+  - Commit `90918b5` 中引入的 `libc::setpgid(0, 0)` 与全组 `kill(-pgid, SIGKILL)` 能够有效收割遵循标准 fork 的子孙进程并关闭管道；
+  - **但它无法收割主动调用 `setsid()` 脱离原有进程组逃逸的恶意或特殊后代进程**；
+  - 删除“彻底杜绝全部子孙孤儿”的绝对承诺，明确系统只能基于标准进程组隔离尽最大努力收割（Best-effort Group Cleanup）。
+
+### 7.2 候选自检局限性与受信约束
+- 候选自检命令严禁使用任意 shell；
+- 命令如 `--check-config` **仅证明了静态配置文件的反序列化与字段合法性，根本不能代表完整的业务逻辑与应用级自检通过**；
+- 完整的自检机制须待阶段 2/3 定义更完善的受限探针。
 
 ---
 
-## 8. 生产信任根编译、分发源策略与密钥轮换方案
-
-### 8.1 生产公钥根与测试公钥完全隔离
-- **红线规定**：测试夹具中的 `tests/fixtures/test_ed25519.key` 与合成公钥仅在 `#[cfg(test)]` 或测试适配器中可用，**绝对禁止**将测试公钥带入生产构建或作为默认根。
-- **生产信任根注入模式**：
-  在生产编译时，通过受控宏或静态结构体嵌入内置公钥表：
-  ```rust
-  pub static PRODUCTION_TRUSTED_KEYS: &[TrustedKeyEntry] = &[
-      TrustedKeyEntry {
-          key_id: "wechat-mcp-release-2026-v1",
-          public_key_hex: "...", // 待用户提供的生产签名公钥 (32 bytes Ed25519)
-          not_before: 1794297600,
-          not_after: 1825833600,
-          revoked: false,
-      }
-  ];
-  ```
-- 若编译时未配置生产信任根，运行时直接在 `update-check` 与 `apply` 前返回 `error: trust_root_unconfigured` 并退出码 1，保持安全的 Fail-Closed。
-
-### 8.2 密钥轮换策略（Key Rotation）
-1. **双根并存过渡期**：`TrustedKeyStore` 支持配置多个公钥条目；新老密钥更替时，系统可同时信任旧 Key 与新 Key；
-2. **版本清单绑定 Key ID**：发布封套严格携带 `key_id`，客户端根据 `key_id` 匹配信任库中的具体条目，校验当前时间戳处于 `[not_before, not_after]` 范围内且未被吊销；
-3. **紧急吊销（Revocation List）**：支持发布携带签名吊销凭据的更新，当检测到某个 Key ID 被标记为吊销后，立即拒绝任何该 Key 签发的后续安装包。
-
-### 8.3 下载分发源方案审查选项（供协调者审定）
-
-分发源尚未最终敲定，本设计提出以下三种可审查选项：
-- **选项 A（推荐 - 静态安全存储桶）**：使用私有或受控 HTTPS 静态存储桶（如阿里云 OSS / 腾讯云 COS / AWS S3），开启只读与 HTTPS TLS 证书校验。客户端通过预设固定域名下载 Manifest 与 tar.gz。优点是无动态服务端漏洞风险，内容完全由签名封套保护。
-- **选项 B（企业专有更新服务）**：自建专用轻量 API 服务，提供 `/v1/update/check` 和 `/v1/update/download`。支持根据客户端上报的当前版本、操作系统和架构精确下发最小增量说明。
-- **选项 C（纯离线投放模式）**：适用于严格物理隔离的专用生产机器。不开放任何外网下载权限，仅支持管理员通过内部安全通道将已签名的 `release.tar.gz` 与 `manifest.json` 投放到本地目录后，执行 `wechat-updater apply --manifest <path>` 进行安装。
-
----
-
-## 9. 数据不自动覆盖回退与灾难恢复（Disaster Recovery）
-
-### 9.1 数据防覆盖红线
-在更新失败执行回退时：
-- 若系统存在业务数据库（如 SQLite 存储的聊天历史、好友关系、外部大脑对话）：
-  - 一旦版本切换后（进入 `CandidateTesting` 阶段），即使自检失败，**严禁自动用更新前的备份数据库覆盖现有数据库**！
-  - 原因：在版本切换与回滚的窗口期内，可能已有新的客户咨询消息写入数据库；盲目回滚覆盖将导致真实客户消息永久丢失，造成严重业务事故。
-- **行为规范**：
-  若数据库状态变为未知或已可能产生新数据，更新器将状态置为 `RecoveryRequired`，保持 `core.maintenance` 抑制标志，记录详细诊断日志，并向 UI 和 CLI 输出人工恢复指引。由管理员决定是合并数据还是手动恢复备份。
-
-### 9.2 断电与崩溃精确全要素恢复
-复用 Commit `883cb5f` 的全要素恢复契约：
-当系统异常断电重启后，更新器读取 `update-journal.json` 与 `current_release.json`：
-- 若处于 `CandidateTestingPassed` 状态且崩溃前已写入权威 record：全要素核对（`tx_id`、`release_id`、`sequence`、`manifest_digest`、`current` 指针及 Proof 证据）；只有当全部要素完全匹配时，才精确判定为 `CompletePendingCommit` 并完成收尾；
-- 若要素有任一不匹配或序列号被篡改，严格拒绝自动恢复，返回 `ManualInterventionRequired`。
-
----
-
-## 10. 主应用（Swift Host）与 Updater IPC 闭合协议
-
-主应用（Swift Host）与更新器之间采用受限的 CLI 子进程与 JSON 协议进行闭合通信，杜绝开放任意动态脚本或未授权端口：
-
-### 10.1 查询接口：`wechat-mcp control update-status`
-- **调用方式**：`wechat-mcp control update-status --config <path>`
-- **输出格式**：标准 JSON 输出（遵循 D2/I5 闭合字段），包含 `current_release`、`candidate_release`、`transaction`、`guard`；
-- **错误语义**：退出码 0 代表成功获取；退出码非 0 代表配置读取或状态解析异常。
-
-### 10.2 检查更新接口：`wechat-mcp control update-check`
-- **调用方式**：`wechat-mcp control update-check --config <path> [--manifest <path>]`
-- **输出格式**：
-  - 发现可用版本：`{"status": "available", "candidate": {...}, "verification": {...}}`
-  - 最新版本已安装：`{"status": "already_installed", ...}`
-  - 架构或系统不兼容：`{"status": "incompatible", "reason": "...", "candidate": null}`
-  - 生产公钥根未配置：`{"status": "incompatible", "reason": "trust_root_unconfigured", ...}`
-
-### 10.3 幂等与取消语义（Idempotence & Cancellation）
-- **幂等性**：针对同一 `tx_id` 重复调用 `apply`，更新器检查 journal 当前状态：若已在处理该事务，返回当前阶段与进度，严禁重复解包或并发冲突；若已被其他事务占用，返回 `conflict`。
-- **取消语义（Cancel）**：
-  - 仅在 `Staged`、`PublisherVerified`、`LocalSigned` 等尚未停机切换指针的早期准备阶段允许安全取消；取消后清理 `staging/` 暂存区并删除 journal；
-  - 一旦进入 `Draining`、`Switching` 或 `CandidateTesting`，取消请求将被坚决拒绝，必须等待当前阶段收敛为提交或安全回滚，严禁在临界切换窗口强制终止更新器。
-
----
-
-## 11. 实施分类清单（本地代码 / 用户提供 / 专用机实测）
-
-为保证工程实施安全可控，清晰划分三类任务边界：
+## 8. 实施分类清单（本地代码 / 用户提供 / 专用机实测）
 
 | 分类编号 | 分类名称 | 包含事项与范围界定 | 是否可在本工作区实现 |
 |:---:|---|---|:---:|
-| **分类 1** | **本地代码可完成**<br>*(Local Code)* | 1. `core.maintenance` 36 字节 UUID 格式双向对齐与解析加固；<br>2. 核心服务平滑排空逻辑（停止新 turn、在途 unknown 不重发、超时中断）；<br>3. 真实 `core.lock` 退出释放物理检测与获取适配；<br>4. 独立 `wechat-updater` 父子身份及参数校验接入；<br>5. 启动前双检查（Dual-check Guard）Fail-Closed 逻辑；<br>6. 单元测试、模拟故障注入与回归门禁。 | **是**<br>（纯代码与逻辑测试，无外部环境依赖） |
-| **分类 2** | **必须用户提供的资产**<br>*(User Assets)* | 1. 生产环境 Ed25519 发布公钥（`public_key_hex`）与 Key ID；<br>2. 正式更新分发源（CDN 域名、存储桶鉴权策略或离线路径）；<br>3. 目标机器 codesign 重签名使用的钥匙串证书名称（Certificate Identity）。 | **否**<br>（涉及真实密钥与商业资产，必须由用户/管理员明确提供） |
-| **分类 3** | **必须专用机授权实测**<br>*(Dedicated Machine)* | 1. macOS 系统钥匙串真实解锁与无交互重签名测试；<br>2. macOS TCC 辅助功能与屏幕录制权限授予实测；<br>3. 真实 launchd 守护任务（`gui/<uid>/local.wechat-mcp.host`）的 load / bootout / bootstrap 行为；<br>4. 真实微信登录状态下更新切换的无感验证。 | **否**<br>（本地沙箱环境无 macOS 专用机授权，严禁盲目执行） |
+| **分类 1** | **本地代码可完成**<br>*(Local Code)* | 1. `core.maintenance` 36 字节 UUID 格式双向对齐与解析加固；<br>2. 启动前只读双检查（Dual-check Guard）Fail-Closed 逻辑（含 `Committed` 全要素验证）；<br>3. Rust 与 Swift 隔离单元测试。 | **是**<br>（阶段 1 实施范围） |
+| **分类 2** | **必须用户提供的资产**<br>*(User Assets)* | 1. 生产环境 Ed25519 发布公钥（`public_key_hex`）与 Key ID；<br>2. 正式更新分发源（CDN 域名、存储桶鉴权策略或离线路径）；<br>3. 目标机器 codesign 重签名使用的钥匙串证书名称（Certificate Identity）。 | **否**<br>（阶段 1 不引入，保持 unsupported） |
+| **分类 3** | **必须专用机授权实测**<br>*(Dedicated Machine)* | 1. macOS 系统钥匙串真实解锁与无交互重签名测试；<br>2. macOS TCC 辅助功能与屏幕录制权限授予实测；<br>3. 真实 launchd 守护任务的 load / bootout / bootstrap 行为；<br>4. 真实微信登录状态下更新切换的无感验证。 | **否**<br>（阶段 1 严禁执行） |
 
 ---
 
-## 12. 允许修改的文件清单与分阶段实施路线图
+## 9. 阶段 1 实施范围与限定文件清单
 
-### 12.1 允许修改的生产文件清单（待审批后进入开发）
+依据协调者指令，本次**仅实施阶段 1**（仅维护 UUID 格式与 Rust/Swift 启动双检查，限定 journal/启动 guard/CoreSupervisor 及直接测试，避免 serve/control 业务改动与 Q2 冲突；阶段 2 真实排空暂不实施）：
 
-在方案获得协调者明确批准前，**不改动任何生产文件**。获得批准后，仅允许在以下限定文件范围内小步推进：
+### 允许修改的文件清单
+1. **Rust 更新器与只读 Guard**：
+   - `src/updater/journal.rs`：修改 `set_structured_maintenance_marker` 与 `clear_maintenance_for_tx`，使 `core.maintenance` 严格写入 36 字节小写 UUID，并新增只读双检查逻辑 `check_startup_guard_readonly`；
+   - `src/updater/tests.rs`：新增/调整对应阶段 1 的隔离测试。
+2. **Swift CoreSupervisor 守护**：
+   - `native/bootstrap/CoreSupervisor.swift`：对齐只读双检查逻辑（引入 `checkStartupDualGuardReadonly`），支持在拉起前同时校验 `core.maintenance` 与 `update-journal.json`（含 `Committed` 全要素校验），保持 fail-closed。
+3. **Swift 隔离测试**：
+   - `tests/swift_host.rs` 或专有 Swift 测试用例：验证两端 36 字节 UUID 解析与双检查互通性。
 
-1. **Rust 核心与更新器**：
-   - `src/updater/journal.rs`：对齐 `core.maintenance` 36 字节 UUID 写入与清理规范；
-   - `src/updater/executor.rs`：将沙箱适配器能力抽象提升为支持真实排空与锁检测的生产适配器接口；
-   - `src/bin/wechat-updater.rs`：补全 `apply` / `rollback` / `recover` 的参数校验与执行流（在无生产根时安全 fail-closed）；
-   - `src/core/serve.rs`：接线平滑排空协议（停止新请求、在途超时处理）；
-   - `src/core/control.rs`：扩展状态与检查的深层排空标记解析。
-2. **Swift 宿主与守护**：
-   - `native/bootstrap/CoreSupervisor.swift`：对齐双检查逻辑与 `recoveryRequired` 安全边界；
-   - `native/bootstrap/UpdatePage.swift`：仅用于呈现真实排空证据与只读反馈，保持写操作禁用。
-3. **隔离测试文件**：
-   - `tests/updater_tests.rs` / `src/updater/tests.rs`：补充排空在途不重发、UUID 双检查与真实锁竞争测试。
-
-### 12.2 分阶段实施路线图
-
-```mermaid
-flowchart LR
-    P0["阶段 0: 设计与审查 (当前)"] --> P1["阶段 1: 格式对齐与双检查本地闭环"]
-    P1 --> P2["阶段 2: 真实排空与锁释放证明接线"]
-    P2 --> P3["阶段 3: 生产根/分发源配置与专用机实测"]
-```
-
-- **阶段 0（当前阶段）**：完成接线契约设计文档 `docs/design/2026-11-11-update-runtime-contract.md`，通过 Orca ask 向协调者提出明确方案与阻断点，严禁提前修改代码。
-- **阶段 1（本地代码闭环）**：在获得批准后，修复 `core.maintenance` 格式不一致，实现 Rust 与 Swift 双端严格遵循 36 字节 UUID 契约，补齐启动前双检查测试。
-- **阶段 2（真实排空与锁协议）**：实现 `serve-core` 停止新 turn、在途 unknown 不重发机制，将更新器与 `acquire_core_lock_for_maintenance` 真实退出证明接线。
-- **阶段 3（生产资产注入与实测）**：用户提供生产根公钥与分发源后，配置生产编译宏，在具备 TCC 授权的专用机上进行实测。
-
----
-
-## 13. RED-GREEN 验收标准与测试矩阵
-
-实施接线必须遵循严格的 RED-GREEN TDD 规范，先写失败测试暴露缺陷，再完成最小实现：
-
-| 测试用例名称 | 验证目标与断言要点 | 预期 RED 表现 | 预期 GREEN 表现 |
-|---|---|---|---|
-| `test_maintenance_marker_strict_36_bytes_uuid_contract` | 验证 Rust 写入的 `core.maintenance` 为严格 36 字节 UUID，Swift `readMaintenanceLocked()` 能够正常解析为 `.active` 而绝非 `.recoveryRequired`。 | 现实现写入 `reason` 导致 Swift 读取非 36 字节报 `recoveryRequired` | Swift 与 Rust 解析完全一致，`active(tx_id)` 双向通过 |
-| `test_core_drain_rejects_new_turn_and_no_resend_on_unknown` | 模拟进入排空状态后：新 turn 立即被拒绝；在途状态为 unknown 的 turn 绝不触发重发逻辑。 | 排空标志未接线，新 turn 仍被接收处理 | 新 turn 返回 503 维护中，在途 unknown 标记沉淀为 `drained_unknown` |
-| `test_core_drain_timeout_aborts_update_safely` | 模拟在途任务超过 30 秒无法排空，断言更新器放弃切换并安全退出，保持旧版本正常运行。 | 无超时中断逻辑，更新器强杀或强切版本 | 捕获排空超时，journal 记录 `DrainTimeout`，版本软链未发生变更 |
-| `test_lock_release_proof_required_before_version_switch` | 模拟更新器在 `serve-core` 尚未释放 `core.lock` 时尝试切换版本，断言更新器拒绝切换并回滚。 | 仅依靠 PID 缓存判断，造成版本切换时锁冲突 | 更新器因无法获取 `core.lock` 排他锁而安全中止，杜绝并发竞争 |
-| `test_dual_check_guard_fail_closed_on_corrupt_files` | 模拟 `core.maintenance` 或 `update-journal.json` 任一文件损坏/非合法 JSON，断言 CoreSupervisor 和 Core 均拒绝启动。 | 任一检查被绕过导致损坏状态下拉起核心 | 两端均严格返回 `recoveryRequired`，输出明确指引，启动保持抑制 |
-
----
-
-## 14. 结论与下一步审查指引
-
-本设计文档严格立足于现有代码事实，杜绝虚假声称已完成，明确了更新运行时接线的所有安全红线。
-在协调者完成本契约设计审查并正式批准前，工作树保持干净，不引入任何破坏性代码变动。
+### 严禁改动的文件
+- `src/core/serve.rs`（避免与 Q2 冲突，不在此阶段实施）；
+- `src/core/control.rs`（保持现有控制面稳定）；
+- 不引入 Python，不触碰真实系统环境与钥匙串。
