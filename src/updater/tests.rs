@@ -837,9 +837,11 @@ fn test_update_lock_exclusive_and_release_metadata() {
     assert_eq!(load_highest_accepted_sequence(&state_dir).unwrap(), 1002);
 
     // 3. 结构化维护态标记设置与精确 tx 清除测试
+    let test_tx_uuid = uuid::Uuid::new_v4();
+    let valid_tx_id = format!("tx-{}", test_tx_uuid);
     set_structured_maintenance_marker(
         &state_dir,
-        "tx-test-12345",
+        &valid_tx_id,
         "test maintenance reason",
         1794368000,
     )
@@ -848,16 +850,20 @@ fn test_update_lock_exclusive_and_release_metadata() {
     assert!(state_dir.join("core.maintenance").exists());
 
     // 尝试用错误的 tx_id 清除维护态，必须被拒绝！
-    let err_clear = clear_maintenance_for_tx(&state_dir, "tx-wrong-id").unwrap_err();
+    let wrong_tx_id = format!("tx-{}", uuid::Uuid::new_v4());
+    let err_clear = clear_maintenance_for_tx(&state_dir, &wrong_tx_id).unwrap_err();
     assert!(
         err_clear
             .to_string()
             .contains("maintenance_marker_tx_mismatch")
+            || err_clear
+                .to_string()
+                .contains("maintenance_marker_uuid_mismatch")
     );
     assert!(state_dir.join("core.maintenance.json").exists());
 
     // 用匹配的 tx_id 清除维护态，成功清除
-    clear_maintenance_for_tx(&state_dir, "tx-test-12345").unwrap();
+    clear_maintenance_for_tx(&state_dir, &valid_tx_id).unwrap();
     assert!(!state_dir.join("core.maintenance.json").exists());
     assert!(!state_dir.join("core.maintenance").exists());
 }
@@ -2047,4 +2053,189 @@ fn test_atomic_commit_protocol_failure_and_crash_window_recovery() {
         }
         other => panic!("Expected ManualInterventionRequired, got {:?}", other),
     }
+}
+
+#[test]
+fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
+    let dir = TempTestDir::new("maint_uuid_test");
+    let state_dir = &dir.0;
+    let releases_dir = dir.0.join("releases");
+    let current_link = dir.0.join("current");
+    fs::create_dir_all(&releases_dir).unwrap();
+
+    let tx_uuid = uuid::Uuid::new_v4();
+    let tx_id = format!("tx-{}", tx_uuid);
+
+    // 0. 初始空状态测试：纯只读双检查返回 AllowStartup
+    let init_decision = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    assert_eq!(init_decision, StartupDualCheckDecision::AllowStartup);
+
+    // 1. 写入结构化维护标志
+    set_structured_maintenance_marker(state_dir, &tx_id, "updater draining", 1794380000).unwrap();
+
+    let raw_maint = state_dir.join("core.maintenance");
+    assert!(raw_maint.exists(), "core.maintenance should exist");
+
+    // 检查权限为 0600
+    let meta = fs::metadata(&raw_maint).unwrap();
+    let mode = meta.permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "core.maintenance permissions must be 0600");
+
+    // 检查大小严格为 36 字节
+    assert_eq!(
+        meta.len(),
+        36,
+        "core.maintenance size must be exactly 36 bytes"
+    );
+
+    // 检查内容必须为纯 36 字节标准小写 UUID，绝不是 reason 文本
+    let content = fs::read_to_string(&raw_maint).unwrap();
+    assert_eq!(
+        content,
+        tx_uuid.to_string(),
+        "core.maintenance must contain exact 36-byte UUID"
+    );
+
+    // 此时双检查必须返回 MaintenanceSuppressed
+    let sup_decision = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    assert_eq!(
+        sup_decision,
+        StartupDualCheckDecision::MaintenanceSuppressed {
+            tx_id: tx_uuid.to_string(),
+            stage: None,
+        }
+    );
+
+    // 2. 尝试用错误 tx_id 清除：必须拒绝
+    let wrong_tx = format!("tx-{}", uuid::Uuid::new_v4());
+    let err_clear = clear_maintenance_for_tx(state_dir, &wrong_tx);
+    assert!(err_clear.is_err());
+    assert!(
+        raw_maint.exists(),
+        "core.maintenance must still exist when tx mismatch"
+    );
+
+    // 用正确 tx_id 清除
+    clear_maintenance_for_tx(state_dir, &tx_id).unwrap();
+    assert!(
+        !raw_maint.exists(),
+        "core.maintenance should be removed after clean"
+    );
+    let after_clean = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    assert_eq!(after_clean, StartupDualCheckDecision::AllowStartup);
+
+    // 3. 损坏对抗场景测试
+    // 3a. core.maintenance 大小不是 36 字节
+    fs::write(&raw_maint, b"too_short").unwrap();
+    fs::set_permissions(&raw_maint, fs::Permissions::from_mode(0o600)).unwrap();
+    let dec_short = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    match dec_short {
+        StartupDualCheckDecision::RecoveryRequired { reason } => {
+            assert!(reason.contains("size_must_be_36_bytes"));
+        }
+        other => panic!("Expected RecoveryRequired, got {:?}", other),
+    }
+
+    // 3b. core.maintenance 包含非合法 UUID（恰好 36 字节但字符非法）
+    fs::write(&raw_maint, b"12345678-1234-1234-1234-123456789zz!").unwrap();
+    fs::set_permissions(&raw_maint, fs::Permissions::from_mode(0o600)).unwrap();
+    let dec_bad_uuid = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    match dec_bad_uuid {
+        StartupDualCheckDecision::RecoveryRequired { reason } => {
+            assert!(reason.contains("content_not_valid_uuid"));
+        }
+        other => panic!("Expected RecoveryRequired, got {:?}", other),
+    }
+    fs::remove_file(&raw_maint).unwrap();
+
+    // 3c. core.maintenance 为符号链接
+    let dummy_target = state_dir.join("dummy_target");
+    fs::write(&dummy_target, b"test").unwrap();
+    std::os::unix::fs::symlink(&dummy_target, &raw_maint).unwrap();
+    let dec_sym = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    match dec_sym {
+        StartupDualCheckDecision::RecoveryRequired { reason } => {
+            assert!(reason.contains("core.maintenance_must_not_be_symlink"));
+        }
+        other => panic!("Expected RecoveryRequired, got {:?}", other),
+    }
+    fs::remove_file(&raw_maint).unwrap();
+    fs::remove_file(&dummy_target).unwrap();
+
+    // 4. UpdateJournal 阶段校验与 Committed 全要素二次只读核验
+    let mut journal = UpdateJournal::new(&tx_id, "0.1.0", "0.2.0-test", 1005, 1794380000);
+    // 4a. 中间状态 (Draining) -> MaintenanceSuppressed
+    journal.stage = TransactionStage::Draining;
+    journal.persist_atomic(state_dir).unwrap();
+    let dec_draining = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    assert_eq!(
+        dec_draining,
+        StartupDualCheckDecision::MaintenanceSuppressed {
+            tx_id: tx_id.clone(),
+            stage: Some(TransactionStage::Draining),
+        }
+    );
+
+    // 4b. 阶段为 Committed，但缺失 current_release.json -> RecoveryRequired (绝不盲目放行)
+    journal.stage = TransactionStage::Committed;
+    journal.manifest_digest = Some("test_digest_value".into());
+    journal.persist_atomic(state_dir).unwrap();
+    let dec_missing_rec = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    match dec_missing_rec {
+        StartupDualCheckDecision::RecoveryRequired { reason } => {
+            assert!(reason.contains("missing_current_release_record"));
+        }
+        other => panic!("Expected RecoveryRequired, got {:?}", other),
+    }
+
+    // 4c. 提供 current_release.json 但要素不一致 (sequence 篡改)
+    let commit_rec = CurrentReleaseCommitRecord {
+        record_schema: 1,
+        tx_id: tx_id.clone(),
+        release_id: "0.2.0-test".into(),
+        sequence: 9999, // 篡改
+        channel: "stable".into(),
+        manifest_digest: "test_digest_value".into(),
+        installed_at: 1794380000,
+    };
+    atomic_commit_release_record(state_dir, &commit_rec).unwrap();
+    let dec_seq_mismatch = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    match dec_seq_mismatch {
+        StartupDualCheckDecision::RecoveryRequired { reason } => {
+            assert!(reason.contains("commit_record_sequence_mismatch"));
+        }
+        other => panic!("Expected RecoveryRequired, got {:?}", other),
+    }
+
+    // 4d. 修正 sequence，但 current 软链接缺失 -> RecoveryRequired
+    let correct_rec = CurrentReleaseCommitRecord {
+        sequence: 1005,
+        ..commit_rec
+    };
+    atomic_commit_release_record(state_dir, &correct_rec).unwrap();
+    let dec_missing_link = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    match dec_missing_link {
+        StartupDualCheckDecision::RecoveryRequired { reason } => {
+            assert!(reason.contains("current_link_does_not_exist"));
+        }
+        other => panic!("Expected RecoveryRequired, got {:?}", other),
+    }
+
+    // 4e. 建立正确的 current 软链并创建目标目录
+    let target_dir = releases_dir.join("0.2.0-test");
+    fs::create_dir_all(&target_dir).unwrap();
+    std::os::unix::fs::symlink(&target_dir, &current_link).unwrap();
+
+    // 全要素核对通过！
+    let dec_all_match = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    assert_eq!(dec_all_match, StartupDualCheckDecision::AllowStartup);
+
+    // 5. 纯只读性验证：检查前后 state 目录文件与元数据零副作用
+    let files_before = fs::read_dir(state_dir).unwrap().count();
+    let _ = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    let files_after = fs::read_dir(state_dir).unwrap().count();
+    assert_eq!(
+        files_before, files_after,
+        "startup guard must have zero write side effects"
+    );
 }

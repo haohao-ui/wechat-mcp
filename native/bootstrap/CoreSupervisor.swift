@@ -237,6 +237,9 @@ public final class CoreSupervisor {
     public var binaryURL: URL
     public var configURL: URL
     public var logURL: URL
+    public var journalURL: URL
+    public var releasesDirURL: URL
+    public var currentLinkURL: URL
     public var gracePeriod: TimeInterval
     public var pythonLoadedChecker: () -> Bool
 
@@ -246,15 +249,23 @@ public final class CoreSupervisor {
         binaryURL: URL? = nil,
         configURL: URL? = nil,
         logURL: URL? = nil,
+        journalURL: URL? = nil,
+        releasesDirURL: URL? = nil,
+        currentLinkURL: URL? = nil,
         gracePeriod: TimeInterval = 240.0,
         pythonLoadedChecker: @escaping () -> Bool = checkPythonLaunchdLoaded
     ) {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        self.coreEnabledURL = coreEnabledURL ?? home.appendingPathComponent(".wechat-rpa/core.enabled")
-        self.maintenanceURL = maintenanceURL ?? self.coreEnabledURL.deletingLastPathComponent().appendingPathComponent("core.maintenance")
-        self.binaryURL = binaryURL ?? home.appendingPathComponent(".wechat-rpa/bin/wechat-mcp")
+        let baseRpa = home.appendingPathComponent(".wechat-rpa")
+        self.coreEnabledURL = coreEnabledURL ?? baseRpa.appendingPathComponent("core.enabled")
+        let stateDir = self.coreEnabledURL.deletingLastPathComponent()
+        self.maintenanceURL = maintenanceURL ?? stateDir.appendingPathComponent("core.maintenance")
+        self.binaryURL = binaryURL ?? baseRpa.appendingPathComponent("bin/wechat-mcp")
         self.configURL = configURL ?? home.appendingPathComponent(".WeChatRPABot/config.json")
-        self.logURL = logURL ?? home.appendingPathComponent(".wechat-rpa/logs/core.log")
+        self.logURL = logURL ?? baseRpa.appendingPathComponent("logs/core.log")
+        self.journalURL = journalURL ?? stateDir.appendingPathComponent("update-journal.json")
+        self.releasesDirURL = releasesDirURL ?? baseRpa.appendingPathComponent("releases")
+        self.currentLinkURL = currentLinkURL ?? baseRpa.appendingPathComponent("current")
         self.gracePeriod = gracePeriod
         self.pythonLoadedChecker = pythonLoadedChecker
     }
@@ -262,7 +273,118 @@ public final class CoreSupervisor {
     public var maintenanceStatus: CoreMaintenanceStatus {
         lock.lock()
         defer { lock.unlock() }
-        return readMaintenanceLocked()
+        return readStartupDualGuardLocked()
+    }
+
+    /// 纯只读启动双检查 Guard：同时校验 core.maintenance 与 update-journal.json（零写入、零删除、Fail-Closed）
+    public func readStartupDualGuardLocked() -> CoreMaintenanceStatus {
+        // 1. 检查 core.maintenance 基础标志
+        let maintRes = readMaintenanceLocked()
+        if maintRes == .recoveryRequired {
+            return .recoveryRequired
+        }
+        var activeTxID: String? = nil
+        if case .active(let tid) = maintRes {
+            activeTxID = tid
+        }
+
+        // 2. 检查 update-journal.json 独立事务日志
+        var jStat = stat()
+        let jPath = journalURL.path
+        if lstat(jPath, &jStat) == 0 {
+            // 校验必须为普通文件、非软链接、UID匹配、权限 0600
+            guard (jStat.st_mode & S_IFMT) == S_IFREG,
+                  jStat.st_uid == geteuid(),
+                  (jStat.st_mode & 0o777) == 0o600 else {
+                return .recoveryRequired
+            }
+
+            guard let jData = try? Data(contentsOf: journalURL),
+                  let jObj = (try? JSONSerialization.jsonObject(with: jData, options: [])) as? [String: Any],
+                  let stage = jObj["stage"] as? String,
+                  let jTxID = jObj["transaction_id"] as? String else {
+                return .recoveryRequired
+            }
+
+            switch stage {
+            case "RecoveryRequired":
+                return .recoveryRequired
+
+            case "Staged", "PublisherVerified", "LocalSigned", "Draining", "BackupVerified",
+                 "Switching", "CandidateTesting", "CandidateTestingPassed", "RollbackStarted":
+                return .active(transactionID: jTxID)
+
+            case "RolledBack":
+                if let atid = activeTxID {
+                    return .active(transactionID: atid)
+                }
+                return .inactive
+
+            case "Committed":
+                // 终态全要素二次只读核验：严禁仅凭 Committed 标签放行！
+                // a. 校验 current_release.json
+                let recordURL = journalURL.deletingLastPathComponent().appendingPathComponent("current_release.json")
+                var rStat = stat()
+                guard lstat(recordURL.path, &rStat) == 0,
+                      (rStat.st_mode & S_IFMT) == S_IFREG,
+                      rStat.st_uid == geteuid(),
+                      (rStat.st_mode & 0o777) == 0o600 else {
+                    return .recoveryRequired
+                }
+                guard let rData = try? Data(contentsOf: recordURL),
+                      let rObj = (try? JSONSerialization.jsonObject(with: rData, options: [])) as? [String: Any],
+                      let rTxID = rObj["tx_id"] as? String,
+                      let rReleaseID = rObj["release_id"] as? String,
+                      let rSeq = (rObj["sequence"] as? NSNumber)?.uint64Value,
+                      let jTargetRel = jObj["target_release_id"] as? String,
+                      let jTargetSeq = (jObj["target_sequence"] as? NSNumber)?.uint64Value else {
+                    return .recoveryRequired
+                }
+                guard rTxID == jTxID, rReleaseID == jTargetRel, rSeq == jTargetSeq else {
+                    return .recoveryRequired
+                }
+                if let jDigest = jObj["manifest_digest"] as? String {
+                    guard let rDigest = rObj["manifest_digest"] as? String, rDigest == jDigest else {
+                        return .recoveryRequired
+                    }
+                }
+
+                // b. 校验 current 软链接与目标目录
+                var linkStat = stat()
+                guard lstat(currentLinkURL.path, &linkStat) == 0,
+                      (linkStat.st_mode & S_IFMT) == S_IFLNK else {
+                    return .recoveryRequired
+                }
+                guard let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: currentLinkURL.path) else {
+                    return .recoveryRequired
+                }
+                let targetLeaf = URL(fileURLWithPath: destination).lastPathComponent
+                guard targetLeaf == jTargetRel else {
+                    return .recoveryRequired
+                }
+                var destDirStat = stat()
+                let targetDirPath = releasesDirURL.appendingPathComponent(targetLeaf).path
+                guard stat(targetDirPath, &destDirStat) == 0,
+                      (destDirStat.st_mode & S_IFMT) == S_IFDIR else {
+                    return .recoveryRequired
+                }
+
+                if let atid = activeTxID {
+                    return .active(transactionID: atid)
+                }
+                return .inactive
+
+            default:
+                // 未知 stage 必须 Fail-Closed
+                return .recoveryRequired
+            }
+        } else {
+            // journal 不存在
+            if let atid = activeTxID {
+                return .active(transactionID: atid)
+            }
+            return .inactive
+        }
     }
 
     private func validTransaction(_ value: String) -> Bool {
@@ -485,7 +607,7 @@ public final class CoreSupervisor {
         lock.lock()
         defer { lock.unlock() }
 
-        guard readMaintenanceLocked() == .inactive else { throw CoreMaintenanceError.recoveryRequired }
+        guard readStartupDualGuardLocked() == .inactive else { throw CoreMaintenanceError.recoveryRequired }
         if let proc = process, proc.isRunning {
             return
         }

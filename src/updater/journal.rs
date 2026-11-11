@@ -563,6 +563,47 @@ pub fn load_current_release_record(state_dir: &Path) -> Result<Option<CurrentRel
     Ok(Some(record))
 }
 
+/// 向后兼容接口：别名转发至 load_current_release_record
+pub fn load_current_release_metadata(
+    state_dir: &Path,
+) -> Result<Option<CurrentReleaseCommitRecord>> {
+    load_current_release_record(state_dir)
+}
+
+/// 向后兼容接口：设置维护标志（自动生成合法 36 字节 UUID）
+pub fn set_maintenance_active(state_dir: &Path, reason: &str) -> Result<()> {
+    let dummy_tx = format!("tx-{}", uuid::Uuid::new_v4());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    set_structured_maintenance_marker(state_dir, &dummy_tx, reason, now)
+}
+
+/// 从 tx_id 中精确提取 36 字节小写标准 UUID（如 "tx-<uuid>" 或 "<uuid>"）
+pub fn extract_pure_uuid(tx_id: &str) -> Result<String> {
+    let raw = if let Some(stripped) = tx_id.strip_prefix("tx-") {
+        stripped
+    } else {
+        tx_id
+    };
+    let parsed = uuid::Uuid::parse_str(raw).map_err(|e| {
+        anyhow::anyhow!(
+            "invalid_tx_uuid: '{}' is not a valid 36-byte UUID: {}",
+            tx_id,
+            e
+        )
+    })?;
+    let lower = parsed.to_string();
+    if lower.len() != 36 {
+        bail!(
+            "extracted_uuid_length_mismatch: expected 36, got {}",
+            lower.len()
+        );
+    }
+    Ok(lower)
+}
+
 /// 沙箱内部结构化维护标志
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -579,8 +620,9 @@ pub fn set_structured_maintenance_marker(
     reason: &str,
     now: u64,
 ) -> Result<()> {
+    let pure_uuid = extract_pure_uuid(tx_id)?;
     let marker_path = state_dir.join("core.maintenance.json");
-    let tmp_path = state_dir.join(format!("core.maintenance.tmp.{}", uuid::Uuid::new_v4()));
+    let tmp_json_path = state_dir.join(format!(".maintenance.json.tmp.{}", uuid::Uuid::new_v4()));
 
     let marker = MaintenanceMarker {
         marker_schema: 1,
@@ -594,22 +636,34 @@ pub fn set_structured_maintenance_marker(
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(&tmp_path)?;
+        .open(&tmp_json_path)?;
     file.write_all(&json_bytes)?;
     file.sync_all()?;
     drop(file);
 
-    fs::rename(&tmp_path, &marker_path)?;
+    fs::rename(&tmp_json_path, &marker_path)?;
 
-    // 兼容原有的 core.maintenance 纯标志文件
+    // 写入严格 36 字节纯 ASCII UUID 的 core.maintenance 标志，权限严格 0600
     let raw_flag = state_dir.join("core.maintenance");
-    let _ = fs::write(raw_flag, reason.as_bytes());
+    let tmp_raw_path = state_dir.join(format!(".maintenance.tmp.{}", uuid::Uuid::new_v4()));
+    let mut raw_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp_raw_path)?;
+    raw_file.write_all(pure_uuid.as_bytes())?;
+    raw_file.sync_all()?;
+    drop(raw_file);
+
+    fs::rename(&tmp_raw_path, &raw_flag)?;
 
     sync_dir(state_dir)?;
     Ok(())
 }
 
 pub fn clear_maintenance_for_tx(state_dir: &Path, current_tx_id: &str) -> Result<()> {
+    let pure_uuid = extract_pure_uuid(current_tx_id)?;
+
     let marker_path = state_dir.join("core.maintenance.json");
     if marker_path.exists() {
         let bytes = fs::read(&marker_path)?;
@@ -628,11 +682,298 @@ pub fn clear_maintenance_for_tx(state_dir: &Path, current_tx_id: &str) -> Result
 
     let raw_flag = state_dir.join("core.maintenance");
     if raw_flag.exists() {
-        let _ = fs::remove_file(raw_flag);
+        let bytes = fs::read(&raw_flag)?;
+        let existing = String::from_utf8_lossy(&bytes).trim().to_string();
+        if existing != pure_uuid {
+            bail!(
+                "maintenance_marker_uuid_mismatch: existing marker has UUID '{}', cannot clear by tx '{}' (uuid '{}')",
+                existing,
+                current_tx_id,
+                pure_uuid
+            );
+        }
+        fs::remove_file(&raw_flag)?;
     }
 
     sync_dir(state_dir)?;
     Ok(())
+}
+
+/// 启动前双检查决策
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupDualCheckDecision {
+    /// 正常启动允许：无维护标志且无未完成/损坏的 journal
+    AllowStartup,
+    /// 维护抑制：存在合法维护标记或处于合法的非终态更新事务中
+    MaintenanceSuppressed {
+        tx_id: String,
+        stage: Option<TransactionStage>,
+    },
+    /// 故障保护：文件损坏、反序列化失败、符号链接冒充、权限/UID异常、或 Committed 但实际 record/指针不一致，必须 Fail-Closed
+    RecoveryRequired { reason: String },
+}
+
+/// 纯只读启动双检查 Guard（零写入、零删除、零副作用）
+pub fn check_startup_guard_readonly(
+    state_dir: &Path,
+    releases_dir: &Path,
+    current_link: &Path,
+) -> StartupDualCheckDecision {
+    use std::os::unix::fs::MetadataExt;
+    let current_uid = unsafe { libc::geteuid() };
+
+    // 1. 检查 core.maintenance
+    let maint_path = state_dir.join("core.maintenance");
+    let mut maint_uuid: Option<String> = None;
+    if maint_path.exists() || fs::symlink_metadata(&maint_path).is_ok() {
+        let meta = match fs::symlink_metadata(&maint_path) {
+            Ok(m) => m,
+            Err(e) => {
+                return StartupDualCheckDecision::RecoveryRequired {
+                    reason: format!("cannot_stat_maintenance_marker: {}", e),
+                };
+            }
+        };
+        if meta.file_type().is_symlink() {
+            return StartupDualCheckDecision::RecoveryRequired {
+                reason: "core.maintenance_must_not_be_symlink".into(),
+            };
+        }
+        if meta.uid() != current_uid {
+            return StartupDualCheckDecision::RecoveryRequired {
+                reason: "core.maintenance_uid_mismatch".into(),
+            };
+        }
+        if (meta.permissions().mode() & 0o777) != 0o600 {
+            return StartupDualCheckDecision::RecoveryRequired {
+                reason: "core.maintenance_permissions_must_be_0600".into(),
+            };
+        }
+        if meta.len() != 36 {
+            return StartupDualCheckDecision::RecoveryRequired {
+                reason: format!("core.maintenance_size_must_be_36_bytes, got {}", meta.len()),
+            };
+        }
+        let content = match fs::read_to_string(&maint_path) {
+            Ok(s) => s,
+            Err(e) => {
+                return StartupDualCheckDecision::RecoveryRequired {
+                    reason: format!("cannot_read_core_maintenance: {}", e),
+                };
+            }
+        };
+        let parsed_uuid = match uuid::Uuid::parse_str(content.trim()) {
+            Ok(u) => u.to_string(),
+            Err(e) => {
+                return StartupDualCheckDecision::RecoveryRequired {
+                    reason: format!("core.maintenance_content_not_valid_uuid: {}", e),
+                };
+            }
+        };
+        maint_uuid = Some(parsed_uuid);
+    }
+
+    // 2. 检查 update-journal.json
+    let journal_path = state_dir.join("update-journal.json");
+    if journal_path.exists() || fs::symlink_metadata(&journal_path).is_ok() {
+        let meta = match fs::symlink_metadata(&journal_path) {
+            Ok(m) => m,
+            Err(e) => {
+                return StartupDualCheckDecision::RecoveryRequired {
+                    reason: format!("cannot_stat_update_journal: {}", e),
+                };
+            }
+        };
+        if meta.file_type().is_symlink() {
+            return StartupDualCheckDecision::RecoveryRequired {
+                reason: "update-journal.json_must_not_be_symlink".into(),
+            };
+        }
+        if meta.uid() != current_uid {
+            return StartupDualCheckDecision::RecoveryRequired {
+                reason: "update-journal.json_uid_mismatch".into(),
+            };
+        }
+        if (meta.permissions().mode() & 0o777) != 0o600 {
+            return StartupDualCheckDecision::RecoveryRequired {
+                reason: "update-journal.json_permissions_must_be_0600".into(),
+            };
+        }
+        let journal = match UpdateJournal::load_from_state(state_dir) {
+            Ok(Some(j)) => j,
+            Ok(None) => {
+                return StartupDualCheckDecision::RecoveryRequired {
+                    reason: "update-journal.json_file_missing_on_load".into(),
+                };
+            }
+            Err(e) => {
+                return StartupDualCheckDecision::RecoveryRequired {
+                    reason: format!("update-journal.json_corrupt_or_invalid: {}", e),
+                };
+            }
+        };
+
+        match journal.stage {
+            TransactionStage::RecoveryRequired => {
+                return StartupDualCheckDecision::RecoveryRequired {
+                    reason: format!("journal_in_recovery_required_stage: {:?}", journal.error),
+                };
+            }
+            TransactionStage::Staged
+            | TransactionStage::PublisherVerified
+            | TransactionStage::LocalSigned
+            | TransactionStage::Draining
+            | TransactionStage::BackupVerified
+            | TransactionStage::Switching
+            | TransactionStage::CandidateTesting
+            | TransactionStage::CandidateTestingPassed
+            | TransactionStage::RollbackStarted => {
+                return StartupDualCheckDecision::MaintenanceSuppressed {
+                    tx_id: journal.transaction_id,
+                    stage: Some(journal.stage),
+                };
+            }
+            TransactionStage::RolledBack => {
+                if let Some(uid) = maint_uuid {
+                    return StartupDualCheckDecision::MaintenanceSuppressed {
+                        tx_id: uid,
+                        stage: Some(TransactionStage::RolledBack),
+                    };
+                }
+                return StartupDualCheckDecision::AllowStartup;
+            }
+            TransactionStage::Committed => {
+                // 终态全要素二次只读核验：严禁仅凭 Committed 标签放行！
+                // a. 核查 current_release.json
+                let record_path = state_dir.join("current_release.json");
+                if !record_path.exists() {
+                    return StartupDualCheckDecision::RecoveryRequired {
+                        reason: "committed_journal_missing_current_release_record".into(),
+                    };
+                }
+                let rec_meta = match fs::symlink_metadata(&record_path) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return StartupDualCheckDecision::RecoveryRequired {
+                            reason: format!("cannot_stat_current_release_record: {}", e),
+                        };
+                    }
+                };
+                if rec_meta.file_type().is_symlink() || rec_meta.uid() != current_uid {
+                    return StartupDualCheckDecision::RecoveryRequired {
+                        reason: "current_release_record_invalid_symlink_or_uid".into(),
+                    };
+                }
+                let commit_record = match load_current_release_record(state_dir) {
+                    Ok(Some(r)) => r,
+                    _ => {
+                        return StartupDualCheckDecision::RecoveryRequired {
+                            reason: "failed_to_load_current_release_record".into(),
+                        };
+                    }
+                };
+
+                if commit_record.tx_id != journal.transaction_id {
+                    return StartupDualCheckDecision::RecoveryRequired {
+                        reason: format!(
+                            "commit_record_tx_mismatch: record '{}' != journal '{}'",
+                            commit_record.tx_id, journal.transaction_id
+                        ),
+                    };
+                }
+                if commit_record.release_id != journal.target_release_id {
+                    return StartupDualCheckDecision::RecoveryRequired {
+                        reason: format!(
+                            "commit_record_release_id_mismatch: record '{}' != journal '{}'",
+                            commit_record.release_id, journal.target_release_id
+                        ),
+                    };
+                }
+                if commit_record.sequence != journal.target_sequence {
+                    return StartupDualCheckDecision::RecoveryRequired {
+                        reason: format!(
+                            "commit_record_sequence_mismatch: record '{}' != journal '{}'",
+                            commit_record.sequence, journal.target_sequence
+                        ),
+                    };
+                }
+                if let Some(ref j_digest) = journal.manifest_digest {
+                    if commit_record.manifest_digest != *j_digest {
+                        return StartupDualCheckDecision::RecoveryRequired {
+                            reason: "commit_record_digest_mismatch".into(),
+                        };
+                    }
+                }
+
+                // b. 核查 current 软链接与目标目录
+                if !current_link.exists() && fs::symlink_metadata(current_link).is_err() {
+                    return StartupDualCheckDecision::RecoveryRequired {
+                        reason: "current_link_does_not_exist".into(),
+                    };
+                }
+                let link_meta = match fs::symlink_metadata(current_link) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return StartupDualCheckDecision::RecoveryRequired {
+                            reason: format!("cannot_stat_current_link: {}", e),
+                        };
+                    }
+                };
+                if !link_meta.file_type().is_symlink() {
+                    return StartupDualCheckDecision::RecoveryRequired {
+                        reason: "current_link_must_be_symlink".into(),
+                    };
+                }
+                let link_target = match fs::read_link(current_link) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        return StartupDualCheckDecision::RecoveryRequired {
+                            reason: format!("cannot_read_current_link: {}", e),
+                        };
+                    }
+                };
+                let target_leaf = link_target
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default();
+                if target_leaf != journal.target_release_id {
+                    return StartupDualCheckDecision::RecoveryRequired {
+                        reason: format!(
+                            "current_link_target_mismatch: link points to '{}', expected '{}'",
+                            target_leaf, journal.target_release_id
+                        ),
+                    };
+                }
+                let target_dir = releases_dir.join(target_leaf);
+                if !target_dir.is_dir() {
+                    return StartupDualCheckDecision::RecoveryRequired {
+                        reason: format!(
+                            "current_link_target_directory_missing: '{}'",
+                            target_dir.display()
+                        ),
+                    };
+                }
+
+                if let Some(uid) = maint_uuid {
+                    return StartupDualCheckDecision::MaintenanceSuppressed {
+                        tx_id: uid,
+                        stage: Some(TransactionStage::Committed),
+                    };
+                }
+                return StartupDualCheckDecision::AllowStartup;
+            }
+        }
+    }
+
+    // journal 不存在
+    if let Some(uid) = maint_uuid {
+        StartupDualCheckDecision::MaintenanceSuppressed {
+            tx_id: uid,
+            stage: None,
+        }
+    } else {
+        StartupDualCheckDecision::AllowStartup
+    }
 }
 
 /// 同步目录元数据
