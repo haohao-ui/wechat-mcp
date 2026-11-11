@@ -145,6 +145,17 @@ impl SandboxUpdateRoot {
     pub fn previous_link(&self) -> PathBuf {
         self.root_dir.join("previous")
     }
+
+    pub fn db_path(&self) -> PathBuf {
+        self.root_dir.join("state").join("wechat.db")
+    }
+}
+
+/// 真实候选自检白名单配置
+#[derive(Debug, Clone)]
+pub struct CandidateTestSpec {
+    pub relative_executable: PathBuf,
+    pub fixed_args: Vec<String>,
 }
 
 /// 故障注入配置（用于验证状态机回滚与断电恢复逻辑）
@@ -152,13 +163,14 @@ impl SandboxUpdateRoot {
 pub struct FaultInjection {
     pub fail_after_stage: Option<TransactionStage>,
     pub fail_candidate_testing: bool,
-    pub simulate_new_business_data_on_rollback: bool,
+    pub fail_backup: bool,
 }
 
 /// 隔离沙箱本地更新执行器
 pub struct SandboxUpdateExecutor<'a> {
     pub sandbox: &'a SandboxUpdateRoot,
     pub fault: FaultInjection,
+    pub candidate_test: Option<CandidateTestSpec>,
 }
 
 /// 严格发布标识校验：字母、数字、点、下划线、短横线，长度 1..=64，严禁穿越符或分隔符
@@ -177,11 +189,17 @@ impl<'a> SandboxUpdateExecutor<'a> {
         Self {
             sandbox,
             fault: FaultInjection::default(),
+            candidate_test: None,
         }
     }
 
     pub fn with_fault(mut self, fault: FaultInjection) -> Self {
         self.fault = fault;
+        self
+    }
+
+    pub fn with_candidate_test(mut self, spec: CandidateTestSpec) -> Self {
+        self.candidate_test = Some(spec);
         self
     }
 
@@ -317,7 +335,16 @@ impl<'a> SandboxUpdateExecutor<'a> {
             bail!("injected_fault_after_draining");
         }
 
-        // 阶段 5: BackupVerified
+        // 阶段 5: BackupVerified (若存在业务数据库，执行真实在线热备份与完整性校验)
+        let db_path = self.sandbox.db_path();
+        if db_path.exists() {
+            if self.fault.fail_backup {
+                bail!("injected_fault_in_backup");
+            }
+            let backup_path = state_dir.join(format!("backup_{}.db", tx_id));
+            let _backup_sha = super::rollback::backup_and_verify_sqlite_db(&db_path, &backup_path)?;
+            journal.backup_path = Some(backup_path.to_string_lossy().to_string());
+        }
         journal.stage = TransactionStage::BackupVerified;
         journal.persist_atomic(&state_dir)?;
         if self.fault.fail_after_stage == Some(TransactionStage::BackupVerified) {
@@ -332,11 +359,27 @@ impl<'a> SandboxUpdateExecutor<'a> {
             bail!("injected_fault_after_switching");
         }
 
-        // 阶段 7: CandidateTesting
+        // 阶段 7: CandidateTesting (执行白名单候选自检或故障注入)
         journal.stage = TransactionStage::CandidateTesting;
         journal.persist_atomic(&state_dir)?;
 
-        let testing_passed = !self.fault.fail_candidate_testing;
+        let mut testing_passed = !self.fault.fail_candidate_testing;
+        if testing_passed {
+            if let Some(ref spec) = self.candidate_test {
+                let test_bin = target_release_dir.join(&spec.relative_executable);
+                if !test_bin.exists() {
+                    bail!("candidate_test_binary_missing: '{}'", test_bin.display());
+                }
+                let status = std::process::Command::new(&test_bin)
+                    .args(&spec.fixed_args)
+                    .status()
+                    .map_err(|e| anyhow::anyhow!("failed_to_exec_candidate_test: {}", e))?;
+                if !status.success() {
+                    testing_passed = false;
+                }
+            }
+        }
+
         if testing_passed {
             // 自检通过 -> Committed
             journal.stage = TransactionStage::Committed;
@@ -364,18 +407,23 @@ impl<'a> SandboxUpdateExecutor<'a> {
             journal.error = Some("candidate_self_test_failed".into());
             journal.persist_atomic(&state_dir)?;
 
-            if self.fault.simulate_new_business_data_on_rollback {
-                // 模拟已产生新业务数据，严禁静默回退，必须保留维护态并标记 RecoveryRequired
-                journal.stage = TransactionStage::RecoveryRequired;
-                journal.error = Some("new_business_data_detected_cannot_auto_rollback".into());
-                journal.persist_atomic(&state_dir)?;
-                set_structured_maintenance_marker(
-                    &state_dir,
-                    &tx_id,
-                    "manual recovery required: new business data conflict",
-                    now,
-                )?;
-                return Ok(journal);
+            let db_path = self.sandbox.db_path();
+            if db_path.exists() {
+                // 真实检查自备份时间戳以来是否产生新业务数据
+                let has_new = super::rollback::has_new_data_since_backup(&db_path, now)?;
+                if has_new {
+                    // 检测到新业务数据，严禁静默覆盖回滚，必须保留维护态并标记 RecoveryRequired
+                    journal.stage = TransactionStage::RecoveryRequired;
+                    journal.error = Some("new_business_data_detected_cannot_auto_rollback".into());
+                    journal.persist_atomic(&state_dir)?;
+                    set_structured_maintenance_marker(
+                        &state_dir,
+                        &tx_id,
+                        "manual recovery required: new business data conflict",
+                        now,
+                    )?;
+                    return Ok(journal);
+                }
             }
 
             rollback_release_atomic(&self.sandbox.root_dir)?;
