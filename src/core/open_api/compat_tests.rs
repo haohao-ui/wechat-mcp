@@ -46,9 +46,38 @@ impl Drop for Fixture {
 
 #[test]
 fn ops_tools_list_unchanged() {
+    let current_tools = crate::tools::list_tools_with_legacy(true);
+    let serialized = serde_json::to_string_pretty(&current_tools).unwrap() + "\n";
     assert_eq!(
-        serde_json::to_string_pretty(&crate::tools::list_tools_with_legacy(true)).unwrap() + "\n",
-        include_str!("../../../tests/fixtures/ops_tools_list.json")
+        serialized,
+        include_str!("../../../tests/fixtures/ops_tools_list.json"),
+        "全量工具快照必须严格逐字匹配"
+    );
+
+    // 契约核验：desktop_act 的 description 与 timeout_seconds 约束
+    let tools = current_tools["tools"].as_array().expect("tools array");
+    let act = tools
+        .iter()
+        .find(|t| t["name"] == "desktop_act")
+        .expect("desktop_act must exist");
+    let desc = act["description"].as_str().unwrap_or_default();
+    assert!(desc.contains("unique AX target identity/state"));
+    assert!(desc.contains("input_readback and verification"));
+
+    let timeout_prop = &act["inputSchema"]["properties"]["timeout_seconds"];
+    assert_eq!(timeout_prop["type"], "number");
+    assert_eq!(timeout_prop["default"], 30.0);
+    assert_eq!(timeout_prop["maximum"], 30.0);
+    assert_eq!(timeout_prop["exclusiveMinimum"], 0);
+
+    // 负向校验：模拟新增未知字段必须触发不匹配
+    let mut mutated = current_tools.clone();
+    mutated["tools"][0]["unknown_field"] = serde_json::json!("unexpected");
+    let mutated_serialized = serde_json::to_string_pretty(&mutated).unwrap() + "\n";
+    assert_ne!(
+        mutated_serialized,
+        include_str!("../../../tests/fixtures/ops_tools_list.json"),
+        "未知字段注入必须严格触发快照比对失败"
     );
 }
 

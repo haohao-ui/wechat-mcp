@@ -136,6 +136,63 @@ fn now_secs() -> f64 {
         .as_secs_f64()
 }
 
+#[derive(Debug, Clone)]
+pub struct ServePaths {
+    pub home: PathBuf,
+    pub core_sock: PathBuf,
+    pub worker_sock: PathBuf,
+    pub bot_worker_sock: PathBuf,
+    pub gateway_db: Option<Option<PathBuf>>,
+}
+
+impl ServePaths {
+    pub fn from_env() -> Self {
+        let home = std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."));
+        let base_dir = home.join(".wechat-rpa");
+        let core_sock = crate::core::external_brain::default_socket_path();
+        let worker_sock = base_dir.join("worker.sock");
+        let bot_worker_sock = base_dir.join("bot-worker.sock");
+        Self {
+            home,
+            core_sock,
+            worker_sock,
+            bot_worker_sock,
+            gateway_db: None,
+        }
+    }
+
+    pub fn isolated(dir: &Path) -> Self {
+        let base_dir = dir.join(".wechat-rpa");
+        let _ = fs::create_dir_all(&base_dir);
+        let _ = fs::set_permissions(&base_dir, fs::Permissions::from_mode(0o700));
+        // Unix domain socket 路径受 sockaddr_un.sun_path 限制（macOS 上为 104 字节）。
+        // 测试临时目录路径通常较深，因此 socket 统一挂在短前缀 /tmp/wc_{uuid} 下
+        let short_id = uuid::Uuid::new_v4().simple();
+        let sock_dir = PathBuf::from(format!("/tmp/wc_{short_id}"));
+        let _ = fs::create_dir_all(&sock_dir);
+        let _ = fs::set_permissions(&sock_dir, fs::Permissions::from_mode(0o700));
+        Self {
+            home: dir.to_path_buf(),
+            core_sock: sock_dir.join("c.sock"),
+            worker_sock: sock_dir.join("w.sock"),
+            bot_worker_sock: sock_dir.join("bw.sock"),
+            gateway_db: Some(Some(dir.join("gateway.sqlite3"))),
+        }
+    }
+}
+
+impl Drop for ServePaths {
+    fn drop(&mut self) {
+        if self.core_sock.starts_with("/tmp/wc_") {
+            if let Some(parent) = self.core_sock.parent() {
+                let _ = fs::remove_dir_all(parent);
+            }
+        }
+    }
+}
+
 pub async fn run_serve_core(
     config_path: &Path,
     stop_rx: Option<tokio::sync::watch::Receiver<bool>>,
@@ -145,8 +202,18 @@ pub async fn run_serve_core(
 
 pub async fn run_serve_core_with(
     config_path: &Path,
+    stop_rx: Option<tokio::sync::watch::Receiver<bool>>,
+    source: AccountSource,
+) -> Result<i32> {
+    let paths = ServePaths::from_env();
+    run_serve_core_with_paths(config_path, stop_rx, source, &paths).await
+}
+
+pub async fn run_serve_core_with_paths(
+    config_path: &Path,
     mut stop_rx: Option<tokio::sync::watch::Receiver<bool>>,
     source: AccountSource,
+    paths: &ServePaths,
 ) -> Result<i32> {
     ensure_locale();
     install_signals();
@@ -200,7 +267,9 @@ pub async fn run_serve_core_with(
                 Some(acc)
             }
         };
-        match run_core_for_account(config_path, &config, &mut stop_rx, source, account).await? {
+        match run_core_for_account(config_path, &config, &mut stop_rx, source, account, paths)
+            .await?
+        {
             CoreRunEnd::Exit(code) => return Ok(code),
             CoreRunEnd::AccountChanged => continue,
         }
@@ -213,12 +282,14 @@ async fn run_core_for_account(
     stop_rx: &mut Option<tokio::sync::watch::Receiver<bool>>,
     source: AccountSource,
     account: Option<String>,
+    paths: &ServePaths,
 ) -> Result<CoreRunEnd> {
     // 3. 构造外部大脑并启动 core.sock
-    let external_brain = ExternalBrain::new(
+    let external_brain = ExternalBrain::new_with_socket(
         &config.brain,
         &config.model_config,
         config.state_dir.clone(),
+        paths.core_sock.clone(),
     );
     let sock_path = external_brain.socket_path.clone();
     let listener = bind_core_socket(&sock_path)?;
@@ -258,12 +329,9 @@ async fn run_core_for_account(
     let stop_ptr = std::sync::Arc::into_raw(coordinator.stop.clone()) as *mut AtomicBool;
     SHARED_STOP.store(stop_ptr, Ordering::SeqCst);
 
-    let home = std::env::var("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let base_dir = home.join(".wechat-rpa");
-    let worker_sock = base_dir.join("worker.sock");
-    let bot_worker_sock = base_dir.join("bot-worker.sock");
+    let base_dir = paths.home.join(".wechat-rpa");
+    let worker_sock = paths.worker_sock.clone();
+    let bot_worker_sock = paths.bot_worker_sock.clone();
 
     // 网关里登记的是配置里的账号名（设备绑定），不是数据归属的微信账号；用 wxid 会"未注册账号"连不上（2026-11-08 实机）
     let mcp_client = std::sync::Arc::new(McpSocketClient::new(
@@ -437,7 +505,11 @@ async fn run_core_for_account(
         let is_idle = coordinator.pending.is_empty()
             && !coordinator.sessions.values().any(|s| s.turn.is_some());
         if crate::core::backup::should_auto_backup(is_idle, now, last_backup_at) {
-            match crate::core::backup::run_backup(&coordinator.config, None) {
+            match crate::core::backup::run_backup_with_gateway_db(
+                &coordinator.config,
+                None,
+                paths.gateway_db.clone(),
+            ) {
                 Ok(out_path) => {
                     last_backup_at = now;
                     coordinator.log_event(
@@ -534,22 +606,6 @@ mod tests {
         assert!(!call.contains("config.account_id"), "{call}");
     }
 
-    /// serve-core makes an idle backup that touches the gateway database; keep it inside the test dir.
-    /// The caller must hold `crate::core::env_lock()`.
-    struct GatewayEnv(Option<String>);
-    fn isolate_gateway(dir: &TempDir) -> GatewayEnv {
-        let previous = std::env::var("MESSAGE_GATEWAY_DB").ok();
-        unsafe { std::env::set_var("MESSAGE_GATEWAY_DB", dir.path().join("gateway.sqlite3")) };
-        GatewayEnv(previous)
-    }
-    impl Drop for GatewayEnv {
-        fn drop(&mut self) {
-            match &self.0 {
-                Some(v) => unsafe { std::env::set_var("MESSAGE_GATEWAY_DB", v) },
-                None => unsafe { std::env::remove_var("MESSAGE_GATEWAY_DB") },
-            }
-        }
-    }
     struct TempDir(PathBuf);
     impl TempDir {
         fn new() -> Self {
@@ -652,34 +708,40 @@ mod tests {
         assert!(lock3.is_ok());
     }
 
+    struct StopOnDrop(Option<tokio::sync::watch::Sender<bool>>);
+    impl Drop for StopOnDrop {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(true);
+            }
+        }
+    }
+
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn test_run_serve_core_graceful_shutdown() {
-        let _lock = crate::core::env_lock();
         let dir = TempDir::new();
-        let _gw = isolate_gateway(&dir);
+        let paths = ServePaths::isolated(dir.path());
         let (cfg_path, state_dir) = write_test_config(dir.path());
 
-        let pid = std::process::id();
-        let count = uuid::Uuid::new_v4().simple();
-        let sock_dir = PathBuf::from(format!("/tmp/sg_{pid}_{count}"));
-        fs::create_dir_all(&sock_dir).unwrap();
-        fs::set_permissions(&sock_dir, fs::Permissions::from_mode(0o700)).unwrap();
-        let sock_path = sock_dir.join("core.sock");
-        unsafe {
-            std::env::set_var("WECHAT_CORE_SOCK", &sock_path);
-        }
-
         let (tx, rx) = tokio::sync::watch::channel(false);
+        let tx_clone = tx.clone();
 
         // 启动后台任务在 100ms 后触发停止
-        tokio::spawn(async move {
+        let client_task = tokio::spawn(async move {
+            let _guard = StopOnDrop(Some(tx_clone));
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            let _ = tx.send(true);
         });
 
-        let code = run_serve_core(&cfg_path, Some(rx)).await.unwrap();
+        let code = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_serve_core_with_paths(&cfg_path, Some(rx), AccountSource::Config, &paths),
+        )
+        .await
+        .expect("serve-core should exit within bounded timeout")
+        .unwrap();
         assert_eq!(code, 0);
+
+        client_task.await.unwrap();
 
         // 检查退出后的 health.json
         let health_file = state_dir.join("health.json");
@@ -690,33 +752,16 @@ mod tests {
         assert!(health.get("brain").is_some());
         assert_eq!(health["brain"]["mode"], "builtin");
 
-        assert!(!sock_path.exists());
-        let _ = fs::remove_dir_all(&sock_dir);
-        unsafe {
-            std::env::remove_var("WECHAT_CORE_SOCK");
-        }
+        assert!(!paths.core_sock.exists());
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn test_run_serve_core_external_brain_socket_and_health() {
-        let _lock = crate::core::env_lock();
         let dir = TempDir::new();
-        let _gw = isolate_gateway(&dir);
+        let paths = ServePaths::isolated(dir.path());
         let state_dir = dir.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
         fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
-
-        let pid = std::process::id();
-        let count = uuid::Uuid::new_v4().simple();
-        let sock_dir = PathBuf::from(format!("/tmp/se_{pid}_{count}"));
-        fs::create_dir_all(&sock_dir).unwrap();
-        fs::set_permissions(&sock_dir, fs::Permissions::from_mode(0o700)).unwrap();
-        let sock_path = sock_dir.join("core.sock");
-
-        unsafe {
-            std::env::set_var("WECHAT_CORE_SOCK", &sock_path);
-        }
 
         let port = get_free_port();
         let cfg = json!({
@@ -744,9 +789,11 @@ mod tests {
         fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
 
         let (tx, rx) = tokio::sync::watch::channel(false);
-        let s_path = sock_path.clone();
+        let s_path = paths.core_sock.clone();
+        let tx_clone = tx.clone();
 
-        tokio::spawn(async move {
+        let client_task = tokio::spawn(async move {
+            let _guard = StopOnDrop(Some(tx_clone));
             // 等待 core.sock 出现并连接验证 status
             for _ in 0..50 {
                 if s_path.exists() {
@@ -768,25 +815,30 @@ mod tests {
                 }
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            let _ = tx.send(true);
         });
 
-        let code = run_serve_core(&cfg_path, Some(rx)).await.unwrap();
+        let code = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_serve_core_with_paths(&cfg_path, Some(rx), AccountSource::Config, &paths),
+        )
+        .await
+        .expect("serve-core should exit within bounded timeout")
+        .unwrap();
         assert_eq!(code, 0);
 
+        client_task.await.unwrap();
+
         // 验证退出后 socket 文件被删除
-        assert!(!sock_path.exists(), "core.sock should be deleted on exit");
+        assert!(
+            !paths.core_sock.exists(),
+            "core.sock should be deleted on exit"
+        );
 
         // 验证 health.json 记录的 brain 状态
         let health_file = state_dir.join("health.json");
         let health: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&health_file).unwrap()).unwrap();
         assert_eq!(health["brain"]["mode"], "external");
-
-        let _ = fs::remove_dir_all(&sock_dir);
-        unsafe {
-            std::env::remove_var("WECHAT_CORE_SOCK");
-        }
     }
 
     #[tokio::test]
@@ -816,11 +868,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn test_serve_core_auto_backup_on_idle() {
-        let _guard = crate::core::env_lock();
         let dir = TempDir::new();
-        let _gw = isolate_gateway(&dir);
+        let paths = ServePaths::isolated(dir.path());
         let (cfg_path, state_dir) = write_test_config(dir.path());
 
         // 创建并写入初始历史库
@@ -837,15 +887,24 @@ mod tests {
         }
 
         let (tx, rx) = tokio::sync::watch::channel(false);
+        let tx_clone = tx.clone();
 
-        tokio::spawn(async move {
+        let client_task = tokio::spawn(async move {
+            let _guard = StopOnDrop(Some(tx_clone));
             // 等待一轮 sweep 完成，并触发自动备份
             tokio::time::sleep(Duration::from_millis(500)).await;
-            let _ = tx.send(true);
         });
 
-        let code = run_serve_core(&cfg_path, Some(rx)).await.unwrap();
+        let code = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_serve_core_with_paths(&cfg_path, Some(rx), AccountSource::Config, &paths),
+        )
+        .await
+        .expect("serve-core should exit within bounded timeout")
+        .unwrap();
         assert_eq!(code, 0);
+
+        client_task.await.unwrap();
 
         // 验证 backups 目录下生成了备份
         let backups_dir = state_dir.join("backups");
@@ -874,48 +933,52 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn test_history_http_launchd_plist() {
-        let _lock = crate::core::env_lock();
         let dir = TempDir::new();
-        let _gw = isolate_gateway(&dir);
+        let paths = ServePaths::isolated(dir.path());
         let (cfg_path, state_dir) = write_test_config(dir.path());
 
         let config = BotConfig::load(&cfg_path).unwrap();
         assert_eq!(config.history_http.bind, "127.0.0.1");
         let port = config.history_http.port;
 
-        let pid = std::process::id();
-        let count = uuid::Uuid::new_v4().simple();
-        let sock_dir = PathBuf::from(format!("/tmp/sh_{pid}_{count}"));
-        fs::create_dir_all(&sock_dir).unwrap();
-        fs::set_permissions(&sock_dir, fs::Permissions::from_mode(0o700)).unwrap();
-        let sock_path = sock_dir.join("core.sock");
-        unsafe {
-            std::env::set_var("WECHAT_CORE_SOCK", &sock_path);
-        }
-
         let (tx, rx) = tokio::sync::watch::channel(false);
+        let tx_clone = tx.clone();
 
         let http_client_task = tokio::spawn(async move {
+            let _guard = StopOnDrop(Some(tx_clone));
             let mut connected = false;
+            let mut perm_denied = false;
             for _ in 0..50 {
-                if let Ok(mut stream) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
-                    connected = true;
-                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                    // 1. 无 token 请求返回 401
-                    let req = b"GET /v1/contacts HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
-                    let _ = stream.write_all(req).await;
-                    let mut buf = vec![0u8; 1024];
-                    let n = stream.read(&mut buf).await.unwrap_or(0);
-                    let resp = String::from_utf8_lossy(&buf[..n]);
-                    assert!(
-                        resp.starts_with("HTTP/1.1 401"),
-                        "Expected 401, got: {resp}"
-                    );
-                    break;
+                match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                    Ok(mut stream) => {
+                        connected = true;
+                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                        // 1. 无 token 请求返回 401
+                        let req = b"GET /v1/contacts HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+                        let _ = stream.write_all(req).await;
+                        let mut buf = vec![0u8; 1024];
+                        let n = stream.read(&mut buf).await.unwrap_or(0);
+                        let resp = String::from_utf8_lossy(&buf[..n]);
+                        assert!(
+                            resp.starts_with("HTTP/1.1 401"),
+                            "Expected 401, got: {resp}"
+                        );
+                        break;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                        perm_denied = true;
+                        break;
+                    }
+                    Err(_) => {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+
+            if perm_denied {
+                // 精准记录受限原因：macOS 沙箱策略拦截本地网络回环 connect
+                panic!("sandbox network restriction: TcpStream::connect returned PermissionDenied");
             }
             assert!(connected, "History HTTP server did not start in time");
 
@@ -938,11 +1001,17 @@ mod tests {
                     "Expected 200, got: {resp}"
                 );
             }
-
-            let _ = tx.send(true);
         });
 
-        let code = run_serve_core(&cfg_path, Some(rx)).await.unwrap();
+        let serve_res = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_serve_core_with_paths(&cfg_path, Some(rx), AccountSource::Config, &paths),
+        )
+        .await;
+
+        let code = serve_res
+            .expect("serve-core should exit within bounded timeout when client task settles")
+            .unwrap();
         assert_eq!(code, 0);
 
         http_client_task.await.unwrap();
@@ -950,11 +1019,6 @@ mod tests {
         // 验证停止后端口关闭
         let after = std::net::TcpStream::connect(("127.0.0.1", port));
         assert!(after.is_err(), "History HTTP server should be stopped");
-
-        let _ = fs::remove_dir_all(&sock_dir);
-        unsafe {
-            std::env::remove_var("WECHAT_CORE_SOCK");
-        }
     }
 
     #[tokio::test]
