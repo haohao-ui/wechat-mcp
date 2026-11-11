@@ -1,3 +1,4 @@
+pub mod executor;
 pub mod journal;
 pub mod manifest;
 pub mod rollback;

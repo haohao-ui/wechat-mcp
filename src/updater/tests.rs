@@ -1,3 +1,4 @@
+use super::executor::*;
 use super::journal::*;
 use super::manifest::*;
 use super::rollback::*;
@@ -616,6 +617,39 @@ fn test_journal_atomic_persistence_and_recovery_evaluation() {
     let act = loaded.evaluate_recovery(&releases_dir, &current_link);
     assert_eq!(act, RecoveryAction::DiscardCandidate);
 
+    // Switching 阶段恢复测试：精确匹配 vs 未知 current fail-closed
+    journal.stage = TransactionStage::Switching;
+    journal.persist_atomic(&state_dir).unwrap();
+
+    // 1) current 指向 target (0.2.0) -> TestCandidate
+    let rel_target = releases_dir.join("0.2.0");
+    fs::create_dir_all(&rel_target).unwrap();
+    let _ = fs::remove_file(&current_link);
+    std::os::unix::fs::symlink(&rel_target, &current_link).unwrap();
+    let act_switch_target = journal.evaluate_recovery(&releases_dir, &current_link);
+    assert_eq!(act_switch_target, RecoveryAction::TestCandidate);
+
+    // 2) current 指向 source (0.1.0) -> ResumeOldRelease
+    let rel_source = releases_dir.join("0.1.0");
+    fs::create_dir_all(&rel_source).unwrap();
+    let _ = fs::remove_file(&current_link);
+    std::os::unix::fs::symlink(&rel_source, &current_link).unwrap();
+    let act_switch_source = journal.evaluate_recovery(&releases_dir, &current_link);
+    assert_eq!(act_switch_source, RecoveryAction::ResumeOldRelease);
+
+    // 3) current 指向未知目录 (0.9.9) -> ManualInterventionRequired (严禁当旧版默认安全)
+    let rel_unknown = releases_dir.join("0.9.9");
+    fs::create_dir_all(&rel_unknown).unwrap();
+    let _ = fs::remove_file(&current_link);
+    std::os::unix::fs::symlink(&rel_unknown, &current_link).unwrap();
+    let act_switch_unknown = journal.evaluate_recovery(&releases_dir, &current_link);
+    match act_switch_unknown {
+        RecoveryAction::ManualInterventionRequired(msg) => {
+            assert!(msg.contains("unknown_current_target"));
+        }
+        other => panic!("expected ManualInterventionRequired, got {:?}", other),
+    }
+
     journal.stage = TransactionStage::CandidateTesting;
     journal.persist_atomic(&state_dir).unwrap();
     let act2 = journal.evaluate_recovery(&releases_dir, &current_link);
@@ -635,6 +669,42 @@ fn test_journal_atomic_persistence_and_recovery_evaluation() {
     // 验证损坏的 journal 能够返回 Err（不伪装空闲）
     fs::write(state_dir.join("update-journal.json"), b"corrupted-non-json").unwrap();
     assert!(UpdateJournal::load_from_state(&state_dir).is_err());
+}
+
+#[test]
+fn test_update_lock_exclusive_and_release_metadata() {
+    let temp = TempTestDir::new("lock_and_meta");
+    let state_dir = temp.0.clone();
+
+    // 1. 排他锁测试
+    let guard1 = acquire_update_lock(&state_dir).unwrap();
+    let err_lock2 = acquire_update_lock(&state_dir).unwrap_err();
+    assert!(err_lock2.to_string().contains("concurrent_update_in_progress"));
+    drop(guard1);
+
+    // 释放后可再次获取
+    let _guard3 = acquire_update_lock(&state_dir).unwrap();
+
+    // 2. 当前 Release 元数据保存与恢复测试
+    let meta = CurrentReleaseMetadata {
+        release_id: "0.2.0-test".into(),
+        sequence: 1002,
+        channel: "test".into(),
+        components_consistent: true,
+        installed_at: 1794368000,
+    };
+    save_current_release_metadata(&state_dir, &meta).unwrap();
+    let loaded_meta = load_current_release_metadata(&state_dir).unwrap().unwrap();
+    assert_eq!(loaded_meta, meta);
+
+    // 3. 维护态标记设置与清除
+    set_maintenance_active(&state_dir, "test maintenance reason").unwrap();
+    assert!(state_dir.join("core.maintenance").exists());
+    let maint_bytes = fs::read(state_dir.join("core.maintenance")).unwrap();
+    assert_eq!(maint_bytes, b"test maintenance reason");
+
+    clear_maintenance_if_safe(&state_dir).unwrap();
+    assert!(!state_dir.join("core.maintenance").exists());
 }
 
 #[test]
@@ -931,4 +1001,183 @@ fn test_cli_rejects_invalid_or_missing_config_without_side_effects() {
     // 仅包含新写入的 corrupt_config.json 和 incomplete_config.json 两个输入文件
     assert_eq!(entries_before.len() + 2, entries_after.len());
     assert!(!temp.0.join("state").exists());
+}
+
+#[test]
+fn test_sandbox_executor_end_to_end_and_fault_injections() {
+    let temp = TempTestDir::new("sandbox_e2e");
+    let sandbox = SandboxUpdateRoot::new_isolated(temp.0.join("sandbox_root")).unwrap();
+
+    // 0. 验证禁止在生产或系统路径创建沙箱根
+    assert!(SandboxUpdateRoot::new_isolated(PathBuf::from("/Applications/evil")).is_err());
+    assert!(SandboxUpdateRoot::new_isolated(PathBuf::from("/var/root/.wechat-rpa")).is_err());
+
+    // 生成真实测试密钥对与受信任 Keystore
+    let (key_pair, pub_bytes) = generate_test_ed25519_key();
+    let key_store = TrustedKeyStore::new().with_key("test-root-v1", &pub_bytes);
+
+    // 1. 构造一个包含真实组件的发布包归档
+    let archive_path = temp.0.join("pkg-0.2.0.tar.gz");
+    let mcp_bin_content = b"wechat-mcp-bin-v0.2.0";
+    let mcp_sha = calculate_sha256_bytes(mcp_bin_content);
+    {
+        let file = fs::File::create(&archive_path).unwrap();
+        let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(enc);
+
+        let mut h = tar::Header::new_gnu();
+        h.set_size(mcp_bin_content.len() as u64);
+        h.set_mode(0o755);
+        h.set_cksum();
+        builder
+            .append_data(&mut h, "bin/wechat-mcp", &mcp_bin_content[..])
+            .unwrap();
+
+        let enc = builder.into_inner().unwrap();
+        enc.finish().unwrap();
+    }
+    let meta = fs::metadata(&archive_path).unwrap();
+    let archive_sha = calculate_sha256_bytes(&fs::read(&archive_path).unwrap());
+
+    let mut manifest = sample_manifest(1005, "arm64");
+    manifest.release_id = "0.2.0-1005".into();
+    manifest.artifact = ArtifactSpec {
+        filename: "pkg-0.2.0.tar.gz".into(),
+        sha256: archive_sha,
+        size_bytes: meta.len(),
+        max_unpacked_bytes: 100000,
+        max_file_count: 10,
+    };
+    manifest.components = vec![ComponentSpec {
+        path: "bin/wechat-mcp".into(),
+        kind: "executable".into(),
+        file_mode: 0o755,
+        sha256: mcp_sha,
+        size_bytes: mcp_bin_content.len() as u64,
+    }];
+
+    // 签名封套
+    let sig_hex = sign_manifest(&key_pair, &manifest);
+    let envelope = SignedEnvelope {
+        envelope_schema: 1,
+        key_id: "test-root-v1".into(),
+        signature_algorithm: "ed25519".into(),
+        signature: sig_hex,
+        manifest,
+    };
+    let env_bytes = serde_json::to_vec(&envelope).unwrap();
+
+    // 强类型验证通过构造 VerifiedManifestEnvelope
+    let verified = VerifiedManifestEnvelope::verify_and_construct(
+        &env_bytes,
+        &key_store,
+        "arm64",
+        "13.0",
+        1000, // highest accepted
+    )
+    .unwrap();
+
+    let signer = LocalSigner::for_test_mock();
+
+    // 执行更新全流程 -> Committed
+    let executor = SandboxUpdateExecutor::new(&sandbox);
+    let res = executor.execute_transaction(&verified, &archive_path, &signer, 1794368000);
+    assert!(res.is_ok(), "Update execution failed: {:?}", res.err());
+    let journal = res.unwrap();
+    assert_eq!(journal.stage, TransactionStage::Committed);
+
+    // 核验更新后状态：current 指向新版 releases/0.2.0-1005
+    let current_target = fs::read_link(sandbox.current_link()).unwrap();
+    assert!(current_target.to_string_lossy().contains("0.2.0-1005"));
+
+    // 最高水位已提升
+    let highest = load_highest_accepted_sequence(&sandbox.state_dir()).unwrap();
+    assert_eq!(highest, 1005);
+
+    // CurrentReleaseMetadata 已写入
+    let current_meta = load_current_release_metadata(&sandbox.state_dir()).unwrap().unwrap();
+    assert_eq!(current_meta.release_id, "0.2.0-1005");
+    assert_eq!(current_meta.sequence, 1005);
+
+    // 维护态已安全清除
+    assert!(!sandbox.state_dir().join("core.maintenance").exists());
+
+    // 2. 候选自检失败注入测试：自动回滚切回 previous
+    // 构造更高版本 1006
+    let mut manifest2 = verified.manifest().clone();
+    manifest2.sequence = 1006;
+    manifest2.release_id = "0.2.0-1006".into();
+    let sig_hex2 = sign_manifest(&key_pair, &manifest2);
+    let envelope2 = SignedEnvelope {
+        envelope_schema: 1,
+        key_id: "test-root-v1".into(),
+        signature_algorithm: "ed25519".into(),
+        signature: sig_hex2,
+        manifest: manifest2,
+    };
+    let env_bytes2 = serde_json::to_vec(&envelope2).unwrap();
+    let verified2 = VerifiedManifestEnvelope::verify_and_construct(
+        &env_bytes2,
+        &key_store,
+        "arm64",
+        "13.0",
+        1005,
+    )
+    .unwrap();
+
+    let fail_test_executor = SandboxUpdateExecutor::new(&sandbox).with_fault(FaultInjection {
+        fail_candidate_testing: true,
+        ..Default::default()
+    });
+    let res_fail = fail_test_executor.execute_transaction(
+        &verified2,
+        &archive_path,
+        &signer,
+        1794369000,
+    );
+    assert!(res_fail.is_ok());
+    let journal_fail = res_fail.unwrap();
+    assert_eq!(journal_fail.stage, TransactionStage::RolledBack);
+    // current 指针切回 0.2.0-1005
+    let target_after_rollback = fs::read_link(sandbox.current_link()).unwrap();
+    assert!(target_after_rollback.to_string_lossy().contains("0.2.0-1005"));
+
+    // 3. 产生新业务数据冲突注入测试：严禁静默回退，保持维护态 RecoveryRequired
+    let mut manifest3 = verified.manifest().clone();
+    manifest3.sequence = 1007;
+    manifest3.release_id = "0.2.0-1007".into();
+    let sig_hex3 = sign_manifest(&key_pair, &manifest3);
+    let envelope3 = SignedEnvelope {
+        envelope_schema: 1,
+        key_id: "test-root-v1".into(),
+        signature_algorithm: "ed25519".into(),
+        signature: sig_hex3,
+        manifest: manifest3,
+    };
+    let env_bytes3 = serde_json::to_vec(&envelope3).unwrap();
+    let verified3 = VerifiedManifestEnvelope::verify_and_construct(
+        &env_bytes3,
+        &key_store,
+        "arm64",
+        "13.0",
+        1005,
+    )
+    .unwrap();
+
+    let conflict_executor = SandboxUpdateExecutor::new(&sandbox).with_fault(FaultInjection {
+        fail_candidate_testing: true,
+        simulate_new_business_data_on_rollback: true,
+        ..Default::default()
+    });
+    let res_conflict = conflict_executor.execute_transaction(
+        &verified3,
+        &archive_path,
+        &signer,
+        1794370000,
+    );
+    assert!(res_conflict.is_ok());
+    let journal_conflict = res_conflict.unwrap();
+    assert_eq!(journal_conflict.stage, TransactionStage::RecoveryRequired);
+    // 维护标志保持激活状态，绝不自动清除
+    assert!(sandbox.state_dir().join("core.maintenance").exists());
 }

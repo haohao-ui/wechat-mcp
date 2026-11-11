@@ -8,6 +8,7 @@ pub struct LocalSigner {
     pub keychain_pass: Option<String>,
     pub identity: String,
     pub simulate_failure: Option<String>,
+    pub test_mock_success: bool,
 }
 
 impl LocalSigner {
@@ -17,6 +18,18 @@ impl LocalSigner {
             keychain_pass: None,
             identity: identity.into(),
             simulate_failure: None,
+            test_mock_success: false,
+        }
+    }
+
+    /// 仅限受控测试适配器使用，免调系统 codesign
+    pub fn for_test_mock() -> Self {
+        Self {
+            keychain_path: None,
+            keychain_pass: None,
+            identity: "test-mock-signer".into(),
+            simulate_failure: None,
+            test_mock_success: true,
         }
     }
 
@@ -43,6 +56,10 @@ impl LocalSigner {
 
         if !target_path.exists() {
             bail!("target_path_not_found: {}", target_path.display());
+        }
+
+        if self.test_mock_success {
+            return Ok(());
         }
 
         // 若配置了解锁钥匙串
