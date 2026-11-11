@@ -39,11 +39,21 @@ fn install_signals() {
     }
 }
 
+/// 纯函数决策：对齐原 std::env::var("LANG").is_err() 语义，仅缺失 (None) 补默认，所有 Some 保持不覆盖。
+pub(crate) fn required_locale_defaults(lang: Option<&str>) -> Option<(&'static str, &'static str)> {
+    if lang.is_none() {
+        Some(("en_US.UTF-8", "en_US.UTF-8"))
+    } else {
+        None
+    }
+}
+
 pub fn ensure_locale() {
-    if std::env::var("LANG").is_err() {
+    let current_lang = std::env::var("LANG").ok();
+    if let Some((lang, lc_all)) = required_locale_defaults(current_lang.as_deref()) {
         unsafe {
-            std::env::set_var("LANG", "en_US.UTF-8");
-            std::env::set_var("LC_ALL", "en_US.UTF-8");
+            std::env::set_var("LANG", lang);
+            std::env::set_var("LC_ALL", lc_all);
         }
     }
 }
@@ -147,6 +157,10 @@ struct OwnedSocketDir {
 #[cfg(test)]
 impl Drop for OwnedSocketDir {
     fn drop(&mut self) {
+        // 安全清理：
+        // 1. 获取 symlink_metadata，绝不跟随符号链接 (follow symlink)
+        // 2. 如果是符号链接，只删除该符号链接本身，绝不删除外部目标目录中的内容
+        // 3. 如果是真实目录，严格比对 dev 与 ino，防止目录被 rename 并被外部非自有目录替换后误删
         if let Ok(meta) = fs::symlink_metadata(&self.dir) {
             let file_type = meta.file_type();
             if file_type.is_symlink() {
@@ -177,12 +191,20 @@ pub struct ServePaths {
     pub worker_sock: PathBuf,
     pub bot_worker_sock: PathBuf,
     pub gateway_db: Option<Option<PathBuf>>,
+    /// 仅测试 isolated 环境独占持有的临时目录 guard。
+    /// 生产环境 from_env() 始终为 None，永不清理任何目录。
+    /// 使用 Arc 保证 Clone 共享所有权，只有所有 Clone 均 Drop 后才触发清理。
     #[cfg(test)]
-    #[allow(dead_code)]
     temp_dir_guard: Option<std::sync::Arc<OwnedSocketDir>>,
 }
 
 impl ServePaths {
+    /// 纯函数解析器：根据传入的 HOME 与 WECHAT_CORE_SOCK 解析路径。
+    /// 严格保持与 1e120b5 原生产行为完全一致：
+    /// - 当 HOME 缺失时，fallback 到 "." (而不是 ControlPaths 的 "/")
+    /// - 当 HOME 为空时，保持 ""
+    /// - worker_sock 与 bot_worker_sock 挂在 home.join(".wechat-rpa") 下
+    /// - core_sock 若未提供覆盖，则按原 external_brain::default_socket_path 规则回退
     pub(crate) fn from_values(home: Option<&str>, core_sock: Option<&str>) -> Self {
         let home_path = home
             .map(PathBuf::from)
@@ -218,7 +240,9 @@ impl ServePaths {
         Self::from_values(home.as_deref(), core_sock.as_deref())
     }
 
-    pub fn try_isolated(dir: &Path) -> Result<Self> {
+    /// 尝试创建隔离的 ServePaths 环境，若目录创建或权限设置失败则返回错误，绝不静默吞错。
+    #[cfg(test)]
+    pub(crate) fn try_isolated(dir: &Path) -> Result<Self> {
         let base_dir = dir.join(".wechat-rpa");
         fs::create_dir_all(&base_dir)
             .with_context(|| format!("failed to create base dir {}", base_dir.display()))?;
@@ -254,8 +278,7 @@ impl ServePaths {
             core_sock: sock_dir.join("c.sock"),
             worker_sock: sock_dir.join("w.sock"),
             bot_worker_sock: sock_dir.join("bw.sock"),
-            gateway_db: None,
-            #[cfg(test)]
+            gateway_db: Some(Some(dir.join("gateway.sqlite3"))),
             temp_dir_guard: Some(std::sync::Arc::new(OwnedSocketDir {
                 dir: sock_dir,
                 dev,
@@ -264,16 +287,18 @@ impl ServePaths {
         })
     }
 
-    pub fn isolated(dir: &Path) -> Self {
-        Self::try_isolated(dir).expect("isolated ServePaths creation must succeed")
+    #[cfg(test)]
+    pub(crate) fn isolated(dir: &Path) -> Self {
+        Self::try_isolated(dir).expect("failed to create isolated ServePaths")
     }
 
     #[cfg(test)]
-    #[allow(dead_code)]
     pub(crate) fn socket_dir(&self) -> Option<PathBuf> {
         self.temp_dir_guard.as_ref().map(|g| g.dir.clone())
     }
 }
+
+pub type AccountDetector = std::sync::Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
 /// 启动守卫路径定义（严格区分状态根与安装根）
 #[derive(Debug, Clone)]
@@ -363,7 +388,7 @@ pub async fn run_serve_core_with_paths(
     source: AccountSource,
     paths: &ServePaths,
 ) -> Result<i32> {
-    run_serve_core_internal(config_path, stop_rx, source, paths, None).await
+    run_serve_core_internal(config_path, stop_rx, source, paths, None, None).await
 }
 
 #[cfg(test)]
@@ -373,8 +398,17 @@ pub(crate) async fn run_serve_core_for_test(
     source: AccountSource,
     paths: &ServePaths,
     guard_paths: Option<StartupGuardPaths>,
+    custom_detector: Option<AccountDetector>,
 ) -> Result<i32> {
-    run_serve_core_internal(config_path, stop_rx, source, paths, guard_paths).await
+    run_serve_core_internal(
+        config_path,
+        stop_rx,
+        source,
+        paths,
+        guard_paths,
+        custom_detector,
+    )
+    .await
 }
 
 async fn run_serve_core_internal(
@@ -383,6 +417,7 @@ async fn run_serve_core_internal(
     source: AccountSource,
     paths: &ServePaths,
     guard_paths: Option<StartupGuardPaths>,
+    custom_detector: Option<AccountDetector>,
 ) -> Result<i32> {
     ensure_locale();
     install_signals();
@@ -399,6 +434,10 @@ async fn run_serve_core_internal(
     let gp = guard_paths.unwrap_or_else(|| StartupGuardPaths::from_state_dir(&config.state_dir));
     let _core_lock = verify_serve_core_startup_guard_in_lock(&gp, core_lock)?;
 
+    let detector: AccountDetector = custom_detector.unwrap_or_else(|| {
+        std::sync::Arc::new(crate::core::wechat_account::detect_logged_in_account)
+    });
+
     loop {
         let account = match source {
             AccountSource::Config => None,
@@ -409,7 +448,7 @@ async fn run_serve_core_internal(
                     if stop_requested(&stop_rx) {
                         return Ok(0);
                     }
-                    if let Some(acc) = crate::core::wechat_account::detect_logged_in_account() {
+                    if let Some(acc) = detector() {
                         break acc;
                     }
                     if !waited {
@@ -440,8 +479,16 @@ async fn run_serve_core_internal(
                 Some(acc)
             }
         };
-        match run_core_for_account(config_path, &config, &mut stop_rx, source, account, paths)
-            .await?
+        match run_core_for_account(
+            config_path,
+            &config,
+            &mut stop_rx,
+            source,
+            account,
+            paths,
+            Some(detector.clone()),
+        )
+        .await?
         {
             CoreRunEnd::Exit(code) => return Ok(code),
             CoreRunEnd::AccountChanged => continue,
@@ -456,6 +503,7 @@ async fn run_core_for_account(
     source: AccountSource,
     account: Option<String>,
     paths: &ServePaths,
+    custom_detector: Option<AccountDetector>,
 ) -> Result<CoreRunEnd> {
     // 3. 构造外部大脑并启动 core.sock
     let external_brain = ExternalBrain::new_with_socket(
@@ -486,9 +534,11 @@ async fn run_core_for_account(
     // 4. 运行调度器
     let mut coordinator = BotCoordinator::new_with_account(config_path, account.clone())?;
     if source == AccountSource::WeChat {
-        coordinator.account_detector = Some(std::sync::Arc::new(
-            crate::core::wechat_account::detect_logged_in_account,
-        ));
+        coordinator.account_detector = custom_detector.or_else(|| {
+            Some(std::sync::Arc::new(
+                crate::core::wechat_account::detect_logged_in_account,
+            ))
+        });
     }
     if let Some(acc) = &account {
         coordinator.log_event("wechat_account", json!({"account_id": acc}));
@@ -678,7 +728,11 @@ async fn run_core_for_account(
         let is_idle = coordinator.pending.is_empty()
             && !coordinator.sessions.values().any(|s| s.turn.is_some());
         if crate::core::backup::should_auto_backup(is_idle, now, last_backup_at) {
-            match crate::core::backup::run_backup(&coordinator.config, None) {
+            match crate::core::backup::run_backup_with_gateway_db(
+                &coordinator.config,
+                None,
+                paths.gateway_db.clone(),
+            ) {
                 Ok(out_path) => {
                     last_backup_at = now;
                     coordinator.log_event(
@@ -775,22 +829,6 @@ mod tests {
         assert!(!call.contains("config.account_id"), "{call}");
     }
 
-    /// serve-core makes an idle backup that touches the gateway database; keep it inside the test dir.
-    /// The caller must hold `crate::core::env_lock()`.
-    struct GatewayEnv(Option<String>);
-    fn isolate_gateway(dir: &TempDir) -> GatewayEnv {
-        let previous = std::env::var("MESSAGE_GATEWAY_DB").ok();
-        unsafe { std::env::set_var("MESSAGE_GATEWAY_DB", dir.path().join("gateway.sqlite3")) };
-        GatewayEnv(previous)
-    }
-    impl Drop for GatewayEnv {
-        fn drop(&mut self) {
-            match &self.0 {
-                Some(v) => unsafe { std::env::set_var("MESSAGE_GATEWAY_DB", v) },
-                None => unsafe { std::env::remove_var("MESSAGE_GATEWAY_DB") },
-            }
-        }
-    }
     struct TempDir(PathBuf);
     impl TempDir {
         fn new() -> Self {
@@ -843,9 +881,16 @@ mod tests {
 
     #[test]
     fn test_ensure_locale_sets_vars() {
-        ensure_locale();
-        assert_eq!(std::env::var("LANG").unwrap(), "en_US.UTF-8");
-        assert_eq!(std::env::var("LC_ALL").unwrap(), "en_US.UTF-8");
+        // 纯函数隔离验证：仅缺失 (None) 触发回退，所有 Some（含空串、空白与有效值）严格保留原语义不覆盖
+        assert_eq!(
+            required_locale_defaults(None),
+            Some(("en_US.UTF-8", "en_US.UTF-8"))
+        );
+        assert_eq!(required_locale_defaults(Some("")), None);
+        assert_eq!(required_locale_defaults(Some("   ")), None);
+        assert_eq!(required_locale_defaults(Some("C.UTF-8")), None);
+        assert_eq!(required_locale_defaults(Some("zh_CN.UTF-8")), None);
+        assert_eq!(required_locale_defaults(Some("en_US.UTF-8")), None);
     }
 
     #[test]
@@ -893,34 +938,40 @@ mod tests {
         assert!(lock3.is_ok());
     }
 
+    struct StopOnDrop(Option<tokio::sync::watch::Sender<bool>>);
+    impl Drop for StopOnDrop {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(true);
+            }
+        }
+    }
+
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn test_run_serve_core_graceful_shutdown() {
-        let _lock = crate::core::env_lock();
         let dir = TempDir::new();
-        let _gw = isolate_gateway(&dir);
+        let paths = ServePaths::isolated(dir.path());
         let (cfg_path, state_dir) = write_test_config(dir.path());
 
-        let pid = std::process::id();
-        let count = uuid::Uuid::new_v4().simple();
-        let sock_dir = PathBuf::from(format!("/tmp/sg_{pid}_{count}"));
-        fs::create_dir_all(&sock_dir).unwrap();
-        fs::set_permissions(&sock_dir, fs::Permissions::from_mode(0o700)).unwrap();
-        let sock_path = sock_dir.join("core.sock");
-        unsafe {
-            std::env::set_var("WECHAT_CORE_SOCK", &sock_path);
-        }
-
         let (tx, rx) = tokio::sync::watch::channel(false);
+        let tx_clone = tx.clone();
 
         // 启动后台任务在 100ms 后触发停止
-        tokio::spawn(async move {
+        let client_task = tokio::spawn(async move {
+            let _guard = StopOnDrop(Some(tx_clone));
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            let _ = tx.send(true);
         });
 
-        let code = run_serve_core(&cfg_path, Some(rx)).await.unwrap();
+        let code = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_serve_core_with_paths(&cfg_path, Some(rx), AccountSource::Config, &paths),
+        )
+        .await
+        .expect("serve-core should exit within bounded timeout")
+        .unwrap();
         assert_eq!(code, 0);
+
+        client_task.await.unwrap();
 
         // 检查退出后的 health.json
         let health_file = state_dir.join("health.json");
@@ -931,33 +982,16 @@ mod tests {
         assert!(health.get("brain").is_some());
         assert_eq!(health["brain"]["mode"], "builtin");
 
-        assert!(!sock_path.exists());
-        let _ = fs::remove_dir_all(&sock_dir);
-        unsafe {
-            std::env::remove_var("WECHAT_CORE_SOCK");
-        }
+        assert!(!paths.core_sock.exists());
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn test_run_serve_core_external_brain_socket_and_health() {
-        let _lock = crate::core::env_lock();
         let dir = TempDir::new();
-        let _gw = isolate_gateway(&dir);
+        let paths = ServePaths::isolated(dir.path());
         let state_dir = dir.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
         fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
-
-        let pid = std::process::id();
-        let count = uuid::Uuid::new_v4().simple();
-        let sock_dir = PathBuf::from(format!("/tmp/se_{pid}_{count}"));
-        fs::create_dir_all(&sock_dir).unwrap();
-        fs::set_permissions(&sock_dir, fs::Permissions::from_mode(0o700)).unwrap();
-        let sock_path = sock_dir.join("core.sock");
-
-        unsafe {
-            std::env::set_var("WECHAT_CORE_SOCK", &sock_path);
-        }
 
         let port = get_free_port();
         let cfg = json!({
@@ -985,9 +1019,11 @@ mod tests {
         fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
 
         let (tx, rx) = tokio::sync::watch::channel(false);
-        let s_path = sock_path.clone();
+        let s_path = paths.core_sock.clone();
+        let tx_clone = tx.clone();
 
-        tokio::spawn(async move {
+        let client_task = tokio::spawn(async move {
+            let _guard = StopOnDrop(Some(tx_clone));
             // 等待 core.sock 出现并连接验证 status
             for _ in 0..50 {
                 if s_path.exists() {
@@ -1009,25 +1045,30 @@ mod tests {
                 }
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            let _ = tx.send(true);
         });
 
-        let code = run_serve_core(&cfg_path, Some(rx)).await.unwrap();
+        let code = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_serve_core_with_paths(&cfg_path, Some(rx), AccountSource::Config, &paths),
+        )
+        .await
+        .expect("serve-core should exit within bounded timeout")
+        .unwrap();
         assert_eq!(code, 0);
 
+        client_task.await.unwrap();
+
         // 验证退出后 socket 文件被删除
-        assert!(!sock_path.exists(), "core.sock should be deleted on exit");
+        assert!(
+            !paths.core_sock.exists(),
+            "core.sock should be deleted on exit"
+        );
 
         // 验证 health.json 记录的 brain 状态
         let health_file = state_dir.join("health.json");
         let health: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&health_file).unwrap()).unwrap();
         assert_eq!(health["brain"]["mode"], "external");
-
-        let _ = fs::remove_dir_all(&sock_dir);
-        unsafe {
-            std::env::remove_var("WECHAT_CORE_SOCK");
-        }
     }
 
     #[tokio::test]
@@ -1059,7 +1100,6 @@ mod tests {
     #[tokio::test]
     async fn test_run_serve_core_blocked_by_startup_guard_maintenance() {
         let dir = TempDir::new();
-        let _gw = isolate_gateway(&dir);
         let (cfg_path, state_dir) = write_test_config(dir.path());
         let serve_paths = ServePaths::isolated(dir.path());
 
@@ -1108,9 +1148,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_run_serve_core_blocked_by_maintenance_proves_zero_wechat_probe() {
+        let dir = TempDir::new();
+        let (cfg_path, state_dir) = write_test_config(dir.path());
+        let serve_paths = ServePaths::isolated(dir.path());
+
+        let maint_file = state_dir.join("core.maintenance");
+        fs::write(&maint_file, b"12345678-1234-4234-8234-123456789abc").unwrap();
+        fs::set_permissions(&maint_file, fs::Permissions::from_mode(0o600)).unwrap();
+
+        // 注入带原子计数器的测试探测器，证明 AccountSource::WeChat 阻断时零微信探测调用（不触真机）
+        let probe_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probe_counter = probe_count.clone();
+        let detector: AccountDetector = std::sync::Arc::new(move || {
+            probe_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            None
+        });
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let res = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_serve_core_for_test(
+                &cfg_path,
+                Some(rx),
+                AccountSource::WeChat,
+                &serve_paths,
+                None,
+                Some(detector),
+            ),
+        )
+        .await
+        .expect("test timed out");
+
+        assert!(res.is_err());
+        assert_eq!(
+            probe_count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "WeChat account probe must NOT be executed when startup guard blocks"
+        );
+        assert!(!serve_paths.core_sock.exists());
+        assert!(!state_dir.join("health.json").exists());
+
+        let lock_check = acquire_core_lock(&state_dir);
+        assert!(lock_check.is_ok(), "core.lock must be released");
+        let _ = tx.send(true);
+    }
+
+    #[tokio::test]
     async fn test_run_serve_core_blocked_by_recovery_required_on_corrupt_journal() {
         let dir = TempDir::new();
-        let _gw = isolate_gateway(&dir);
         let (cfg_path, state_dir) = write_test_config(dir.path());
         let serve_paths = ServePaths::isolated(dir.path());
 
@@ -1136,6 +1222,7 @@ mod tests {
                 AccountSource::Config,
                 &serve_paths,
                 Some(guard_paths),
+                None,
             ),
         )
         .await
@@ -1170,7 +1257,6 @@ mod tests {
     #[tokio::test]
     async fn test_run_serve_core_blocked_by_rolled_back_stage() {
         let dir = TempDir::new();
-        let _gw = isolate_gateway(&dir);
         let (cfg_path, state_dir) = write_test_config(dir.path());
         let serve_paths = ServePaths::isolated(dir.path());
 
@@ -1201,6 +1287,7 @@ mod tests {
                 AccountSource::Config,
                 &serve_paths,
                 Some(guard_paths),
+                None,
             ),
         )
         .await
@@ -1228,7 +1315,6 @@ mod tests {
     #[tokio::test]
     async fn test_run_serve_core_committed_with_unknown_install_root_fails_closed() {
         let dir = TempDir::new();
-        let _gw = isolate_gateway(&dir);
         let (cfg_path, state_dir) = write_test_config(dir.path());
         let serve_paths = ServePaths::isolated(dir.path());
 
@@ -1277,7 +1363,6 @@ mod tests {
     #[tokio::test]
     async fn test_run_serve_core_empty_state_allows_startup() {
         let dir = TempDir::new();
-        let _gw = isolate_gateway(&dir);
         let (cfg_path, state_dir) = write_test_config(dir.path());
         let serve_paths = ServePaths::isolated(dir.path());
 
@@ -1312,7 +1397,6 @@ mod tests {
     #[tokio::test]
     async fn test_run_serve_core_allows_startup_with_committed_release() {
         let dir = TempDir::new();
-        let _gw = isolate_gateway(&dir);
         let (cfg_path, state_dir) = write_test_config(dir.path());
         let serve_paths = ServePaths::isolated(dir.path());
 
@@ -1359,6 +1443,7 @@ mod tests {
                 AccountSource::Config,
                 &serve_paths,
                 Some(guard_paths),
+                None,
             ),
         )
         .await
@@ -1379,11 +1464,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn test_serve_core_auto_backup_on_idle() {
-        let _guard = crate::core::env_lock();
         let dir = TempDir::new();
-        let _gw = isolate_gateway(&dir);
+        let paths = ServePaths::isolated(dir.path());
         let (cfg_path, state_dir) = write_test_config(dir.path());
 
         // 创建并写入初始历史库
@@ -1400,15 +1483,24 @@ mod tests {
         }
 
         let (tx, rx) = tokio::sync::watch::channel(false);
+        let tx_clone = tx.clone();
 
-        tokio::spawn(async move {
+        let client_task = tokio::spawn(async move {
+            let _guard = StopOnDrop(Some(tx_clone));
             // 等待一轮 sweep 完成，并触发自动备份
             tokio::time::sleep(Duration::from_millis(500)).await;
-            let _ = tx.send(true);
         });
 
-        let code = run_serve_core(&cfg_path, Some(rx)).await.unwrap();
+        let code = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_serve_core_with_paths(&cfg_path, Some(rx), AccountSource::Config, &paths),
+        )
+        .await
+        .expect("serve-core should exit within bounded timeout")
+        .unwrap();
         assert_eq!(code, 0);
+
+        client_task.await.unwrap();
 
         // 验证 backups 目录下生成了备份
         let backups_dir = state_dir.join("backups");
@@ -1437,11 +1529,8 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn test_history_http_launchd_plist() {
-        let _lock = crate::core::env_lock();
         let dir = TempDir::new();
-        let _gw = isolate_gateway(&dir);
         let paths = ServePaths::isolated(dir.path());
         let (cfg_path, state_dir) = write_test_config(dir.path());
 
@@ -1450,26 +1539,42 @@ mod tests {
         let port = config.history_http.port;
 
         let (tx, rx) = tokio::sync::watch::channel(false);
+        let tx_clone = tx.clone();
 
         let http_client_task = tokio::spawn(async move {
+            let _guard = StopOnDrop(Some(tx_clone));
             let mut connected = false;
+            let mut perm_denied = false;
             for _ in 0..50 {
-                if let Ok(mut stream) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
-                    connected = true;
-                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                    // 1. 无 token 请求返回 401
-                    let req = b"GET /v1/contacts HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
-                    let _ = stream.write_all(req).await;
-                    let mut buf = vec![0u8; 1024];
-                    let n = stream.read(&mut buf).await.unwrap_or(0);
-                    let resp = String::from_utf8_lossy(&buf[..n]);
-                    assert!(
-                        resp.starts_with("HTTP/1.1 401"),
-                        "Expected 401, got: {resp}"
-                    );
-                    break;
+                match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                    Ok(mut stream) => {
+                        connected = true;
+                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                        // 1. 无 token 请求返回 401
+                        let req = b"GET /v1/contacts HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+                        let _ = stream.write_all(req).await;
+                        let mut buf = vec![0u8; 1024];
+                        let n = stream.read(&mut buf).await.unwrap_or(0);
+                        let resp = String::from_utf8_lossy(&buf[..n]);
+                        assert!(
+                            resp.starts_with("HTTP/1.1 401"),
+                            "Expected 401, got: {resp}"
+                        );
+                        break;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                        perm_denied = true;
+                        break;
+                    }
+                    Err(_) => {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+
+            if perm_denied {
+                // 精准记录受限原因：macOS 沙箱策略拦截本地网络回环 connect
+                panic!("sandbox network restriction: TcpStream::connect returned PermissionDenied");
             }
             assert!(connected, "History HTTP server did not start in time");
 
@@ -1492,12 +1597,16 @@ mod tests {
                     "Expected 200, got: {resp}"
                 );
             }
-
-            let _ = tx.send(true);
         });
 
-        let code = run_serve_core_with_paths(&cfg_path, Some(rx), AccountSource::Config, &paths)
-            .await
+        let serve_res = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_serve_core_with_paths(&cfg_path, Some(rx), AccountSource::Config, &paths),
+        )
+        .await;
+
+        let code = serve_res
+            .expect("serve-core should exit within bounded timeout when client task settles")
             .unwrap();
         assert_eq!(code, 0);
 
@@ -1534,5 +1643,252 @@ mod tests {
 
         SHARED_STOP.store(std::ptr::null_mut(), Ordering::SeqCst);
         STOP_SIGNAL.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn test_serve_paths_from_env_never_deletes_directory() {
+        let temp = TempDir::new();
+        let custom_sock_dir = temp.path().join("custom_socks");
+        fs::create_dir_all(&custom_sock_dir).unwrap();
+        let sock_file = custom_sock_dir.join("core.sock");
+        fs::write(&sock_file, b"socket placeholder").unwrap();
+
+        let paths = ServePaths {
+            home: temp.path().to_path_buf(),
+            core_sock: sock_file.clone(),
+            worker_sock: custom_sock_dir.join("w.sock"),
+            bot_worker_sock: custom_sock_dir.join("bw.sock"),
+            gateway_db: None,
+            temp_dir_guard: None,
+        };
+
+        drop(paths);
+        assert!(
+            custom_sock_dir.exists(),
+            "from_env paths must never delete custom directory"
+        );
+        assert!(
+            sock_file.exists(),
+            "from_env paths must never delete custom socket file"
+        );
+    }
+
+    #[test]
+    fn test_serve_paths_isolated_cleans_up_on_drop() {
+        let temp = TempDir::new();
+        let sock_dir;
+        {
+            let paths = ServePaths::isolated(temp.path());
+            sock_dir = paths
+                .socket_dir()
+                .expect("isolated paths must have socket_dir");
+            assert!(
+                sock_dir.exists(),
+                "socket directory must exist while paths is alive"
+            );
+        }
+        assert!(
+            !sock_dir.exists(),
+            "isolated socket directory must be removed on drop"
+        );
+    }
+
+    #[test]
+    fn test_serve_paths_clone_lifecycle_shares_ownership_without_early_deletion() {
+        let temp = TempDir::new();
+        let p1 = ServePaths::isolated(temp.path());
+        let sock_dir = p1.socket_dir().unwrap();
+        assert!(sock_dir.exists());
+
+        let p2 = p1.clone();
+        let p3 = p2.clone();
+
+        drop(p1);
+        assert!(
+            sock_dir.exists(),
+            "directory must still exist after dropping p1"
+        );
+
+        drop(p2);
+        assert!(
+            sock_dir.exists(),
+            "directory must still exist after dropping p2"
+        );
+
+        drop(p3);
+        assert!(
+            !sock_dir.exists(),
+            "directory must be removed after dropping final clone p3"
+        );
+    }
+
+    #[test]
+    fn test_serve_paths_try_isolated_directory_creation_failure() {
+        let temp = TempDir::new();
+        let file_as_dir = temp.path().join("not_a_dir");
+        fs::write(&file_as_dir, b"regular file").unwrap();
+
+        let res = ServePaths::try_isolated(&file_as_dir);
+        assert!(
+            res.is_err(),
+            "try_isolated must return Err when base dir creation fails"
+        );
+        let err_str = res.err().unwrap().to_string();
+        assert!(
+            err_str.contains("failed to create base dir")
+                || err_str.contains("failed to set permissions"),
+            "Error should describe failure context: {err_str}"
+        );
+    }
+
+    #[test]
+    fn test_serve_paths_symlink_replacement_safe_does_not_delete_external_target() {
+        let temp = TempDir::new();
+        let external_target_dir = temp.path().join("external_important_data");
+        fs::create_dir_all(&external_target_dir).unwrap();
+        let canary_file = external_target_dir.join("must_survive.txt");
+        fs::write(&canary_file, b"precious contents").unwrap();
+
+        let paths = ServePaths::isolated(temp.path());
+        let owned_sock_dir = paths.socket_dir().unwrap();
+        assert!(owned_sock_dir.exists());
+
+        fs::remove_dir_all(&owned_sock_dir).unwrap();
+        std::os::unix::fs::symlink(&external_target_dir, &owned_sock_dir).unwrap();
+        assert!(owned_sock_dir.is_symlink());
+
+        drop(paths);
+
+        assert!(
+            external_target_dir.exists(),
+            "external target must remain intact"
+        );
+        assert!(
+            canary_file.exists(),
+            "canary file in external target must not be deleted"
+        );
+        assert_eq!(fs::read(&canary_file).unwrap(), b"precious contents");
+        assert!(!owned_sock_dir.exists(), "symlink itself must be removed");
+    }
+
+    #[test]
+    fn test_serve_paths_owned_socket_dir_identity_mismatch_does_not_delete_external_dir() {
+        let temp = TempDir::new();
+        let external_dir = temp.path().join("external_replacement_dir");
+        fs::create_dir_all(&external_dir).unwrap();
+        let marker_file = external_dir.join("must_not_be_deleted.txt");
+        fs::write(&marker_file, b"valuable marker content").unwrap();
+
+        let paths = ServePaths::isolated(temp.path());
+        let owned_sock_dir = paths
+            .socket_dir()
+            .expect("isolated paths must have socket_dir");
+        assert!(owned_sock_dir.exists());
+
+        // 模拟攻击或竞态替换：
+        // 1. 将原目录重命名为 backup 路径
+        let backup_dir = temp.path().join("original_sock_dir_backup");
+        fs::rename(&owned_sock_dir, &backup_dir).unwrap();
+
+        // 2. 将 external_dir 移动或重命名到 owned_sock_dir 路径上
+        // 此时 owned_sock_dir 路径存在且是目录，但其 inode/dev 属于 external_dir，与 guard 创建时的 dev/ino 不匹配
+        fs::rename(&external_dir, &owned_sock_dir).unwrap();
+        let current_marker = owned_sock_dir.join("must_not_be_deleted.txt");
+        assert!(current_marker.exists());
+
+        // 3. drop paths，触发 OwnedSocketDir::drop
+        drop(paths);
+
+        // 4. 断言：由于 dev/ino 身份不匹配，drop 绝不递归删除该外部目录！
+        assert!(
+            owned_sock_dir.exists(),
+            "mismatched directory must not be deleted"
+        );
+        assert!(
+            current_marker.exists(),
+            "marker file in mismatched directory must remain intact"
+        );
+        assert_eq!(
+            fs::read(&current_marker).unwrap(),
+            b"valuable marker content"
+        );
+
+        // 收尾清理
+        let _ = fs::remove_dir_all(&owned_sock_dir);
+        let _ = fs::remove_dir_all(&backup_dir);
+    }
+
+    #[test]
+    fn test_serve_paths_from_values_semantics_and_comparison_with_baseline() {
+        // 1. HOME 缺失 (None) 且 core_sock 缺失 (None)
+        // 必须精确恢复 1e120b5 原生产语义：
+        // home 为 "."，worker_sock/bot_worker_sock 挂在 "./.wechat-rpa" 下
+        // core_sock 则按原 default_socket_path 规则回退到 "/.wechat-rpa/core.sock"
+        {
+            let paths = ServePaths::from_values(None, None);
+            assert_eq!(paths.home, PathBuf::from("."));
+            assert_eq!(
+                paths.worker_sock,
+                PathBuf::from("./.wechat-rpa/worker.sock")
+            );
+            assert_eq!(
+                paths.bot_worker_sock,
+                PathBuf::from("./.wechat-rpa/bot-worker.sock")
+            );
+            assert_eq!(paths.core_sock, PathBuf::from("/.wechat-rpa/core.sock"));
+        }
+
+        // 2. HOME 为空字符串 (Some("")) 且 core_sock 缺失 (None)
+        // 1e120b5 中 std::env::var("HOME") 返回 Ok("")，因此 home 为 ""
+        {
+            let paths = ServePaths::from_values(Some(""), None);
+            assert_eq!(paths.home, PathBuf::from(""));
+            assert_eq!(paths.worker_sock, PathBuf::from(".wechat-rpa/worker.sock"));
+            assert_eq!(
+                paths.bot_worker_sock,
+                PathBuf::from(".wechat-rpa/bot-worker.sock")
+            );
+            assert_eq!(paths.core_sock, PathBuf::from(".wechat-rpa/core.sock"));
+        }
+
+        // 3. HOME 有效设置且 core_sock 缺失 (None)
+        {
+            let paths = ServePaths::from_values(Some("/opt/fake_user_dir"), None);
+            assert_eq!(paths.home, PathBuf::from("/opt/fake_user_dir"));
+            assert_eq!(
+                paths.worker_sock,
+                PathBuf::from("/opt/fake_user_dir/.wechat-rpa/worker.sock")
+            );
+            assert_eq!(
+                paths.bot_worker_sock,
+                PathBuf::from("/opt/fake_user_dir/.wechat-rpa/bot-worker.sock")
+            );
+            assert_eq!(
+                paths.core_sock,
+                PathBuf::from("/opt/fake_user_dir/.wechat-rpa/core.sock")
+            );
+        }
+
+        // 4. WECHAT_CORE_SOCK 覆盖存在
+        {
+            let paths =
+                ServePaths::from_values(Some("/opt/fake_user_dir"), Some("/tmp/custom.sock"));
+            assert_eq!(paths.core_sock, PathBuf::from("/tmp/custom.sock"));
+        }
+
+        // 5. WECHAT_CORE_SOCK 为空或纯空白，应忽略并回退到默认路径
+        {
+            let paths_empty = ServePaths::from_values(Some("/opt/fake_user_dir"), Some(""));
+            assert_eq!(
+                paths_empty.core_sock,
+                PathBuf::from("/opt/fake_user_dir/.wechat-rpa/core.sock")
+            );
+
+            let paths_spaces = ServePaths::from_values(Some("/opt/fake_user_dir"), Some("   "));
+            assert_eq!(
+                paths_spaces.core_sock,
+                PathBuf::from("/opt/fake_user_dir/.wechat-rpa/core.sock")
+            );
+        }
     }
 }

@@ -65,9 +65,16 @@ fn main() {
 
             let status_str = if journal_err.is_some() || seq_err.is_some() {
                 if !maintenance {
-                    let _ = journal::set_maintenance_active(
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let tx_id = format!("tx-{}", uuid::Uuid::new_v4());
+                    let _ = journal::set_structured_maintenance_marker(
                         &state_dir,
+                        &tx_id,
                         "fail closed: corrupt journal or sequence file",
+                        now,
                     );
                 }
                 "recovery_required"
@@ -82,7 +89,7 @@ fn main() {
                 "idle"
             };
 
-            let current_meta = journal::load_current_release_metadata(&state_dir)
+            let current_meta = journal::load_current_release_record(&state_dir)
                 .ok()
                 .flatten();
 
