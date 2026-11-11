@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use fs2::FileExt;
 use serde_json::json;
 use std::fs::{self, File, OpenOptions};
@@ -136,17 +136,100 @@ fn now_secs() -> f64 {
         .as_secs_f64()
 }
 
+/// 启动守卫路径定义（严格区分状态根与安装根）
+#[derive(Debug, Clone)]
+pub struct StartupGuardPaths {
+    pub state_dir: PathBuf,
+    pub releases_dir: Option<PathBuf>,
+    pub current_link: Option<PathBuf>,
+}
+
+impl StartupGuardPaths {
+    pub fn from_state_dir(state_dir: &Path) -> Self {
+        Self {
+            state_dir: state_dir.to_path_buf(),
+            releases_dir: None,
+            current_link: None,
+        }
+    }
+
+    pub fn with_install_root(state_dir: &Path, releases_dir: &Path, current_link: &Path) -> Self {
+        Self {
+            state_dir: state_dir.to_path_buf(),
+            releases_dir: Some(releases_dir.to_path_buf()),
+            current_link: Some(current_link.to_path_buf()),
+        }
+    }
+}
+
+pub fn verify_serve_core_startup_guard_in_lock(
+    paths: &StartupGuardPaths,
+    core_lock: File,
+) -> Result<File> {
+    if (paths.releases_dir.is_none() || paths.current_link.is_none())
+        && paths.state_dir.join("update-journal.json").exists()
+    {
+        drop(core_lock);
+        bail!(
+            "startup_guard_blocked: unconfigured_production_install_root: formal releases_dir and current_link are required"
+        );
+    }
+
+    let dummy_fallback = paths.state_dir.join("__unconfigured_install_root__");
+    let releases_dir = paths.releases_dir.as_deref().unwrap_or(&dummy_fallback);
+    let current_link = paths.current_link.as_deref().unwrap_or(&dummy_fallback);
+
+    let decision = crate::updater::journal::check_startup_guard_readonly(
+        &paths.state_dir,
+        releases_dir,
+        current_link,
+    );
+
+    match decision {
+        crate::updater::journal::StartupDualCheckDecision::AllowStartup => Ok(core_lock),
+        crate::updater::journal::StartupDualCheckDecision::MaintenanceSuppressed {
+            tx_id,
+            stage,
+        } => {
+            drop(core_lock);
+            eprintln!(
+                "serve-core startup suppressed by maintenance: tx_id={}, stage={:?}",
+                tx_id, stage
+            );
+            bail!(
+                "startup_suppressed_by_maintenance: tx_id={}, stage={:?}",
+                tx_id,
+                stage
+            );
+        }
+        crate::updater::journal::StartupDualCheckDecision::RecoveryRequired { reason } => {
+            drop(core_lock);
+            eprintln!("serve-core startup blocked: recovery required: {}", reason);
+            bail!("startup_blocked_recovery_required: {}", reason);
+        }
+    }
+}
+
 pub async fn run_serve_core(
     config_path: &Path,
     stop_rx: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> Result<i32> {
-    run_serve_core_with(config_path, stop_rx, AccountSource::Config).await
+    run_serve_core_with_guard_paths(config_path, stop_rx, AccountSource::Config, None).await
 }
 
 pub async fn run_serve_core_with(
     config_path: &Path,
+    stop_rx: Option<tokio::sync::watch::Receiver<bool>>,
+    source: AccountSource,
+) -> Result<i32> {
+    run_serve_core_with_guard_paths(config_path, stop_rx, source, None).await
+}
+
+pub async fn run_serve_core_with_guard_paths(
+    config_path: &Path,
     mut stop_rx: Option<tokio::sync::watch::Receiver<bool>>,
     source: AccountSource,
+    guard_paths: Option<StartupGuardPaths>,
 ) -> Result<i32> {
     ensure_locale();
     install_signals();
@@ -156,8 +239,12 @@ pub async fn run_serve_core_with(
         .with_context(|| format!("configuration error in {}", config_path.display()))?;
 
     // 2. 获取文件锁（保证同一 state_dir 只有一个实例，拿不到退出 2 并打印原因）
-    let _core_lock = acquire_core_lock(&config.state_dir)
+    let core_lock = acquire_core_lock(&config.state_dir)
         .with_context(|| format!("state lock error in {}", config.state_dir.display()))?;
+
+    // 3. 锁内核验启动双检查 Guard（在任何微信探测、Worker 或业务 DB 副作用之前）
+    let paths = guard_paths.unwrap_or_else(|| StartupGuardPaths::from_state_dir(&config.state_dir));
+    let _core_lock = verify_serve_core_startup_guard_in_lock(&paths, core_lock)?;
 
     loop {
         let account = match source {
@@ -812,6 +899,222 @@ mod tests {
         let err_str = res.err().unwrap().to_string();
         assert!(
             err_str.contains("state lock error") || err_str.contains("failed to acquire core.lock")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_serve_core_blocked_by_startup_guard_maintenance() {
+        let _guard = crate::core::env_lock();
+        let dir = TempDir::new();
+        let _gw = isolate_gateway(&dir);
+        let (cfg_path, state_dir) = write_test_config(dir.path());
+
+        // 写入 36 字节合法 UUID 维护标志
+        let maint_file = state_dir.join("core.maintenance");
+        fs::write(&maint_file, b"12345678-1234-4234-8234-123456789abc").unwrap();
+        fs::set_permissions(&maint_file, fs::Permissions::from_mode(0o600)).unwrap();
+
+        // 真实调用 run_serve_core 入口（必须被启动守卫阻断返回 Err，且非 0）
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let _ = tx.send(true);
+        });
+        let res = run_serve_core(&cfg_path, Some(rx)).await;
+        assert!(
+            res.is_err(),
+            "run_serve_core must fail when maintenance is active"
+        );
+        let err_msg = res.err().unwrap().to_string();
+        assert!(err_msg.contains("startup_suppressed_by_maintenance"));
+
+        // 验证 core.lock 必须被干净释放，其他进程可以立即获取
+        let lock_check = acquire_core_lock(&state_dir);
+        assert!(
+            lock_check.is_ok(),
+            "core.lock must be released after guard suppression"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_serve_core_blocked_by_recovery_required_on_corrupt_journal() {
+        let _guard = crate::core::env_lock();
+        let dir = TempDir::new();
+        let _gw = isolate_gateway(&dir);
+        let (cfg_path, state_dir) = write_test_config(dir.path());
+
+        let releases_dir = dir.path().join("releases");
+        let release_1 = releases_dir.join("1.0.0");
+        fs::create_dir_all(&release_1).unwrap();
+        let current_link = dir.path().join("current");
+        std::os::unix::fs::symlink(&release_1, &current_link).unwrap();
+        let paths = StartupGuardPaths::with_install_root(&state_dir, &releases_dir, &current_link);
+
+        // 写入损坏格式的 update-journal.json
+        let journal_file = state_dir.join("update-journal.json");
+        fs::write(&journal_file, b"{ invalid json content").unwrap();
+        fs::set_permissions(&journal_file, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let _ = tx.send(true);
+        });
+        let res = run_serve_core_with_guard_paths(
+            &cfg_path,
+            Some(rx),
+            AccountSource::Config,
+            Some(paths),
+        )
+        .await;
+        assert!(
+            res.is_err(),
+            "run_serve_core must fail when journal is corrupt"
+        );
+        let err_msg = res.err().unwrap().to_string();
+        assert!(err_msg.contains("startup_blocked_recovery_required"));
+
+        // 验证 core.lock 必须被干净释放
+        let lock_check = acquire_core_lock(&state_dir);
+        assert!(
+            lock_check.is_ok(),
+            "core.lock must be released after recovery required"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_serve_core_blocked_by_rolled_back_stage() {
+        let _guard = crate::core::env_lock();
+        let dir = TempDir::new();
+        let _gw = isolate_gateway(&dir);
+        let (cfg_path, state_dir) = write_test_config(dir.path());
+
+        let releases_dir = dir.path().join("releases");
+        let release_1 = releases_dir.join("1.0.0");
+        fs::create_dir_all(&release_1).unwrap();
+        let current_link = dir.path().join("current");
+        std::os::unix::fs::symlink(&release_1, &current_link).unwrap();
+        let paths = StartupGuardPaths::with_install_root(&state_dir, &releases_dir, &current_link);
+
+        let mut journal = crate::updater::journal::UpdateJournal::new(
+            "00000000-0000-4000-8000-000000000001",
+            "1.0.0",
+            "1.0.1",
+            2,
+            1000,
+        );
+        journal.stage = crate::updater::journal::TransactionStage::RolledBack;
+        journal.persist_atomic(&state_dir).unwrap();
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let _ = tx.send(true);
+        });
+        let res = run_serve_core_with_guard_paths(
+            &cfg_path,
+            Some(rx),
+            AccountSource::Config,
+            Some(paths),
+        )
+        .await;
+        assert!(
+            res.is_err(),
+            "run_serve_core must fail when stage is RolledBack"
+        );
+        let err_msg = res.err().unwrap().to_string();
+        assert!(err_msg.contains("startup_blocked_recovery_required"));
+
+        let lock_check = acquire_core_lock(&state_dir);
+        assert!(
+            lock_check.is_ok(),
+            "core.lock must be released after guard suppression"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_serve_core_blocked_by_unconfigured_install_root_when_journal_exists() {
+        let _guard = crate::core::env_lock();
+        let dir = TempDir::new();
+        let _gw = isolate_gateway(&dir);
+        let (cfg_path, state_dir) = write_test_config(dir.path());
+
+        let mut journal = crate::updater::journal::UpdateJournal::new(
+            "00000000-0000-4000-8000-000000000002",
+            "1.0.0",
+            "1.0.1",
+            2,
+            1000,
+        );
+        journal.stage = crate::updater::journal::TransactionStage::Committed;
+        journal.manifest_digest =
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string());
+        journal.persist_atomic(&state_dir).unwrap();
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let _ = tx.send(true);
+        });
+        let res = run_serve_core(&cfg_path, Some(rx)).await;
+        assert!(res.is_err());
+        let err_msg = res.err().unwrap().to_string();
+        assert!(err_msg.contains("unconfigured_production_install_root"));
+
+        let lock_check = acquire_core_lock(&state_dir);
+        assert!(lock_check.is_ok(), "core.lock must be released");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_run_serve_core_allows_startup_with_injected_paths() {
+        let _guard = crate::core::env_lock();
+        let dir = TempDir::new();
+        let _gw = isolate_gateway(&dir);
+        let (cfg_path, state_dir) = write_test_config(dir.path());
+
+        let releases_dir = dir.path().join("releases");
+        let release_1 = releases_dir.join("rel-1");
+        fs::create_dir_all(&release_1).unwrap();
+        let current_link = dir.path().join("current");
+        std::os::unix::fs::symlink(&release_1, &current_link).unwrap();
+
+        let paths = StartupGuardPaths::with_install_root(&state_dir, &releases_dir, &current_link);
+
+        let pid = std::process::id();
+        let count = uuid::Uuid::new_v4().simple();
+        let sock_dir = PathBuf::from(format!("/tmp/sg_ok_{pid}_{count}"));
+        fs::create_dir_all(&sock_dir).unwrap();
+        fs::set_permissions(&sock_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let sock_path = sock_dir.join("core.sock");
+        unsafe {
+            std::env::set_var("WECHAT_CORE_SOCK", &sock_path);
+        }
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let _ = tx.send(true);
+        });
+
+        let res = run_serve_core_with_guard_paths(
+            &cfg_path,
+            Some(rx),
+            AccountSource::Config,
+            Some(paths),
+        )
+        .await;
+        assert!(
+            res.is_ok(),
+            "run_serve_core must succeed when guard allows startup: {:?}",
+            res.err()
+        );
+        assert_eq!(res.unwrap(), 0);
+
+        let lock_check = acquire_core_lock(&state_dir);
+        assert!(
+            lock_check.is_ok(),
+            "core.lock must be released after normal shutdown"
         );
     }
 
