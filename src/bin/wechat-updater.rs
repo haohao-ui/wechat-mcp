@@ -64,6 +64,12 @@ fn main() {
             let maintenance = state_dir.join("core.maintenance").exists();
 
             let status_str = if journal_err.is_some() || seq_err.is_some() {
+                if !maintenance {
+                    let _ = journal::set_maintenance_active(
+                        &state_dir,
+                        "fail closed: corrupt journal or sequence file",
+                    );
+                }
                 "recovery_required"
             } else if let Some(ref j) = journal {
                 match j.stage {
@@ -76,10 +82,15 @@ fn main() {
                 "idle"
             };
 
+            let current_meta = journal::load_current_release_metadata(&state_dir)
+                .ok()
+                .flatten();
+
             let out = serde_json::json!({
                 "status": status_str,
                 "highest_accepted_sequence": highest_seq,
-                "maintenance_active": maintenance,
+                "current_release": current_meta,
+                "maintenance_active": maintenance || journal_err.is_some() || seq_err.is_some(),
                 "journal": journal,
                 "error": journal_err.or(seq_err),
             });
