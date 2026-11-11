@@ -316,7 +316,7 @@
       "name": "desktop_observe"
     },
     {
-      "description": "Act on a control from desktop_observe. Rechecks PID/window/bounds and rendered/AX state before posting events. Reuses human-like trajectories. Consumes the observation even on failure: never retry with a new key blindly. focus is explicit; other actions require the application in front. Returns a fresh observation and separate verification; business success remains unknown. Use desktop_stop to interrupt.",
+      "description": "Act on a control from desktop_observe. Rechecks PID/window/bounds and unique AX target identity/state; OCR targets also require matching local pixels. Reuses human-like trajectories. Consumes the observation even on failure: never retry with a new key blindly. focus is explicit; other actions require the application in front. Returns independent input_readback and verification fields; a fresh observation may be absent when the total budget expires. Business success remains unknown. Use desktop_stop to interrupt.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -366,6 +366,8 @@
             "type": "integer"
           },
           "timeout_seconds": {
+            "default": 30.0,
+            "description": "One total native action budget, including precheck, activation, input readback, refresh and expected-text verification; not a separate timeout for each phase.",
             "exclusiveMinimum": 0,
             "maximum": 30.0,
             "type": "number"

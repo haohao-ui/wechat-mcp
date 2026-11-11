@@ -411,21 +411,37 @@ pub fn prune_old_backups(backups_dir: &Path, keep: usize) -> Result<usize> {
 /// 3. ~/Library/Application Support/message-gateway/service.sqlite3 (if exists)
 /// 4. ~/.wechat-rpa/test.sqlite3
 pub fn resolve_gateway_db_path() -> Option<PathBuf> {
+    resolve_gateway_db_path_with(None, None)
+}
+
+pub fn resolve_gateway_db_path_with(
+    override_db: Option<&Path>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(p) = override_db {
+        return Some(p.to_path_buf());
+    }
     if let Ok(env_path) = std::env::var("MESSAGE_GATEWAY_DB") {
         let p = PathBuf::from(env_path);
         return Some(p);
     }
     // Backup and restore move and overwrite this file; a test that falls through to the real
     // $HOME would rewrite the developer's own gateway database.
+    let effective_home = home
+        .map(|h| h.to_path_buf())
+        .or_else(|| std::env::var("HOME").ok().map(PathBuf::from));
+
     #[cfg(test)]
-    if !std::env::var("HOME").is_ok_and(|home| Path::new(&home).starts_with(std::env::temp_dir())) {
+    if !effective_home
+        .as_ref()
+        .is_some_and(|h| h.starts_with(std::env::temp_dir()))
+    {
         panic!(
             "test must isolate the gateway database: set MESSAGE_GATEWAY_DB or point HOME at a temp dir"
         );
     }
 
-    if let Ok(home) = std::env::var("HOME") {
-        let home_path = PathBuf::from(home);
+    if let Some(home_path) = effective_home {
         let test_db = home_path.join(".wechat-rpa").join("test.sqlite3");
         if test_db.exists() {
             return Some(test_db);
@@ -449,6 +465,14 @@ pub fn resolve_gateway_db_path() -> Option<PathBuf> {
 /// - If `custom_out` is provided, backs up directly into that directory.
 /// - Otherwise backs up into `<config.state_dir>/backups/YYYYMMDD-HHMMSS/` and prunes old backups to 7.
 pub fn run_backup(config: &BotConfig, custom_out: Option<&Path>) -> Result<PathBuf> {
+    run_backup_with_gateway_db(config, custom_out, None)
+}
+
+pub fn run_backup_with_gateway_db(
+    config: &BotConfig,
+    custom_out: Option<&Path>,
+    gateway_db_override: Option<Option<PathBuf>>,
+) -> Result<PathBuf> {
     let (out_dir, is_custom) = match custom_out {
         Some(dir) => (dir.to_path_buf(), true),
         None => {
@@ -488,7 +512,10 @@ pub fn run_backup(config: &BotConfig, custom_out: Option<&Path>) -> Result<PathB
 
     let run_backup_internal = || -> Result<()> {
         let history_db = config.state_dir.join("history").join("history.sqlite3");
-        let gateway_db = resolve_gateway_db_path();
+        let gateway_db = match gateway_db_override {
+            Some(override_opt) => override_opt,
+            None => resolve_gateway_db_path(),
+        };
 
         let mut backed_up_count = 0;
         let mut database_entries = Vec::new();
@@ -702,6 +729,14 @@ fn sqlite_family(db: &Path) -> [PathBuf; 3] {
 }
 
 pub fn run_restore(backup_dir: &Path, config: &BotConfig) -> Result<()> {
+    run_restore_with_gateway_db(backup_dir, config, None)
+}
+
+pub fn run_restore_with_gateway_db(
+    backup_dir: &Path,
+    config: &BotConfig,
+    gateway_db_override: Option<Option<PathBuf>>,
+) -> Result<()> {
     if !backup_dir.exists() || !backup_dir.is_dir() {
         bail!(
             "Backup directory does not exist or is not a directory: {}",
@@ -841,7 +876,10 @@ pub fn run_restore(backup_dir: &Path, config: &BotConfig) -> Result<()> {
 
     // A stale -wal left beside the gateway database would be replayed onto the restored file,
     // so the database and its sidecars move out together. Only successful moves are recorded.
-    let gw_dest = resolve_gateway_db_path();
+    let gw_dest = match gateway_db_override {
+        Some(override_opt) => override_opt,
+        None => resolve_gateway_db_path(),
+    };
     let mut gw_moved: Vec<(PathBuf, PathBuf)> = Vec::new();
     let restore_gateway_files = |moved: &[(PathBuf, PathBuf)]| {
         if let Some(gw_path) = &gw_dest {
@@ -1069,21 +1107,18 @@ mod tests {
         }
     }
 
-    /// Points MESSAGE_GATEWAY_DB at a file inside `temp` for the test and restores it on drop.
-    /// The caller must hold `crate::core::env_lock()`.
-    struct GatewayEnv(Option<String>);
-    fn isolate_gateway(temp: &TempDir) -> GatewayEnv {
-        let previous = std::env::var("MESSAGE_GATEWAY_DB").ok();
-        unsafe { std::env::set_var("MESSAGE_GATEWAY_DB", temp.0.join("gateway.sqlite3")) };
-        GatewayEnv(previous)
+    fn run_backup_isolated(
+        config: &BotConfig,
+        custom_out: Option<&Path>,
+        temp: &TempDir,
+    ) -> Result<PathBuf> {
+        let gw = temp.0.join("gateway.sqlite3");
+        run_backup_with_gateway_db(config, custom_out, Some(Some(gw)))
     }
-    impl Drop for GatewayEnv {
-        fn drop(&mut self) {
-            match &self.0 {
-                Some(v) => unsafe { std::env::set_var("MESSAGE_GATEWAY_DB", v) },
-                None => unsafe { std::env::remove_var("MESSAGE_GATEWAY_DB") },
-            }
-        }
+
+    fn run_restore_isolated(backup_dir: &Path, config: &BotConfig, temp: &TempDir) -> Result<()> {
+        let gw = temp.0.join("gateway.sqlite3");
+        run_restore_with_gateway_db(backup_dir, config, Some(Some(gw)))
     }
 
     fn sample_config(state_dir: &Path) -> BotConfig {
@@ -1240,8 +1275,6 @@ mod tests {
 
     #[test]
     fn test_run_backup_default_and_retention() {
-        let _env = crate::core::env_lock();
-        let orig_gw = std::env::var("MESSAGE_GATEWAY_DB").ok();
         let temp = TempDir::new("run_backup");
         let state_dir = temp.0.join("state");
         let history_dir = state_dir.join("history");
@@ -1257,7 +1290,7 @@ mod tests {
             .unwrap();
         }
 
-        // 构造 gateway db 并通过环境变量指定
+        // 构造 gateway db 并直接注入
         let gw_db = temp.0.join("test.sqlite3");
         {
             let conn = Connection::open(&gw_db).unwrap();
@@ -1266,12 +1299,9 @@ mod tests {
             )
             .unwrap();
         }
-        unsafe {
-            std::env::set_var("MESSAGE_GATEWAY_DB", gw_db.to_str().unwrap());
-        }
 
         let config = sample_config(&state_dir);
-        let out = run_backup(&config, None).unwrap();
+        let out = run_backup_with_gateway_db(&config, None, Some(Some(gw_db))).unwrap();
         assert!(out.exists());
 
         // 检查目录权限 0700
@@ -1308,19 +1338,11 @@ mod tests {
                 .unwrap(),
             "ok"
         );
-
-        if let Some(g) = orig_gw {
-            unsafe { std::env::set_var("MESSAGE_GATEWAY_DB", g) };
-        } else {
-            unsafe { std::env::remove_var("MESSAGE_GATEWAY_DB") };
-        }
     }
 
     #[test]
     fn test_run_backup_custom_out() {
-        let _env = crate::core::env_lock();
         let temp = TempDir::new("custom_out");
-        let _gw = isolate_gateway(&temp);
         let state_dir = temp.0.join("state");
         let history_dir = state_dir.join("history");
         fs::create_dir_all(&history_dir).unwrap();
@@ -1333,16 +1355,14 @@ mod tests {
         let config = sample_config(&state_dir);
 
         let custom_dir = temp.0.join("manual_export");
-        let res = run_backup(&config, Some(&custom_dir)).unwrap();
+        let res = run_backup_isolated(&config, Some(&custom_dir), &temp).unwrap();
         assert_eq!(res, custom_dir);
         assert!(custom_dir.join("history.sqlite3").exists());
     }
 
     #[test]
     fn test_backup_failure_does_not_leave_empty_dir_as_latest_backup() {
-        let _env = crate::core::env_lock();
         let temp = TempDir::new("failure_empty_dir");
-        let _gw = isolate_gateway(&temp);
         let state_dir = temp.0.join("state");
         let backups_dir = state_dir.join("backups");
         fs::create_dir_all(&backups_dir).unwrap();
@@ -1366,7 +1386,7 @@ mod tests {
         fs::write(&history_db, b"not a sqlite db").unwrap();
 
         let config = sample_config(&state_dir);
-        let res = run_backup(&config, None);
+        let res = run_backup_isolated(&config, None, &temp);
         assert!(res.is_err(), "Corrupted database backup must fail");
 
         // 验证失败后不会留下新的空目录
@@ -1379,29 +1399,14 @@ mod tests {
 
     #[test]
     fn test_resolve_gateway_db_path_fallback_service_sqlite3() {
-        let _env = crate::core::env_lock();
         let temp = TempDir::new("service_sqlite3_test");
-        let orig_home = std::env::var("HOME").ok();
-        let orig_gw = std::env::var("MESSAGE_GATEWAY_DB").ok();
-
-        unsafe {
-            std::env::remove_var("MESSAGE_GATEWAY_DB");
-            std::env::set_var("HOME", temp.0.to_str().unwrap());
-        }
 
         let app_support = temp.0.join("Library/Application Support/message-gateway");
         fs::create_dir_all(&app_support).unwrap();
         let service_db = app_support.join("service.sqlite3");
         fs::write(&service_db, b"dummy").unwrap();
 
-        let resolved = resolve_gateway_db_path();
-
-        if let Some(h) = orig_home {
-            unsafe { std::env::set_var("HOME", h) };
-        }
-        if let Some(g) = orig_gw {
-            unsafe { std::env::set_var("MESSAGE_GATEWAY_DB", g) };
-        }
+        let resolved = resolve_gateway_db_path_with(None, Some(&temp.0));
 
         assert_eq!(
             resolved,
@@ -1484,9 +1489,7 @@ mod tests {
 
     #[test]
     fn backup_includes_media_and_digests() {
-        let _env = crate::core::env_lock();
         let temp = TempDir::new("media_and_digests");
-        let _gw = isolate_gateway(&temp);
         let state_dir = temp.0.join("state");
         let history_dir = state_dir.join("history");
         let media_dir = history_dir.join("media").join("ab");
@@ -1509,7 +1512,7 @@ mod tests {
         fs::write(&media_file, b"fake-jpg-content-123456789").unwrap();
 
         let config = sample_config(&state_dir);
-        let out = run_backup(&config, None).unwrap();
+        let out = run_backup_isolated(&config, None, &temp).unwrap();
 
         // 验证 history/media/ 相对路径被复制
         let backed_media = out
@@ -1554,9 +1557,7 @@ mod tests {
 
     #[test]
     fn backup_refuses_foreign_directory() {
-        let _env = crate::core::env_lock();
         let temp = TempDir::new("refuses_foreign");
-        let _gw = isolate_gateway(&temp);
         let state_dir = temp.0.join("state");
         let history_dir = state_dir.join("history");
         fs::create_dir_all(&history_dir).unwrap();
@@ -1572,7 +1573,7 @@ mod tests {
         fs::write(&foreign_file, b"do not delete me!").unwrap();
 
         let config = sample_config(&state_dir);
-        let res = run_backup(&config, Some(&foreign_dir));
+        let res = run_backup_isolated(&config, Some(&foreign_dir), &temp);
         assert!(
             res.is_err(),
             "run_backup must refuse to overwrite foreign non-backup directory"
@@ -1583,9 +1584,7 @@ mod tests {
 
     #[test]
     fn restore_refuses_while_core_running() {
-        let _env = crate::core::env_lock();
         let temp = TempDir::new("refuses_running");
-        let _gw = isolate_gateway(&temp);
         let state_dir = temp.0.join("state");
         let history_dir = state_dir.join("history");
         fs::create_dir_all(&history_dir).unwrap();
@@ -1597,7 +1596,7 @@ mod tests {
 
         let config = sample_config(&state_dir);
         let backup_dir = temp.0.join("my_backup");
-        let _ = run_backup(&config, Some(&backup_dir)).unwrap();
+        let _ = run_backup_isolated(&config, Some(&backup_dir), &temp).unwrap();
 
         // 模拟 core.lock 被持有
         fs::create_dir_all(&state_dir).unwrap();
@@ -1612,7 +1611,7 @@ mod tests {
         use fs2::FileExt;
         lock_file.lock_exclusive().unwrap();
 
-        let res = run_restore(&backup_dir, &config);
+        let res = run_restore_isolated(&backup_dir, &config, &temp);
         assert!(res.is_err(), "run_restore must fail while core is running");
         let err_msg = res.unwrap_err().to_string();
         assert!(
@@ -1624,9 +1623,7 @@ mod tests {
 
     #[test]
     fn restore_rolls_back_on_digest_mismatch() {
-        let _env = crate::core::env_lock();
         let temp = TempDir::new("restore_rollback");
-        let _gw = isolate_gateway(&temp);
         let state_dir = temp.0.join("state");
         let history_dir = state_dir.join("history");
         fs::create_dir_all(&history_dir).unwrap();
@@ -1642,7 +1639,7 @@ mod tests {
 
         let config = sample_config(&state_dir);
         let backup_dir = temp.0.join("my_backup");
-        let _ = run_backup(&config, Some(&backup_dir)).unwrap();
+        let _ = run_backup_isolated(&config, Some(&backup_dir), &temp).unwrap();
 
         // 修改当前 state 中的数据库为 "modified_content"
         {
@@ -1658,7 +1655,7 @@ mod tests {
         let bak_db = backup_dir.join("history.sqlite3");
         fs::write(&bak_db, b"tampered corrupt sqlite data").unwrap();
 
-        let res = run_restore(&backup_dir, &config);
+        let res = run_restore_isolated(&backup_dir, &config, &temp);
         assert!(res.is_err(), "run_restore must fail on digest mismatch");
         let err_msg = res.unwrap_err().to_string();
         assert!(
@@ -1681,9 +1678,7 @@ mod tests {
     #[test]
     fn restore_moves_stale_gateway_sidecars() {
         // A WAL left beside the live gateway database must not be replayed onto the restored file.
-        let _env = crate::core::env_lock();
         let temp = TempDir::new("restore_stale_wal");
-        let _gw = isolate_gateway(&temp);
         let gw = temp.0.join("gateway.sqlite3");
         let state_dir = temp.0.join("state");
         let history_dir = state_dir.join("history");
@@ -1698,7 +1693,7 @@ mod tests {
             .unwrap();
         let config = sample_config(&state_dir);
         let backup_dir = temp.0.join("backup");
-        run_backup(&config, Some(&backup_dir)).unwrap();
+        run_backup_isolated(&config, Some(&backup_dir), &temp).unwrap();
 
         // Leave a real, un-checkpointed WAL holding a row written after the backup.
         let wal = PathBuf::from(format!("{}-wal", gw.display()));
@@ -1710,7 +1705,7 @@ mod tests {
         }
         fs::copy(&saved_wal, &wal).unwrap();
 
-        run_restore(&backup_dir, &config).unwrap();
+        run_restore_isolated(&backup_dir, &config, &temp).unwrap();
 
         let rows: Vec<String> = Connection::open(&gw)
             .unwrap()
@@ -1729,9 +1724,7 @@ mod tests {
 
     #[test]
     fn restore_roundtrip() {
-        let _env = crate::core::env_lock();
         let temp = TempDir::new("restore_roundtrip");
-        let _gw = isolate_gateway(&temp);
         let state_dir_a = temp.0.join("state_a");
         let history_dir_a = state_dir_a.join("history");
         let media_dir_a = history_dir_a.join("media").join("cd");
@@ -1752,7 +1745,7 @@ mod tests {
 
         let config_a = sample_config(&state_dir_a);
         let backup_dir = temp.0.join("roundtrip_backup");
-        let _ = run_backup(&config_a, Some(&backup_dir)).unwrap();
+        let _ = run_backup_isolated(&config_a, Some(&backup_dir), &temp).unwrap();
 
         // 准备目标 state_dir_b
         let state_dir_b = temp.0.join("state_b");
@@ -1769,7 +1762,7 @@ mod tests {
         }
 
         let config_b = sample_config(&state_dir_b);
-        let res = run_restore(&backup_dir, &config_b);
+        let res = run_restore_isolated(&backup_dir, &config_b, &temp);
         assert!(res.is_ok(), "run_restore should succeed: {:?}", res.err());
 
         // 验证数据库内容已恢复
@@ -1796,9 +1789,7 @@ mod tests {
 
     #[test]
     fn test_backup_v3_roundtrip_with_brain() {
-        let _env = crate::core::env_lock();
         let temp = TempDir::new("backup_v3_roundtrip");
-        let _gw = isolate_gateway(&temp);
 
         let state_dir_a = temp.0.join("state_a");
         let history_dir_a = state_dir_a.join("history");
@@ -1822,7 +1813,7 @@ mod tests {
 
         let config_a = sample_config(&state_dir_a);
         let backup_out = temp.0.join("custom_bak");
-        let out = run_backup(&config_a, Some(&backup_out)).unwrap();
+        let out = run_backup_isolated(&config_a, Some(&backup_out), &temp).unwrap();
         assert_eq!(out, backup_out);
 
         // 验证 manifest v3
@@ -1837,7 +1828,7 @@ mod tests {
         // 还原到 state_dir_b
         let state_dir_b = temp.0.join("state_b");
         let config_b = sample_config(&state_dir_b);
-        run_restore(&backup_out, &config_b).unwrap();
+        run_restore_isolated(&backup_out, &config_b, &temp).unwrap();
 
         // 验证 state_dir_b 中 brain-bindings.json 和 brain-profiles 完整存在
         assert!(state_dir_b.join("brain-bindings.json").exists());
@@ -1858,9 +1849,7 @@ mod tests {
 
     #[test]
     fn test_restore_v2_with_existing_brain_rejected() {
-        let _env = crate::core::env_lock();
         let temp = TempDir::new("restore_v2_existing_brain");
-        let _gw = isolate_gateway(&temp);
 
         // 构造一个 v2 格式的备份（无 brain）
         let bak_dir = temp.0.join("v2_bak");
@@ -1898,15 +1887,13 @@ mod tests {
         fs::write(target_state.join("brain-bindings.json"), "{}").unwrap();
 
         let cfg = sample_config(&target_state);
-        let err = run_restore(&bak_dir, &cfg).unwrap_err();
+        let err = run_restore_isolated(&bak_dir, &cfg, &temp).unwrap_err();
         assert!(err.to_string().contains("restore_incomplete"));
     }
 
     #[test]
     fn test_restore_symlink_rejected() {
-        let _env = crate::core::env_lock();
         let temp = TempDir::new("restore_symlink");
-        let _gw = isolate_gateway(&temp);
 
         let bak_dir = temp.0.join("symlink_bak");
         fs::create_dir_all(&bak_dir).unwrap();
@@ -1955,7 +1942,7 @@ mod tests {
 
         let target_state = temp.0.join("target_state");
         let cfg = sample_config(&target_state);
-        let err = run_restore(&bak_dir, &cfg).unwrap_err();
+        let err = run_restore_isolated(&bak_dir, &cfg, &temp).unwrap_err();
         assert!(err.to_string().contains("Symlink rejected"));
     }
 }
