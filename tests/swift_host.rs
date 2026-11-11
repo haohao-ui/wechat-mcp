@@ -3172,7 +3172,9 @@ print(checkMode())
 
     // 场景 D: 存在中间状态 update-journal.json (Draining) -> ACTIVE:<tx_id>
     let journal_path = state_dir.join("update-journal.json");
+    let valid_sha256 = "6b3a2f1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a";
     let journal_draining = serde_json::json!({
+        "journal_schema": 1,
         "transaction_id": "tx-88d447d2-749e-4e89-a5c3-1d89851148e6",
         "stage": "Draining",
         "source_release_id": "0.1.0",
@@ -3194,12 +3196,13 @@ print(checkMode())
 
     // 场景 E: journal 为 Committed 但缺少 current_release.json -> RECOVERY_REQUIRED (严格拒绝盲猜放行)
     let journal_committed = serde_json::json!({
+        "journal_schema": 1,
         "transaction_id": "tx-88d447d2-749e-4e89-a5c3-1d89851148e6",
         "stage": "Committed",
         "source_release_id": "0.1.0",
         "target_release_id": "0.2.0-test",
         "target_sequence": 1002,
-        "manifest_digest": "6b3a2f1c",
+        "manifest_digest": valid_sha256,
         "timestamp": 1794300000,
         "maintenance_marker_confirmed": true
     });
@@ -3219,7 +3222,7 @@ print(checkMode())
         "release_id": "0.2.0-test",
         "sequence": 9999,
         "channel": "stable",
-        "manifest_digest": "6b3a2f1c",
+        "manifest_digest": valid_sha256,
         "installed_at": 1794300000
     });
     fs::write(
@@ -3237,7 +3240,7 @@ print(checkMode())
         "release_id": "0.2.0-test",
         "sequence": 1002,
         "channel": "stable",
-        "manifest_digest": "6b3a2f1c",
+        "manifest_digest": valid_sha256,
         "installed_at": 1794300000
     });
     fs::write(
@@ -3258,5 +3261,12 @@ print(checkMode())
     let foreign_dir = releases_dir.join("0.9.9-foreign");
     fs::create_dir_all(&foreign_dir).unwrap();
     std::os::unix::fs::symlink(&foreign_dir, &current_link).unwrap();
+    assert_eq!(run_guard("RECOVERY_REQUIRED"), "RECOVERY_REQUIRED");
+
+    // 场景 I: 防 /tmp 外部目录逃逸：若 current 指向 /tmp 下同名目录，必须 Fail-Closed
+    fs::remove_file(&current_link).unwrap();
+    let tmp_escape_dir = temp.path.join("external_tmp").join("0.2.0-test");
+    fs::create_dir_all(&tmp_escape_dir).unwrap();
+    std::os::unix::fs::symlink(&tmp_escape_dir, &current_link).unwrap();
     assert_eq!(run_guard("RECOVERY_REQUIRED"), "RECOVERY_REQUIRED");
 }
