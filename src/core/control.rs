@@ -33,12 +33,18 @@ pub struct ControlPaths {
 }
 
 impl ControlPaths {
-    pub fn from_env() -> Self {
-        let home = std::env::var("HOME")
+    pub(crate) fn from_values(home: Option<&str>, core_sock: Option<&str>) -> Self {
+        let home = home
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/"));
-        let core_sock = std::env::var("WECHAT_CORE_SOCK").ok().map(PathBuf::from);
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let core_sock = core_sock.map(PathBuf::from);
         Self { home, core_sock }
+    }
+
+    pub fn from_env() -> Self {
+        let home = std::env::var("HOME").ok();
+        let core_sock = std::env::var("WECHAT_CORE_SOCK").ok();
+        Self::from_values(home.as_deref(), core_sock.as_deref())
     }
 
     pub fn isolated(dir: &Path) -> Self {
@@ -63,7 +69,9 @@ impl ControlPaths {
 
     pub fn core_socket_file(&self) -> PathBuf {
         if let Some(sock) = &self.core_sock {
-            return sock.clone();
+            if !sock.as_os_str().is_empty() && !sock.to_string_lossy().trim().is_empty() {
+                return sock.clone();
+            }
         }
         self.home.join(".wechat-rpa/core.sock")
     }
@@ -4128,6 +4136,62 @@ mod tests {
             crate::core::external_brain::default_socket_path(),
             "ControlPaths::from_env().core_socket_file() must match external_brain::default_socket_path()"
         );
+    }
+
+    #[test]
+    fn test_control_paths_from_values_semantics_and_comparison_with_baseline() {
+        // 1. HOME 缺失 (None) 且 core_sock 缺失 (None)
+        // ControlPaths 生产语义：HOME 缺失回退到 "/" (而 ServePaths 回退到 ".")
+        {
+            let cp = ControlPaths::from_values(None, None);
+            assert_eq!(cp.home, PathBuf::from("/"));
+            assert_eq!(
+                cp.core_socket_file(),
+                PathBuf::from("/.wechat-rpa/core.sock")
+            );
+        }
+
+        // 2. HOME 为空字符串 (Some("")) 且 core_sock 缺失 (None)
+        {
+            let cp = ControlPaths::from_values(Some(""), None);
+            assert_eq!(cp.home, PathBuf::from(""));
+            assert_eq!(
+                cp.core_socket_file(),
+                PathBuf::from(".wechat-rpa/core.sock")
+            );
+        }
+
+        // 3. HOME 有效设置且 core_sock 缺失 (None)
+        {
+            let cp = ControlPaths::from_values(Some("/opt/fake_user_dir"), None);
+            assert_eq!(cp.home, PathBuf::from("/opt/fake_user_dir"));
+            assert_eq!(
+                cp.core_socket_file(),
+                PathBuf::from("/opt/fake_user_dir/.wechat-rpa/core.sock")
+            );
+        }
+
+        // 4. WECHAT_CORE_SOCK 覆盖存在
+        {
+            let cp =
+                ControlPaths::from_values(Some("/opt/fake_user_dir"), Some("/tmp/custom.sock"));
+            assert_eq!(cp.core_socket_file(), PathBuf::from("/tmp/custom.sock"));
+        }
+
+        // 5. WECHAT_CORE_SOCK 为空或纯空白，应忽略并回退到默认路径
+        {
+            let cp_empty = ControlPaths::from_values(Some("/opt/fake_user_dir"), Some(""));
+            assert_eq!(
+                cp_empty.core_socket_file(),
+                PathBuf::from("/opt/fake_user_dir/.wechat-rpa/core.sock")
+            );
+
+            let cp_spaces = ControlPaths::from_values(Some("/opt/fake_user_dir"), Some("   "));
+            assert_eq!(
+                cp_spaces.core_socket_file(),
+                PathBuf::from("/opt/fake_user_dir/.wechat-rpa/core.sock")
+            );
+        }
     }
 
     #[test]

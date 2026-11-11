@@ -136,23 +136,39 @@ fn now_secs() -> f64 {
         .as_secs_f64()
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 struct OwnedSocketDir {
     dir: PathBuf,
+    dev: u64,
+    ino: u64,
 }
 
+#[cfg(test)]
 impl Drop for OwnedSocketDir {
     fn drop(&mut self) {
         // 安全清理：
         // 1. 获取 symlink_metadata，绝不跟随符号链接 (follow symlink)
-        // 2. 如果是真实目录且不是符号链接，才递归删除
-        // 3. 如果是符号链接，只删除该符号链接本身，绝不删除外部目标目录中的内容
+        // 2. 如果是符号链接，只删除该符号链接本身，绝不删除外部目标目录中的内容
+        // 3. 如果是真实目录，严格比对 dev 与 ino，防止目录被 rename 并被外部非自有目录替换后误删
         if let Ok(meta) = fs::symlink_metadata(&self.dir) {
             let file_type = meta.file_type();
             if file_type.is_symlink() {
                 let _ = fs::remove_file(&self.dir);
             } else if file_type.is_dir() {
-                let _ = fs::remove_dir_all(&self.dir);
+                use std::os::unix::fs::MetadataExt;
+                if meta.dev() == self.dev && meta.ino() == self.ino {
+                    let _ = fs::remove_dir_all(&self.dir);
+                } else {
+                    eprintln!(
+                        "[WARN] OwnedSocketDir drop skipped: directory identity mismatch for {} (expected dev={}, ino={}, actual dev={}, ino={})",
+                        self.dir.display(),
+                        self.dev,
+                        self.ino,
+                        meta.dev(),
+                        meta.ino()
+                    );
+                }
             }
         }
     }
@@ -168,31 +184,54 @@ pub struct ServePaths {
     /// 仅测试 isolated 环境独占持有的临时目录 guard。
     /// 生产环境 from_env() 始终为 None，永不清理任何目录。
     /// 使用 Arc 保证 Clone 共享所有权，只有所有 Clone 均 Drop 后才触发清理。
-    #[allow(dead_code)]
+    #[cfg(test)]
     temp_dir_guard: Option<std::sync::Arc<OwnedSocketDir>>,
 }
 
 impl ServePaths {
-    pub fn from_env() -> Self {
-        let home = std::env::var("HOME")
+    /// 纯函数解析器：根据传入的 HOME 与 WECHAT_CORE_SOCK 解析路径。
+    /// 严格保持与 1e120b5 原生产行为完全一致：
+    /// - 当 HOME 缺失时，fallback 到 "." (而不是 ControlPaths 的 "/")
+    /// - 当 HOME 为空时，保持 ""
+    /// - worker_sock 与 bot_worker_sock 挂在 home.join(".wechat-rpa") 下
+    /// - core_sock 若未提供覆盖，则按原 external_brain::default_socket_path 规则回退
+    pub(crate) fn from_values(home: Option<&str>, core_sock: Option<&str>) -> Self {
+        let home_path = home
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/"));
-        let base_dir = home.join(".wechat-rpa");
-        let core_sock = crate::core::external_brain::default_socket_path();
+            .unwrap_or_else(|| PathBuf::from("."));
+        let base_dir = home_path.join(".wechat-rpa");
         let worker_sock = base_dir.join("worker.sock");
         let bot_worker_sock = base_dir.join("bot-worker.sock");
+
+        let resolved_core_sock = match core_sock {
+            Some(sock) if !sock.trim().is_empty() => PathBuf::from(sock),
+            _ => {
+                let default_home = home.unwrap_or("/");
+                PathBuf::from(default_home)
+                    .join(".wechat-rpa")
+                    .join("core.sock")
+            }
+        };
+
         Self {
-            home,
-            core_sock,
+            home: home_path,
+            core_sock: resolved_core_sock,
             worker_sock,
             bot_worker_sock,
             gateway_db: None,
+            #[cfg(test)]
             temp_dir_guard: None,
         }
     }
 
+    pub fn from_env() -> Self {
+        let home = std::env::var("HOME").ok();
+        let core_sock = std::env::var("WECHAT_CORE_SOCK").ok();
+        Self::from_values(home.as_deref(), core_sock.as_deref())
+    }
+
     /// 尝试创建隔离的 ServePaths 环境，若目录创建或权限设置失败则返回错误，绝不静默吞错。
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn try_isolated(dir: &Path) -> Result<Self> {
         let base_dir = dir.join(".wechat-rpa");
         fs::create_dir_all(&base_dir)
@@ -218,17 +257,27 @@ impl ServePaths {
             )
         })?;
 
+        let meta = fs::symlink_metadata(&sock_dir)
+            .with_context(|| format!("failed to stat isolated sock dir {}", sock_dir.display()))?;
+        use std::os::unix::fs::MetadataExt;
+        let dev = meta.dev();
+        let ino = meta.ino();
+
         Ok(Self {
             home: dir.to_path_buf(),
             core_sock: sock_dir.join("c.sock"),
             worker_sock: sock_dir.join("w.sock"),
             bot_worker_sock: sock_dir.join("bw.sock"),
             gateway_db: Some(Some(dir.join("gateway.sqlite3"))),
-            temp_dir_guard: Some(std::sync::Arc::new(OwnedSocketDir { dir: sock_dir })),
+            temp_dir_guard: Some(std::sync::Arc::new(OwnedSocketDir {
+                dir: sock_dir,
+                dev,
+                ino,
+            })),
         })
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn isolated(dir: &Path) -> Self {
         Self::try_isolated(dir).expect("failed to create isolated ServePaths")
     }
@@ -1219,5 +1268,126 @@ mod tests {
         );
         assert_eq!(fs::read(&canary_file).unwrap(), b"precious contents");
         assert!(!owned_sock_dir.exists(), "symlink itself must be removed");
+    }
+
+    #[test]
+    fn test_serve_paths_owned_socket_dir_identity_mismatch_does_not_delete_external_dir() {
+        let temp = TempDir::new();
+        let external_dir = temp.path().join("external_replacement_dir");
+        fs::create_dir_all(&external_dir).unwrap();
+        let marker_file = external_dir.join("must_not_be_deleted.txt");
+        fs::write(&marker_file, b"valuable marker content").unwrap();
+
+        let paths = ServePaths::isolated(temp.path());
+        let owned_sock_dir = paths
+            .socket_dir()
+            .expect("isolated paths must have socket_dir");
+        assert!(owned_sock_dir.exists());
+
+        // 模拟攻击或竞态替换：
+        // 1. 将原目录重命名为 backup 路径
+        let backup_dir = temp.path().join("original_sock_dir_backup");
+        fs::rename(&owned_sock_dir, &backup_dir).unwrap();
+
+        // 2. 将 external_dir 移动或重命名到 owned_sock_dir 路径上
+        // 此时 owned_sock_dir 路径存在且是目录，但其 inode/dev 属于 external_dir，与 guard 创建时的 dev/ino 不匹配
+        fs::rename(&external_dir, &owned_sock_dir).unwrap();
+        let current_marker = owned_sock_dir.join("must_not_be_deleted.txt");
+        assert!(current_marker.exists());
+
+        // 3. drop paths，触发 OwnedSocketDir::drop
+        drop(paths);
+
+        // 4. 断言：由于 dev/ino 身份不匹配，drop 绝不递归删除该外部目录！
+        assert!(
+            owned_sock_dir.exists(),
+            "mismatched directory must not be deleted"
+        );
+        assert!(
+            current_marker.exists(),
+            "marker file in mismatched directory must remain intact"
+        );
+        assert_eq!(
+            fs::read(&current_marker).unwrap(),
+            b"valuable marker content"
+        );
+
+        // 收尾清理
+        let _ = fs::remove_dir_all(&owned_sock_dir);
+        let _ = fs::remove_dir_all(&backup_dir);
+    }
+
+    #[test]
+    fn test_serve_paths_from_values_semantics_and_comparison_with_baseline() {
+        // 1. HOME 缺失 (None) 且 core_sock 缺失 (None)
+        // 必须精确恢复 1e120b5 原生产语义：
+        // home 为 "."，worker_sock/bot_worker_sock 挂在 "./.wechat-rpa" 下
+        // core_sock 则按原 default_socket_path 规则回退到 "/.wechat-rpa/core.sock"
+        {
+            let paths = ServePaths::from_values(None, None);
+            assert_eq!(paths.home, PathBuf::from("."));
+            assert_eq!(
+                paths.worker_sock,
+                PathBuf::from("./.wechat-rpa/worker.sock")
+            );
+            assert_eq!(
+                paths.bot_worker_sock,
+                PathBuf::from("./.wechat-rpa/bot-worker.sock")
+            );
+            assert_eq!(paths.core_sock, PathBuf::from("/.wechat-rpa/core.sock"));
+        }
+
+        // 2. HOME 为空字符串 (Some("")) 且 core_sock 缺失 (None)
+        // 1e120b5 中 std::env::var("HOME") 返回 Ok("")，因此 home 为 ""
+        {
+            let paths = ServePaths::from_values(Some(""), None);
+            assert_eq!(paths.home, PathBuf::from(""));
+            assert_eq!(paths.worker_sock, PathBuf::from(".wechat-rpa/worker.sock"));
+            assert_eq!(
+                paths.bot_worker_sock,
+                PathBuf::from(".wechat-rpa/bot-worker.sock")
+            );
+            assert_eq!(paths.core_sock, PathBuf::from(".wechat-rpa/core.sock"));
+        }
+
+        // 3. HOME 有效设置且 core_sock 缺失 (None)
+        {
+            let paths = ServePaths::from_values(Some("/opt/fake_user_dir"), None);
+            assert_eq!(paths.home, PathBuf::from("/opt/fake_user_dir"));
+            assert_eq!(
+                paths.worker_sock,
+                PathBuf::from("/opt/fake_user_dir/.wechat-rpa/worker.sock")
+            );
+            assert_eq!(
+                paths.bot_worker_sock,
+                PathBuf::from("/opt/fake_user_dir/.wechat-rpa/bot-worker.sock")
+            );
+            assert_eq!(
+                paths.core_sock,
+                PathBuf::from("/opt/fake_user_dir/.wechat-rpa/core.sock")
+            );
+        }
+
+        // 4. WECHAT_CORE_SOCK 覆盖存在
+        {
+            let paths =
+                ServePaths::from_values(Some("/opt/fake_user_dir"), Some("/tmp/custom.sock"));
+            assert_eq!(paths.core_sock, PathBuf::from("/tmp/custom.sock"));
+        }
+
+        // 5. WECHAT_CORE_SOCK 为空或纯空白，应忽略并回退到默认路径
+        {
+            let paths_empty = ServePaths::from_values(Some("/opt/fake_user_dir"), Some(""));
+            assert_eq!(
+                paths_empty.core_sock,
+                PathBuf::from("/opt/fake_user_dir/.wechat-rpa/core.sock")
+            );
+
+            let paths_spaces = ServePaths::from_values(Some("/opt/fake_user_dir"), Some("   "));
+            assert_eq!(
+                paths_spaces.core_sock,
+                PathBuf::from("/opt/fake_user_dir/.wechat-rpa/core.sock")
+            );
+        }
     }
 }
