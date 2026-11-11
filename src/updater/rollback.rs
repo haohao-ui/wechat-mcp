@@ -112,6 +112,56 @@ pub fn has_new_data_since_backup(db_path: &Path, backup_time: u64) -> Result<boo
     Ok(false)
 }
 
+/// 执行 SQLite 在线一致热备份并校验完整性与摘要
+pub fn backup_and_verify_sqlite_db(src_db: &Path, backup_db: &Path) -> Result<String> {
+    if !src_db.exists() {
+        bail!("source_db_not_found: {}", src_db.display());
+    }
+
+    // 1. 打开源数据库只读连接
+    let src_conn =
+        rusqlite::Connection::open_with_flags(src_db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| anyhow::anyhow!("cannot_open_src_db: {}", e))?;
+
+    // 2. 若目标备份已存在先删除
+    if backup_db.exists() {
+        fs::remove_file(backup_db)?;
+    }
+    let mut dst_conn = rusqlite::Connection::open(backup_db)
+        .map_err(|e| anyhow::anyhow!("cannot_open_dst_db: {}", e))?;
+
+    // 3. 在线一致性备份 (rusqlite::backup::Backup)
+    let backup = rusqlite::backup::Backup::new(&src_conn, &mut dst_conn)
+        .map_err(|e| anyhow::anyhow!("failed_to_initialize_backup: {}", e))?;
+    backup
+        .run_to_completion(10, std::time::Duration::from_millis(10), None)
+        .map_err(|e| anyhow::anyhow!("backup_run_failed: {}", e))?;
+    drop(backup);
+    drop(src_conn);
+
+    // 4. 对备份数据库运行完整性校验
+    let integrity: String = dst_conn
+        .query_row("PRAGMA integrity_check;", [], |row| row.get(0))
+        .map_err(|e| anyhow::anyhow!("backup_integrity_query_failed: {}", e))?;
+    if integrity != "ok" {
+        bail!("backup_integrity_check_failed: returned '{}'", integrity);
+    }
+    drop(dst_conn);
+
+    // 5. 计算并返回备份文件的 SHA-256
+    let bytes = fs::read(backup_db)?;
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let hash_bytes = hasher.finalize();
+    let mut hex_str = String::with_capacity(64);
+    for b in hash_bytes {
+        use std::fmt::Write;
+        let _ = write!(hex_str, "{:02x}", b);
+    }
+    Ok(hex_str)
+}
+
 /// 数据库自动恢复守卫：
 /// 在缺乏全量 WAL 快照与完整 schema 证明前，自动覆盖恢复旧 DB 必须明确返回 unsupported 并拒绝执行。
 pub fn restore_database_backup_guarded(_backup_file: &Path, _target_db: &Path) -> Result<()> {

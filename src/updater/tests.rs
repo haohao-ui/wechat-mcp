@@ -1167,6 +1167,22 @@ fn test_sandbox_executor_end_to_end_and_fault_injections() {
     assert!(sandbox.root_fd() >= 0);
     assert!(sandbox.root_dir().exists());
 
+    // 初始化真实 SQLite 数据库与业务消息表
+    let db_p = sandbox.db_path();
+    {
+        let conn = rusqlite::Connection::open(&db_p).unwrap();
+        conn.execute(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY, content TEXT, created_at INTEGER);",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, content, created_at) VALUES (1, 'initial baseline message', 1794360000);",
+            [],
+        )
+        .unwrap();
+    }
+
     // 生成真实测试密钥对与受信任 Keystore
     let (key_pair, pub_bytes) = generate_test_ed25519_key();
     let key_store = TrustedKeyStore::new().with_key("test-root-v1", &pub_bytes);
@@ -1237,6 +1253,11 @@ fn test_sandbox_executor_end_to_end_and_fault_injections() {
     let journal = res.unwrap();
     assert_eq!(journal.stage, TransactionStage::Committed);
 
+    // 真实 SQLite 在线备份已成功生成与记录
+    assert!(journal.backup_path.is_some());
+    let backup_file = PathBuf::from(journal.backup_path.as_ref().unwrap());
+    assert!(backup_file.exists());
+
     // 核验更新后状态：current 指向新版 releases/0.2.0-1005
     let current_target = fs::read_link(sandbox.current_link()).unwrap();
     assert!(current_target.to_string_lossy().contains("0.2.0-1005"));
@@ -1260,7 +1281,7 @@ fn test_sandbox_executor_end_to_end_and_fault_injections() {
     assert!(!sandbox.state_dir().join("core.maintenance.json").exists());
     assert!(!sandbox.state_dir().join("core.maintenance").exists());
 
-    // 2. 候选自检失败注入测试：自动回滚切回 previous
+    // 2. 候选自检失败注入测试（无新业务数据）：自动回滚切回 previous
     // 构造更高版本 1006
     let mut manifest2 = verified.manifest().clone();
     manifest2.sequence = 1006;
@@ -1300,7 +1321,16 @@ fn test_sandbox_executor_end_to_end_and_fault_injections() {
             .contains("0.2.0-1005")
     );
 
-    // 3. 产生新业务数据冲突注入测试：严禁静默回退，保持维护态 RecoveryRequired
+    // 3. 真实新业务数据冲突注入测试：向 SQLite 数据库真实写入一条时间戳晚于 backup 的新消息！
+    {
+        let conn = rusqlite::Connection::open(&db_p).unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, content, created_at) VALUES (2, 'new message created during candidate run', 1794370001);",
+            [],
+        )
+        .unwrap();
+    }
+
     let mut manifest3 = verified.manifest().clone();
     manifest3.sequence = 1007;
     manifest3.release_id = "0.2.0-1007".into();
@@ -1322,9 +1352,9 @@ fn test_sandbox_executor_end_to_end_and_fault_injections() {
     )
     .unwrap();
 
+    // 执行更新自检失败：由于真实检测到业务新数据，严禁静默回退，必须保留维护态并标记 RecoveryRequired！
     let conflict_executor = SandboxUpdateExecutor::new(&sandbox).with_fault(FaultInjection {
         fail_candidate_testing: true,
-        simulate_new_business_data_on_rollback: true,
         ..Default::default()
     });
     let res_conflict =
@@ -1333,6 +1363,7 @@ fn test_sandbox_executor_end_to_end_and_fault_injections() {
     let journal_conflict = res_conflict.unwrap();
     assert_eq!(journal_conflict.stage, TransactionStage::RecoveryRequired);
     // 维护标志保持激活状态，绝不自动清除
+    assert!(sandbox.state_dir().join("core.maintenance.json").exists());
     assert!(sandbox.state_dir().join("core.maintenance").exists());
 }
 
@@ -1438,4 +1469,114 @@ fn test_recovery_evaluation_rejects_unknown_external_or_invalid_targets() {
         }
         other => panic!("Expected ManualInterventionRequired, got {:?}", other),
     }
+}
+
+#[test]
+fn test_whitelist_candidate_testing_and_exit_code_enforcement() {
+    let temp = TempTestDir::new("cand_test");
+    let sandbox = SandboxUpdateRoot::create_test_isolated_sandbox().unwrap();
+
+    let (key_pair, pub_bytes) = generate_test_ed25519_key();
+    let key_store = TrustedKeyStore::new().with_key("test-root-v1", &pub_bytes);
+
+    // 构造包含自检可执行脚本的归档
+    let archive_path = temp.0.join("cand-pkg.tar.gz");
+    let script_content = b"#!/bin/sh\nif [ \"$1\" = \"--fail\" ]; then exit 42; fi\nexit 0\n";
+    let script_sha = calculate_sha256_bytes(script_content);
+
+    {
+        let file = fs::File::create(&archive_path).unwrap();
+        let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(enc);
+
+        let mut h = tar::Header::new_gnu();
+        h.set_size(script_content.len() as u64);
+        h.set_mode(0o755);
+        h.set_cksum();
+        builder
+            .append_data(&mut h, "bin/candidate_check.sh", &script_content[..])
+            .unwrap();
+
+        let enc = builder.into_inner().unwrap();
+        enc.finish().unwrap();
+    }
+    let meta = fs::metadata(&archive_path).unwrap();
+    let archive_sha = calculate_sha256_bytes(&fs::read(&archive_path).unwrap());
+
+    let mut manifest = sample_manifest(3001, "arm64");
+    manifest.release_id = "0.3.0-test".into();
+    manifest.artifact = ArtifactSpec {
+        filename: "cand-pkg.tar.gz".into(),
+        sha256: archive_sha,
+        size_bytes: meta.len(),
+        max_unpacked_bytes: 100000,
+        max_file_count: 10,
+    };
+    manifest.components = vec![ComponentSpec {
+        path: "bin/candidate_check.sh".into(),
+        kind: "executable".into(),
+        file_mode: 0o755,
+        sha256: script_sha,
+        size_bytes: script_content.len() as u64,
+    }];
+
+    let sig_hex = sign_manifest(&key_pair, &manifest);
+    let envelope = SignedEnvelope {
+        envelope_schema: 1,
+        key_id: "test-root-v1".into(),
+        signature_algorithm: "ed25519".into(),
+        signature: sig_hex,
+        manifest,
+    };
+    let env_bytes = serde_json::to_vec(&envelope).unwrap();
+    let verified =
+        VerifiedManifestEnvelope::verify_and_construct(&env_bytes, &key_store, "arm64", "13.0", 0)
+            .unwrap();
+
+    let signer = LocalSigner::for_test_mock();
+
+    // 1. 真实自检命令返回 0 -> 成功提交
+    let pass_executor =
+        SandboxUpdateExecutor::new(&sandbox).with_candidate_test(CandidateTestSpec {
+            relative_executable: PathBuf::from("bin/candidate_check.sh"),
+            fixed_args: vec!["--ok".into()],
+        });
+    let res_pass = pass_executor
+        .execute_transaction(&verified, &archive_path, &signer, 1794380000)
+        .unwrap();
+    assert_eq!(res_pass.stage, TransactionStage::Committed);
+
+    // 2. 真实自检命令返回非 0 (exit code 42) -> 触发回滚
+    let mut manifest_fail = sample_manifest(3002, "arm64");
+    manifest_fail.release_id = "0.3.1-fail".into();
+    manifest_fail.artifact = verified.manifest().artifact.clone();
+    manifest_fail.components = verified.manifest().components.clone();
+
+    let sig_hex_f = sign_manifest(&key_pair, &manifest_fail);
+    let envelope_f = SignedEnvelope {
+        envelope_schema: 1,
+        key_id: "test-root-v1".into(),
+        signature_algorithm: "ed25519".into(),
+        signature: sig_hex_f,
+        manifest: manifest_fail,
+    };
+    let env_bytes_f = serde_json::to_vec(&envelope_f).unwrap();
+    let verified_f = VerifiedManifestEnvelope::verify_and_construct(
+        &env_bytes_f,
+        &key_store,
+        "arm64",
+        "13.0",
+        3001,
+    )
+    .unwrap();
+
+    let fail_executor =
+        SandboxUpdateExecutor::new(&sandbox).with_candidate_test(CandidateTestSpec {
+            relative_executable: PathBuf::from("bin/candidate_check.sh"),
+            fixed_args: vec!["--fail".into()],
+        });
+    let res_fail = fail_executor
+        .execute_transaction(&verified_f, &archive_path, &signer, 1794381000)
+        .unwrap();
+    assert_eq!(res_fail.stage, TransactionStage::RolledBack);
 }
