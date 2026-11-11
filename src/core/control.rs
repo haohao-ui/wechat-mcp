@@ -6885,23 +6885,104 @@ mod tests {
             "升级后配置文件原字节必须完全不变"
         );
 
+        let cfg_legacy_loaded = crate::core::config::BotConfig::load(&cfg_legacy_path).unwrap();
+        let history_dir = legacy_state.join("history");
+        fs::create_dir_all(&history_dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&history_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let _history_store =
+            crate::core::history::store::HistoryStore::open(&legacy_state).unwrap();
+        let db_path = history_dir.join("history.sqlite3");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            -- 当前账号合法白名单联系人（recipient 姓名 "客户张三" 与 contact_id "c_legacy_cust" 严格不同）
+            INSERT INTO contacts VALUES('c_legacy_cust', 'legacy-acc-1', 'private', '客户张三真实名', NULL, 100, 100);
+            INSERT INTO contact_names VALUES(101, 'c_legacy_cust', 'legacy-acc-1', '客户张三', '客户张三', 'config', 100, 100);
+
+            -- 未授权联系人（不在 allowlist）
+            INSERT INTO contacts VALUES('c_unauth', 'legacy-acc-1', 'private', '李四', NULL, 100, 100);
+            INSERT INTO contact_names VALUES(102, 'c_unauth', 'legacy-acc-1', '李四', '李四', 'config', 100, 100);
+
+            -- 跨账号联系人（legacy-acc-other）
+            INSERT INTO contacts VALUES('c_other_acc', 'legacy-acc-other', 'private', '客户张三真实名', NULL, 100, 100);
+            INSERT INTO contact_names VALUES(103, 'c_other_acc', 'legacy-acc-other', '客户张三', '客户张三', 'config', 100, 100);
+            "#,
+        )
+        .unwrap();
+
+        let brain_access =
+            crate::core::open_api::access::BrainAccess::load(&cfg_legacy_loaded, &conn).unwrap();
+        let access = crate::core::control::ControlContactAccess {
+            account_id: "legacy-acc-1".into(),
+            brain_access: Some(brain_access),
+            conn: Some(conn),
+        };
+
         let store_legacy = crate::core::brain_profiles::Store::open(&legacy_state).unwrap();
         let ctx_legacy =
             crate::core::brain_profiles::AccountContext::new("legacy-acc-1".into()).unwrap();
         let role_legacy = store_legacy
             .resolve(
                 &ctx_legacy,
-                "c_any",
+                "c_legacy_cust",
                 &crate::core::brain_profiles::ChatKind::Private,
-                &crate::core::control::ControlContactAccess {
-                    account_id: "legacy-acc-1".into(),
-                    brain_access: None,
-                    conn: None,
-                },
+                &access,
             )
             .unwrap();
         assert_eq!(role_legacy.name, "原内置客服");
         assert_eq!(role_legacy.persona, "用户部署的个人微信AI客服助手");
+
+        // 追加断言：未知联系人、未授权联系人与跨账号联系人必须严格返回 not_found 拒绝
+        assert!(
+            store_legacy
+                .resolve(
+                    &ctx_legacy,
+                    "c_unknown",
+                    &crate::core::brain_profiles::ChatKind::Private,
+                    &access,
+                )
+                .is_err(),
+            "未知联系人必须拒绝"
+        );
+        assert!(
+            store_legacy
+                .resolve(
+                    &ctx_legacy,
+                    "c_unauth",
+                    &crate::core::brain_profiles::ChatKind::Private,
+                    &access,
+                )
+                .is_err(),
+            "未授权联系人必须拒绝"
+        );
+        assert!(
+            store_legacy
+                .resolve(
+                    &ctx_legacy,
+                    "c_other_acc",
+                    &crate::core::brain_profiles::ChatKind::Private,
+                    &access,
+                )
+                .is_err(),
+            "跨账号联系人必须拒绝"
+        );
+        let ctx_other =
+            crate::core::brain_profiles::AccountContext::new("legacy-acc-other".into()).unwrap();
+        assert!(
+            store_legacy
+                .resolve(
+                    &ctx_other,
+                    "c_legacy_cust",
+                    &crate::core::brain_profiles::ChatKind::Private,
+                    &access,
+                )
+                .is_err(),
+            "跨账号上下文必须拒绝"
+        );
 
         // 8. 外部大脑模式配置（brain.mode: "external"）升级保留客服人设与配置字节不变
         let ext_state = temp.path().join("state_ext_mode");
