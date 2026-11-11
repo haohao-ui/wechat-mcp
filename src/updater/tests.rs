@@ -403,6 +403,77 @@ fn test_safe_unpack_and_verify_valid_and_adversarial() {
     let su_res = safe_unpack_and_verify(&setuid_archive, &staging, &su_artifact, &components);
     assert!(su_res.is_err());
     assert!(su_res.unwrap_err().to_string().contains("forbidden_special_permissions"));
+
+    // 9. 对抗包测试：尾部附加非零垃圾数据拒绝
+    let trailing_archive = temp.0.join("trailing_garbage.tar.gz");
+    {
+        let mut gz_bytes = fs::read(&valid_archive).unwrap();
+        // 尾部追加非零垃圾数据
+        gz_bytes.extend_from_slice(b"NON_ZERO_TRAILING_GARBAGE_BYTES");
+        fs::write(&trailing_archive, &gz_bytes).unwrap();
+    }
+    let tg_meta = fs::metadata(&trailing_archive).unwrap();
+    let tg_sha = calculate_sha256_bytes(&fs::read(&trailing_archive).unwrap());
+    let tg_artifact = ArtifactSpec {
+        filename: "trailing_garbage.tar.gz".into(),
+        sha256: tg_sha,
+        size_bytes: tg_meta.len(),
+        max_unpacked_bytes: 10000,
+        max_file_count: 10,
+    };
+    let stage_tg = temp.0.join("stage_tg");
+    let tg_res = safe_unpack_and_verify(&trailing_archive, &stage_tg, &tg_artifact, &components);
+    assert!(tg_res.is_err());
+    let tg_err = tg_res.unwrap_err().to_string();
+    assert!(
+        tg_err.contains("trailing_data_in_archive") || tg_err.contains("gzip_tail_read_error"),
+        "Unexpected error: {}",
+        tg_err
+    );
+
+    // 10. 对抗包测试：非 UTF-8 路径拒绝 (严禁使用 to_string_lossy)
+    let non_utf8_archive = temp.0.join("non_utf8_evil.tar.gz");
+    {
+        let file = fs::File::create(&non_utf8_archive).unwrap();
+        let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(enc);
+
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o755);
+        // 填入包含非 UTF-8 序列的原始字节 (0xFF, 0xFE)
+        let evil_raw_name = b"bin/bad_\xFF\xFE_name\0";
+        header.as_mut_bytes()[..evil_raw_name.len()].copy_from_slice(evil_raw_name);
+        header.set_cksum();
+        builder.append(&header, &content[..]).unwrap();
+
+        let enc = builder.into_inner().unwrap();
+        enc.finish().unwrap();
+    }
+    let nu_meta = fs::metadata(&non_utf8_archive).unwrap();
+    let nu_sha = calculate_sha256_bytes(&fs::read(&non_utf8_archive).unwrap());
+    let nu_artifact = ArtifactSpec {
+        filename: "non_utf8_evil.tar.gz".into(),
+        sha256: nu_sha,
+        size_bytes: nu_meta.len(),
+        max_unpacked_bytes: 10000,
+        max_file_count: 10,
+    };
+    let stage_nu = temp.0.join("stage_nu");
+    let nu_res = safe_unpack_and_verify(&non_utf8_archive, &stage_nu, &nu_artifact, &components);
+    assert!(nu_res.is_err());
+    assert!(nu_res.unwrap_err().to_string().contains("invalid_utf8_in_entry_path"));
+
+    // 11. 对抗测试：解压目标祖先目录被替换为 symlink 拒绝
+    let stage_sym_ancestor = temp.0.join("stage_sym_anc");
+    fs::create_dir_all(&stage_sym_ancestor).unwrap();
+    let real_other = temp.0.join("other_dir");
+    fs::create_dir_all(&real_other).unwrap();
+    // 将 bin 目录软链接指向外部目录
+    std::os::unix::fs::symlink(&real_other, stage_sym_ancestor.join("bin")).unwrap();
+    let anc_res = safe_unpack_and_verify(&valid_archive, &stage_sym_ancestor, &artifact, &components);
+    assert!(anc_res.is_err());
+    assert!(anc_res.unwrap_err().to_string().contains("symlink_in_directory_path"));
 }
 
 #[test]
