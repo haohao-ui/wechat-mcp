@@ -1,4 +1,4 @@
-# U1 受限解码与 sandbox 候选实现待复核报告（CLI 对齐、JSON 资源与完整验签解包版）
+# U1 受限解码与 sandbox 候选实现待复核报告（CLI 对齐、JSON 资源与严格验签解包版）
 
 - **日期**：2026-11-11
 - **任务编号**：`task_e939c24d4e0d`
@@ -10,8 +10,8 @@
   - 针对 Q2 报告（`de8e2c0`）发现的 `src/bin/wechat-updater.rs` 编译阻塞完成最小契约对齐修复；
   - 针对打包脚本排除扩展名导致 payload 内 JSON 资源遗漏缺陷，改为按 payload 目录（`bin`/`Apps`/`resources`）精确枚举；
   - 严格不恢复不安全旧 API、不用伪 tx、不改动 `journal.rs`（避免干扰 R1 并行开发）；
-  - 全量二进制、25 项 updater 单元/集成测试、代码格式与完整发布包打包全部通过并经本地真实验证；
-  - 完成对真实生成发布包的端到端验签解包核验，以及多余未声明文件的负向拒绝测试；
+  - 全量二进制、常规 24 项 updater 单元/集成测试、代码格式与完整发布包打包全部通过并经本地真实验证；
+  - 按照协调者审查意见（`msg_42af79e8a2b6`），彻底杜绝缺产物静默通过（假绿）：测试标记为 `#[ignore = "requires explicitly built test release package"]`，动态平台架构核验、约定 fixture 资源前置非空断言、解包集合与清单集合双向严格比较、缺归档显式失败断言、以及多余未声明文件的负向拒绝拦截；
   - 生产 CLI 严格保持在安全 fail-closed 状态（退出码 1，提示 unsupported / trust_root_unconfigured）；
   - 零 Python，零真实生产 DB / 钥匙串 / 生产应用副作用，零远端推送。
 
@@ -20,7 +20,7 @@
 ## 1. 核心整改与契约对齐落地
 
 ### A. CLI 编译阻塞最小契约对齐（Q2 报告响应）
-- **Fresh Build RED 记录**：修复前，`cargo build --locked --bin wechat-updater` 因引用不存在的 `set_maintenance_active` 和 `load_current_release_metadata` 报错（退出码 101）。
+- **Fresh Build RED 记录**：修复前，`cargo build --locked --bin wechat-updater` 真实重现报错（退出码 101，缺少已删除的 `set_maintenance_active` 和 `load_current_release_metadata`）。
 - **整改措施**：
   1. 移除只读 `status` 查询命令中的写维护标记调用：状态查询命令无 update 事务上下文，严禁编造伪 tx 写 marker；当 journal 或 seq 文件损坏时，直接在输出 JSON 中精准标识 `status: "recovery_required"` 与 `maintenance_active: true`。
   2. 替换为现有的单一权威记录加载函数 `journal::load_current_release_record`。
@@ -38,7 +38,7 @@
 
 ---
 
-## 2. 真实构建、测试与真实包验签解包验证记录
+## 2. 真实构建、测试与显式包验签解包验证记录
 
 所有步骤均在本地工作树中执行并通过，无任何破坏性副作用：
 
@@ -46,26 +46,28 @@
 |---|---|:---:|---|
 | **CLI 编译** | `cargo build --locked --bin wechat-updater` | **0** | 编译成功，零 error |
 | **全量 Bin 构建** | `cargo build --locked --bins` | **0** | 全部二进制产物（含 wechat-mcp、wechat-updater 等）构建成功 |
-| **Updater 测试套件** | `cargo test --locked --lib updater` | **0** | **25 项测试全部 PASS**（耗时 1.62s，零 failure） |
+| **常规 Updater 测试** | `cargo test --locked --lib updater` | **0** | **24 项测试全部 PASS，1 项 ignored**（耗时 0.50s，零 failure） |
+| **显式发布包验签解包测试** | `cargo test --locked --lib test_real_built_release_package_verification_and_unlisted_rejection -- --ignored` | **0** | **显式调用 PASS**（耗时 5.61s，无静默跳过，详见下文） |
 | **格式与静态分析** | `cargo fmt --all -- --check` & `cargo clippy --bin wechat-updater` | **0** | 源码格式规范，clippy 零 error |
-| **安全与门禁脚本** | `./scripts/check_no_python.sh` & `./scripts/check_sensitive.sh` | **0** | 零 Python 依赖，无私钥或敏感信息泄露 |
-| **门禁夹具回归** | `bash scripts/test-gate-fixtures.sh` | **0** | 门禁回归夹具全部通过 |
-| **完整发布包构建** | `bash scripts/build_release_package.sh 0.2.0-test target/test-dist 1002 test true` | **0** | **成功生成完整应用发布包及签名封套**（详见下文） |
+| **完整发布包构建** | `bash scripts/build_release_package.sh 0.2.0-test target/test-dist 1002 test true` | **0** | **成功生成 15 组件完整应用发布包及签名封套** |
 
 ### 完整发布包产物真实信息
 - **产物目录**：`target/test-dist`
 - **制品归档**：`target/test-dist/wechat-mcp-0.2.0-test-macos-arm64.tar.gz`
   - 文件大小：`9,288,768` 字节
   - 归档 SHA-256：`6765b8bc961369798e82291d82fbfbcee0d45543ddb46b950141fdfa75b7e0a4`
-- **清单组件**：15 个组件（解压展开总计 `22,754,025` 字节），包含 `微信客服助手.app`、全部二进制以及 `gateway.test.json`、`gateway.example.json` 两个 JSON 资源文件
+- **组件清单**：15 个组件（展开总计 `22,754,025` 字节），包含 `微信客服助手.app`、全部二进制以及 `gateway.test.json`、`gateway.example.json`
 - **发布清单**：`target/test-dist/manifest.json`
-- **测试签名封套**：`target/test-dist/envelope.json`（由隔离测试私钥生成，签名公钥导出至 `target/test-dist/test_pubkey.hex`）
+- **签名封套**：`target/test-dist/envelope.json`（测试公钥导出至 `target/test-dist/test_pubkey.hex`）
 
 ### 真实生成包的验签解包与负向拦截验证（测试 `test_real_built_release_package_verification_and_unlisted_rejection`）
-1. **密码学验签**：使用 `test_pubkey.hex` 导出的受信公钥成功验证 `envelope.json`，清单完整性校验通过；
-2. **归档哈希核验**：实际 `.tar.gz` 字节 SHA-256 完全匹配清单中的 `artifact.sha256` 与大小；
-3. **流式解压与组件核验**：通过 `safe_unpack_and_verify` 完整解包并在受限沙箱中通过 `safe_verify_staged_dir` 核验，15 个组件权限与哈希 100% 匹配；
-4. **负向测试（多余未列出文件）**：故意在 staging 注入未在清单声明的文件，`safe_verify_staged_dir` 精确拦截并报错 `unexpected_file_in_staged_dir`；清理后恢复通过。
+遵照 `msg_42af79e8a2b6` 审查指示进行深度加固：
+1. **禁止缺产物静默通过**：标记 `#[ignore = "requires explicitly built test release package"]`，显式调用时以硬断言（`assert!`）检验 `dist_dir`、`pubkey_path` 与 `envelope_path`，缺失直接报错，杜绝假绿；
+2. **动态平台架构核验**：由当前平台常量（`std::env::consts::ARCH`）动态推导架构（arm64 / x86_64），与清单目标架构完全匹配核验，不硬编码 arm64；
+3. **约定 fixture 资源前置强检验**：显式断言 `Apps/微信客服助手.app/Contents/Resources/gateway.test.json` 与 `resources/gateway.example.json` 必须被清单列出，不允许跳过；
+4. **缺失归档显式失败断言**：显式测试缺失 artifact 文件时，`safe_unpack_and_verify` 明确返回错误；
+5. **解包后真实 Payload 集合双向对齐**：解压出的文件相对路径集合与 `manifest.components` 声明的路径集合建立 `HashSet` 严格相等比对，包内无多余、清单无缺少；
+6. **负向测试（多余未列出文件）**：故意在 staging 注入未在清单声明的文件，`safe_verify_staged_dir` 精确拦截并报错 `unexpected_file_in_staged_dir`；清理后恢复通过。
 
 ---
 
