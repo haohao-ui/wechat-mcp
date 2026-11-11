@@ -6,7 +6,7 @@ use super::signing::*;
 use super::unpack::*;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 struct TempTestDir(PathBuf);
 impl TempTestDir {
@@ -2047,4 +2047,164 @@ fn test_atomic_commit_protocol_failure_and_crash_window_recovery() {
         }
         other => panic!("Expected ManualInterventionRequired, got {:?}", other),
     }
+}
+
+#[test]
+#[ignore = "requires explicitly built test release package"]
+fn test_real_built_release_package_verification_and_unlisted_rejection() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dist_dir = manifest_dir.join("target/test-dist");
+    assert!(
+        dist_dir.exists(),
+        "Target test-dist directory '{}' does not exist; run build_release_package.sh first",
+        dist_dir.display()
+    );
+
+    let pubkey_path = dist_dir.join("test_pubkey.hex");
+    let envelope_path = dist_dir.join("envelope.json");
+    assert!(
+        pubkey_path.exists(),
+        "test_pubkey.hex does not exist at '{}'",
+        pubkey_path.display()
+    );
+    assert!(
+        envelope_path.exists(),
+        "envelope.json does not exist at '{}'",
+        envelope_path.display()
+    );
+
+    // 1. 读取真实导出的测试公钥并构造受信 Keystore
+    let pub_hex = fs::read_to_string(&pubkey_path).unwrap();
+    let trimmed_hex = pub_hex.trim();
+    assert_eq!(trimmed_hex.len(), 64);
+    let mut pubkey_bytes = Vec::with_capacity(32);
+    for i in (0..64).step_by(2) {
+        let b = u8::from_str_radix(&trimmed_hex[i..i + 2], 16).unwrap();
+        pubkey_bytes.push(b);
+    }
+    let key_store = TrustedKeyStore::new().with_key("test-root-v1", &pubkey_bytes);
+
+    // 2. 动态核验当前宿主平台架构，不硬编码 arm64
+    let target_arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x86_64",
+        other => other,
+    };
+
+    let env_bytes = fs::read(&envelope_path).unwrap();
+    let verified = VerifiedManifestEnvelope::verify_and_construct(
+        &env_bytes,
+        &key_store,
+        target_arch,
+        "12.0",
+        1000,
+    )
+    .expect("Real built envelope must pass cryptographic verification for current arch");
+
+    let manifest = verified.manifest();
+    assert_eq!(manifest.target.arch, target_arch);
+
+    // 3. 明确前置要求两个约定 fixture 资源必须在 manifest 中，不允许静默跳过
+    let has_gw_test = manifest
+        .components
+        .iter()
+        .any(|c| c.path == "Apps/微信客服助手.app/Contents/Resources/gateway.test.json");
+    assert!(
+        has_gw_test,
+        "gateway.test.json fixture resource MUST be declared in manifest components"
+    );
+
+    let has_gw_example = manifest
+        .components
+        .iter()
+        .any(|c| c.path == "resources/gateway.example.json");
+    assert!(
+        has_gw_example,
+        "gateway.example.json fixture resource MUST be declared in manifest components"
+    );
+
+    // 4. 真实归档文件哈希与大小核验
+    let tar_path = dist_dir.join(&manifest.artifact.filename);
+    assert!(
+        tar_path.exists(),
+        "Artifact tar file '{}' does not exist",
+        tar_path.display()
+    );
+    let tar_bytes = fs::read(&tar_path).unwrap();
+    assert_eq!(tar_bytes.len() as u64, manifest.artifact.size_bytes);
+    let actual_sha = calculate_sha256_bytes(&tar_bytes);
+    assert_eq!(actual_sha, manifest.artifact.sha256);
+
+    // 5. 缺失 artifact 归档文件的明确失败断言
+    let missing_tar_path = dist_dir.join("non_existent_archive_payload.tar.gz");
+    let temp_missing = TempTestDir::new("real_pkg_missing_staging");
+    let err_missing = safe_unpack_and_verify(
+        &missing_tar_path,
+        &temp_missing.0,
+        &manifest.artifact,
+        &manifest.components,
+    );
+    assert!(
+        err_missing.is_err(),
+        "safe_unpack_and_verify must fail explicitly when archive is missing"
+    );
+
+    // 6. 真实受限流式解压与严格组件核验
+    let temp_staging = TempTestDir::new("real_pkg_staging");
+    safe_unpack_and_verify(
+        &tar_path,
+        &temp_staging.0,
+        &manifest.artifact,
+        &manifest.components,
+    )
+    .expect("Real built archive must safely unpack and strictly verify against manifest");
+
+    // 7. 解压后真实 payload 集合与 manifest components 双向严格对齐比较
+    let mut unpacked_paths = std::collections::HashSet::new();
+    for entry in walk_dir_recursive(&temp_staging.0) {
+        if entry.is_file() {
+            let rel = entry.strip_prefix(&temp_staging.0).unwrap().to_path_buf();
+            unpacked_paths.insert(rel.to_string_lossy().to_string());
+        }
+    }
+    let manifest_paths: std::collections::HashSet<String> =
+        manifest.components.iter().map(|c| c.path.clone()).collect();
+    assert_eq!(
+        unpacked_paths, manifest_paths,
+        "Unpacked payload files must exactly match manifest declared components"
+    );
+
+    // 8. 负向验证：包内若存在任何未在 manifest 中列出的多余文件，必须严格拦截拒绝
+    let extra_file = temp_staging.0.join("resources/unlisted_payload.json");
+    fs::write(&extra_file, b"{\"unlisted\": true}").unwrap();
+    let err_unlisted =
+        safe_verify_staged_dir(&temp_staging.0, &manifest.artifact, &manifest.components)
+            .unwrap_err();
+    assert!(
+        err_unlisted
+            .to_string()
+            .contains("unexpected_file_in_staged_dir"),
+        "Unexpected error: {:?}",
+        err_unlisted
+    );
+    // 清理多余文件后恢复正常
+    fs::remove_file(&extra_file).unwrap();
+    assert!(
+        safe_verify_staged_dir(&temp_staging.0, &manifest.artifact, &manifest.components).is_ok()
+    );
+}
+
+fn walk_dir_recursive(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                files.extend(walk_dir_recursive(&path));
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files
 }
