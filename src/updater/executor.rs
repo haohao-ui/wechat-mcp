@@ -195,13 +195,17 @@ pub trait SandboxBackupAdapter: Send + Sync {
 /// 沙箱候选自检适配器证明
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct VerifiedSandboxCandidateProof {
+    pub tx_id: String,
     pub tested_at: u64,
     pub exit_code: i32,
 }
 
 pub trait SandboxCandidateAdapter: Send + Sync {
-    fn execute_candidate_test(&self, candidate_dir: &Path)
-    -> Result<VerifiedSandboxCandidateProof>;
+    fn execute_candidate_test(
+        &self,
+        tx_id: &str,
+        candidate_dir: &Path,
+    ) -> Result<VerifiedSandboxCandidateProof>;
 }
 
 /// 沙箱排空测试 Fixture 适配器
@@ -281,21 +285,70 @@ impl SandboxBackupAdapter for SandboxFixtureBackupAdapter {
     }
 }
 
-/// 受信沙箱候选自检测试 Fixture 适配器（硬编码固定绝对路径、固定参数、超时防挂死、输出洪泛防护、kill+wait 回收自有进程）
+/// 受信候选自检 Fixture 预定义类型枚举（禁止外部传入任意未批准命令）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SandboxCandidateFixtureKind {
+    /// 正常退出通过 (exit 0)
+    Pass,
+    /// 异常退出码失败 (exit <code>)
+    FailExitCode(i32),
+    /// 超时无响应 (sleep)
+    TimeoutHang,
+    /// 孙进程后台持有管道写端，父进程先行退出
+    OrphanForkHoldsPipe,
+    /// 进程组内孙进程与父进程均长时间运行
+    TimeoutForkProcessGroup,
+    /// 输出大量数据测试洪泛防御
+    OutputFlood,
+}
+
+/// 受信沙箱候选自检测试 Fixture 适配器（硬编码受信枚举、字段私有、进程组全组回收、输出洪泛硬限保护）
 pub struct SandboxFixtureCandidateAdapter {
-    pub executable_path: PathBuf,
-    pub fixed_args: Vec<String>,
-    pub timeout: std::time::Duration,
-    pub max_output_bytes: usize,
+    fixture_kind: SandboxCandidateFixtureKind,
+    executable_path: PathBuf,
+    fixed_args: Vec<String>,
+    timeout: std::time::Duration,
+    max_output_bytes: usize,
+    max_total_drain_bytes: usize,
 }
 
 impl SandboxFixtureCandidateAdapter {
-    pub fn new(executable_path: impl Into<PathBuf>, fixed_args: Vec<String>) -> Self {
+    pub fn fixture_kind(&self) -> &SandboxCandidateFixtureKind {
+        &self.fixture_kind
+    }
+    pub fn from_fixture(kind: SandboxCandidateFixtureKind) -> Self {
+        let (exe, args) = match &kind {
+            SandboxCandidateFixtureKind::Pass => ("/bin/sh", vec!["-c".into(), "exit 0".into()]),
+            SandboxCandidateFixtureKind::FailExitCode(code) => {
+                let safe_code = (*code).clamp(1, 255);
+                ("/bin/sh", vec!["-c".into(), format!("exit {}", safe_code)])
+            }
+            SandboxCandidateFixtureKind::TimeoutHang => {
+                ("/bin/sh", vec!["-c".into(), "sleep 30".into()])
+            }
+            SandboxCandidateFixtureKind::OrphanForkHoldsPipe => (
+                "/bin/sh",
+                vec!["-c".into(), "(sleep 30 >&1) & exit 0".into()],
+            ),
+            SandboxCandidateFixtureKind::TimeoutForkProcessGroup => {
+                ("/bin/sh", vec!["-c".into(), "(sleep 30) & sleep 30".into()])
+            }
+            SandboxCandidateFixtureKind::OutputFlood => (
+                "/bin/sh",
+                vec![
+                    "-c".into(),
+                    "dd if=/dev/zero bs=1024 count=1000 2>/dev/null".into(),
+                ],
+            ),
+        };
+
         Self {
-            executable_path: executable_path.into(),
-            fixed_args,
+            fixture_kind: kind,
+            executable_path: PathBuf::from(exe),
+            fixed_args: args,
             timeout: std::time::Duration::from_secs(5),
             max_output_bytes: 64 * 1024,
+            max_total_drain_bytes: 512 * 1024,
         }
     }
 
@@ -308,15 +361,36 @@ impl SandboxFixtureCandidateAdapter {
         self.max_output_bytes = max;
         self
     }
+
+    pub fn with_max_total_drain_bytes(mut self, max: usize) -> Self {
+        self.max_total_drain_bytes = max;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_raw_command(exe: impl Into<PathBuf>, args: Vec<String>) -> Self {
+        Self {
+            fixture_kind: SandboxCandidateFixtureKind::Pass,
+            executable_path: exe.into(),
+            fixed_args: args,
+            timeout: std::time::Duration::from_secs(5),
+            max_output_bytes: 64 * 1024,
+            max_total_drain_bytes: 512 * 1024,
+        }
+    }
 }
 
 impl SandboxCandidateAdapter for SandboxFixtureCandidateAdapter {
     fn execute_candidate_test(
         &self,
+        tx_id: &str,
         candidate_dir: &Path,
     ) -> Result<VerifiedSandboxCandidateProof> {
         use std::io::Read;
+        use std::os::unix::process::CommandExt;
         use std::process::{Command, Stdio};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::thread;
         use std::time::Instant;
 
@@ -340,18 +414,45 @@ impl SandboxCandidateAdapter for SandboxFixtureCandidateAdapter {
             );
         }
 
-        let mut child = Command::new(&self.executable_path)
-            .args(&self.fixed_args)
+        let mut cmd = Command::new(&self.executable_path);
+        cmd.args(&self.fixed_args)
             .env("CANDIDATE_RELEASE_DIR", candidate_dir)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        // 核心加固：创建自有独立进程组 (PGID == PID)，确保可整组杀灭所有派生子孙进程
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setpgid(0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+
+        let mut child = cmd
             .spawn()
             .map_err(|e| anyhow::anyhow!("failed_to_spawn_candidate_test: {}", e))?;
+
+        let pgid = child.id() as libc::pid_t;
+
+        let kill_process_group = |child: &mut std::process::Child| {
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+            let _ = child.wait();
+        };
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let max_bytes = self.max_output_bytes;
+        let max_drain = self.max_total_drain_bytes;
 
+        let total_read = Arc::new(AtomicUsize::new(0));
+        let flood_exceeded = Arc::new(AtomicBool::new(false));
+
+        let total_stdout = total_read.clone();
+        let flood_stdout = flood_exceeded.clone();
         let stdout_handle = thread::spawn(move || {
             let mut buf = Vec::new();
             if let Some(mut stream) = stdout {
@@ -360,22 +461,33 @@ impl SandboxCandidateAdapter for SandboxFixtureCandidateAdapter {
                     if n == 0 {
                         break;
                     }
+                    let tot = total_stdout.fetch_add(n, Ordering::SeqCst) + n;
+                    if tot > max_drain {
+                        flood_stdout.store(true, Ordering::SeqCst);
+                        break;
+                    }
                     if buf.len() < max_bytes {
                         let to_take = n.min(max_bytes - buf.len());
                         buf.extend_from_slice(&chunk[..to_take]);
                     }
-                    // 超过 max_bytes 后继续读空丢弃，防止对端写入触发 SIGPIPE
                 }
             }
             buf
         });
 
+        let total_stderr = total_read.clone();
+        let flood_stderr = flood_exceeded.clone();
         let stderr_handle = thread::spawn(move || {
             let mut buf = Vec::new();
             if let Some(mut stream) = stderr {
                 let mut chunk = [0u8; 4096];
                 while let Ok(n) = stream.read(&mut chunk) {
                     if n == 0 {
+                        break;
+                    }
+                    let tot = total_stderr.fetch_add(n, Ordering::SeqCst) + n;
+                    if tot > max_drain {
+                        flood_stderr.store(true, Ordering::SeqCst);
                         break;
                     }
                     if buf.len() < max_bytes {
@@ -390,17 +502,28 @@ impl SandboxCandidateAdapter for SandboxFixtureCandidateAdapter {
         let start = Instant::now();
         let mut exit_status = None;
         while start.elapsed() < self.timeout {
+            if flood_exceeded.load(Ordering::SeqCst) {
+                kill_process_group(&mut child);
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                bail!(
+                    "candidate_test_output_flood_exceeded_limit: output exceeded {} bytes",
+                    self.max_total_drain_bytes
+                );
+            }
+
             match child.try_wait() {
                 Ok(Some(status)) => {
                     exit_status = Some(status);
                     break;
                 }
                 Ok(None) => {
-                    thread::sleep(std::time::Duration::from_millis(50));
+                    thread::sleep(std::time::Duration::from_millis(20));
                 }
                 Err(e) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_process_group(&mut child);
+                    let _ = stdout_handle.join();
+                    let _ = stderr_handle.join();
                     bail!("candidate_test_wait_error: {}", e);
                 }
             }
@@ -409,13 +532,16 @@ impl SandboxCandidateAdapter for SandboxFixtureCandidateAdapter {
         let status = match exit_status {
             Some(st) => st,
             None => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_process_group(&mut child);
                 let _ = stdout_handle.join();
                 let _ = stderr_handle.join();
                 bail!("candidate_test_timeout_exceeded: limit {:?}", self.timeout);
             }
         };
+
+        // 直接子进程已退出。为了收割派生孙子孤儿进程并确保管道写端全部关闭，短暂停留后强制清理整个进程组
+        thread::sleep(std::time::Duration::from_millis(20));
+        kill_process_group(&mut child);
 
         let _ = stdout_handle.join();
         let _ = stderr_handle.join();
@@ -431,6 +557,7 @@ impl SandboxCandidateAdapter for SandboxFixtureCandidateAdapter {
             .as_secs();
 
         Ok(VerifiedSandboxCandidateProof {
+            tx_id: tx_id.to_string(),
             tested_at: now_ts,
             exit_code: 0,
         })
@@ -684,7 +811,7 @@ impl<'a> SandboxUpdateExecutor<'a> {
         let candidate_test_result = if self.fault.fail_candidate_testing {
             Err(anyhow::anyhow!("injected_fault_candidate_testing_failed"))
         } else {
-            candidate_adapter.execute_candidate_test(&target_release_dir)
+            candidate_adapter.execute_candidate_test(&tx_id, &target_release_dir)
         };
 
         match candidate_test_result {

@@ -1248,9 +1248,8 @@ fn test_sandbox_executor_end_to_end_and_fault_injections() {
 
     let drain_adapter = std::sync::Arc::new(SandboxFixtureDrainAdapter);
     let backup_adapter = std::sync::Arc::new(SandboxFixtureBackupAdapter::new_with_db(&db_p));
-    let cand_adapter = std::sync::Arc::new(SandboxFixtureCandidateAdapter::new(
-        "/bin/sh",
-        vec!["-c".into(), "exit 0".into()],
+    let cand_adapter = std::sync::Arc::new(SandboxFixtureCandidateAdapter::from_fixture(
+        SandboxCandidateFixtureKind::Pass,
     ));
 
     // 执行更新全流程 -> Committed
@@ -1426,10 +1425,9 @@ fn test_release_id_validation_and_existing_directory_protection() {
         .with_backup_adapter(std::sync::Arc::new(
             SandboxFixtureBackupAdapter::new_no_database(),
         ))
-        .with_candidate_adapter(std::sync::Arc::new(SandboxFixtureCandidateAdapter::new(
-            "/bin/sh",
-            vec!["-c".into(), "exit 0".into()],
-        )));
+        .with_candidate_adapter(std::sync::Arc::new(
+            SandboxFixtureCandidateAdapter::from_fixture(SandboxCandidateFixtureKind::Pass),
+        ));
     let err = executor
         .execute_transaction(&verified, &archive_path, &signer, 1794360100)
         .unwrap_err();
@@ -1568,9 +1566,8 @@ fn test_whitelist_candidate_testing_and_exit_code_enforcement() {
     let backup_adapter = std::sync::Arc::new(SandboxFixtureBackupAdapter::new_no_database());
 
     // 1. 真实自检命令返回 0 -> 成功提交
-    let pass_cand_adapter = std::sync::Arc::new(SandboxFixtureCandidateAdapter::new(
-        "/bin/sh",
-        vec!["-c".into(), "exit 0".into()],
+    let pass_cand_adapter = std::sync::Arc::new(SandboxFixtureCandidateAdapter::from_fixture(
+        SandboxCandidateFixtureKind::Pass,
     ));
     let pass_executor = SandboxUpdateExecutor::new(&sandbox)
         .with_drain_adapter(drain_adapter.clone())
@@ -1605,9 +1602,8 @@ fn test_whitelist_candidate_testing_and_exit_code_enforcement() {
     )
     .unwrap();
 
-    let fail_cand_adapter = std::sync::Arc::new(SandboxFixtureCandidateAdapter::new(
-        "/bin/sh",
-        vec!["-c".into(), "exit 42".into()],
+    let fail_cand_adapter = std::sync::Arc::new(SandboxFixtureCandidateAdapter::from_fixture(
+        SandboxCandidateFixtureKind::FailExitCode(42),
     ));
     let fail_executor = SandboxUpdateExecutor::new(&sandbox)
         .with_drain_adapter(drain_adapter.clone())
@@ -1661,32 +1657,85 @@ fn test_executor_fails_closed_before_write_if_any_adapter_missing() {
 fn test_candidate_adapter_timeout_output_flood_and_process_cleanup() {
     let temp = TempTestDir::new("cand_limits");
 
-    // 1. 超时测试：命令 sleep 5 秒，适配器 timeout 200ms -> 拦截超时并杀死子进程
-    let sleep_adapter = SandboxFixtureCandidateAdapter::new("/bin/sleep", vec!["5".into()])
-        .with_timeout(std::time::Duration::from_millis(200));
+    // 1. 超时测试：命令 sleep，适配器 timeout 200ms -> 拦截超时并杀死全进程组，毫秒级返回
+    let start_hang = std::time::Instant::now();
+    let sleep_adapter =
+        SandboxFixtureCandidateAdapter::from_fixture(SandboxCandidateFixtureKind::TimeoutHang)
+            .with_timeout(std::time::Duration::from_millis(200));
 
-    let err = sleep_adapter.execute_candidate_test(&temp.0).unwrap_err();
+    let err = sleep_adapter
+        .execute_candidate_test("tx-timeout", &temp.0)
+        .unwrap_err();
     assert!(err.to_string().contains("candidate_test_timeout_exceeded"));
+    assert!(
+        start_hang.elapsed() < std::time::Duration::from_secs(2),
+        "Timeout exceeded deadline: {:?}",
+        start_hang.elapsed()
+    );
 
-    // 2. 相对路径试图逃逸被严格静态拒绝
-    let rel_adapter = SandboxFixtureCandidateAdapter::new("../escape_bin", vec![]);
-    let err_rel = rel_adapter.execute_candidate_test(&temp.0).unwrap_err();
+    // 2. 进程组超时 fork 场景：子进程派生后台孙进程并在后台持续运行 -> 超时收割全组，join 不被绕过
+    let start_fork = std::time::Instant::now();
+    let fork_hang_adapter = SandboxFixtureCandidateAdapter::from_fixture(
+        SandboxCandidateFixtureKind::TimeoutForkProcessGroup,
+    )
+    .with_timeout(std::time::Duration::from_millis(200));
+
+    let err_fork = fork_hang_adapter
+        .execute_candidate_test("tx-fork-hang", &temp.0)
+        .unwrap_err();
+    assert!(
+        err_fork
+            .to_string()
+            .contains("candidate_test_timeout_exceeded")
+    );
+    assert!(
+        start_fork.elapsed() < std::time::Duration::from_secs(2),
+        "Fork hang exceeded deadline: {:?}",
+        start_fork.elapsed()
+    );
+
+    // 3. 孙进程孤儿持有管道场景：父进程 exit 0 退出，孙进程后台 hold stdout sleep 30 -> 立即收割，join 绝不无界阻塞
+    let start_orphan = std::time::Instant::now();
+    let orphan_adapter = SandboxFixtureCandidateAdapter::from_fixture(
+        SandboxCandidateFixtureKind::OrphanForkHoldsPipe,
+    );
+    let proof_orphan = orphan_adapter
+        .execute_candidate_test("tx-orphan", &temp.0)
+        .expect("Orphan pipe test should be reaped and succeed cleanly");
+    assert_eq!(proof_orphan.exit_code, 0);
+    assert_eq!(proof_orphan.tx_id, "tx-orphan");
+    assert!(
+        start_orphan.elapsed() < std::time::Duration::from_secs(2),
+        "Orphan join hang detected: took {:?}",
+        start_orphan.elapsed()
+    );
+
+    // 4. 输出洪泛硬上限与持续消耗防护：超限立即杀组拦截，绝不无限读空消耗资源
+    let flood_limit_adapter =
+        SandboxFixtureCandidateAdapter::from_fixture(SandboxCandidateFixtureKind::OutputFlood)
+            .with_max_output_bytes(512)
+            .with_max_total_drain_bytes(4096);
+
+    let flood_err = flood_limit_adapter
+        .execute_candidate_test("tx-flood", &temp.0)
+        .unwrap_err();
+    assert!(
+        flood_err
+            .to_string()
+            .contains("candidate_test_output_flood_exceeded_limit"),
+        "Unexpected error: {:?}",
+        flood_err
+    );
+
+    // 5. 相对路径试图逃逸被严格静态拒绝
+    let rel_adapter = SandboxFixtureCandidateAdapter::for_test_raw_command("../escape_bin", vec![]);
+    let err_rel = rel_adapter
+        .execute_candidate_test("tx-rel", &temp.0)
+        .unwrap_err();
     assert!(
         err_rel.to_string().contains("must_be_absolute")
             || err_rel.to_string().contains("contains_traversal")
     );
-
-    // 3. 输出洪泛保护测试：限制 512 字节，命令产生海量输出，防死锁
-    let flood_adapter = SandboxFixtureCandidateAdapter::new(
-        "/bin/sh",
-        vec![
-            "-c".into(),
-            "dd if=/dev/zero bs=1024 count=100 2>/dev/null".into(),
-        ],
-    )
-    .with_max_output_bytes(512);
-    let res = flood_adapter.execute_candidate_test(&temp.0);
-    assert!(res.is_ok(), "flood error: {:?}", res.err());
 }
 
 #[test]
@@ -1863,10 +1912,9 @@ fn test_atomic_commit_protocol_failure_and_crash_window_recovery() {
         .with_backup_adapter(std::sync::Arc::new(
             SandboxFixtureBackupAdapter::new_no_database(),
         ))
-        .with_candidate_adapter(std::sync::Arc::new(SandboxFixtureCandidateAdapter::new(
-            "/bin/sh",
-            vec!["-c".into(), "exit 0".into()],
-        )))
+        .with_candidate_adapter(std::sync::Arc::new(
+            SandboxFixtureCandidateAdapter::from_fixture(SandboxCandidateFixtureKind::Pass),
+        ))
         .with_fault(FaultInjection {
             fail_record_commit: true,
             ..Default::default()
@@ -1912,10 +1960,9 @@ fn test_atomic_commit_protocol_failure_and_crash_window_recovery() {
         .with_backup_adapter(std::sync::Arc::new(
             SandboxFixtureBackupAdapter::new_no_database(),
         ))
-        .with_candidate_adapter(std::sync::Arc::new(SandboxFixtureCandidateAdapter::new(
-            "/bin/sh",
-            vec!["-c".into(), "exit 0".into()],
-        )))
+        .with_candidate_adapter(std::sync::Arc::new(
+            SandboxFixtureCandidateAdapter::from_fixture(SandboxCandidateFixtureKind::Pass),
+        ))
         .with_fault(FaultInjection {
             fail_after_record_commit: true,
             ..Default::default()
