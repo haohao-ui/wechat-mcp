@@ -15,6 +15,7 @@ pub enum TransactionStage {
     BackupVerified,
     Switching,
     CandidateTesting,
+    CandidateTestingPassed,
     Committed,
     RollbackStarted,
     RolledBack,
@@ -39,6 +40,8 @@ pub struct UpdateJournal {
     pub backup_proof: Option<String>,
     #[serde(default)]
     pub candidate_proof: Option<String>,
+    #[serde(default)]
+    pub manifest_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +51,7 @@ pub enum RecoveryAction {
     ResumeOldRelease,
     TestCandidate,
     RollbackToPrevious,
+    CompletePendingCommit,
     CommitSuccess,
     ManualInterventionRequired(String),
 }
@@ -101,6 +105,7 @@ impl UpdateJournal {
             drain_proof: None,
             backup_proof: None,
             candidate_proof: None,
+            manifest_digest: None,
         }
     }
 
@@ -146,8 +151,117 @@ impl UpdateJournal {
         Ok(Some(journal))
     }
 
+    /// 校验 Proof 证据结构体全要素一致性（防伪造空串或非当前 tx 证明）
+    pub fn verify_proofs_consistent(&self, expected_tx_id: &str) -> Result<(), String> {
+        // 1. drain_proof 校验
+        let drain_str = self
+            .drain_proof
+            .as_ref()
+            .ok_or_else(|| "missing_drain_proof".to_string())?;
+        #[derive(Deserialize)]
+        struct DrainProofCheck {
+            tx_id: String,
+        }
+        let drain: DrainProofCheck = serde_json::from_str(drain_str)
+            .map_err(|e| format!("corrupt_drain_proof_json: {}", e))?;
+        if drain.tx_id != expected_tx_id {
+            return Err(format!(
+                "drain_proof_tx_mismatch: proof tx '{}' != journal tx '{}'",
+                drain.tx_id, expected_tx_id
+            ));
+        }
+
+        // 2. candidate_proof 校验
+        let cand_str = self
+            .candidate_proof
+            .as_ref()
+            .ok_or_else(|| "missing_candidate_proof".to_string())?;
+        #[derive(Deserialize)]
+        struct CandidateProofCheck {
+            #[serde(default)]
+            tx_id: Option<String>,
+            exit_code: i32,
+        }
+        let cand: CandidateProofCheck = serde_json::from_str(cand_str)
+            .map_err(|e| format!("corrupt_candidate_proof_json: {}", e))?;
+        if cand.exit_code != 0 {
+            return Err(format!(
+                "candidate_proof_exit_code_non_zero: {}",
+                cand.exit_code
+            ));
+        }
+        if let Some(ref tx) = cand.tx_id {
+            if tx != expected_tx_id {
+                return Err(format!(
+                    "candidate_proof_tx_mismatch: proof tx '{}' != journal tx '{}'",
+                    tx, expected_tx_id
+                ));
+            }
+        }
+
+        // 3. backup_proof 存在性校验
+        if self.backup_proof.is_none() {
+            return Err("missing_backup_proof".to_string());
+        }
+
+        Ok(())
+    }
+
+    /// 内核级安全核验 current 软链接确实指向 target 且在 releases 目录中绝非伪造 symlink
+    pub fn verify_current_link_secure(
+        &self,
+        releases_dir: &Path,
+        current_link: &Path,
+    ) -> Result<(), String> {
+        let target = fs::read_link(current_link)
+            .map_err(|e| format!("unreadable_current_symlink: {}", e))?;
+
+        let expected_target = releases_dir.join(&self.target_release_id);
+        let is_matching_target = target == expected_target
+            || target == Path::new("releases").join(&self.target_release_id)
+            || target == Path::new(&self.target_release_id);
+        if !is_matching_target {
+            return Err(format!(
+                "current_symlink_target_mismatch: current points to '{}', expected '{}'",
+                target.display(),
+                self.target_release_id
+            ));
+        }
+
+        use std::ffi::CString;
+        let c_releases = match CString::new(releases_dir.to_str().unwrap_or_default()) {
+            Ok(c) => c,
+            Err(_) => return Err("invalid_releases_path".into()),
+        };
+        let r_fd = unsafe {
+            libc::open(
+                c_releases.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if r_fd < 0 {
+            return Err("unreadable_releases_dir_fd".into());
+        }
+
+        let verified = verify_subdir_secure_at(r_fd, &self.target_release_id);
+        unsafe {
+            libc::close(r_fd);
+        }
+        verified.map_err(|e| format!("target_subdir_in_releases_dir_invalid: {}", e))
+    }
+
     /// 评估断电/崩溃后的恢复动作（采用严格规范化路径精确匹配，绝不使用 contains 模糊匹配，绝不把未知 current 当旧版安全）
     pub fn evaluate_recovery(&self, releases_dir: &Path, current_link: &Path) -> RecoveryAction {
+        let state_dir = releases_dir.parent().map(|p| p.join("state"));
+        self.evaluate_recovery_with_state(state_dir.as_deref(), releases_dir, current_link)
+    }
+
+    pub fn evaluate_recovery_with_state(
+        &self,
+        state_dir: Option<&Path>,
+        releases_dir: &Path,
+        current_link: &Path,
+    ) -> RecoveryAction {
         match self.stage {
             TransactionStage::Staged
             | TransactionStage::PublisherVerified
@@ -247,68 +361,113 @@ impl UpdateJournal {
                 // 候选自检阶段中断，需重新自检；若自检失败则切回 previous
                 RecoveryAction::TestCandidate
             }
-            TransactionStage::RollbackStarted => RecoveryAction::RollbackToPrevious,
-            TransactionStage::Committed => {
-                // 全要素严格核验：proof、受限 target 目录全要素匹配；若缺失证明严格保持人工介入
-                if self.drain_proof.is_none() || self.candidate_proof.is_none() {
-                    return RecoveryAction::ManualInterventionRequired(
-                        "committed_journal_missing_drain_or_candidate_proof".into(),
-                    );
-                }
-
-                match fs::read_link(current_link) {
-                    Ok(target) => {
-                        let expected_target = releases_dir.join(&self.target_release_id);
-                        let is_matching_target = target == expected_target
-                            || target == Path::new("releases").join(&self.target_release_id)
-                            || target == Path::new(&self.target_release_id);
-                        if !is_matching_target {
+            TransactionStage::CandidateTestingPassed => {
+                // 候选自检已通过但尚未写入 Committed 的崩溃窗口：精确恢复核验
+                let state_d = match state_dir {
+                    Some(d) => d,
+                    None => {
+                        return RecoveryAction::ManualInterventionRequired(
+                            "candidate_passed_recovery_missing_state_dir".into(),
+                        );
+                    }
+                };
+                match load_current_release_record(state_d) {
+                    Ok(Some(record)) => {
+                        // 1. record 全要素校验
+                        if record.tx_id != self.transaction_id
+                            || record.release_id != self.target_release_id
+                            || record.sequence != self.target_sequence
+                        {
+                            return RecoveryAction::ManualInterventionRequired(
+                                "candidate_passed_but_commit_record_mismatch".into(),
+                            );
+                        }
+                        if let Some(ref digest) = self.manifest_digest {
+                            if record.manifest_digest != *digest {
+                                return RecoveryAction::ManualInterventionRequired(
+                                    "candidate_passed_but_manifest_digest_mismatch".into(),
+                                );
+                            }
+                        }
+                        // 2. proof 全要素校验
+                        if let Err(proof_err) = self.verify_proofs_consistent(&self.transaction_id)
+                        {
                             return RecoveryAction::ManualInterventionRequired(format!(
-                                "committed_journal_target_mismatch: current points to '{}', expected '{}'",
-                                target.display(),
-                                self.target_release_id
+                                "candidate_passed_proof_inconsistent: {}",
+                                proof_err
                             ));
                         }
+                        // 3. current 软链校验
+                        if let Err(link_err) =
+                            self.verify_current_link_secure(releases_dir, current_link)
+                        {
+                            return RecoveryAction::ManualInterventionRequired(format!(
+                                "candidate_passed_current_link_insecure: {}",
+                                link_err
+                            ));
+                        }
+                        // 全要素一致：权威记录已生效，精确恢复为推进完成提交
+                        RecoveryAction::CompletePendingCommit
+                    }
+                    Ok(None) => {
+                        // 权威记录不存在（写 record 失败或断电）：绝不猜成功，严格保持维护态
+                        RecoveryAction::ManualInterventionRequired(
+                            "record_commit_not_found_after_candidate_testing_passed".into(),
+                        )
+                    }
+                    Err(e) => RecoveryAction::ManualInterventionRequired(format!(
+                        "corrupt_current_release_record: {}",
+                        e
+                    )),
+                }
+            }
+            TransactionStage::RollbackStarted => RecoveryAction::RollbackToPrevious,
+            TransactionStage::Committed => {
+                // 全要素严格核验：proof、权威 record、受限 target 目录全要素匹配；若缺失证明严格保持人工介入
+                if let Err(proof_err) = self.verify_proofs_consistent(&self.transaction_id) {
+                    return RecoveryAction::ManualInterventionRequired(format!(
+                        "committed_journal_proof_missing_or_inconsistent: {}",
+                        proof_err
+                    ));
+                }
 
-                        use std::ffi::CString;
-                        let c_releases =
-                            match CString::new(releases_dir.to_str().unwrap_or_default()) {
-                                Ok(c) => c,
-                                Err(_) => {
+                if let Err(link_err) = self.verify_current_link_secure(releases_dir, current_link) {
+                    return RecoveryAction::ManualInterventionRequired(format!(
+                        "committed_current_link_insecure: {}",
+                        link_err
+                    ));
+                }
+
+                if let Some(state_d) = state_dir {
+                    match load_current_release_record(state_d) {
+                        Ok(Some(record)) => {
+                            if record.tx_id != self.transaction_id
+                                || record.release_id != self.target_release_id
+                                || record.sequence != self.target_sequence
+                            {
+                                return RecoveryAction::ManualInterventionRequired(
+                                    "committed_record_mismatch_with_journal".into(),
+                                );
+                            }
+                            if let Some(ref digest) = self.manifest_digest {
+                                if record.manifest_digest != *digest {
                                     return RecoveryAction::ManualInterventionRequired(
-                                        "invalid_releases_path".into(),
+                                        "committed_record_manifest_digest_mismatch".into(),
                                     );
                                 }
-                            };
-                        let r_fd = unsafe {
-                            libc::open(
-                                c_releases.as_ptr(),
-                                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-                            )
-                        };
-                        if r_fd < 0 {
+                            }
+                        }
+                        Ok(None) => {
                             return RecoveryAction::ManualInterventionRequired(
-                                "unreadable_releases_dir_fd".into(),
+                                "committed_state_missing_authoritative_release_record".into(),
                             );
                         }
-
-                        let verified_target =
-                            verify_subdir_secure_at(r_fd, &self.target_release_id);
-                        unsafe {
-                            libc::close(r_fd);
+                        Err(e) => {
+                            return RecoveryAction::ManualInterventionRequired(format!(
+                                "committed_state_corrupt_authoritative_release_record: {}",
+                                e
+                            ));
                         }
-
-                        if verified_target.is_err() {
-                            return RecoveryAction::ManualInterventionRequired(
-                                "committed_target_dir_missing_or_symlink".into(),
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        return RecoveryAction::ManualInterventionRequired(format!(
-                            "unreadable_current_symlink_on_committed: {}",
-                            e
-                        ));
                     }
                 }
 

@@ -443,6 +443,8 @@ pub struct FaultInjection {
     pub fail_after_stage: Option<TransactionStage>,
     pub fail_candidate_testing: bool,
     pub fail_backup: bool,
+    pub fail_record_commit: bool,
+    pub fail_after_record_commit: bool,
 }
 
 /// 隔离沙箱本地更新执行器
@@ -687,13 +689,19 @@ impl<'a> SandboxUpdateExecutor<'a> {
 
         match candidate_test_result {
             Ok(candidate_proof) => {
-                // 自检通过 -> Committed
+                let manifest_digest = calculate_manifest_digest(manifest)?;
+
+                // 阶段 7.1: CandidateTestingPassed (自检通过，已持有 proof，但尚未提交权威 record)
+                journal.stage = TransactionStage::CandidateTestingPassed;
                 journal.candidate_proof = Some(serde_json::to_string(&candidate_proof)?);
-                journal.stage = TransactionStage::Committed;
+                journal.manifest_digest = Some(manifest_digest.clone());
                 journal.persist_atomic(&state_dir)?;
 
-                // 单一权威提交记录：计算真正的规范化 manifest_digest 并写入 current_release.json
-                let manifest_digest = calculate_manifest_digest(manifest)?;
+                if self.fault.fail_after_stage == Some(TransactionStage::CandidateTestingPassed) {
+                    bail!("injected_fault_after_candidate_testing_passed");
+                }
+
+                // 准备单一权威提交记录
                 let commit_record = CurrentReleaseCommitRecord {
                     record_schema: 1,
                     tx_id: tx_id.clone(),
@@ -703,7 +711,23 @@ impl<'a> SandboxUpdateExecutor<'a> {
                     manifest_digest,
                     installed_at: now,
                 };
+
+                // 模拟 record 写/fsync 失败故障
+                if self.fault.fail_record_commit {
+                    bail!("injected_fault_record_commit_failed");
+                }
+
+                // 执行 record 原子落盘 (写 tmp -> fsync -> rename -> sync_dir)
                 atomic_commit_release_record(&state_dir, &commit_record)?;
+
+                // 模拟 record 成功但写入 journal Committed 前崩溃的故障
+                if self.fault.fail_after_record_commit {
+                    bail!("injected_fault_after_record_commit_before_journal_committed");
+                }
+
+                // 阶段 8: Committed (权威记录成功原子生效后，journal 才能推进到 Committed)
+                journal.stage = TransactionStage::Committed;
+                journal.persist_atomic(&state_dir)?;
 
                 // 清除本事务的维护态标志
                 clear_maintenance_for_tx(&state_dir, &tx_id)?;
