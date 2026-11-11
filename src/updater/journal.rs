@@ -22,14 +22,9 @@ pub enum TransactionStage {
     RecoveryRequired,
 }
 
-fn default_journal_schema() -> u32 {
-    1
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateJournal {
-    #[serde(default = "default_journal_schema")]
     pub journal_schema: u32,
     pub transaction_id: String,
     pub stage: TransactionStage,
@@ -663,7 +658,7 @@ pub fn read_limited_private_file(path: &Path, max_bytes: usize) -> Result<Option
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path);
 
-    let mut file = match file_res {
+    let file = match file_res {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
@@ -708,11 +703,39 @@ pub fn read_limited_private_file(path: &Path, max_bytes: usize) -> Result<Option
         );
     }
 
-    let mut buf = Vec::with_capacity(meta.len() as usize);
-    file.read_to_end(&mut buf)
+    // 流式硬限制：take(max_bytes + 1)，防止 fstat 后文件并发增长导致无界内存消耗
+    let mut limited = file.take((max_bytes + 1) as u64);
+    let mut buf = Vec::with_capacity(std::cmp::min(meta.len() as usize, max_bytes));
+    limited
+        .read_to_end(&mut buf)
         .with_context(|| format!("failed_to_read_file: '{}'", path.display()))?;
 
+    if buf.len() > max_bytes {
+        bail!(
+            "file_size_exceeded_limit_during_read: '{}' (bytes read exceeded {})",
+            path.display(),
+            max_bytes
+        );
+    }
+
     Ok(Some(buf))
+}
+
+/// 验证 release_id 命名安全：非空且仅含字母、数字、点、减号、下划线，绝不含 / 或 ..
+pub fn validate_release_id_safe(release_id: &str) -> Result<()> {
+    if release_id.is_empty() {
+        bail!("release_id_cannot_be_empty");
+    }
+    if release_id == "." || release_id == ".." {
+        bail!("release_id_cannot_be_dot: '{}'", release_id);
+    }
+    if !release_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+    {
+        bail!("invalid_release_id_characters: '{}'", release_id);
+    }
+    Ok(())
 }
 
 /// 精确核验 current 软链接的目标必须是受控 releases_dir 下指定的物理目录，拒绝任何外部逃逸或悬空
@@ -721,6 +744,12 @@ pub fn verify_current_link_target(
     releases_dir: &Path,
     expected_release_id: &str,
 ) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    // a. 校验 release_id 命名格式安全
+    validate_release_id_safe(expected_release_id)?;
+
+    // b. 核验 current 软链接自身是否存在且为 symlink
     let link_meta = match fs::symlink_metadata(current_link) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -737,6 +766,76 @@ pub fn verify_current_link_target(
         bail!("current_link_must_be_symlink: '{}'", current_link.display());
     }
 
+    // c. 锚定受控 releases_dir：自身必须是真实物理目录且不可为符号链接
+    let releases_meta = match fs::symlink_metadata(releases_dir) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            bail!("releases_dir_does_not_exist: '{}'", releases_dir.display());
+        }
+        Err(e) => bail!(
+            "cannot_stat_releases_dir: '{}' ({})",
+            releases_dir.display(),
+            e
+        ),
+    };
+    if releases_meta.file_type().is_symlink() {
+        bail!(
+            "releases_dir_must_not_be_symlink: '{}'",
+            releases_dir.display()
+        );
+    }
+    if !releases_meta.file_type().is_dir() {
+        bail!(
+            "releases_dir_must_be_directory: '{}'",
+            releases_dir.display()
+        );
+    }
+    let canonical_releases = releases_dir.canonicalize().with_context(|| {
+        format!(
+            "cannot_canonicalize_releases_dir: '{}'",
+            releases_dir.display()
+        )
+    })?;
+
+    // d. 核验受控目录下 expected_release_id：必须存在、必须是真实物理目录、绝对不能是软链接！
+    let expected_path = releases_dir.join(expected_release_id);
+    let exp_meta = match fs::symlink_metadata(&expected_path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            bail!(
+                "expected_release_dir_does_not_exist: '{}'",
+                expected_path.display()
+            );
+        }
+        Err(e) => bail!(
+            "cannot_stat_expected_release_dir: '{}' ({})",
+            expected_path.display(),
+            e
+        ),
+    };
+    if exp_meta.file_type().is_symlink() {
+        bail!(
+            "expected_release_dir_must_not_be_symlink: '{}'",
+            expected_path.display()
+        );
+    }
+    if !exp_meta.file_type().is_dir() {
+        bail!(
+            "expected_release_path_must_be_directory: '{}'",
+            expected_path.display()
+        );
+    }
+    let current_uid = unsafe { libc::geteuid() };
+    if exp_meta.uid() != current_uid {
+        bail!(
+            "expected_release_dir_uid_mismatch: '{}' (owner: {}, current: {})",
+            expected_path.display(),
+            exp_meta.uid(),
+            current_uid
+        );
+    }
+
+    // e. 读取 current 目标并核验
     let raw_target = fs::read_link(current_link)
         .with_context(|| format!("cannot_read_link: '{}'", current_link.display()))?;
 
@@ -749,27 +848,27 @@ pub fn verify_current_link_target(
         raw_target.clone()
     };
 
-    let expected_dir = releases_dir.join(expected_release_id);
-
     let canonical_target = target_path
         .canonicalize()
         .map_err(|e| anyhow::anyhow!("current_target_canonicalize_failed: {}", e))?;
-    let canonical_expected = expected_dir
+    let canonical_expected = expected_path
         .canonicalize()
         .map_err(|e| anyhow::anyhow!("expected_release_dir_canonicalize_failed: {}", e))?;
 
-    if canonical_target != canonical_expected {
+    // f. 目标必须与 canonical_releases/expected_release_id 完全一致（拒绝任何逃逸）
+    let anchored_expected = canonical_releases.join(expected_release_id);
+    if canonical_expected != anchored_expected {
+        bail!(
+            "expected_release_dir_escaped_releases_dir: '{}' != '{}'",
+            canonical_expected.display(),
+            anchored_expected.display()
+        );
+    }
+    if canonical_target != anchored_expected {
         bail!(
             "current_target_escape_detected: points to '{}', expected '{}'",
             canonical_target.display(),
-            canonical_expected.display()
-        );
-    }
-
-    if !canonical_target.is_dir() {
-        bail!(
-            "current_target_not_a_directory: '{}'",
-            canonical_target.display()
+            anchored_expected.display()
         );
     }
 
@@ -943,12 +1042,25 @@ pub fn check_startup_guard_readonly(
                 TransactionStage::RolledBack => {
                     // 真实回滚终态二次只读校验
                     if journal.source_release_id == "none" {
-                        if current_link.exists() || fs::symlink_metadata(current_link).is_ok() {
-                            return StartupDualCheckDecision::RecoveryRequired {
-                                reason: "rolled_back_to_none_but_current_link_still_exists".into(),
-                            };
+                        match fs::symlink_metadata(current_link) {
+                            Ok(_) => {
+                                return StartupDualCheckDecision::RecoveryRequired {
+                                    reason: "rolled_back_to_none_but_current_link_still_exists"
+                                        .into(),
+                                };
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(e) => {
+                                return StartupDualCheckDecision::RecoveryRequired {
+                                    reason: format!(
+                                        "cannot_stat_current_link_on_rollback_none: {}",
+                                        e
+                                    ),
+                                };
+                            }
                         }
                     } else {
+                        // 核验回滚目标物理目录与软链接
                         if let Err(e) = verify_current_link_target(
                             current_link,
                             releases_dir,
@@ -957,6 +1069,44 @@ pub fn check_startup_guard_readonly(
                             return StartupDualCheckDecision::RecoveryRequired {
                                 reason: format!("rollback_target_verification_failed: {}", e),
                             };
+                        }
+
+                        // 核验当前生效记录 current_release.json：若存在，其 release_id 必须为 source_release_id
+                        let record_path = state_dir.join("current_release.json");
+                        match read_limited_private_file(&record_path, 64 * 1024) {
+                            Ok(Some(rec_bytes)) => {
+                                let commit_record: CurrentReleaseCommitRecord =
+                                    match serde_json::from_slice(&rec_bytes) {
+                                        Ok(r) => r,
+                                        Err(e) => {
+                                            return StartupDualCheckDecision::RecoveryRequired {
+                                                reason: format!(
+                                                    "rollback_current_release_record_corrupt: {}",
+                                                    e
+                                                ),
+                                            };
+                                        }
+                                    };
+                                if commit_record.release_id != journal.source_release_id {
+                                    return StartupDualCheckDecision::RecoveryRequired {
+                                        reason: format!(
+                                            "rollback_release_record_mismatch: record has '{}', expected source '{}'",
+                                            commit_record.release_id, journal.source_release_id
+                                        ),
+                                    };
+                                }
+                            }
+                            Ok(None) => {
+                                // baseline 首次安装回滚尚无记录，允许
+                            }
+                            Err(e) => {
+                                return StartupDualCheckDecision::RecoveryRequired {
+                                    reason: format!(
+                                        "cannot_read_rollback_current_release_record: {}",
+                                        e
+                                    ),
+                                };
+                            }
                         }
                     }
 
