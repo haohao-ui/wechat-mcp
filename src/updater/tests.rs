@@ -1467,6 +1467,7 @@ fn test_recovery_evaluation_rejects_unknown_external_or_invalid_targets() {
         drain_proof: None,
         backup_proof: None,
         candidate_proof: None,
+        manifest_digest: None,
     };
 
     // 1. current 指向外部目录（不在 releases_dir 内）
@@ -1781,11 +1782,221 @@ fn test_highest_accepted_sequence_conflict_and_recovery_evaluation() {
         drain_proof: None, // 缺失 proof
         backup_proof: None,
         candidate_proof: None,
+        manifest_digest: None,
     };
     let rec_act = journal.evaluate_recovery(&releases_dir, &current_link);
     match rec_act {
         RecoveryAction::ManualInterventionRequired(msg) => {
-            assert!(msg.contains("missing_drain_or_candidate_proof"));
+            assert!(
+                msg.contains("missing_drain_proof")
+                    || msg.contains("missing_drain_or_candidate_proof")
+                    || msg.contains("proof_missing_or_inconsistent")
+            );
+        }
+        other => panic!("Expected ManualInterventionRequired, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_atomic_commit_protocol_failure_and_crash_window_recovery() {
+    let temp = TempTestDir::new("atomic_commit_rec");
+    let sandbox = SandboxUpdateRoot::create_test_isolated_sandbox().unwrap();
+
+    // 构造测试发布包归档
+    let archive_path = temp.0.join("pkg-0.2.0.tar.gz");
+    let mcp_bin_content = b"wechat-mcp-bin-v0.2.0";
+    let mcp_sha = calculate_sha256_bytes(mcp_bin_content);
+    {
+        let file = fs::File::create(&archive_path).unwrap();
+        let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(enc);
+        let mut h = tar::Header::new_gnu();
+        h.set_size(mcp_bin_content.len() as u64);
+        h.set_mode(0o755);
+        h.set_cksum();
+        builder
+            .append_data(&mut h, "bin/wechat-mcp", &mcp_bin_content[..])
+            .unwrap();
+        let enc = builder.into_inner().unwrap();
+        enc.finish().unwrap();
+    }
+    let meta = fs::metadata(&archive_path).unwrap();
+    let archive_sha = calculate_sha256_bytes(&fs::read(&archive_path).unwrap());
+
+    let (key_pair, pub_bytes) = generate_test_ed25519_key();
+    let key_store = TrustedKeyStore::new().with_key("test-root-v1", &pub_bytes);
+
+    let mut manifest = sample_manifest(1010, "arm64");
+    manifest.release_id = "0.2.0-1010".into();
+    manifest.artifact = ArtifactSpec {
+        filename: "pkg-0.2.0.tar.gz".into(),
+        sha256: archive_sha,
+        size_bytes: meta.len(),
+        max_unpacked_bytes: 100000,
+        max_file_count: 10,
+    };
+    manifest.components = vec![ComponentSpec {
+        path: "bin/wechat-mcp".into(),
+        kind: "executable".into(),
+        file_mode: 0o755,
+        sha256: mcp_sha,
+        size_bytes: mcp_bin_content.len() as u64,
+    }];
+    let sig_hex = sign_manifest(&key_pair, &manifest);
+    let envelope = SignedEnvelope {
+        envelope_schema: 1,
+        key_id: "test-root-v1".into(),
+        signature_algorithm: "ed25519".into(),
+        signature: sig_hex,
+        manifest,
+    };
+    let env_bytes = serde_json::to_vec(&envelope).unwrap();
+    let verified = VerifiedManifestEnvelope::verify_and_construct(
+        &env_bytes, &key_store, "arm64", "13.0", 1000,
+    )
+    .unwrap();
+    let signer = LocalSigner::for_test_mock();
+
+    // 1. 模拟 record 写/fsync 失败 (fail_record_commit)
+    let executor_fail_rec = SandboxUpdateExecutor::new(&sandbox)
+        .with_drain_adapter(std::sync::Arc::new(SandboxFixtureDrainAdapter))
+        .with_backup_adapter(std::sync::Arc::new(
+            SandboxFixtureBackupAdapter::new_no_database(),
+        ))
+        .with_candidate_adapter(std::sync::Arc::new(SandboxFixtureCandidateAdapter::new(
+            "/bin/sh",
+            vec!["-c".into(), "exit 0".into()],
+        )))
+        .with_fault(FaultInjection {
+            fail_record_commit: true,
+            ..Default::default()
+        });
+
+    let res_fail =
+        executor_fail_rec.execute_transaction(&verified, &archive_path, &signer, 1794380000);
+    assert!(res_fail.is_err());
+    let err_msg = res_fail.unwrap_err().to_string();
+    assert!(err_msg.contains("injected_fault_record_commit_failed"));
+
+    // 核心断言：
+    // a. journal 处于 CandidateTestingPassed，绝不是 Committed！
+    let journal = UpdateJournal::load_from_state(&sandbox.state_dir())
+        .unwrap()
+        .expect("journal should exist");
+    assert_eq!(journal.stage, TransactionStage::CandidateTestingPassed);
+    assert_ne!(journal.stage, TransactionStage::Committed);
+
+    // b. 维护标记绝对未被清除
+    assert!(sandbox.state_dir().join("core.maintenance.json").exists());
+
+    // c. 权威提交记录 current_release.json 不存在
+    assert!(
+        load_current_release_record(&sandbox.state_dir())
+            .unwrap()
+            .is_none()
+    );
+
+    // d. 恢复评估绝不盲猜成功，严格返回人工干预
+    let rec_action = journal.evaluate_recovery(&sandbox.releases_dir(), &sandbox.current_link());
+    match rec_action {
+        RecoveryAction::ManualInterventionRequired(msg) => {
+            assert!(msg.contains("record_commit_not_found_after_candidate_testing_passed"));
+        }
+        other => panic!("Expected ManualInterventionRequired, got {:?}", other),
+    }
+
+    // 2. 模拟 record 成功写入但在 journal 写 Committed 前崩溃 (fail_after_record_commit)
+    let sandbox_crash = SandboxUpdateRoot::create_test_isolated_sandbox().unwrap();
+    let executor_crash_window = SandboxUpdateExecutor::new(&sandbox_crash)
+        .with_drain_adapter(std::sync::Arc::new(SandboxFixtureDrainAdapter))
+        .with_backup_adapter(std::sync::Arc::new(
+            SandboxFixtureBackupAdapter::new_no_database(),
+        ))
+        .with_candidate_adapter(std::sync::Arc::new(SandboxFixtureCandidateAdapter::new(
+            "/bin/sh",
+            vec!["-c".into(), "exit 0".into()],
+        )))
+        .with_fault(FaultInjection {
+            fail_after_record_commit: true,
+            ..Default::default()
+        });
+
+    let res_crash =
+        executor_crash_window.execute_transaction(&verified, &archive_path, &signer, 1794381000);
+    assert!(res_crash.is_err());
+    assert!(
+        res_crash
+            .unwrap_err()
+            .to_string()
+            .contains("injected_fault_after_record_commit_before_journal_committed")
+    );
+
+    // 此时权威记录已存在
+    let current_rec = load_current_release_record(&sandbox_crash.state_dir())
+        .unwrap()
+        .expect("current_release.json should exist");
+    assert_eq!(current_rec.sequence, 1010);
+    assert_eq!(current_rec.release_id, "0.2.0-1010");
+
+    let journal_crash = UpdateJournal::load_from_state(&sandbox_crash.state_dir())
+        .unwrap()
+        .expect("journal should exist");
+    assert_eq!(
+        journal_crash.stage,
+        TransactionStage::CandidateTestingPassed
+    );
+
+    // 核心断言：崩溃恢复能精确识别 record 成功且要素完全匹配，返回 CompletePendingCommit
+    let rec_exact = journal_crash
+        .evaluate_recovery(&sandbox_crash.releases_dir(), &sandbox_crash.current_link());
+    assert_eq!(rec_exact, RecoveryAction::CompletePendingCommit);
+
+    // 3. 篡改与伪造对抗测试：若 record 与 journal 要素不匹配，绝不猜成功
+    // 3a. 篡改 sequence
+    let mut tampered_rec = current_rec.clone();
+    tampered_rec.sequence = 9999;
+    atomic_commit_release_record(&sandbox_crash.state_dir(), &tampered_rec).unwrap();
+    let rec_tampered_seq = journal_crash
+        .evaluate_recovery(&sandbox_crash.releases_dir(), &sandbox_crash.current_link());
+    match rec_tampered_seq {
+        RecoveryAction::ManualInterventionRequired(msg) => {
+            assert!(msg.contains("candidate_passed_but_commit_record_mismatch"));
+        }
+        other => panic!("Expected ManualInterventionRequired, got {:?}", other),
+    }
+
+    // 3b. 恢复 sequence 但篡改 manifest_digest
+    tampered_rec.sequence = 1010;
+    tampered_rec.manifest_digest = "sha256-forged-digest-value".into();
+    atomic_commit_release_record(&sandbox_crash.state_dir(), &tampered_rec).unwrap();
+    let rec_tampered_digest = journal_crash
+        .evaluate_recovery(&sandbox_crash.releases_dir(), &sandbox_crash.current_link());
+    match rec_tampered_digest {
+        RecoveryAction::ManualInterventionRequired(msg) => {
+            assert!(msg.contains("manifest_digest_mismatch"));
+        }
+        other => panic!("Expected ManualInterventionRequired, got {:?}", other),
+    }
+
+    // 4. Committed 状态下的全要素防伪造校验
+    let mut committed_journal = journal_crash.clone();
+    committed_journal.stage = TransactionStage::Committed;
+    // 恢复正确 record
+    atomic_commit_release_record(&sandbox_crash.state_dir(), &current_rec).unwrap();
+
+    // 4a. 伪造 drain_proof（非当前 tx_id）
+    committed_journal.drain_proof = Some(
+        serde_json::to_string(&VerifiedSandboxDrainProof {
+            drained_at: 1794380000,
+            tx_id: "forged-foreign-tx".into(),
+        })
+        .unwrap(),
+    );
+    let rec_forged_proof = committed_journal
+        .evaluate_recovery(&sandbox_crash.releases_dir(), &sandbox_crash.current_link());
+    match rec_forged_proof {
+        RecoveryAction::ManualInterventionRequired(msg) => {
+            assert!(msg.contains("drain_proof_tx_mismatch"));
         }
         other => panic!("Expected ManualInterventionRequired, got {:?}", other),
     }
