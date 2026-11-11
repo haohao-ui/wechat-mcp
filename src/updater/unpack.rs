@@ -1,9 +1,11 @@
 use anyhow::{Result, bail};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, Write};
+use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::io::{FromRawFd, RawFd};
 use std::path::Path;
 use unicode_normalization::UnicodeNormalization;
 
@@ -17,6 +19,17 @@ pub const CLIENT_HARD_MAX_FILE_COUNT: usize = 2000;
 struct LimitedReader<R> {
     inner: R,
     remaining: u64,
+    total_read: u64,
+}
+
+impl<R: Read> LimitedReader<R> {
+    fn new(inner: R, limit: u64) -> Self {
+        Self {
+            inner,
+            remaining: limit,
+            total_read: 0,
+        }
+    }
 }
 
 impl<R: Read> Read for LimitedReader<R> {
@@ -30,6 +43,7 @@ impl<R: Read> Read for LimitedReader<R> {
         let max_to_read = buf.len().min(self.remaining as usize);
         let n = self.inner.read(&mut buf[..max_to_read])?;
         self.remaining = self.remaining.saturating_sub(n as u64);
+        self.total_read += n as u64;
         Ok(n)
     }
 }
@@ -87,39 +101,87 @@ pub fn safe_unpack_and_verify(
         fs::set_permissions(staging_dir, fs::Permissions::from_mode(0o700))?;
     }
 
-    // 1. 防 TOCTOU：打开单一文件描述符 (FD)
-    let mut file = File::open(archive_path)?;
-    let meta = file.metadata()?;
-    if meta.len() != expected_artifact.size_bytes {
-        bail!(
-            "archive_size_mismatch: got {} bytes, expected {}",
-            meta.len(),
-            expected_artifact.size_bytes
-        );
-    }
+    // 1. 创建受限私有不可变副本，并在复制过程中计算哈希核对，杜绝同 inode 并发改写
+    let private_replica_path = staging_dir.join(format!(
+        ".private_archive_replica_{}.tmp",
+        uuid::Uuid::new_v4()
+    ));
 
-    // 计算哈希
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 65536];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
+    {
+        let mut src_file = File::open(archive_path)?;
+        let src_meta = src_file.metadata()?;
+        if src_meta.len() != expected_artifact.size_bytes {
+            bail!(
+                "archive_size_mismatch: got {} bytes, expected {}",
+                src_meta.len(),
+                expected_artifact.size_bytes
+            );
         }
-        hasher.update(&buf[..n]);
-    }
-    let actual_sha = to_hex(&hasher.finalize());
-    if !actual_sha.eq_ignore_ascii_case(&expected_artifact.sha256) {
-        bail!(
-            "archive_sha256_mismatch: got {}, expected {}",
-            actual_sha,
-            expected_artifact.sha256
-        );
+
+        let mut replica_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&private_replica_path)?;
+
+        let mut hasher = Sha256::new();
+        let mut copy_buf = [0u8; 65536];
+        let mut copied: u64 = 0;
+        loop {
+            let n = src_file.read(&mut copy_buf)?;
+            if n == 0 {
+                break;
+            }
+            copied += n as u64;
+            if copied > expected_artifact.size_bytes {
+                let _ = fs::remove_file(&private_replica_path);
+                bail!("archive_input_size_exceeded");
+            }
+            hasher.update(&copy_buf[..n]);
+            replica_file.write_all(&copy_buf[..n])?;
+        }
+        replica_file.sync_all()?;
+        drop(replica_file);
+
+        let actual_sha = to_hex(&hasher.finalize());
+        if !actual_sha.eq_ignore_ascii_case(&expected_artifact.sha256) {
+            let _ = fs::remove_file(&private_replica_path);
+            bail!(
+                "archive_sha256_mismatch: got {}, expected {}",
+                actual_sha,
+                expected_artifact.sha256
+            );
+        }
+        // 将私有副本设为只读
+        fs::set_permissions(&private_replica_path, fs::Permissions::from_mode(0o400))?;
     }
 
-    // 倒带同一个 FD，绝不通过路径重新 open
-    file.seek(std::io::SeekFrom::Start(0))?;
+    // 打开只读私有副本进行安全解压
+    let replica_file = match File::open(&private_replica_path) {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = fs::remove_file(&private_replica_path);
+            return Err(e.into());
+        }
+    };
 
+    // 执行受控解包，完成后无论成败全量清除私有副本
+    let result = unpack_from_verified_reader(
+        replica_file,
+        staging_dir,
+        expected_artifact,
+        expected_components,
+    );
+    let _ = fs::remove_file(&private_replica_path);
+    result
+}
+
+fn unpack_from_verified_reader(
+    file: File,
+    staging_dir: &Path,
+    expected_artifact: &ArtifactSpec,
+    expected_components: &[ComponentSpec],
+) -> Result<()> {
     let hard_max_bytes = expected_artifact
         .max_unpacked_bytes
         .min(CLIENT_HARD_MAX_UNPACKED_BYTES);
@@ -127,13 +189,9 @@ pub fn safe_unpack_and_verify(
         .max_file_count
         .min(CLIENT_HARD_MAX_FILE_COUNT);
 
-    // 构建有限字节流的解包器（解包流受限，不能只累计落盘文件）
-    let gz_decoder = flate2::read::GzDecoder::new(file);
-    let limited_reader = LimitedReader {
-        inner: gz_decoder,
-        remaining: hard_max_bytes,
-    };
-    let mut archive = tar::Archive::new(limited_reader);
+    // 构建有界 LimitedReader（使用 MultiGzDecoder 自动侦测并拒绝多 member 拼接与尾垃圾）
+    let gz_decoder = flate2::read::MultiGzDecoder::new(file);
+    let mut limited_reader = LimitedReader::new(gz_decoder, hard_max_bytes);
 
     let mut seen_paths = HashSet::new();
     let mut seen_lower_paths = HashSet::new();
@@ -147,282 +205,322 @@ pub fn safe_unpack_and_verify(
         comp_map.insert(comp.path.clone(), comp);
     }
 
-    let entries = archive.entries()?;
-    for entry_res in entries {
-        let mut entry = match entry_res {
-            Ok(e) => e,
-            Err(e) => {
-                cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-                bail!("corrupt_tar_entry: {}", e);
-            }
-        };
+    // 锚定 staging 目录的只读 FD，防止父级和祖先目录被 symlink 替换
+    let staging_c = CString::new(staging_dir.to_str().unwrap())?;
+    let staging_fd = unsafe {
+        libc::open(
+            staging_c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if staging_fd < 0 {
+        let err = std::io::Error::last_os_error();
+        bail!("cannot_open_staging_fd: {}", err);
+    }
+    let staging_fd_guard = FdGuard(staging_fd);
 
-        total_entries += 1;
-        if total_entries > hard_max_count {
-            cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-            bail!(
-                "file_count_limit_exceeded: archive entries exceed limit of {}",
-                hard_max_count
-            );
-        }
-
-        // 严格类型审查：严禁软链、硬链、特殊设备节点、稀疏/PAX/GNU 扩展
-        let entry_type = entry.header().entry_type();
-        match entry_type {
-            tar::EntryType::Regular
-            | tar::EntryType::Continuous
-            | tar::EntryType::Directory => {}
-            tar::EntryType::Symlink => {
-                cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-                bail!("symlink_rejected: symbolic links forbidden in archive");
-            }
-            tar::EntryType::Link => {
-                cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-                bail!("hardlink_rejected: hard links forbidden in archive");
-            }
-            other => {
-                cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-                bail!("special_entry_rejected: unsupported entry type {:?}", other);
-            }
-        }
-
-        let raw_path = match entry.path() {
-            Ok(p) => p.to_string_lossy().to_string(),
-            Err(e) => {
-                cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-                bail!("invalid_entry_path: {}", e);
-            }
-        };
-
-        let norm_path = raw_path.trim_end_matches('/').to_string();
-        if norm_path.is_empty() || norm_path == "." {
-            continue;
-        }
-
-        // 路径长度与深度限制
-        if norm_path.len() > 255 {
-            cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-            bail!(
-                "path_too_long: path length {} exceeds 255 on '{}'",
-                norm_path.len(),
-                norm_path
-            );
-        }
-        let depth = norm_path.split('/').count();
-        if depth > 16 {
-            cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-            bail!(
-                "path_depth_exceeded: path depth {} exceeds 16 on '{}'",
-                depth,
-                norm_path
-            );
-        }
-
-        // 拒绝绝对路径、穿越段与特殊字符
-        if norm_path.starts_with('/')
-            || norm_path.contains("..")
-            || norm_path.contains('\\')
-            || norm_path.contains('\0')
-        {
-            cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-            bail!("invalid_relative_path: '{}'", norm_path);
-        }
-
-        // Unicode NFC 规范化
-        let nfc: String = norm_path.nfc().collect();
-        if nfc != norm_path {
-            cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-            bail!(
-                "unicode_normalization_rejected: path '{}' is not in Unicode NFC format",
-                norm_path
-            );
-        }
-
-        // 大小写冲突
-        let lower = norm_path.to_lowercase();
-        if !seen_lower_paths.insert(lower) {
-            cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-            bail!(
-                "case_collision_detected: path '{}' conflicts in case-insensitive comparison",
-                norm_path
-            );
-        }
-
-        // 重复路径
-        if !seen_paths.insert(norm_path.clone()) {
-            cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-            bail!(
-                "duplicate_path_detected: duplicate entry for '{}'",
-                norm_path
-            );
-        }
-
-        if entry_type == tar::EntryType::Directory {
-            if unpacked_components.contains_key(&norm_path) {
-                cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-                bail!(
-                    "parent_child_collision: directory '{}' conflicts with existing file",
-                    norm_path
-                );
-            }
-            seen_dirs.insert(norm_path.clone());
-            let target_dir = staging_dir.join(&norm_path);
-            if let Err(e) = create_dir_all_secure(staging_dir, &target_dir) {
-                cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-                return Err(e);
-            }
-            continue;
-        }
-
-        // 常规文件处理
-        if seen_dirs.contains(&norm_path) {
-            cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-            bail!(
-                "parent_child_collision: file '{}' conflicts with existing directory",
-                norm_path
-            );
-        }
-
-        let comp = match comp_map.get(&norm_path) {
-            Some(c) => *c,
-            None => {
-                cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-                bail!(
-                    "unexpected_file_in_archive: '{}' is not declared in components whitelist",
-                    norm_path
-                );
-            }
-        };
-
-        let entry_mode = entry.header().mode().unwrap_or(0);
-        // 拒绝 setuid / setgid / sticky
-        if (entry_mode & 0o7000) != 0 {
-            cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-            bail!(
-                "forbidden_special_permissions: mode {:o} on '{}'",
-                entry_mode,
-                norm_path
-            );
-        }
-        // 拒绝 group/other 可写位
-        if (entry_mode & 0o022) != 0 {
-            cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-            bail!(
-                "forbidden_world_writable_permissions: mode {:o} on '{}'",
-                entry_mode,
-                norm_path
-            );
-        }
-
-        let actual_mode = entry_mode & 0o777;
-        let expected_mode = comp.file_mode & 0o777;
-        if actual_mode != expected_mode {
-            cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-            bail!(
-                "component_mode_mismatch: '{}' mode {:o} != expected {:o}",
-                norm_path,
-                actual_mode,
-                expected_mode
-            );
-        }
-
-        let dest_path = staging_dir.join(&norm_path);
-        if let Some(parent) = dest_path.parent() {
-            if let Err(e) = create_dir_all_secure(staging_dir, parent) {
-                cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-                return Err(e);
-            }
-        }
-
-        // 使用 O_CREAT | O_EXCL 创建新文件，防跟随软链与文件覆盖
-        let mut out_file = match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(expected_mode)
-            .open(&dest_path)
-        {
-            Ok(f) => f,
-            Err(e) => {
-                cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-                bail!("failed_to_create_file '{}': {}", dest_path.display(), e);
-            }
-        };
-
-        let mut file_hasher = Sha256::new();
-        let mut written_bytes: u64 = 0;
-        let mut write_buf = [0u8; 16384];
-
-        loop {
-            let n = match entry.read(&mut write_buf) {
-                Ok(n) => n,
+    {
+        let mut archive = tar::Archive::new(&mut limited_reader);
+        let entries = archive.entries()?;
+        for entry_res in entries {
+            let mut entry = match entry_res {
+                Ok(e) => e,
                 Err(e) => {
-                    drop(out_file);
                     cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-                    bail!("read_entry_failed on '{}': {}", norm_path, e);
+                    bail!("corrupt_tar_entry: {}", e);
                 }
             };
-            if n == 0 {
-                break;
-            }
-            written_bytes += n as u64;
-            total_unpacked_bytes += n as u64;
 
-            if written_bytes > comp.size_bytes {
-                drop(out_file);
+            total_entries += 1;
+            if total_entries > hard_max_count {
                 cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
                 bail!(
-                    "component_size_exceeded: '{}' wrote {} > expected {}",
+                    "file_count_limit_exceeded: archive entries exceed limit of {}",
+                    hard_max_count
+                );
+            }
+
+            // 原始 header 检查：在库扩展解析前拒绝 PAX / GNU 扩展
+            let entry_type = entry.header().entry_type();
+            match entry_type {
+                tar::EntryType::Regular
+                | tar::EntryType::Continuous
+                | tar::EntryType::Directory => {}
+                tar::EntryType::Symlink => {
+                    cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                    bail!("symlink_rejected: symbolic links forbidden in archive");
+                }
+                tar::EntryType::Link => {
+                    cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                    bail!("hardlink_rejected: hard links forbidden in archive");
+                }
+                other => {
+                    cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                    bail!("pax_or_gnu_extensions_rejected: unsupported entry type {:?}", other);
+                }
+            }
+
+            // 严禁 to_string_lossy，非 UTF-8 严格报错拒绝
+            let path_bytes = entry.path_bytes();
+            let raw_path = match std::str::from_utf8(&path_bytes) {
+                Ok(s) => s.to_string(),
+                Err(e) => {
+                    cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                    bail!("invalid_utf8_in_entry_path: {}", e);
+                }
+            };
+
+            let norm_path = raw_path.trim_end_matches('/').to_string();
+            if norm_path.is_empty() || norm_path == "." {
+                continue;
+            }
+
+            // 路径长度与深度限制
+            if norm_path.len() > 255 {
+                cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                bail!(
+                    "path_too_long: path length {} exceeds 255 on '{}'",
+                    norm_path.len(),
+                    norm_path
+                );
+            }
+            let depth = norm_path.split('/').count();
+            if depth > 16 {
+                cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                bail!(
+                    "path_depth_exceeded: path depth {} exceeds 16 on '{}'",
+                    depth,
+                    norm_path
+                );
+            }
+
+            // 拒绝绝对路径、穿越段与特殊字符
+            if norm_path.starts_with('/')
+                || norm_path.contains("..")
+                || norm_path.contains('\\')
+                || norm_path.contains('\0')
+            {
+                cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                bail!("invalid_relative_path: '{}'", norm_path);
+            }
+
+            // Unicode NFC 规范化
+            let nfc: String = norm_path.nfc().collect();
+            if nfc != norm_path {
+                cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                bail!(
+                    "unicode_normalization_rejected: path '{}' is not in Unicode NFC format",
+                    norm_path
+                );
+            }
+
+            // 大小写冲突
+            let lower = norm_path.to_lowercase();
+            if !seen_lower_paths.insert(lower) {
+                cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                bail!(
+                    "case_collision_detected: path '{}' conflicts in case-insensitive comparison",
+                    norm_path
+                );
+            }
+
+            // 重复路径
+            if !seen_paths.insert(norm_path.clone()) {
+                cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                bail!(
+                    "duplicate_path_detected: duplicate entry for '{}'",
+                    norm_path
+                );
+            }
+
+            if entry_type == tar::EntryType::Directory {
+                if unpacked_components.contains_key(&norm_path) {
+                    cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                    bail!(
+                        "parent_child_collision: directory '{}' conflicts with existing file",
+                        norm_path
+                    );
+                }
+                seen_dirs.insert(norm_path.clone());
+                if let Err(e) = create_dir_all_secure_at(staging_fd_guard.0, &norm_path) {
+                    cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                    return Err(e);
+                }
+                continue;
+            }
+
+            // 常规文件处理
+            if seen_dirs.contains(&norm_path) {
+                cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                bail!(
+                    "parent_child_collision: file '{}' conflicts with existing directory",
+                    norm_path
+                );
+            }
+
+            let comp = match comp_map.get(&norm_path) {
+                Some(c) => *c,
+                None => {
+                    cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                    bail!(
+                        "unexpected_file_in_archive: '{}' is not declared in components whitelist",
+                        norm_path
+                    );
+                }
+            };
+
+            let entry_mode = entry.header().mode().unwrap_or(0);
+            if (entry_mode & 0o7000) != 0 {
+                cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                bail!(
+                    "forbidden_special_permissions: mode {:o} on '{}'",
+                    entry_mode,
+                    norm_path
+                );
+            }
+            if (entry_mode & 0o022) != 0 {
+                cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                bail!(
+                    "forbidden_world_writable_permissions: mode {:o} on '{}'",
+                    entry_mode,
+                    norm_path
+                );
+            }
+
+            let actual_mode = entry_mode & 0o777;
+            let expected_mode = comp.file_mode & 0o777;
+            if actual_mode != expected_mode {
+                cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                bail!(
+                    "component_mode_mismatch: '{}' mode {:o} != expected {:o}",
+                    norm_path,
+                    actual_mode,
+                    expected_mode
+                );
+            }
+
+            // 使用 openat + O_CREAT | O_EXCL | O_NOFOLLOW 锚定创建文件，防跟随软链接
+            let mut out_file = match open_file_secure_at(
+                staging_fd_guard.0,
+                &norm_path,
+                expected_mode,
+            ) {
+                Ok(f) => f,
+                Err(e) => {
+                    cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                    bail!("failed_to_create_file '{}': {}", norm_path, e);
+                }
+            };
+
+            let mut file_hasher = Sha256::new();
+            let mut written_bytes: u64 = 0;
+            let mut write_buf = [0u8; 16384];
+
+            loop {
+                let n = match entry.read(&mut write_buf) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        drop(out_file);
+                        cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                        bail!("read_entry_failed on '{}': {}", norm_path, e);
+                    }
+                };
+                if n == 0 {
+                    break;
+                }
+                written_bytes += n as u64;
+                total_unpacked_bytes += n as u64;
+
+                if written_bytes > comp.size_bytes {
+                    drop(out_file);
+                    cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                    bail!(
+                        "component_size_exceeded: '{}' wrote {} > expected {}",
+                        norm_path,
+                        written_bytes,
+                        comp.size_bytes
+                    );
+                }
+                if total_unpacked_bytes > hard_max_bytes {
+                    drop(out_file);
+                    cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                    bail!(
+                        "unpacked_size_limit_exceeded: total unpacked bytes exceeds limit {}",
+                        hard_max_bytes
+                    );
+                }
+
+                file_hasher.update(&write_buf[..n]);
+                if let Err(e) = out_file.write_all(&write_buf[..n]) {
+                    drop(out_file);
+                    cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                    bail!("write_file_failed on '{}': {}", norm_path, e);
+                }
+            }
+
+            if let Err(e) = out_file.sync_all() {
+                drop(out_file);
+                cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                bail!("sync_file_failed on '{}': {}", norm_path, e);
+            }
+            drop(out_file);
+
+            if written_bytes != comp.size_bytes {
+                cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                bail!(
+                    "component_size_mismatch: '{}' wrote {} != expected {}",
                     norm_path,
                     written_bytes,
                     comp.size_bytes
                 );
             }
-            if total_unpacked_bytes > hard_max_bytes {
-                drop(out_file);
+
+            let actual_file_sha = to_hex(&file_hasher.finalize());
+            if !actual_file_sha.eq_ignore_ascii_case(&comp.sha256) {
                 cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
                 bail!(
-                    "unpacked_size_limit_exceeded: total unpacked bytes exceeds limit {}",
-                    hard_max_bytes
+                    "component_sha256_mismatch: '{}' sha256 {} != expected {}",
+                    norm_path,
+                    actual_file_sha,
+                    comp.sha256
                 );
             }
 
-            file_hasher.update(&write_buf[..n]);
-            if let Err(e) = out_file.write_all(&write_buf[..n]) {
-                drop(out_file);
+            unpacked_components.insert(norm_path, (*comp).clone());
+        }
+    }
+
+    // 2. 尾流消费与残余数据校验（只接受合法单 gzip member + 合法 tar 终止与零 padding，拒绝尾垃圾/多 member）
+    let mut gz_decoder = limited_reader.inner;
+    let mut dec_tail = [0u8; 1024];
+    loop {
+        match gz_decoder.read(&mut dec_tail) {
+            Ok(0) => break,
+            Ok(n) => {
+                for &b in &dec_tail[..n] {
+                    if b != 0 {
+                        cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                        bail!("trailing_data_in_archive: non-zero bytes after tar stream");
+                    }
+                }
+            }
+            Err(e) => {
                 cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-                bail!("write_file_failed on '{}': {}", norm_path, e);
+                bail!(
+                    "trailing_data_in_archive: error reading trailing gzip stream: {}",
+                    e
+                );
             }
         }
+    }
 
-        if let Err(e) = out_file.sync_all() {
-            drop(out_file);
-            cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-            bail!("sync_file_failed on '{}': {}", norm_path, e);
-        }
-        drop(out_file);
-
-        if written_bytes != comp.size_bytes {
-            cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-            bail!(
-                "component_size_mismatch: '{}' wrote {} != expected {}",
-                norm_path,
-                written_bytes,
-                comp.size_bytes
-            );
-        }
-
-        let actual_file_sha = to_hex(&file_hasher.finalize());
-        if !actual_file_sha.eq_ignore_ascii_case(&comp.sha256) {
-            cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-            bail!(
-                "component_sha256_mismatch: '{}' sha256 {} != expected {}",
-                norm_path,
-                actual_file_sha,
-                comp.sha256
-            );
-        }
-
-        unpacked_components.insert(norm_path, (*comp).clone());
+    // 关键：取出底层物理文件流，检查归档物理文件是否已完全消费至 EOF
+    let mut raw_file = gz_decoder.into_inner();
+    let mut raw_tail = [0u8; 128];
+    let extra_raw = raw_file.read(&mut raw_tail)?;
+    if extra_raw > 0 {
+        cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+        bail!("trailing_data_in_archive: extra trailing bytes or multi-member gzip stream detected");
     }
 
     // 白名单闭合校验：解出的组件必须与 expected_components 1:1 闭合匹配
@@ -439,29 +537,136 @@ pub fn safe_unpack_and_verify(
     Ok(())
 }
 
-fn create_dir_all_secure(staging_root: &Path, target: &Path) -> Result<()> {
-    if !target.starts_with(staging_root) {
-        bail!("directory_escapes_staging_root: {}", target.display());
-    }
-
-    let rel = target.strip_prefix(staging_root)?;
-    let mut current = staging_root.to_path_buf();
-    for segment in rel.components() {
-        current.push(segment);
-        if current.exists() {
-            let meta = fs::symlink_metadata(&current)?;
-            if meta.file_type().is_symlink() {
-                bail!("symlink_in_directory_path: {}", current.display());
+struct FdGuard(RawFd);
+impl Drop for FdGuard {
+    fn drop(&mut self) {
+        if self.0 >= 0 {
+            unsafe {
+                libc::close(self.0);
             }
-            if !meta.is_dir() {
-                bail!("non_directory_in_path: {}", current.display());
-            }
-        } else {
-            fs::create_dir(&current)?;
-            fs::set_permissions(&current, fs::Permissions::from_mode(0o700))?;
         }
     }
+}
+
+/// 逐级通过 openat + O_NOFOLLOW 创建与核验目录，严禁跟随父/祖先 symlink
+fn create_dir_all_secure_at(root_fd: RawFd, rel_path: &str) -> Result<()> {
+    let segments: Vec<&str> = rel_path.split('/').filter(|s| !s.is_empty()).collect();
+    let mut current_fd = unsafe { libc::dup(root_fd) };
+    if current_fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    for seg in segments {
+        let seg_c = CString::new(seg)?;
+        // 尝试打开子目录（禁止跟随软链）
+        let child_fd = unsafe {
+            libc::openat(
+                current_fd,
+                seg_c.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+
+        if child_fd >= 0 {
+            unsafe {
+                libc::close(current_fd);
+            }
+            current_fd = child_fd;
+        } else {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ENOENT) {
+                // 不存在则创建
+                let res = unsafe { libc::mkdirat(current_fd, seg_c.as_ptr(), 0o700) };
+                if res != 0 {
+                    unsafe { libc::close(current_fd) };
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                let new_child = unsafe {
+                    libc::openat(
+                        current_fd,
+                        seg_c.as_ptr(),
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    )
+                };
+                if new_child < 0 {
+                    unsafe { libc::close(current_fd) };
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                unsafe { libc::close(current_fd) };
+                current_fd = new_child;
+            } else {
+                unsafe { libc::close(current_fd) };
+                bail!("symlink_in_directory_path: segment '{}' error: {}", seg, err);
+            }
+        }
+    }
+
+    unsafe {
+        libc::close(current_fd);
+    }
     Ok(())
+}
+
+/// 使用 openat + O_CREAT | O_EXCL | O_NOFOLLOW 打开最终目标文件
+fn open_file_secure_at(root_fd: RawFd, rel_path: &str, mode: u32) -> Result<File> {
+    let path = Path::new(rel_path);
+    let parent = path.parent();
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow::anyhow!("invalid_file_name"))?;
+
+    let dir_fd = if let Some(parent_dir) = parent {
+        let parent_str = parent_dir.to_string_lossy();
+        if parent_str.is_empty() || parent_str == "." {
+            unsafe { libc::dup(root_fd) }
+        } else {
+            create_dir_all_secure_at(root_fd, &parent_str)?;
+            let segments: Vec<&str> = parent_str.split('/').filter(|s| !s.is_empty()).collect();
+            let mut cur = unsafe { libc::dup(root_fd) };
+            for seg in segments {
+                let seg_c = CString::new(seg)?;
+                let next = unsafe {
+                    libc::openat(
+                        cur,
+                        seg_c.as_ptr(),
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    )
+                };
+                unsafe { libc::close(cur) };
+                if next < 0 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                cur = next;
+            }
+            cur
+        }
+    } else {
+        unsafe { libc::dup(root_fd) }
+    };
+
+    if dir_fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    let file_c = CString::new(file_name)?;
+    let fd = unsafe {
+        libc::openat(
+            dir_fd,
+            file_c.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            mode as libc::c_uint,
+        )
+    };
+    unsafe { libc::close(dir_fd) };
+
+    if fd < 0 {
+        let err = std::io::Error::last_os_error();
+        bail!("openat_failed: {}", err);
+    }
+
+    let file = unsafe { File::from_raw_fd(fd) };
+    Ok(file)
 }
 
 /// 受控暂存区局部安全清理（仅清理刚刚解出的组件与目录，不可任意 remove_dir_all）
