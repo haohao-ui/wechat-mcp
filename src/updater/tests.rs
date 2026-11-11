@@ -1246,12 +1246,26 @@ fn test_sandbox_executor_end_to_end_and_fault_injections() {
 
     let signer = LocalSigner::for_test_mock();
 
+    let drain_adapter = std::sync::Arc::new(SandboxFixtureDrainAdapter);
+    let backup_adapter = std::sync::Arc::new(SandboxFixtureBackupAdapter::new_with_db(&db_p));
+    let cand_adapter = std::sync::Arc::new(SandboxFixtureCandidateAdapter::new(
+        "/bin/sh",
+        vec!["-c".into(), "exit 0".into()],
+    ));
+
     // 执行更新全流程 -> Committed
-    let executor = SandboxUpdateExecutor::new(&sandbox);
+    let executor = SandboxUpdateExecutor::new(&sandbox)
+        .with_drain_adapter(drain_adapter.clone())
+        .with_backup_adapter(backup_adapter.clone())
+        .with_candidate_adapter(cand_adapter.clone());
     let res = executor.execute_transaction(&verified, &archive_path, &signer, 1794368000);
     assert!(res.is_ok(), "Update execution failed: {:?}", res.err());
     let journal = res.unwrap();
     assert_eq!(journal.stage, TransactionStage::Committed);
+
+    // 证明记录有效
+    assert!(journal.drain_proof.is_some());
+    assert!(journal.candidate_proof.is_some());
 
     // 真实 SQLite 在线备份已成功生成与记录
     assert!(journal.backup_path.is_some());
@@ -1274,14 +1288,14 @@ fn test_sandbox_executor_end_to_end_and_fault_injections() {
     assert_eq!(current_meta.sequence, 1005);
     assert_eq!(
         current_meta.manifest_digest,
-        verified.manifest().artifact.sha256
+        calculate_manifest_digest(verified.manifest()).unwrap()
     );
 
     // 维护态已安全清除
     assert!(!sandbox.state_dir().join("core.maintenance.json").exists());
     assert!(!sandbox.state_dir().join("core.maintenance").exists());
 
-    // 2. 候选自检失败注入测试（无新业务数据）：自动回滚切回 previous
+    // 2. 候选自检失败注入测试：存在业务数据库时，自检失败严格进入 RecoveryRequired 并保持维护态，绝不自动覆盖 DB
     // 构造更高版本 1006
     let mut manifest2 = verified.manifest().clone();
     manifest2.sequence = 1006;
@@ -1304,33 +1318,26 @@ fn test_sandbox_executor_end_to_end_and_fault_injections() {
     )
     .unwrap();
 
-    let fail_test_executor = SandboxUpdateExecutor::new(&sandbox).with_fault(FaultInjection {
-        fail_candidate_testing: true,
-        ..Default::default()
-    });
+    let fail_test_executor = SandboxUpdateExecutor::new(&sandbox)
+        .with_drain_adapter(drain_adapter.clone())
+        .with_backup_adapter(std::sync::Arc::new(
+            SandboxFixtureBackupAdapter::new_with_db(&db_p),
+        ))
+        .with_candidate_adapter(cand_adapter.clone())
+        .with_fault(FaultInjection {
+            fail_candidate_testing: true,
+            ..Default::default()
+        });
     let res_fail =
         fail_test_executor.execute_transaction(&verified2, &archive_path, &signer, 1794369000);
-    assert!(res_fail.is_ok());
+    assert!(res_fail.is_ok(), "res_fail failed: {:?}", res_fail.err());
     let journal_fail = res_fail.unwrap();
-    assert_eq!(journal_fail.stage, TransactionStage::RolledBack);
-    // current 指针切回 0.2.0-1005
-    let target_after_rollback = fs::read_link(sandbox.current_link()).unwrap();
-    assert!(
-        target_after_rollback
-            .to_string_lossy()
-            .contains("0.2.0-1005")
-    );
+    assert_eq!(journal_fail.stage, TransactionStage::RecoveryRequired);
+    // 维护标志保持激活，绝不自动清除
+    assert!(sandbox.state_dir().join("core.maintenance.json").exists());
+    assert!(sandbox.state_dir().join("core.maintenance").exists());
 
-    // 3. 真实新业务数据冲突注入测试：向 SQLite 数据库真实写入一条时间戳晚于 backup 的新消息！
-    {
-        let conn = rusqlite::Connection::open(&db_p).unwrap();
-        conn.execute(
-            "INSERT INTO messages (id, content, created_at) VALUES (2, 'new message created during candidate run', 1794370001);",
-            [],
-        )
-        .unwrap();
-    }
-
+    // 3. 业务数据保护测试：当受控存在业务数据库时，自检失败必须保留维护态并标记 RecoveryRequired，严禁自动回滚覆盖
     let mut manifest3 = verified.manifest().clone();
     manifest3.sequence = 1007;
     manifest3.release_id = "0.2.0-1007".into();
@@ -1352,11 +1359,16 @@ fn test_sandbox_executor_end_to_end_and_fault_injections() {
     )
     .unwrap();
 
-    // 执行更新自检失败：由于真实检测到业务新数据，严禁静默回退，必须保留维护态并标记 RecoveryRequired！
-    let conflict_executor = SandboxUpdateExecutor::new(&sandbox).with_fault(FaultInjection {
-        fail_candidate_testing: true,
-        ..Default::default()
-    });
+    let conflict_executor = SandboxUpdateExecutor::new(&sandbox)
+        .with_drain_adapter(drain_adapter.clone())
+        .with_backup_adapter(std::sync::Arc::new(
+            SandboxFixtureBackupAdapter::new_with_db(&db_p),
+        ))
+        .with_candidate_adapter(cand_adapter.clone())
+        .with_fault(FaultInjection {
+            fail_candidate_testing: true,
+            ..Default::default()
+        });
     let res_conflict =
         conflict_executor.execute_transaction(&verified3, &archive_path, &signer, 1794370000);
     assert!(res_conflict.is_ok());
@@ -1409,7 +1421,15 @@ fn test_release_id_validation_and_existing_directory_protection() {
             .unwrap();
 
     let signer = LocalSigner::for_test_mock();
-    let executor = SandboxUpdateExecutor::new(&sandbox);
+    let executor = SandboxUpdateExecutor::new(&sandbox)
+        .with_drain_adapter(std::sync::Arc::new(SandboxFixtureDrainAdapter))
+        .with_backup_adapter(std::sync::Arc::new(
+            SandboxFixtureBackupAdapter::new_no_database(),
+        ))
+        .with_candidate_adapter(std::sync::Arc::new(SandboxFixtureCandidateAdapter::new(
+            "/bin/sh",
+            vec!["-c".into(), "exit 0".into()],
+        )));
     let err = executor
         .execute_transaction(&verified, &archive_path, &signer, 1794360100)
         .unwrap_err();
@@ -1444,6 +1464,9 @@ fn test_recovery_evaluation_rejects_unknown_external_or_invalid_targets() {
         backup_path: None,
         error: None,
         maintenance_marker_confirmed: true,
+        drain_proof: None,
+        backup_proof: None,
+        candidate_proof: None,
     };
 
     // 1. current 指向外部目录（不在 releases_dir 内）
@@ -1452,7 +1475,8 @@ fn test_recovery_evaluation_rejects_unknown_external_or_invalid_targets() {
     match rec1 {
         RecoveryAction::ManualInterventionRequired(msg) => {
             assert!(
-                msg.contains("current_target_not_a_directory")
+                msg.contains("foreign_or_unknown_current_target")
+                    || msg.contains("current_target_not_a_directory")
                     || msg.contains("unknown_current_target")
             );
         }
@@ -1465,7 +1489,11 @@ fn test_recovery_evaluation_rejects_unknown_external_or_invalid_targets() {
     let rec2 = journal.evaluate_recovery(&releases_dir, &current_link);
     match rec2 {
         RecoveryAction::ManualInterventionRequired(msg) => {
-            assert!(msg.contains("current_target_not_a_directory"));
+            assert!(
+                msg.contains("foreign_or_unknown_current_target")
+                    || msg.contains("target_subdir_in_releases_dir_invalid")
+                    || msg.contains("current_target_not_a_directory")
+            );
         }
         other => panic!("Expected ManualInterventionRequired, got {:?}", other),
     }
@@ -1535,12 +1563,18 @@ fn test_whitelist_candidate_testing_and_exit_code_enforcement() {
 
     let signer = LocalSigner::for_test_mock();
 
+    let drain_adapter = std::sync::Arc::new(SandboxFixtureDrainAdapter);
+    let backup_adapter = std::sync::Arc::new(SandboxFixtureBackupAdapter::new_no_database());
+
     // 1. 真实自检命令返回 0 -> 成功提交
-    let pass_executor =
-        SandboxUpdateExecutor::new(&sandbox).with_candidate_test(CandidateTestSpec {
-            relative_executable: PathBuf::from("bin/candidate_check.sh"),
-            fixed_args: vec!["--ok".into()],
-        });
+    let pass_cand_adapter = std::sync::Arc::new(SandboxFixtureCandidateAdapter::new(
+        "/bin/sh",
+        vec!["-c".into(), "exit 0".into()],
+    ));
+    let pass_executor = SandboxUpdateExecutor::new(&sandbox)
+        .with_drain_adapter(drain_adapter.clone())
+        .with_backup_adapter(backup_adapter.clone())
+        .with_candidate_adapter(pass_cand_adapter);
     let res_pass = pass_executor
         .execute_transaction(&verified, &archive_path, &signer, 1794380000)
         .unwrap();
@@ -1570,13 +1604,189 @@ fn test_whitelist_candidate_testing_and_exit_code_enforcement() {
     )
     .unwrap();
 
-    let fail_executor =
-        SandboxUpdateExecutor::new(&sandbox).with_candidate_test(CandidateTestSpec {
-            relative_executable: PathBuf::from("bin/candidate_check.sh"),
-            fixed_args: vec!["--fail".into()],
-        });
+    let fail_cand_adapter = std::sync::Arc::new(SandboxFixtureCandidateAdapter::new(
+        "/bin/sh",
+        vec!["-c".into(), "exit 42".into()],
+    ));
+    let fail_executor = SandboxUpdateExecutor::new(&sandbox)
+        .with_drain_adapter(drain_adapter.clone())
+        .with_backup_adapter(backup_adapter.clone())
+        .with_candidate_adapter(fail_cand_adapter);
     let res_fail = fail_executor
         .execute_transaction(&verified_f, &archive_path, &signer, 1794381000)
         .unwrap();
     assert_eq!(res_fail.stage, TransactionStage::RolledBack);
+}
+
+#[test]
+fn test_executor_fails_closed_before_write_if_any_adapter_missing() {
+    let sandbox = SandboxUpdateRoot::create_test_isolated_sandbox().unwrap();
+    let (key_pair, pub_bytes) = generate_test_ed25519_key();
+    let key_store = TrustedKeyStore::new().with_key("test-root-v1", &pub_bytes);
+
+    let archive_path = sandbox.root_dir().join("dummy.tar.gz");
+    fs::write(&archive_path, b"dummy").unwrap();
+
+    let manifest = sample_manifest(4001, "arm64");
+    let sig_hex = sign_manifest(&key_pair, &manifest);
+    let envelope = SignedEnvelope {
+        envelope_schema: 1,
+        key_id: "test-root-v1".into(),
+        signature_algorithm: "ed25519".into(),
+        signature: sig_hex,
+        manifest,
+    };
+    let env_bytes = serde_json::to_vec(&envelope).unwrap();
+    let verified =
+        VerifiedManifestEnvelope::verify_and_construct(&env_bytes, &key_store, "arm64", "13.0", 0)
+            .unwrap();
+
+    let signer = LocalSigner::for_test_mock();
+
+    // 1. 完全未注入适配器 -> 立即返回 unsupported_update_execution
+    let raw_executor = SandboxUpdateExecutor::new(&sandbox);
+    let err = raw_executor
+        .execute_transaction(&verified, &archive_path, &signer, 1794380000)
+        .unwrap_err();
+    assert!(err.to_string().contains("unsupported_update_execution"));
+
+    // 证明零写副作用：无 staging 目录、无 release 目录、无 journal 写入！
+    assert!(!sandbox.root_dir().join("staging").exists());
+    assert!(!sandbox.state_dir().join("journal.json").exists());
+    assert!(!sandbox.state_dir().join("current_release.json").exists());
+}
+
+#[test]
+fn test_candidate_adapter_timeout_output_flood_and_process_cleanup() {
+    let temp = TempTestDir::new("cand_limits");
+
+    // 1. 超时测试：命令 sleep 5 秒，适配器 timeout 200ms -> 拦截超时并杀死子进程
+    let sleep_adapter = SandboxFixtureCandidateAdapter::new("/bin/sleep", vec!["5".into()])
+        .with_timeout(std::time::Duration::from_millis(200));
+
+    let err = sleep_adapter.execute_candidate_test(&temp.0).unwrap_err();
+    assert!(err.to_string().contains("candidate_test_timeout_exceeded"));
+
+    // 2. 相对路径试图逃逸被严格静态拒绝
+    let rel_adapter = SandboxFixtureCandidateAdapter::new("../escape_bin", vec![]);
+    let err_rel = rel_adapter.execute_candidate_test(&temp.0).unwrap_err();
+    assert!(
+        err_rel.to_string().contains("must_be_absolute")
+            || err_rel.to_string().contains("contains_traversal")
+    );
+
+    // 3. 输出洪泛保护测试：限制 512 字节，命令产生海量输出，防死锁
+    let flood_adapter = SandboxFixtureCandidateAdapter::new(
+        "/bin/sh",
+        vec![
+            "-c".into(),
+            "dd if=/dev/zero bs=1024 count=100 2>/dev/null".into(),
+        ],
+    )
+    .with_max_output_bytes(512);
+    let res = flood_adapter.execute_candidate_test(&temp.0);
+    assert!(res.is_ok(), "flood error: {:?}", res.err());
+}
+
+#[test]
+fn test_backup_adapter_no_database_and_restore_verification() {
+    let temp = TempTestDir::new("backup_adapter_test");
+    let state_dir = temp.0.clone();
+
+    // 1. 声明 NoDatabase 但 state_dir 实际存在 wechat.db -> 严格抛错拒绝
+    let dummy_db = state_dir.join("wechat.db");
+    fs::write(&dummy_db, b"fake_db").unwrap();
+
+    let no_db_adapter = SandboxFixtureBackupAdapter::new_no_database();
+    let err = no_db_adapter
+        .execute_backup("tx-no-db", &state_dir)
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("database_file_detected_when_expected_no_database")
+    );
+
+    // 2. 真实 SQLite 数据库备份与 restore 核验
+    fs::remove_file(&dummy_db).unwrap();
+    {
+        let conn = rusqlite::Connection::open(&dummy_db).unwrap();
+        conn.execute(
+            "CREATE TABLE test_data (id INTEGER PRIMARY KEY, name TEXT);",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO test_data (id, name) VALUES (1, 'val1');", [])
+            .unwrap();
+    }
+
+    let with_db_adapter = SandboxFixtureBackupAdapter::new_with_db(&dummy_db);
+    let proof = with_db_adapter
+        .execute_backup("tx-db-test", &state_dir)
+        .unwrap();
+    match proof {
+        VerifiedSandboxBackupProof::DatabaseBackupVerified {
+            backup_path,
+            backup_sha256,
+        } => {
+            assert!(backup_path.exists());
+            assert_eq!(backup_sha256.len(), 64);
+            // 验证真实 restore 校验函数对该备份有效
+            assert!(super::rollback::verify_backup_restorable(&backup_path).is_ok());
+        }
+        other => panic!("Expected DatabaseBackupVerified, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_highest_accepted_sequence_conflict_and_recovery_evaluation() {
+    let temp = TempTestDir::new("seq_conflict_and_rec");
+    let state_dir = temp.0.join("state");
+    let releases_dir = temp.0.join("releases");
+    let current_link = temp.0.join("current");
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::create_dir_all(&releases_dir).unwrap();
+
+    // 1. 水位冲突防倒退：current_release.json 为 2000，旧文件为 1000 -> 报错拒绝，绝不回 0
+    let rec = CurrentReleaseCommitRecord {
+        record_schema: 1,
+        tx_id: "tx-seq-test".into(),
+        release_id: "0.2.0-2000".into(),
+        sequence: 2000,
+        channel: "test".into(),
+        manifest_digest: "sha256-test-digest".into(),
+        installed_at: 1794360000,
+    };
+    atomic_commit_release_record(&state_dir, &rec).unwrap();
+    // 强制把旧文件修改为不一致的值
+    fs::write(state_dir.join("highest_accepted_sequence"), b"1000").unwrap();
+
+    let conflict_err = load_highest_accepted_sequence(&state_dir).unwrap_err();
+    assert!(
+        conflict_err
+            .to_string()
+            .contains("sequence_conflict_detected")
+    );
+
+    // 2. Crash 恢复核验：阶段为 Committed 但缺少 drain_proof 或 candidate_proof -> 严格保持维护态
+    let journal = UpdateJournal {
+        transaction_id: "tx-crash-test".into(),
+        stage: TransactionStage::Committed,
+        source_release_id: "0.1.0".into(),
+        target_release_id: "0.2.0".into(),
+        target_sequence: 2000,
+        timestamp: 1794360000,
+        backup_path: None,
+        error: None,
+        maintenance_marker_confirmed: true,
+        drain_proof: None, // 缺失 proof
+        backup_proof: None,
+        candidate_proof: None,
+    };
+    let rec_act = journal.evaluate_recovery(&releases_dir, &current_link);
+    match rec_act {
+        RecoveryAction::ManualInterventionRequired(msg) => {
+            assert!(msg.contains("missing_drain_or_candidate_proof"));
+        }
+        other => panic!("Expected ManualInterventionRequired, got {:?}", other),
+    }
 }

@@ -151,11 +151,290 @@ impl SandboxUpdateRoot {
     }
 }
 
-/// 真实候选自检白名单配置
-#[derive(Debug, Clone)]
-pub struct CandidateTestSpec {
-    pub relative_executable: PathBuf,
+/// 计算规范化 Manifest 的 SHA-256 摘要（使用 RFC 8785 规范化 JSON，绝不能错标为 artifact.sha256）
+pub fn calculate_manifest_digest(manifest: &ReleaseManifest) -> Result<String> {
+    let manifest_val = serde_json::to_value(manifest)?;
+    let canonical_bytes = serde_json_canonicalizer::to_vec(&manifest_val)?;
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(&canonical_bytes);
+    let hash_bytes = hasher.finalize();
+    let mut hex_str = String::with_capacity(64);
+    for b in hash_bytes {
+        use std::fmt::Write;
+        let _ = write!(hex_str, "{:02x}", b);
+    }
+    Ok(hex_str)
+}
+
+/// 沙箱排空适配器证明
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VerifiedSandboxDrainProof {
+    pub drained_at: u64,
+    pub tx_id: String,
+}
+
+pub trait SandboxDrainAdapter: Send + Sync {
+    fn execute_drain(&self, tx_id: &str, now: u64) -> Result<VerifiedSandboxDrainProof>;
+}
+
+/// 沙箱备份适配器证明
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum VerifiedSandboxBackupProof {
+    NoDatabaseVerified,
+    DatabaseBackupVerified {
+        backup_path: PathBuf,
+        backup_sha256: String,
+    },
+}
+
+pub trait SandboxBackupAdapter: Send + Sync {
+    fn execute_backup(&self, tx_id: &str, state_dir: &Path) -> Result<VerifiedSandboxBackupProof>;
+}
+
+/// 沙箱候选自检适配器证明
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VerifiedSandboxCandidateProof {
+    pub tested_at: u64,
+    pub exit_code: i32,
+}
+
+pub trait SandboxCandidateAdapter: Send + Sync {
+    fn execute_candidate_test(&self, candidate_dir: &Path)
+    -> Result<VerifiedSandboxCandidateProof>;
+}
+
+/// 沙箱排空测试 Fixture 适配器
+pub struct SandboxFixtureDrainAdapter;
+impl SandboxDrainAdapter for SandboxFixtureDrainAdapter {
+    fn execute_drain(&self, tx_id: &str, now: u64) -> Result<VerifiedSandboxDrainProof> {
+        Ok(VerifiedSandboxDrainProof {
+            drained_at: now,
+            tx_id: tx_id.to_string(),
+        })
+    }
+}
+
+/// 沙箱备份测试 Fixture 适配器（支持显式 NoDatabase 声明校验与真实 DB 在线备份+restore 恢复核验）
+pub struct SandboxFixtureBackupAdapter {
+    pub expected_no_database: bool,
+    pub db_path: Option<PathBuf>,
+}
+
+impl SandboxFixtureBackupAdapter {
+    pub fn new_no_database() -> Self {
+        Self {
+            expected_no_database: true,
+            db_path: None,
+        }
+    }
+
+    pub fn new_with_db(db_path: impl Into<PathBuf>) -> Self {
+        Self {
+            expected_no_database: false,
+            db_path: Some(db_path.into()),
+        }
+    }
+}
+
+impl SandboxBackupAdapter for SandboxFixtureBackupAdapter {
+    fn execute_backup(&self, tx_id: &str, state_dir: &Path) -> Result<VerifiedSandboxBackupProof> {
+        if self.expected_no_database {
+            // 校验 state 目录中确实无任何数据库文件或 WAL 遗留
+            if state_dir.exists() {
+                for entry in fs::read_dir(state_dir)? {
+                    let p = entry?.path();
+                    let name = p.file_name().unwrap_or_default().to_string_lossy();
+                    if name.ends_with(".db")
+                        || name.ends_with(".db-wal")
+                        || name.ends_with(".db-shm")
+                        || name == "wechat.db"
+                    {
+                        bail!(
+                            "database_file_detected_when_expected_no_database: {}",
+                            p.display()
+                        );
+                    }
+                }
+            }
+            return Ok(VerifiedSandboxBackupProof::NoDatabaseVerified);
+        }
+
+        let db_p = self
+            .db_path
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("db_path_not_configured_for_backup"))?;
+        if !db_p.exists() {
+            bail!("source_db_not_found: {}", db_p.display());
+        }
+
+        let backup_path = state_dir.join(format!("backup_{}.db", tx_id));
+        let sha256 = super::rollback::backup_and_verify_sqlite_db(db_p, &backup_path)?;
+
+        // 真实 restore 核验：打开备份数据库执行 PRAGMA integrity_check 并确认元数据与业务表结构可读
+        super::rollback::verify_backup_restorable(&backup_path)?;
+
+        Ok(VerifiedSandboxBackupProof::DatabaseBackupVerified {
+            backup_path,
+            backup_sha256: sha256,
+        })
+    }
+}
+
+/// 受信沙箱候选自检测试 Fixture 适配器（硬编码固定绝对路径、固定参数、超时防挂死、输出洪泛防护、kill+wait 回收自有进程）
+pub struct SandboxFixtureCandidateAdapter {
+    pub executable_path: PathBuf,
     pub fixed_args: Vec<String>,
+    pub timeout: std::time::Duration,
+    pub max_output_bytes: usize,
+}
+
+impl SandboxFixtureCandidateAdapter {
+    pub fn new(executable_path: impl Into<PathBuf>, fixed_args: Vec<String>) -> Self {
+        Self {
+            executable_path: executable_path.into(),
+            fixed_args,
+            timeout: std::time::Duration::from_secs(5),
+            max_output_bytes: 64 * 1024,
+        }
+    }
+
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    pub fn with_max_output_bytes(mut self, max: usize) -> Self {
+        self.max_output_bytes = max;
+        self
+    }
+}
+
+impl SandboxCandidateAdapter for SandboxFixtureCandidateAdapter {
+    fn execute_candidate_test(
+        &self,
+        candidate_dir: &Path,
+    ) -> Result<VerifiedSandboxCandidateProof> {
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+        use std::thread;
+        use std::time::Instant;
+
+        if !self.executable_path.is_absolute() {
+            bail!(
+                "candidate_adapter_executable_must_be_absolute: '{}'",
+                self.executable_path.display()
+            );
+        }
+        let exe_str = self.executable_path.to_string_lossy();
+        if exe_str.contains("..") {
+            bail!(
+                "candidate_adapter_executable_contains_traversal: '{}'",
+                exe_str
+            );
+        }
+        if !self.executable_path.exists() {
+            bail!(
+                "candidate_adapter_executable_missing: '{}'",
+                self.executable_path.display()
+            );
+        }
+
+        let mut child = Command::new(&self.executable_path)
+            .args(&self.fixed_args)
+            .env("CANDIDATE_RELEASE_DIR", candidate_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("failed_to_spawn_candidate_test: {}", e))?;
+
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let max_bytes = self.max_output_bytes;
+
+        let stdout_handle = thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut stream) = stdout {
+                let mut chunk = [0u8; 4096];
+                while let Ok(n) = stream.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    if buf.len() < max_bytes {
+                        let to_take = n.min(max_bytes - buf.len());
+                        buf.extend_from_slice(&chunk[..to_take]);
+                    }
+                    // 超过 max_bytes 后继续读空丢弃，防止对端写入触发 SIGPIPE
+                }
+            }
+            buf
+        });
+
+        let stderr_handle = thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut stream) = stderr {
+                let mut chunk = [0u8; 4096];
+                while let Ok(n) = stream.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    if buf.len() < max_bytes {
+                        let to_take = n.min(max_bytes - buf.len());
+                        buf.extend_from_slice(&chunk[..to_take]);
+                    }
+                }
+            }
+            buf
+        });
+
+        let start = Instant::now();
+        let mut exit_status = None;
+        while start.elapsed() < self.timeout {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    exit_status = Some(status);
+                    break;
+                }
+                Ok(None) => {
+                    thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    bail!("candidate_test_wait_error: {}", e);
+                }
+            }
+        }
+
+        let status = match exit_status {
+            Some(st) => st,
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                bail!("candidate_test_timeout_exceeded: limit {:?}", self.timeout);
+            }
+        };
+
+        let _ = stdout_handle.join();
+        let _ = stderr_handle.join();
+
+        let code = status.code().unwrap_or(-1);
+        if code != 0 {
+            bail!("candidate_test_failed_exit_code: {}", code);
+        }
+
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        Ok(VerifiedSandboxCandidateProof {
+            tested_at: now_ts,
+            exit_code: 0,
+        })
+    }
 }
 
 /// 故障注入配置（用于验证状态机回滚与断电恢复逻辑）
@@ -170,7 +449,9 @@ pub struct FaultInjection {
 pub struct SandboxUpdateExecutor<'a> {
     pub sandbox: &'a SandboxUpdateRoot,
     pub fault: FaultInjection,
-    pub candidate_test: Option<CandidateTestSpec>,
+    pub drain_adapter: Option<std::sync::Arc<dyn SandboxDrainAdapter>>,
+    pub backup_adapter: Option<std::sync::Arc<dyn SandboxBackupAdapter>>,
+    pub candidate_adapter: Option<std::sync::Arc<dyn SandboxCandidateAdapter>>,
 }
 
 /// 严格发布标识校验：字母、数字、点、下划线、短横线，长度 1..=64，严禁穿越符或分隔符
@@ -189,7 +470,9 @@ impl<'a> SandboxUpdateExecutor<'a> {
         Self {
             sandbox,
             fault: FaultInjection::default(),
-            candidate_test: None,
+            drain_adapter: None,
+            backup_adapter: None,
+            candidate_adapter: None,
         }
     }
 
@@ -198,8 +481,24 @@ impl<'a> SandboxUpdateExecutor<'a> {
         self
     }
 
-    pub fn with_candidate_test(mut self, spec: CandidateTestSpec) -> Self {
-        self.candidate_test = Some(spec);
+    pub fn with_drain_adapter(mut self, adapter: std::sync::Arc<dyn SandboxDrainAdapter>) -> Self {
+        self.drain_adapter = Some(adapter);
+        self
+    }
+
+    pub fn with_backup_adapter(
+        mut self,
+        adapter: std::sync::Arc<dyn SandboxBackupAdapter>,
+    ) -> Self {
+        self.backup_adapter = Some(adapter);
+        self
+    }
+
+    pub fn with_candidate_adapter(
+        mut self,
+        adapter: std::sync::Arc<dyn SandboxCandidateAdapter>,
+    ) -> Self {
+        self.candidate_adapter = Some(adapter);
         self
     }
 
@@ -215,6 +514,17 @@ impl<'a> SandboxUpdateExecutor<'a> {
         let state_dir = self.sandbox.state_dir();
         let releases_dir = self.sandbox.releases_dir();
         let current_link = self.sandbox.current_link();
+
+        // 0. 前置能力预检：三类 adapter 缺失任何必要能力必须在产生写副作用前返回 unsupported，严禁产生写副作用
+        let drain_adapter = self.drain_adapter.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("unsupported_update_execution: missing required drain_adapter")
+        })?;
+        let backup_adapter = self.backup_adapter.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("unsupported_update_execution: missing required backup_adapter")
+        })?;
+        let candidate_adapter = self.candidate_adapter.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("unsupported_update_execution: missing required candidate_adapter")
+        })?;
 
         // 校验 release_id 命名合法性
         if !is_valid_release_id(&manifest.release_id) {
@@ -326,26 +636,32 @@ impl<'a> SandboxUpdateExecutor<'a> {
         fs::rename(&staging_dir, &target_release_dir)?;
         sync_dir(&releases_dir)?;
 
-        // 阶段 4: Draining (模拟排空，设置带 tx_id 绑定的结构化维护标记)
+        // 阶段 4: Draining (仅通过沙箱排空适配器产生证据后推进)
         set_structured_maintenance_marker(&state_dir, &tx_id, "updater draining", now)?;
+        let drain_proof = drain_adapter.execute_drain(&tx_id, now)?;
         journal.stage = TransactionStage::Draining;
+        journal.drain_proof = Some(serde_json::to_string(&drain_proof)?);
         journal.maintenance_marker_confirmed = true;
         journal.persist_atomic(&state_dir)?;
         if self.fault.fail_after_stage == Some(TransactionStage::Draining) {
             bail!("injected_fault_after_draining");
         }
 
-        // 阶段 5: BackupVerified (若存在业务数据库，执行真实在线热备份与完整性校验)
-        let db_path = self.sandbox.db_path();
-        if db_path.exists() {
-            if self.fault.fail_backup {
-                bail!("injected_fault_in_backup");
+        // 阶段 5: BackupVerified (仅通过沙箱备份适配器产生证据并核验 restore 后推进)
+        if self.fault.fail_backup {
+            bail!("injected_fault_in_backup");
+        }
+        let backup_proof = backup_adapter.execute_backup(&tx_id, &state_dir)?;
+        match &backup_proof {
+            VerifiedSandboxBackupProof::DatabaseBackupVerified { backup_path, .. } => {
+                journal.backup_path = Some(backup_path.to_string_lossy().to_string());
             }
-            let backup_path = state_dir.join(format!("backup_{}.db", tx_id));
-            let _backup_sha = super::rollback::backup_and_verify_sqlite_db(&db_path, &backup_path)?;
-            journal.backup_path = Some(backup_path.to_string_lossy().to_string());
+            VerifiedSandboxBackupProof::NoDatabaseVerified => {
+                journal.backup_path = None;
+            }
         }
         journal.stage = TransactionStage::BackupVerified;
+        journal.backup_proof = Some(serde_json::to_string(&backup_proof)?);
         journal.persist_atomic(&state_dir)?;
         if self.fault.fail_after_stage == Some(TransactionStage::BackupVerified) {
             bail!("injected_fault_after_backup_verified");
@@ -359,80 +675,74 @@ impl<'a> SandboxUpdateExecutor<'a> {
             bail!("injected_fault_after_switching");
         }
 
-        // 阶段 7: CandidateTesting (执行白名单候选自检或故障注入)
+        // 阶段 7: CandidateTesting (执行受信适配器自检并收集 Proof)
         journal.stage = TransactionStage::CandidateTesting;
         journal.persist_atomic(&state_dir)?;
 
-        let mut testing_passed = !self.fault.fail_candidate_testing;
-        if testing_passed {
-            if let Some(ref spec) = self.candidate_test {
-                let test_bin = target_release_dir.join(&spec.relative_executable);
-                if !test_bin.exists() {
-                    bail!("candidate_test_binary_missing: '{}'", test_bin.display());
-                }
-                let status = std::process::Command::new(&test_bin)
-                    .args(&spec.fixed_args)
-                    .status()
-                    .map_err(|e| anyhow::anyhow!("failed_to_exec_candidate_test: {}", e))?;
-                if !status.success() {
-                    testing_passed = false;
-                }
-            }
-        }
-
-        if testing_passed {
-            // 自检通过 -> Committed
-            journal.stage = TransactionStage::Committed;
-            journal.persist_atomic(&state_dir)?;
-
-            // 单一权威提交记录：原子写入 current_release.json（含最高水位与 manifest 摘要）
-            let commit_record = CurrentReleaseCommitRecord {
-                record_schema: 1,
-                tx_id: tx_id.clone(),
-                release_id: manifest.release_id.clone(),
-                sequence: manifest.sequence,
-                channel: manifest.channel.clone(),
-                manifest_digest: manifest.artifact.sha256.clone(),
-                installed_at: now,
-            };
-            atomic_commit_release_record(&state_dir, &commit_record)?;
-
-            // 清除本事务的维护态标志
-            clear_maintenance_for_tx(&state_dir, &tx_id)?;
-
-            Ok(journal)
+        let candidate_test_result = if self.fault.fail_candidate_testing {
+            Err(anyhow::anyhow!("injected_fault_candidate_testing_failed"))
         } else {
-            // 自检失败 -> 触发回滚
-            journal.stage = TransactionStage::RollbackStarted;
-            journal.error = Some("candidate_self_test_failed".into());
-            journal.persist_atomic(&state_dir)?;
+            candidate_adapter.execute_candidate_test(&target_release_dir)
+        };
 
-            let db_path = self.sandbox.db_path();
-            if db_path.exists() {
-                // 真实检查自备份时间戳以来是否产生新业务数据
-                let has_new = super::rollback::has_new_data_since_backup(&db_path, now)?;
-                if has_new {
-                    // 检测到新业务数据，严禁静默覆盖回滚，必须保留维护态并标记 RecoveryRequired
-                    journal.stage = TransactionStage::RecoveryRequired;
-                    journal.error = Some("new_business_data_detected_cannot_auto_rollback".into());
-                    journal.persist_atomic(&state_dir)?;
-                    set_structured_maintenance_marker(
-                        &state_dir,
-                        &tx_id,
-                        "manual recovery required: new business data conflict",
-                        now,
-                    )?;
-                    return Ok(journal);
+        match candidate_test_result {
+            Ok(candidate_proof) => {
+                // 自检通过 -> Committed
+                journal.candidate_proof = Some(serde_json::to_string(&candidate_proof)?);
+                journal.stage = TransactionStage::Committed;
+                journal.persist_atomic(&state_dir)?;
+
+                // 单一权威提交记录：计算真正的规范化 manifest_digest 并写入 current_release.json
+                let manifest_digest = calculate_manifest_digest(manifest)?;
+                let commit_record = CurrentReleaseCommitRecord {
+                    record_schema: 1,
+                    tx_id: tx_id.clone(),
+                    release_id: manifest.release_id.clone(),
+                    sequence: manifest.sequence,
+                    channel: manifest.channel.clone(),
+                    manifest_digest,
+                    installed_at: now,
+                };
+                atomic_commit_release_record(&state_dir, &commit_record)?;
+
+                // 清除本事务的维护态标志
+                clear_maintenance_for_tx(&state_dir, &tx_id)?;
+
+                Ok(journal)
+            }
+            Err(test_err) => {
+                // 自检失败 -> 触发回滚
+                journal.stage = TransactionStage::RollbackStarted;
+                journal.error = Some(format!("candidate_test_failed: {}", test_err));
+                journal.persist_atomic(&state_dir)?;
+
+                // 业务数据安全准则：当受控存在数据库时，首版默认 UnknownDataState 保持维护，严禁自动回滚覆盖数据库
+                match backup_proof {
+                    VerifiedSandboxBackupProof::DatabaseBackupVerified { .. } => {
+                        journal.stage = TransactionStage::RecoveryRequired;
+                        journal.error = Some(
+                            "database_state_unknown_cannot_auto_rollback_requires_manual_recovery"
+                                .into(),
+                        );
+                        journal.persist_atomic(&state_dir)?;
+                        set_structured_maintenance_marker(
+                            &state_dir,
+                            &tx_id,
+                            "manual recovery required: database state unknown",
+                            now,
+                        )?;
+                        Ok(journal)
+                    }
+                    VerifiedSandboxBackupProof::NoDatabaseVerified => {
+                        // 确认无业务数据库：安全回退程序指针
+                        rollback_release_atomic(&self.sandbox.root_dir)?;
+                        journal.stage = TransactionStage::RolledBack;
+                        journal.persist_atomic(&state_dir)?;
+                        clear_maintenance_for_tx(&state_dir, &tx_id)?;
+                        Ok(journal)
+                    }
                 }
             }
-
-            rollback_release_atomic(&self.sandbox.root_dir)?;
-            journal.stage = TransactionStage::RolledBack;
-            journal.persist_atomic(&state_dir)?;
-
-            // 回退成功，安全清除本事务的维护标志
-            clear_maintenance_for_tx(&state_dir, &tx_id)?;
-            Ok(journal)
         }
     }
 }
