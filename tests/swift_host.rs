@@ -3269,4 +3269,54 @@ print(checkMode())
     fs::create_dir_all(&tmp_escape_dir).unwrap();
     std::os::unix::fs::symlink(&tmp_escape_dir, &current_link).unwrap();
     assert_eq!(run_guard("RECOVERY_REQUIRED"), "RECOVERY_REQUIRED");
+
+    // 场景 J: releases/id 自身为 symlink 指向外部且 current 同指外部：必须拦截！
+    fs::remove_file(&current_link).unwrap();
+    fs::remove_dir(&target_release_dir).unwrap();
+    std::os::unix::fs::symlink(&tmp_escape_dir, &target_release_dir).unwrap();
+    std::os::unix::fs::symlink(&tmp_escape_dir, &current_link).unwrap();
+    assert_eq!(run_guard("RECOVERY_REQUIRED"), "RECOVERY_REQUIRED");
+    // 恢复正常物理目录与链接
+    fs::remove_file(&current_link).unwrap();
+    fs::remove_file(&target_release_dir).unwrap();
+    fs::create_dir_all(&target_release_dir).unwrap();
+    std::os::unix::fs::symlink(&target_release_dir, &current_link).unwrap();
+
+    // 场景 K: RolledBack 终态元数据不一致拦截
+    let journal_rolled_back = serde_json::json!({
+        "journal_schema": 1,
+        "transaction_id": "tx-88d447d2-749e-4e89-a5c3-1d89851148e6",
+        "stage": "RolledBack",
+        "source_release_id": "0.1.0",
+        "target_release_id": "0.2.0-test",
+        "target_sequence": 1002,
+        "timestamp": 1794300000,
+        "maintenance_marker_confirmed": true
+    });
+    fs::write(
+        &journal_path,
+        serde_json::to_vec_pretty(&journal_rolled_back).unwrap(),
+    )
+    .unwrap();
+    let source_release_dir = releases_dir.join("0.1.0");
+    fs::create_dir_all(&source_release_dir).unwrap();
+    fs::remove_file(&current_link).unwrap();
+    std::os::unix::fs::symlink(&source_release_dir, &current_link).unwrap();
+    // 此时 current_release.json 依然是 0.2.0-test -> 必须拦截 RECOVERY_REQUIRED
+    assert_eq!(run_guard("RECOVERY_REQUIRED"), "RECOVERY_REQUIRED");
+    // 更新 current_release.json 为 0.1.0 -> 正常放行 INACTIVE
+    let rollback_record_correct = serde_json::json!({
+        "record_schema": 1,
+        "tx_id": "tx-88d447d2-749e-4e89-a5c3-1d89851148e6",
+        "release_id": "0.1.0",
+        "sequence": 1000,
+        "channel": "stable",
+        "installed_at": 1794300000
+    });
+    fs::write(
+        &record_path,
+        serde_json::to_vec_pretty(&rollback_record_correct).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(run_guard("INACTIVE"), "INACTIVE");
 }

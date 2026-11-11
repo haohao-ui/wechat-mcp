@@ -305,16 +305,52 @@ public final class CoreSupervisor {
         guard readBytes == expectedCount else {
             return (nil, .recoveryRequired)
         }
+
+        // 流式硬限制探测：检查是否已到 EOF，防止并发追加或无界文件篡改
+        var extraByte: UInt8 = 0
+        let extraRead = read(fd, &extraByte, 1)
+        if extraRead > 0 {
+            return (nil, .recoveryRequired)
+        }
+
         return (Data(buffer), nil)
     }
 
     /// 精确核验 current 软链接物理目标必须落在 releasesDir 且等于预期 release_id 目录（拒绝外部目录逃逸或悬空）
     private func verifyCurrentLinkTarget(expectedReleaseID: String) -> Bool {
+        // a. 校验 expectedReleaseID 命名格式安全
+        guard !expectedReleaseID.isEmpty,
+              expectedReleaseID != ".", expectedReleaseID != "..",
+              expectedReleaseID.allSatisfy({ ($0 >= "0" && $0 <= "9") || ($0 >= "a" && $0 <= "z") || ($0 >= "A" && $0 <= "Z") || $0 == "." || $0 == "-" || $0 == "_" }) else {
+            return false
+        }
+
+        // b. 校验 currentLinkURL 自身必须为符号链接
         var linkStat = stat()
         guard lstat(currentLinkURL.path, &linkStat) == 0,
               (linkStat.st_mode & S_IFMT) == S_IFLNK else {
             return false
         }
+
+        // c. 锚定 releasesDir 必须为物理目录且非符号链接
+        var releasesStat = stat()
+        guard lstat(releasesDirURL.path, &releasesStat) == 0,
+              (releasesStat.st_mode & S_IFMT) == S_IFDIR,
+              (releasesStat.st_mode & S_IFMT) != S_IFLNK else {
+            return false
+        }
+
+        // d. 核验 releasesDir 下 expectedReleaseID 必须为真实物理目录且绝对不可为符号链接
+        let expectedURL = releasesDirURL.appendingPathComponent(expectedReleaseID)
+        var expStat = stat()
+        guard lstat(expectedURL.path, &expStat) == 0,
+              (expStat.st_mode & S_IFMT) == S_IFDIR,
+              (expStat.st_mode & S_IFMT) != S_IFLNK,
+              expStat.st_uid == geteuid() else {
+            return false
+        }
+
+        // e. 解析 current 软链接物理目标
         guard let dest = try? FileManager.default.destinationOfSymbolicLink(atPath: currentLinkURL.path) else {
             return false
         }
@@ -323,15 +359,11 @@ public final class CoreSupervisor {
             : currentLinkURL.deletingLastPathComponent().appendingPathComponent(dest)
 
         let resolvedTarget = targetURL.standardized.resolvingSymlinksInPath().path
-        let expectedURL = releasesDirURL.appendingPathComponent(expectedReleaseID).standardized.resolvingSymlinksInPath()
-        guard resolvedTarget == expectedURL.path else {
+        let resolvedExpected = expectedURL.standardized.resolvingSymlinksInPath().path
+        guard resolvedTarget == resolvedExpected else {
             return false
         }
-        var dirStat = stat()
-        guard stat(resolvedTarget, &dirStat) == 0,
-              (dirStat.st_mode & S_IFMT) == S_IFDIR else {
-            return false
-        }
+
         return true
     }
 
@@ -381,16 +413,32 @@ public final class CoreSupervisor {
                 return .active(transactionID: jTxID)
 
             case "RolledBack":
-                // 真实回滚终态全要素校验
+                // 真实回滚终态全要素校验（严格不吞错误，且核查元数据一致性）
                 let sourceRel = (jObj["source_release_id"] as? String) ?? "none"
                 if sourceRel == "none" {
                     var lStat = stat()
                     if lstat(currentLinkURL.path, &lStat) == 0 {
                         return .recoveryRequired
                     }
+                    if errno != ENOENT {
+                        return .recoveryRequired
+                    }
                 } else {
                     guard verifyCurrentLinkTarget(expectedReleaseID: sourceRel) else {
                         return .recoveryRequired
+                    }
+                    // 核验 current_release.json：若存在，其 release_id 必须等于 sourceRel
+                    let recordURL = journalURL.deletingLastPathComponent().appendingPathComponent("current_release.json")
+                    let (rData, rErr) = readLimitedPrivateFile(url: recordURL, maxBytes: 64 * 1024)
+                    if rErr != nil {
+                        return .recoveryRequired
+                    }
+                    if let rBytes = rData {
+                        guard let rObj = (try? JSONSerialization.jsonObject(with: rBytes, options: [])) as? [String: Any],
+                              let rReleaseID = rObj["release_id"] as? String,
+                              rReleaseID == sourceRel else {
+                            return .recoveryRequired
+                        }
                     }
                 }
 

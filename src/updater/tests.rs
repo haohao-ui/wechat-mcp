@@ -2255,6 +2255,27 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
     fs::remove_file(&current_link).unwrap();
     std::os::unix::fs::symlink(&target_dir, &current_link).unwrap();
 
+    // 4f2. releases/id 自身为 symlink 指向外部，且 current 也指向该外部目录：必须拦截！
+    fs::remove_file(&current_link).unwrap();
+    fs::remove_dir(&target_dir).unwrap();
+    std::os::unix::fs::symlink(&escape_target, &target_dir).unwrap();
+    std::os::unix::fs::symlink(&escape_target, &current_link).unwrap();
+    let dec_symlink_release = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    match dec_symlink_release {
+        StartupDualCheckDecision::RecoveryRequired { reason } => {
+            assert!(reason.contains("expected_release_dir_must_not_be_symlink"));
+        }
+        other => panic!(
+            "Expected RecoveryRequired when releases/id is symlink, got {:?}",
+            other
+        ),
+    }
+    // 恢复原状
+    fs::remove_file(&current_link).unwrap();
+    fs::remove_file(&target_dir).unwrap();
+    fs::create_dir_all(&target_dir).unwrap();
+    std::os::unix::fs::symlink(&target_dir, &current_link).unwrap();
+
     // 4g. digest 格式非法（非 64 字符 hex）必须 failclosed
     journal.manifest_digest = Some("not_a_valid_hex_sha256".into());
     journal.persist_atomic(state_dir).unwrap();
@@ -2289,8 +2310,68 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
     fs::create_dir_all(&source_dir).unwrap();
     fs::remove_file(&current_link).unwrap();
     std::os::unix::fs::symlink(&source_dir, &current_link).unwrap();
+
+    // 4h2. 软链接已切回 0.1.0，但 current_release.json 仍为 0.2.0-test -> 必须拦截！
+    let dec_rollback_record_mismatch =
+        check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    match dec_rollback_record_mismatch {
+        StartupDualCheckDecision::RecoveryRequired { reason } => {
+            assert!(reason.contains("rollback_release_record_mismatch"));
+        }
+        other => panic!(
+            "Expected RecoveryRequired for rollback record mismatch, got {:?}",
+            other
+        ),
+    }
+
+    // 4h3. 正确更新 current_release.json 为 0.1.0 后，全要素一致 -> AllowStartup
+    let rollback_rec = CurrentReleaseCommitRecord {
+        release_id: "0.1.0".into(),
+        sequence: 1000,
+        ..correct_rec
+    };
+    atomic_commit_release_record(state_dir, &rollback_rec).unwrap();
     let dec_rollback_ok = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
     assert_eq!(dec_rollback_ok, StartupDualCheckDecision::AllowStartup);
+
+    // 4i. 负向测试：update-journal.json 缺失 journal_schema 必须 Fail-Closed
+    let journal_raw_missing_schema = serde_json::json!({
+        "transaction_id": tx_id.clone(),
+        "stage": "Committed",
+        "source_release_id": "0.1.0",
+        "target_release_id": "0.2.0-test",
+        "target_sequence": 1005,
+        "timestamp": 1794380000,
+        "maintenance_marker_confirmed": true
+    });
+    let j_path = state_dir.join("update-journal.json");
+    fs::write(
+        &j_path,
+        serde_json::to_vec_pretty(&journal_raw_missing_schema).unwrap(),
+    )
+    .unwrap();
+    let dec_missing_schema = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    match dec_missing_schema {
+        StartupDualCheckDecision::RecoveryRequired { reason } => {
+            assert!(reason.contains("update-journal.json_corrupt_or_invalid"));
+        }
+        other => panic!(
+            "Expected RecoveryRequired when journal_schema missing, got {:?}",
+            other
+        ),
+    }
+    // 恢复合法 journal
+    journal.persist_atomic(state_dir).unwrap();
+
+    // 4j. 负向测试：read_limited_private_file 流式超限截断与拦截
+    let large_file = state_dir.join("large_test_file");
+    fs::write(&large_file, vec![b'a'; 256]).unwrap();
+    let read_res = read_limited_private_file(&large_file, 64);
+    assert!(
+        read_res.is_err(),
+        "reading file larger than limit must error"
+    );
+    fs::remove_file(&large_file).unwrap();
 
     // 5. 纯只读性验证：检查前后 state 目录文件与元数据零副作用
     let files_before = fs::read_dir(state_dir).unwrap().count();
