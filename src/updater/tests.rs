@@ -1459,6 +1459,7 @@ fn test_recovery_evaluation_rejects_unknown_external_or_invalid_targets() {
     let current_link = temp.0.join("current");
 
     let journal = UpdateJournal {
+        journal_schema: 1,
         transaction_id: "tx-test-eval".into(),
         stage: TransactionStage::Switching,
         source_release_id: "0.1.0".into(),
@@ -1825,6 +1826,7 @@ fn test_highest_accepted_sequence_conflict_and_recovery_evaluation() {
 
     // 2. Crash 恢复核验：阶段为 Committed 但缺少 drain_proof 或 candidate_proof -> 严格保持维护态
     let journal = UpdateJournal {
+        journal_schema: 1,
         transaction_id: "tx-crash-test".into(),
         stage: TransactionStage::Committed,
         source_release_id: "0.1.0".into(),
@@ -2155,7 +2157,10 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
     let dec_sym = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
     match dec_sym {
         StartupDualCheckDecision::RecoveryRequired { reason } => {
-            assert!(reason.contains("core.maintenance_must_not_be_symlink"));
+            assert!(
+                reason.contains("file_must_not_be_symlink")
+                    || reason.contains("cannot_read_core_maintenance_safely")
+            );
         }
         other => panic!("Expected RecoveryRequired, got {:?}", other),
     }
@@ -2178,7 +2183,8 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
 
     // 4b. 阶段为 Committed，但缺失 current_release.json -> RecoveryRequired (绝不盲目放行)
     journal.stage = TransactionStage::Committed;
-    journal.manifest_digest = Some("test_digest_value".into());
+    let valid_sha256 = "a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4e5f67890";
+    journal.manifest_digest = Some(valid_sha256.into());
     journal.persist_atomic(state_dir).unwrap();
     let dec_missing_rec = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
     match dec_missing_rec {
@@ -2195,7 +2201,7 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
         release_id: "0.2.0-test".into(),
         sequence: 9999, // 篡改
         channel: "stable".into(),
-        manifest_digest: "test_digest_value".into(),
+        manifest_digest: valid_sha256.into(),
         installed_at: 1794380000,
     };
     atomic_commit_release_record(state_dir, &commit_rec).unwrap();
@@ -2229,6 +2235,62 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
     // 全要素核对通过！
     let dec_all_match = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
     assert_eq!(dec_all_match, StartupDualCheckDecision::AllowStartup);
+
+    // 4f. 防 /tmp 外部目录逃逸：若 current 指向 /tmp 下同名目录，必须 Fail-Closed
+    let escape_target = dir.0.join("external_tmp").join("0.2.0-test");
+    fs::create_dir_all(&escape_target).unwrap();
+    fs::remove_file(&current_link).unwrap();
+    std::os::unix::fs::symlink(&escape_target, &current_link).unwrap();
+    let dec_escape = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    match dec_escape {
+        StartupDualCheckDecision::RecoveryRequired { reason } => {
+            assert!(
+                reason.contains("current_target_escape_detected")
+                    || reason.contains("current_link_escapes_releases_dir")
+            );
+        }
+        other => panic!("Expected RecoveryRequired for path escape, got {:?}", other),
+    }
+    // 恢复正常链接
+    fs::remove_file(&current_link).unwrap();
+    std::os::unix::fs::symlink(&target_dir, &current_link).unwrap();
+
+    // 4g. digest 格式非法（非 64 字符 hex）必须 failclosed
+    journal.manifest_digest = Some("not_a_valid_hex_sha256".into());
+    journal.persist_atomic(state_dir).unwrap();
+    let dec_bad_digest = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    match dec_bad_digest {
+        StartupDualCheckDecision::RecoveryRequired { reason } => {
+            assert!(reason.contains("invalid_manifest_digest_format"));
+        }
+        other => panic!("Expected RecoveryRequired for bad digest, got {:?}", other),
+    }
+    journal.manifest_digest = Some(valid_sha256.into());
+    journal.persist_atomic(state_dir).unwrap();
+
+    // 4h. RolledBack 终态核查：无法证明 source_release_id 真实生效时 failclosed
+    journal.stage = TransactionStage::RolledBack;
+    journal.source_release_id = "0.1.0".into();
+    journal.persist_atomic(state_dir).unwrap();
+    // 此时 current 仍指向 0.2.0-test，与 source_release_id 0.1.0 不符 -> 必须拦截
+    let dec_rollback_mismatch =
+        check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    match dec_rollback_mismatch {
+        StartupDualCheckDecision::RecoveryRequired { reason } => {
+            assert!(reason.contains("rollback_target_verification_failed"));
+        }
+        other => panic!(
+            "Expected RecoveryRequired for rollback mismatch, got {:?}",
+            other
+        ),
+    }
+    // 建立 0.1.0 目录并切换 current 指向 0.1.0
+    let source_dir = releases_dir.join("0.1.0");
+    fs::create_dir_all(&source_dir).unwrap();
+    fs::remove_file(&current_link).unwrap();
+    std::os::unix::fs::symlink(&source_dir, &current_link).unwrap();
+    let dec_rollback_ok = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    assert_eq!(dec_rollback_ok, StartupDualCheckDecision::AllowStartup);
 
     // 5. 纯只读性验证：检查前后 state 目录文件与元数据零副作用
     let files_before = fs::read_dir(state_dir).unwrap().count();

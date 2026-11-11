@@ -276,33 +276,99 @@ public final class CoreSupervisor {
         return readStartupDualGuardLocked()
     }
 
-    /// 纯只读启动双检查 Guard：同时校验 core.maintenance 与 update-journal.json（零写入、零删除、Fail-Closed）
+    /// 纯只读安全打开并读取私有文件（防 TOCTOU 与特殊文件阻塞，只有 ENOENT 视为不存在，其余非零错误均返回 recoveryRequired）
+    private func readLimitedPrivateFile(url: URL, maxBytes: Int) -> (data: Data?, error: CoreMaintenanceError?) {
+        let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        if fd < 0 {
+            if errno == ENOENT {
+                return (nil, nil)
+            }
+            return (nil, .recoveryRequired)
+        }
+        defer { close(fd) }
+
+        var fileInfo = stat()
+        guard fstat(fd, &fileInfo) == 0,
+              (fileInfo.st_mode & S_IFMT) == S_IFREG,
+              fileInfo.st_uid == geteuid(),
+              (fileInfo.st_mode & 0o777) == 0o600,
+              fileInfo.st_size <= maxBytes else {
+            return (nil, .recoveryRequired)
+        }
+
+        let expectedCount = Int(fileInfo.st_size)
+        var buffer = [UInt8](repeating: 0, count: expectedCount)
+        let readBytes = buffer.withUnsafeMutableBytes { ptr -> Int in
+            guard let base = ptr.baseAddress else { return -1 }
+            return read(fd, base, ptr.count)
+        }
+        guard readBytes == expectedCount else {
+            return (nil, .recoveryRequired)
+        }
+        return (Data(buffer), nil)
+    }
+
+    /// 精确核验 current 软链接物理目标必须落在 releasesDir 且等于预期 release_id 目录（拒绝外部目录逃逸或悬空）
+    private func verifyCurrentLinkTarget(expectedReleaseID: String) -> Bool {
+        var linkStat = stat()
+        guard lstat(currentLinkURL.path, &linkStat) == 0,
+              (linkStat.st_mode & S_IFMT) == S_IFLNK else {
+            return false
+        }
+        guard let dest = try? FileManager.default.destinationOfSymbolicLink(atPath: currentLinkURL.path) else {
+            return false
+        }
+        let targetURL = (dest as NSString).isAbsolutePath
+            ? URL(fileURLWithPath: dest)
+            : currentLinkURL.deletingLastPathComponent().appendingPathComponent(dest)
+
+        let resolvedTarget = targetURL.standardized.resolvingSymlinksInPath().path
+        let expectedURL = releasesDirURL.appendingPathComponent(expectedReleaseID).standardized.resolvingSymlinksInPath()
+        guard resolvedTarget == expectedURL.path else {
+            return false
+        }
+        var dirStat = stat()
+        guard stat(resolvedTarget, &dirStat) == 0,
+              (dirStat.st_mode & S_IFMT) == S_IFDIR else {
+            return false
+        }
+        return true
+    }
+
+    /// 纯只读启动双检查 Guard：同时校验 core.maintenance 与 update-journal.json（零写入、零删除、Fail-Closed、防 TOCTOU）
     public func readStartupDualGuardLocked() -> CoreMaintenanceStatus {
-        // 1. 检查 core.maintenance 基础标志
-        let maintRes = readMaintenanceLocked()
-        if maintRes == .recoveryRequired {
+        // 1. 检查 core.maintenance（通过受控 readLimitedPrivateFile，严格 36 字节 ASCII UUID）
+        let (maintData, maintErr) = readLimitedPrivateFile(url: maintenanceURL, maxBytes: 128)
+        if maintErr != nil {
             return .recoveryRequired
         }
         var activeTxID: String? = nil
-        if case .active(let tid) = maintRes {
-            activeTxID = tid
-        }
-
-        // 2. 检查 update-journal.json 独立事务日志
-        var jStat = stat()
-        let jPath = journalURL.path
-        if lstat(jPath, &jStat) == 0 {
-            // 校验必须为普通文件、非软链接、UID匹配、权限 0600
-            guard (jStat.st_mode & S_IFMT) == S_IFREG,
-                  jStat.st_uid == geteuid(),
-                  (jStat.st_mode & 0o777) == 0o600 else {
+        if let mData = maintData {
+            guard mData.count == 36,
+                  let rawUUID = String(data: mData, encoding: .utf8),
+                  validTransaction(rawUUID) else {
                 return .recoveryRequired
             }
+            activeTxID = rawUUID
+        }
 
-            guard let jData = try? Data(contentsOf: journalURL),
-                  let jObj = (try? JSONSerialization.jsonObject(with: jData, options: [])) as? [String: Any],
+        // 2. 检查 update-journal.json（受控打开 + fstat 校验）
+        let (jData, jErr) = readLimitedPrivateFile(url: journalURL, maxBytes: 64 * 1024)
+        if jErr != nil {
+            return .recoveryRequired
+        }
+
+        if let jBytes = jData {
+            guard let jObj = (try? JSONSerialization.jsonObject(with: jBytes, options: [])) as? [String: Any],
+                  let schemaNum = jObj["journal_schema"] as? NSNumber,
+                  CFGetTypeID(schemaNum) != CFBooleanGetTypeID(),
+                  schemaNum.intValue == 1,
                   let stage = jObj["stage"] as? String,
-                  let jTxID = jObj["transaction_id"] as? String else {
+                  let jTxID = jObj["transaction_id"] as? String,
+                  let jTargetRel = jObj["target_release_id"] as? String,
+                  let jTargetSeqNum = jObj["target_sequence"] as? NSNumber,
+                  CFGetTypeID(jTargetSeqNum) != CFBooleanGetTypeID(),
+                  jTargetSeqNum.int64Value >= 0 else {
                 return .recoveryRequired
             }
 
@@ -315,6 +381,19 @@ public final class CoreSupervisor {
                 return .active(transactionID: jTxID)
 
             case "RolledBack":
+                // 真实回滚终态全要素校验
+                let sourceRel = (jObj["source_release_id"] as? String) ?? "none"
+                if sourceRel == "none" {
+                    var lStat = stat()
+                    if lstat(currentLinkURL.path, &lStat) == 0 {
+                        return .recoveryRequired
+                    }
+                } else {
+                    guard verifyCurrentLinkTarget(expectedReleaseID: sourceRel) else {
+                        return .recoveryRequired
+                    }
+                }
+
                 if let atid = activeTxID {
                     return .active(transactionID: atid)
                 }
@@ -322,50 +401,39 @@ public final class CoreSupervisor {
 
             case "Committed":
                 // 终态全要素二次只读核验：严禁仅凭 Committed 标签放行！
-                // a. 校验 current_release.json
+                // a. 读取并校验 current_release.json（严格 O_NOFOLLOW / 0600 / UID 匹配）
                 let recordURL = journalURL.deletingLastPathComponent().appendingPathComponent("current_release.json")
-                var rStat = stat()
-                guard lstat(recordURL.path, &rStat) == 0,
-                      (rStat.st_mode & S_IFMT) == S_IFREG,
-                      rStat.st_uid == geteuid(),
-                      (rStat.st_mode & 0o777) == 0o600 else {
-                    return .recoveryRequired
-                }
-                guard let rData = try? Data(contentsOf: recordURL),
-                      let rObj = (try? JSONSerialization.jsonObject(with: rData, options: [])) as? [String: Any],
+                let (rData, rErr) = readLimitedPrivateFile(url: recordURL, maxBytes: 64 * 1024)
+                guard rErr == nil, let rBytes = rData,
+                      let rObj = (try? JSONSerialization.jsonObject(with: rBytes, options: [])) as? [String: Any],
+                      let rSchema = rObj["record_schema"] as? NSNumber,
+                      CFGetTypeID(rSchema) != CFBooleanGetTypeID(),
+                      rSchema.intValue == 1,
                       let rTxID = rObj["tx_id"] as? String,
                       let rReleaseID = rObj["release_id"] as? String,
-                      let rSeq = (rObj["sequence"] as? NSNumber)?.uint64Value,
-                      let jTargetRel = jObj["target_release_id"] as? String,
-                      let jTargetSeq = (jObj["target_sequence"] as? NSNumber)?.uint64Value else {
+                      let rSeqNum = rObj["sequence"] as? NSNumber,
+                      CFGetTypeID(rSeqNum) != CFBooleanGetTypeID(),
+                      rSeqNum.int64Value >= 0 else {
                     return .recoveryRequired
-                }
-                guard rTxID == jTxID, rReleaseID == jTargetRel, rSeq == jTargetSeq else {
-                    return .recoveryRequired
-                }
-                if let jDigest = jObj["manifest_digest"] as? String {
-                    guard let rDigest = rObj["manifest_digest"] as? String, rDigest == jDigest else {
-                        return .recoveryRequired
-                    }
                 }
 
-                // b. 校验 current 软链接与目标目录
-                var linkStat = stat()
-                guard lstat(currentLinkURL.path, &linkStat) == 0,
-                      (linkStat.st_mode & S_IFMT) == S_IFLNK else {
+                guard rTxID == jTxID,
+                      rReleaseID == jTargetRel,
+                      rSeqNum.uint64Value == jTargetSeqNum.uint64Value else {
                     return .recoveryRequired
                 }
-                guard let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: currentLinkURL.path) else {
+
+                // 必需 digest 格式与匹配校验（严禁跳过）
+                guard let jDigest = jObj["manifest_digest"] as? String,
+                      jDigest.count == 64,
+                      jDigest.allSatisfy({ ($0 >= "0" && $0 <= "9") || ($0 >= "a" && $0 <= "f") }),
+                      let rDigest = rObj["manifest_digest"] as? String,
+                      rDigest == jDigest else {
                     return .recoveryRequired
                 }
-                let targetLeaf = URL(fileURLWithPath: destination).lastPathComponent
-                guard targetLeaf == jTargetRel else {
-                    return .recoveryRequired
-                }
-                var destDirStat = stat()
-                let targetDirPath = releasesDirURL.appendingPathComponent(targetLeaf).path
-                guard stat(targetDirPath, &destDirStat) == 0,
-                      (destDirStat.st_mode & S_IFMT) == S_IFDIR else {
+
+                // b. 校验 current 软链接物理目标（拒绝外部目录逃逸或悬空）
+                guard verifyCurrentLinkTarget(expectedReleaseID: jTargetRel) else {
                     return .recoveryRequired
                 }
 
@@ -379,7 +447,7 @@ public final class CoreSupervisor {
                 return .recoveryRequired
             }
         } else {
-            // journal 不存在
+            // journal 不存在 (ENOENT)
             if let atid = activeTxID {
                 return .active(transactionID: atid)
             }
