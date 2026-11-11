@@ -1029,8 +1029,8 @@ pub enum StartupDualCheckDecision {
 /// 纯只读启动双检查 Guard（零写入、零删除、零副作用、防 TOCTOU）
 pub fn check_startup_guard_readonly(
     state_dir: &Path,
-    releases_dir: &Path,
-    current_link: &Path,
+    releases_dir: Option<&Path>,
+    current_link: Option<&Path>,
 ) -> StartupDualCheckDecision {
     // 1. 检查 core.maintenance（安全打开 + fstat 校验）
     let maint_path = state_dir.join("core.maintenance");
@@ -1125,6 +1125,13 @@ pub fn check_startup_guard_readonly(
                 }
                 TransactionStage::Committed => {
                     // 终态全要素二次只读核验：严禁仅凭 Committed 标签放行！
+                    let (Some(releases_dir), Some(current_link)) = (releases_dir, current_link)
+                    else {
+                        return StartupDualCheckDecision::RecoveryRequired {
+                            reason: "unconfigured_production_install_root: formal releases_dir and current_link are required".into(),
+                        };
+                    };
+
                     // a. 读取并校验 current_release.json
                     let record_path = state_dir.join("current_release.json");
                     let rec_bytes = match read_limited_private_file(&record_path, 64 * 1024) {

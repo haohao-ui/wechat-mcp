@@ -136,16 +136,155 @@ fn now_secs() -> f64 {
         .as_secs_f64()
 }
 
+#[cfg(test)]
+#[derive(Debug)]
+struct OwnedSocketDir {
+    dir: PathBuf,
+    dev: u64,
+    ino: u64,
+}
+
+#[cfg(test)]
+impl Drop for OwnedSocketDir {
+    fn drop(&mut self) {
+        if let Ok(meta) = fs::symlink_metadata(&self.dir) {
+            let file_type = meta.file_type();
+            if file_type.is_symlink() {
+                let _ = fs::remove_file(&self.dir);
+            } else if file_type.is_dir() {
+                use std::os::unix::fs::MetadataExt;
+                if meta.dev() == self.dev && meta.ino() == self.ino {
+                    let _ = fs::remove_dir_all(&self.dir);
+                } else {
+                    eprintln!(
+                        "[WARN] OwnedSocketDir drop skipped: directory identity mismatch for {} (expected dev={}, ino={}, actual dev={}, ino={})",
+                        self.dir.display(),
+                        self.dev,
+                        self.ino,
+                        meta.dev(),
+                        meta.ino()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ServePaths {
+    pub home: PathBuf,
+    pub core_sock: PathBuf,
+    pub worker_sock: PathBuf,
+    pub bot_worker_sock: PathBuf,
+    pub gateway_db: Option<Option<PathBuf>>,
+    #[cfg(test)]
+    #[allow(dead_code)]
+    temp_dir_guard: Option<std::sync::Arc<OwnedSocketDir>>,
+}
+
+impl ServePaths {
+    pub(crate) fn from_values(home: Option<&str>, core_sock: Option<&str>) -> Self {
+        let home_path = home
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let base_dir = home_path.join(".wechat-rpa");
+        let worker_sock = base_dir.join("worker.sock");
+        let bot_worker_sock = base_dir.join("bot-worker.sock");
+
+        let resolved_core_sock = match core_sock {
+            Some(sock) if !sock.trim().is_empty() => PathBuf::from(sock),
+            _ => {
+                let default_home = home.unwrap_or("/");
+                PathBuf::from(default_home)
+                    .join(".wechat-rpa")
+                    .join("core.sock")
+            }
+        };
+
+        Self {
+            home: home_path,
+            core_sock: resolved_core_sock,
+            worker_sock,
+            bot_worker_sock,
+            gateway_db: None,
+            #[cfg(test)]
+            temp_dir_guard: None,
+        }
+    }
+
+    pub fn from_env() -> Self {
+        let home = std::env::var("HOME").ok();
+        let core_sock = std::env::var("WECHAT_CORE_SOCK").ok();
+        Self::from_values(home.as_deref(), core_sock.as_deref())
+    }
+
+    pub fn try_isolated(dir: &Path) -> Result<Self> {
+        let base_dir = dir.join(".wechat-rpa");
+        fs::create_dir_all(&base_dir)
+            .with_context(|| format!("failed to create base dir {}", base_dir.display()))?;
+        fs::set_permissions(&base_dir, fs::Permissions::from_mode(0o700)).with_context(|| {
+            format!(
+                "failed to set permissions for base dir {}",
+                base_dir.display()
+            )
+        })?;
+
+        // Unix domain socket 路径受 sockaddr_un.sun_path 限制（macOS 上为 104 字节）。
+        // 测试临时目录路径通常较深，因此 socket 统一挂在短前缀 /tmp/wc_{uuid} 下。
+        let short_id = uuid::Uuid::new_v4().simple();
+        let sock_dir = PathBuf::from(format!("/tmp/wc_{short_id}"));
+        fs::create_dir(&sock_dir).with_context(|| {
+            format!("failed to create isolated sock dir {}", sock_dir.display())
+        })?;
+        fs::set_permissions(&sock_dir, fs::Permissions::from_mode(0o700)).with_context(|| {
+            format!(
+                "failed to set permissions for sock dir {}",
+                sock_dir.display()
+            )
+        })?;
+
+        let meta = fs::symlink_metadata(&sock_dir)
+            .with_context(|| format!("failed to stat isolated sock dir {}", sock_dir.display()))?;
+        use std::os::unix::fs::MetadataExt;
+        let dev = meta.dev();
+        let ino = meta.ino();
+
+        Ok(Self {
+            home: dir.to_path_buf(),
+            core_sock: sock_dir.join("c.sock"),
+            worker_sock: sock_dir.join("w.sock"),
+            bot_worker_sock: sock_dir.join("bw.sock"),
+            gateway_db: None,
+            #[cfg(test)]
+            temp_dir_guard: Some(std::sync::Arc::new(OwnedSocketDir {
+                dir: sock_dir,
+                dev,
+                ino,
+            })),
+        })
+    }
+
+    pub fn isolated(dir: &Path) -> Self {
+        Self::try_isolated(dir).expect("isolated ServePaths creation must succeed")
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn socket_dir(&self) -> Option<PathBuf> {
+        self.temp_dir_guard.as_ref().map(|g| g.dir.clone())
+    }
+}
+
 /// 启动守卫路径定义（严格区分状态根与安装根）
 #[derive(Debug, Clone)]
-pub struct StartupGuardPaths {
+pub(crate) struct StartupGuardPaths {
     pub state_dir: PathBuf,
     pub releases_dir: Option<PathBuf>,
     pub current_link: Option<PathBuf>,
 }
 
 impl StartupGuardPaths {
-    pub fn from_state_dir(state_dir: &Path) -> Self {
+    pub(crate) fn from_state_dir(state_dir: &Path) -> Self {
         Self {
             state_dir: state_dir.to_path_buf(),
             releases_dir: None,
@@ -153,7 +292,12 @@ impl StartupGuardPaths {
         }
     }
 
-    pub fn with_install_root(state_dir: &Path, releases_dir: &Path, current_link: &Path) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_install_root(
+        state_dir: &Path,
+        releases_dir: &Path,
+        current_link: &Path,
+    ) -> Self {
         Self {
             state_dir: state_dir.to_path_buf(),
             releases_dir: Some(releases_dir.to_path_buf()),
@@ -162,27 +306,14 @@ impl StartupGuardPaths {
     }
 }
 
-pub fn verify_serve_core_startup_guard_in_lock(
+pub(crate) fn verify_serve_core_startup_guard_in_lock(
     paths: &StartupGuardPaths,
     core_lock: File,
 ) -> Result<File> {
-    if (paths.releases_dir.is_none() || paths.current_link.is_none())
-        && paths.state_dir.join("update-journal.json").exists()
-    {
-        drop(core_lock);
-        bail!(
-            "startup_guard_blocked: unconfigured_production_install_root: formal releases_dir and current_link are required"
-        );
-    }
-
-    let dummy_fallback = paths.state_dir.join("__unconfigured_install_root__");
-    let releases_dir = paths.releases_dir.as_deref().unwrap_or(&dummy_fallback);
-    let current_link = paths.current_link.as_deref().unwrap_or(&dummy_fallback);
-
     let decision = crate::updater::journal::check_startup_guard_readonly(
         &paths.state_dir,
-        releases_dir,
-        current_link,
+        paths.releases_dir.as_deref(),
+        paths.current_link.as_deref(),
     );
 
     match decision {
@@ -214,7 +345,7 @@ pub async fn run_serve_core(
     config_path: &Path,
     stop_rx: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> Result<i32> {
-    run_serve_core_with_guard_paths(config_path, stop_rx, AccountSource::Config, None).await
+    run_serve_core_with(config_path, stop_rx, AccountSource::Config).await
 }
 
 pub async fn run_serve_core_with(
@@ -222,13 +353,35 @@ pub async fn run_serve_core_with(
     stop_rx: Option<tokio::sync::watch::Receiver<bool>>,
     source: AccountSource,
 ) -> Result<i32> {
-    run_serve_core_with_guard_paths(config_path, stop_rx, source, None).await
+    let paths = ServePaths::from_env();
+    run_serve_core_with_paths(config_path, stop_rx, source, &paths).await
 }
 
-pub async fn run_serve_core_with_guard_paths(
+pub async fn run_serve_core_with_paths(
+    config_path: &Path,
+    stop_rx: Option<tokio::sync::watch::Receiver<bool>>,
+    source: AccountSource,
+    paths: &ServePaths,
+) -> Result<i32> {
+    run_serve_core_internal(config_path, stop_rx, source, paths, None).await
+}
+
+#[cfg(test)]
+pub(crate) async fn run_serve_core_for_test(
+    config_path: &Path,
+    stop_rx: Option<tokio::sync::watch::Receiver<bool>>,
+    source: AccountSource,
+    paths: &ServePaths,
+    guard_paths: Option<StartupGuardPaths>,
+) -> Result<i32> {
+    run_serve_core_internal(config_path, stop_rx, source, paths, guard_paths).await
+}
+
+async fn run_serve_core_internal(
     config_path: &Path,
     mut stop_rx: Option<tokio::sync::watch::Receiver<bool>>,
     source: AccountSource,
+    paths: &ServePaths,
     guard_paths: Option<StartupGuardPaths>,
 ) -> Result<i32> {
     ensure_locale();
@@ -243,8 +396,8 @@ pub async fn run_serve_core_with_guard_paths(
         .with_context(|| format!("state lock error in {}", config.state_dir.display()))?;
 
     // 3. 锁内核验启动双检查 Guard（在任何微信探测、Worker 或业务 DB 副作用之前）
-    let paths = guard_paths.unwrap_or_else(|| StartupGuardPaths::from_state_dir(&config.state_dir));
-    let _core_lock = verify_serve_core_startup_guard_in_lock(&paths, core_lock)?;
+    let gp = guard_paths.unwrap_or_else(|| StartupGuardPaths::from_state_dir(&config.state_dir));
+    let _core_lock = verify_serve_core_startup_guard_in_lock(&gp, core_lock)?;
 
     loop {
         let account = match source {
@@ -287,7 +440,9 @@ pub async fn run_serve_core_with_guard_paths(
                 Some(acc)
             }
         };
-        match run_core_for_account(config_path, &config, &mut stop_rx, source, account).await? {
+        match run_core_for_account(config_path, &config, &mut stop_rx, source, account, paths)
+            .await?
+        {
             CoreRunEnd::Exit(code) => return Ok(code),
             CoreRunEnd::AccountChanged => continue,
         }
@@ -300,12 +455,14 @@ async fn run_core_for_account(
     stop_rx: &mut Option<tokio::sync::watch::Receiver<bool>>,
     source: AccountSource,
     account: Option<String>,
+    paths: &ServePaths,
 ) -> Result<CoreRunEnd> {
     // 3. 构造外部大脑并启动 core.sock
-    let external_brain = ExternalBrain::new(
+    let external_brain = ExternalBrain::new_with_socket(
         &config.brain,
         &config.model_config,
         config.state_dir.clone(),
+        paths.core_sock.clone(),
     );
     let sock_path = external_brain.socket_path.clone();
     let listener = bind_core_socket(&sock_path)?;
@@ -345,12 +502,9 @@ async fn run_core_for_account(
     let stop_ptr = std::sync::Arc::into_raw(coordinator.stop.clone()) as *mut AtomicBool;
     SHARED_STOP.store(stop_ptr, Ordering::SeqCst);
 
-    let home = std::env::var("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let base_dir = home.join(".wechat-rpa");
-    let worker_sock = base_dir.join("worker.sock");
-    let bot_worker_sock = base_dir.join("bot-worker.sock");
+    let base_dir = paths.home.join(".wechat-rpa");
+    let worker_sock = paths.worker_sock.clone();
+    let bot_worker_sock = paths.bot_worker_sock.clone();
 
     // 网关里登记的是配置里的账号名（设备绑定），不是数据归属的微信账号；用 wxid 会"未注册账号"连不上（2026-11-08 实机）
     let mcp_client = std::sync::Arc::new(McpSocketClient::new(
@@ -904,23 +1058,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_serve_core_blocked_by_startup_guard_maintenance() {
-        let _guard = crate::core::env_lock();
         let dir = TempDir::new();
         let _gw = isolate_gateway(&dir);
         let (cfg_path, state_dir) = write_test_config(dir.path());
+        let serve_paths = ServePaths::isolated(dir.path());
 
         // 写入 36 字节合法 UUID 维护标志
         let maint_file = state_dir.join("core.maintenance");
         fs::write(&maint_file, b"12345678-1234-4234-8234-123456789abc").unwrap();
         fs::set_permissions(&maint_file, fs::Permissions::from_mode(0o600)).unwrap();
 
-        // 真实调用 run_serve_core 入口（必须被启动守卫阻断返回 Err，且非 0）
+        // 真实调用 run_serve_core_with_paths 入口（必须在进入业务前被启动守卫阻断返回 Err，且非 0）
         let (tx, rx) = tokio::sync::watch::channel(false);
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            let _ = tx.send(true);
-        });
-        let res = run_serve_core(&cfg_path, Some(rx)).await;
+        let res = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_serve_core_with_paths(&cfg_path, Some(rx), AccountSource::Config, &serve_paths),
+        )
+        .await
+        .expect("test timed out");
+
         assert!(
             res.is_err(),
             "run_serve_core must fail when maintenance is active"
@@ -928,27 +1084,43 @@ mod tests {
         let err_msg = res.err().unwrap().to_string();
         assert!(err_msg.contains("startup_suppressed_by_maintenance"));
 
+        // 验证零业务副作用：未初始化 core.sock、未生成 health.json、未写事件
+        assert!(
+            !serve_paths.core_sock.exists(),
+            "core.sock must NOT be bound when maintenance blocks startup"
+        );
+        assert!(
+            !state_dir.join("health.json").exists(),
+            "health.json must NOT exist when maintenance blocks startup"
+        );
+        assert!(
+            !state_dir.join("events.jsonl").exists(),
+            "events.jsonl must NOT exist"
+        );
+
         // 验证 core.lock 必须被干净释放，其他进程可以立即获取
         let lock_check = acquire_core_lock(&state_dir);
         assert!(
             lock_check.is_ok(),
             "core.lock must be released after guard suppression"
         );
+        let _ = tx.send(true);
     }
 
     #[tokio::test]
     async fn test_run_serve_core_blocked_by_recovery_required_on_corrupt_journal() {
-        let _guard = crate::core::env_lock();
         let dir = TempDir::new();
         let _gw = isolate_gateway(&dir);
         let (cfg_path, state_dir) = write_test_config(dir.path());
+        let serve_paths = ServePaths::isolated(dir.path());
 
         let releases_dir = dir.path().join("releases");
         let release_1 = releases_dir.join("1.0.0");
         fs::create_dir_all(&release_1).unwrap();
         let current_link = dir.path().join("current");
         std::os::unix::fs::symlink(&release_1, &current_link).unwrap();
-        let paths = StartupGuardPaths::with_install_root(&state_dir, &releases_dir, &current_link);
+        let guard_paths =
+            StartupGuardPaths::with_install_root(&state_dir, &releases_dir, &current_link);
 
         // 写入损坏格式的 update-journal.json
         let journal_file = state_dir.join("update-journal.json");
@@ -956,17 +1128,19 @@ mod tests {
         fs::set_permissions(&journal_file, fs::Permissions::from_mode(0o600)).unwrap();
 
         let (tx, rx) = tokio::sync::watch::channel(false);
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            let _ = tx.send(true);
-        });
-        let res = run_serve_core_with_guard_paths(
-            &cfg_path,
-            Some(rx),
-            AccountSource::Config,
-            Some(paths),
+        let res = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_serve_core_for_test(
+                &cfg_path,
+                Some(rx),
+                AccountSource::Config,
+                &serve_paths,
+                Some(guard_paths),
+            ),
         )
-        .await;
+        .await
+        .expect("test timed out");
+
         assert!(
             res.is_err(),
             "run_serve_core must fail when journal is corrupt"
@@ -974,27 +1148,39 @@ mod tests {
         let err_msg = res.err().unwrap().to_string();
         assert!(err_msg.contains("startup_blocked_recovery_required"));
 
+        // 零业务副作用验证
+        assert!(
+            !serve_paths.core_sock.exists(),
+            "core.sock must NOT be bound on corrupt journal"
+        );
+        assert!(
+            !state_dir.join("health.json").exists(),
+            "health.json must NOT exist on corrupt journal"
+        );
+
         // 验证 core.lock 必须被干净释放
         let lock_check = acquire_core_lock(&state_dir);
         assert!(
             lock_check.is_ok(),
             "core.lock must be released after recovery required"
         );
+        let _ = tx.send(true);
     }
 
     #[tokio::test]
     async fn test_run_serve_core_blocked_by_rolled_back_stage() {
-        let _guard = crate::core::env_lock();
         let dir = TempDir::new();
         let _gw = isolate_gateway(&dir);
         let (cfg_path, state_dir) = write_test_config(dir.path());
+        let serve_paths = ServePaths::isolated(dir.path());
 
         let releases_dir = dir.path().join("releases");
         let release_1 = releases_dir.join("1.0.0");
         fs::create_dir_all(&release_1).unwrap();
         let current_link = dir.path().join("current");
         std::os::unix::fs::symlink(&release_1, &current_link).unwrap();
-        let paths = StartupGuardPaths::with_install_root(&state_dir, &releases_dir, &current_link);
+        let guard_paths =
+            StartupGuardPaths::with_install_root(&state_dir, &releases_dir, &current_link);
 
         let mut journal = crate::updater::journal::UpdateJournal::new(
             "00000000-0000-4000-8000-000000000001",
@@ -1007,17 +1193,19 @@ mod tests {
         journal.persist_atomic(&state_dir).unwrap();
 
         let (tx, rx) = tokio::sync::watch::channel(false);
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            let _ = tx.send(true);
-        });
-        let res = run_serve_core_with_guard_paths(
-            &cfg_path,
-            Some(rx),
-            AccountSource::Config,
-            Some(paths),
+        let res = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_serve_core_for_test(
+                &cfg_path,
+                Some(rx),
+                AccountSource::Config,
+                &serve_paths,
+                Some(guard_paths),
+            ),
         )
-        .await;
+        .await
+        .expect("test timed out");
+
         assert!(
             res.is_err(),
             "run_serve_core must fail when stage is RolledBack"
@@ -1025,19 +1213,24 @@ mod tests {
         let err_msg = res.err().unwrap().to_string();
         assert!(err_msg.contains("startup_blocked_recovery_required"));
 
+        // 零业务副作用验证
+        assert!(!serve_paths.core_sock.exists());
+        assert!(!state_dir.join("health.json").exists());
+
         let lock_check = acquire_core_lock(&state_dir);
         assert!(
             lock_check.is_ok(),
             "core.lock must be released after guard suppression"
         );
+        let _ = tx.send(true);
     }
 
     #[tokio::test]
-    async fn test_run_serve_core_blocked_by_unconfigured_install_root_when_journal_exists() {
-        let _guard = crate::core::env_lock();
+    async fn test_run_serve_core_committed_with_unknown_install_root_fails_closed() {
         let dir = TempDir::new();
         let _gw = isolate_gateway(&dir);
         let (cfg_path, state_dir) = write_test_config(dir.path());
+        let serve_paths = ServePaths::isolated(dir.path());
 
         let mut journal = crate::updater::journal::UpdateJournal::new(
             "00000000-0000-4000-8000-000000000002",
@@ -1051,45 +1244,105 @@ mod tests {
             Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string());
         journal.persist_atomic(&state_dir).unwrap();
 
+        // 默认生产路径（未知安装根，releases_dir: None）直接调用
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let res = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_serve_core_with_paths(&cfg_path, Some(rx), AccountSource::Config, &serve_paths),
+        )
+        .await
+        .expect("test timed out");
+
+        assert!(
+            res.is_err(),
+            "committed release with unknown install root must fail closed"
+        );
+        let err_msg = res.err().unwrap().to_string();
+        assert!(
+            err_msg.contains("unconfigured_production_install_root")
+                || err_msg.contains("startup_blocked_recovery_required"),
+            "unexpected error message: {}",
+            err_msg
+        );
+
+        // 零业务副作用验证
+        assert!(!serve_paths.core_sock.exists());
+        assert!(!state_dir.join("health.json").exists());
+
+        let lock_check = acquire_core_lock(&state_dir);
+        assert!(lock_check.is_ok(), "core.lock must be released");
+        let _ = tx.send(true);
+    }
+
+    #[tokio::test]
+    async fn test_run_serve_core_empty_state_allows_startup() {
+        let dir = TempDir::new();
+        let _gw = isolate_gateway(&dir);
+        let (cfg_path, state_dir) = write_test_config(dir.path());
+        let serve_paths = ServePaths::isolated(dir.path());
+
         let (tx, rx) = tokio::sync::watch::channel(false);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let _ = tx.send(true);
         });
-        let res = run_serve_core(&cfg_path, Some(rx)).await;
-        assert!(res.is_err());
-        let err_msg = res.err().unwrap().to_string();
-        assert!(err_msg.contains("unconfigured_production_install_root"));
+
+        // 纯净空状态（无 maintenance，无 journal），正常放行启动并优雅停机
+        let res = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_serve_core_with_paths(&cfg_path, Some(rx), AccountSource::Config, &serve_paths),
+        )
+        .await
+        .expect("test timed out");
+
+        assert!(
+            res.is_ok(),
+            "empty state must allow startup: {:?}",
+            res.err()
+        );
+        assert_eq!(res.unwrap(), 0);
 
         let lock_check = acquire_core_lock(&state_dir);
-        assert!(lock_check.is_ok(), "core.lock must be released");
+        assert!(
+            lock_check.is_ok(),
+            "core.lock must be released after normal shutdown"
+        );
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn test_run_serve_core_allows_startup_with_injected_paths() {
-        let _guard = crate::core::env_lock();
+    async fn test_run_serve_core_allows_startup_with_committed_release() {
         let dir = TempDir::new();
         let _gw = isolate_gateway(&dir);
         let (cfg_path, state_dir) = write_test_config(dir.path());
+        let serve_paths = ServePaths::isolated(dir.path());
 
         let releases_dir = dir.path().join("releases");
-        let release_1 = releases_dir.join("rel-1");
+        let release_1 = releases_dir.join("1.0.1");
         fs::create_dir_all(&release_1).unwrap();
         let current_link = dir.path().join("current");
         std::os::unix::fs::symlink(&release_1, &current_link).unwrap();
 
-        let paths = StartupGuardPaths::with_install_root(&state_dir, &releases_dir, &current_link);
+        let tx_id = "00000000-0000-4000-8000-000000000003";
+        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let mut journal =
+            crate::updater::journal::UpdateJournal::new(tx_id, "1.0.0", "1.0.1", 2, 1000);
+        journal.stage = crate::updater::journal::TransactionStage::Committed;
+        journal.manifest_digest = Some(digest.to_string());
+        journal.persist_atomic(&state_dir).unwrap();
 
-        let pid = std::process::id();
-        let count = uuid::Uuid::new_v4().simple();
-        let sock_dir = PathBuf::from(format!("/tmp/sg_ok_{pid}_{count}"));
-        fs::create_dir_all(&sock_dir).unwrap();
-        fs::set_permissions(&sock_dir, fs::Permissions::from_mode(0o700)).unwrap();
-        let sock_path = sock_dir.join("core.sock");
-        unsafe {
-            std::env::set_var("WECHAT_CORE_SOCK", &sock_path);
-        }
+        let record = crate::updater::journal::CurrentReleaseCommitRecord {
+            record_schema: 1,
+            tx_id: tx_id.to_string(),
+            release_id: "1.0.1".to_string(),
+            sequence: 2,
+            channel: "stable".to_string(),
+            manifest_digest: digest.to_string(),
+            installed_at: 1000,
+        };
+        crate::updater::journal::atomic_commit_release_record(&state_dir, &record).unwrap();
+
+        let guard_paths =
+            StartupGuardPaths::with_install_root(&state_dir, &releases_dir, &current_link);
 
         let (tx, rx) = tokio::sync::watch::channel(false);
         tokio::spawn(async move {
@@ -1097,16 +1350,23 @@ mod tests {
             let _ = tx.send(true);
         });
 
-        let res = run_serve_core_with_guard_paths(
-            &cfg_path,
-            Some(rx),
-            AccountSource::Config,
-            Some(paths),
+        // 注入合法全要素安装根，启动双检查通过并优雅停机
+        let res = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_serve_core_for_test(
+                &cfg_path,
+                Some(rx),
+                AccountSource::Config,
+                &serve_paths,
+                Some(guard_paths),
+            ),
         )
-        .await;
+        .await
+        .expect("test timed out");
+
         assert!(
             res.is_ok(),
-            "run_serve_core must succeed when guard allows startup: {:?}",
+            "committed release with verified install root must succeed: {:?}",
             res.err()
         );
         assert_eq!(res.unwrap(), 0);
@@ -1182,21 +1442,12 @@ mod tests {
         let _lock = crate::core::env_lock();
         let dir = TempDir::new();
         let _gw = isolate_gateway(&dir);
+        let paths = ServePaths::isolated(dir.path());
         let (cfg_path, state_dir) = write_test_config(dir.path());
 
         let config = BotConfig::load(&cfg_path).unwrap();
         assert_eq!(config.history_http.bind, "127.0.0.1");
         let port = config.history_http.port;
-
-        let pid = std::process::id();
-        let count = uuid::Uuid::new_v4().simple();
-        let sock_dir = PathBuf::from(format!("/tmp/sh_{pid}_{count}"));
-        fs::create_dir_all(&sock_dir).unwrap();
-        fs::set_permissions(&sock_dir, fs::Permissions::from_mode(0o700)).unwrap();
-        let sock_path = sock_dir.join("core.sock");
-        unsafe {
-            std::env::set_var("WECHAT_CORE_SOCK", &sock_path);
-        }
 
         let (tx, rx) = tokio::sync::watch::channel(false);
 
@@ -1245,7 +1496,9 @@ mod tests {
             let _ = tx.send(true);
         });
 
-        let code = run_serve_core(&cfg_path, Some(rx)).await.unwrap();
+        let code = run_serve_core_with_paths(&cfg_path, Some(rx), AccountSource::Config, &paths)
+            .await
+            .unwrap();
         assert_eq!(code, 0);
 
         http_client_task.await.unwrap();
@@ -1253,11 +1506,6 @@ mod tests {
         // 验证停止后端口关闭
         let after = std::net::TcpStream::connect(("127.0.0.1", port));
         assert!(after.is_err(), "History HTTP server should be stopped");
-
-        let _ = fs::remove_dir_all(&sock_dir);
-        unsafe {
-            std::env::remove_var("WECHAT_CORE_SOCK");
-        }
     }
 
     #[tokio::test]

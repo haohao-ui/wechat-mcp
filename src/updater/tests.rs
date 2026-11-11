@@ -2069,7 +2069,8 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
     let tx_id = format!("tx-{}", tx_uuid);
 
     // 0. 初始空状态测试：纯只读双检查返回 AllowStartup
-    let init_decision = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    let init_decision =
+        check_startup_guard_readonly(state_dir, Some(&releases_dir), Some(&current_link));
     assert_eq!(init_decision, StartupDualCheckDecision::AllowStartup);
 
     // 1. 写入结构化维护标志
@@ -2099,7 +2100,8 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
     );
 
     // 此时双检查必须返回 MaintenanceSuppressed
-    let sup_decision = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    let sup_decision =
+        check_startup_guard_readonly(state_dir, Some(&releases_dir), Some(&current_link));
     assert_eq!(
         sup_decision,
         StartupDualCheckDecision::MaintenanceSuppressed {
@@ -2123,14 +2125,16 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
         !raw_maint.exists(),
         "core.maintenance should be removed after clean"
     );
-    let after_clean = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    let after_clean =
+        check_startup_guard_readonly(state_dir, Some(&releases_dir), Some(&current_link));
     assert_eq!(after_clean, StartupDualCheckDecision::AllowStartup);
 
     // 3. 损坏对抗场景测试
     // 3a. core.maintenance 大小不是 36 字节
     fs::write(&raw_maint, b"too_short").unwrap();
     fs::set_permissions(&raw_maint, fs::Permissions::from_mode(0o600)).unwrap();
-    let dec_short = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    let dec_short =
+        check_startup_guard_readonly(state_dir, Some(&releases_dir), Some(&current_link));
     match dec_short {
         StartupDualCheckDecision::RecoveryRequired { reason } => {
             assert!(reason.contains("size_must_be_36_bytes"));
@@ -2141,7 +2145,8 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
     // 3b. core.maintenance 包含非合法 UUID（恰好 36 字节但字符非法）
     fs::write(&raw_maint, b"12345678-1234-1234-1234-123456789zz!").unwrap();
     fs::set_permissions(&raw_maint, fs::Permissions::from_mode(0o600)).unwrap();
-    let dec_bad_uuid = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    let dec_bad_uuid =
+        check_startup_guard_readonly(state_dir, Some(&releases_dir), Some(&current_link));
     match dec_bad_uuid {
         StartupDualCheckDecision::RecoveryRequired { reason } => {
             assert!(reason.contains("content_not_valid_uuid"));
@@ -2154,7 +2159,7 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
     let dummy_target = state_dir.join("dummy_target");
     fs::write(&dummy_target, b"test").unwrap();
     std::os::unix::fs::symlink(&dummy_target, &raw_maint).unwrap();
-    let dec_sym = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    let dec_sym = check_startup_guard_readonly(state_dir, Some(&releases_dir), Some(&current_link));
     match dec_sym {
         StartupDualCheckDecision::RecoveryRequired { reason } => {
             assert!(
@@ -2172,7 +2177,8 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
     // 4a. 中间状态 (Draining) -> MaintenanceSuppressed
     journal.stage = TransactionStage::Draining;
     journal.persist_atomic(state_dir).unwrap();
-    let dec_draining = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    let dec_draining =
+        check_startup_guard_readonly(state_dir, Some(&releases_dir), Some(&current_link));
     assert_eq!(
         dec_draining,
         StartupDualCheckDecision::MaintenanceSuppressed {
@@ -2186,7 +2192,8 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
     let valid_sha256 = "a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4e5f67890";
     journal.manifest_digest = Some(valid_sha256.into());
     journal.persist_atomic(state_dir).unwrap();
-    let dec_missing_rec = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    let dec_missing_rec =
+        check_startup_guard_readonly(state_dir, Some(&releases_dir), Some(&current_link));
     match dec_missing_rec {
         StartupDualCheckDecision::RecoveryRequired { reason } => {
             assert!(reason.contains("missing_current_release_record"));
@@ -2205,7 +2212,8 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
         installed_at: 1794380000,
     };
     atomic_commit_release_record(state_dir, &commit_rec).unwrap();
-    let dec_seq_mismatch = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    let dec_seq_mismatch =
+        check_startup_guard_readonly(state_dir, Some(&releases_dir), Some(&current_link));
     match dec_seq_mismatch {
         StartupDualCheckDecision::RecoveryRequired { reason } => {
             assert!(reason.contains("commit_record_sequence_mismatch"));
@@ -2219,7 +2227,8 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
         ..commit_rec
     };
     atomic_commit_release_record(state_dir, &correct_rec).unwrap();
-    let dec_missing_link = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    let dec_missing_link =
+        check_startup_guard_readonly(state_dir, Some(&releases_dir), Some(&current_link));
     match dec_missing_link {
         StartupDualCheckDecision::RecoveryRequired { reason } => {
             assert!(reason.contains("current_link_does_not_exist"));
@@ -2233,7 +2242,8 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
     std::os::unix::fs::symlink(&target_dir, &current_link).unwrap();
 
     // 全要素核对通过！
-    let dec_all_match = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    let dec_all_match =
+        check_startup_guard_readonly(state_dir, Some(&releases_dir), Some(&current_link));
     assert_eq!(dec_all_match, StartupDualCheckDecision::AllowStartup);
 
     // 4f. 防 /tmp 外部目录逃逸：若 current 指向 /tmp 下同名目录，必须 Fail-Closed
@@ -2241,7 +2251,8 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
     fs::create_dir_all(&escape_target).unwrap();
     fs::remove_file(&current_link).unwrap();
     std::os::unix::fs::symlink(&escape_target, &current_link).unwrap();
-    let dec_escape = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    let dec_escape =
+        check_startup_guard_readonly(state_dir, Some(&releases_dir), Some(&current_link));
     match dec_escape {
         StartupDualCheckDecision::RecoveryRequired { reason } => {
             assert!(
@@ -2260,7 +2271,8 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
     fs::remove_dir(&target_dir).unwrap();
     std::os::unix::fs::symlink(&escape_target, &target_dir).unwrap();
     std::os::unix::fs::symlink(&escape_target, &current_link).unwrap();
-    let dec_symlink_release = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    let dec_symlink_release =
+        check_startup_guard_readonly(state_dir, Some(&releases_dir), Some(&current_link));
     match dec_symlink_release {
         StartupDualCheckDecision::RecoveryRequired { reason } => {
             assert!(reason.contains("expected_release_dir_must_not_be_symlink"));
@@ -2279,7 +2291,8 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
     // 4g. digest 格式非法（非 64 字符 hex）必须 failclosed
     journal.manifest_digest = Some("not_a_valid_hex_sha256".into());
     journal.persist_atomic(state_dir).unwrap();
-    let dec_bad_digest = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    let dec_bad_digest =
+        check_startup_guard_readonly(state_dir, Some(&releases_dir), Some(&current_link));
     match dec_bad_digest {
         StartupDualCheckDecision::RecoveryRequired { reason } => {
             assert!(reason.contains("invalid_manifest_digest_format"));
@@ -2293,7 +2306,8 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
     journal.stage = TransactionStage::RolledBack;
     journal.source_release_id = "0.1.0".into();
     journal.persist_atomic(state_dir).unwrap();
-    let dec_rollback = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    let dec_rollback =
+        check_startup_guard_readonly(state_dir, Some(&releases_dir), Some(&current_link));
     match dec_rollback {
         StartupDualCheckDecision::RecoveryRequired { reason } => {
             assert!(reason.contains("rolled_back_stage_requires_recovery_protocol"));
@@ -2307,7 +2321,8 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
     // 4h2. 即使 source_release_id 为 "none"，同样严格 RecoveryRequired
     journal.source_release_id = "none".into();
     journal.persist_atomic(state_dir).unwrap();
-    let dec_rollback_none = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    let dec_rollback_none =
+        check_startup_guard_readonly(state_dir, Some(&releases_dir), Some(&current_link));
     match dec_rollback_none {
         StartupDualCheckDecision::RecoveryRequired { reason } => {
             assert!(reason.contains("rolled_back_stage_requires_recovery_protocol"));
@@ -2324,7 +2339,7 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
     journal.manifest_digest = Some(valid_sha256.into());
     journal.persist_atomic(state_dir).unwrap();
     let dec_restore_committed =
-        check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+        check_startup_guard_readonly(state_dir, Some(&releases_dir), Some(&current_link));
     assert_eq!(
         dec_restore_committed,
         StartupDualCheckDecision::AllowStartup
@@ -2346,7 +2361,8 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
         serde_json::to_vec_pretty(&journal_raw_missing_schema).unwrap(),
     )
     .unwrap();
-    let dec_missing_schema = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    let dec_missing_schema =
+        check_startup_guard_readonly(state_dir, Some(&releases_dir), Some(&current_link));
     match dec_missing_schema {
         StartupDualCheckDecision::RecoveryRequired { reason } => {
             assert!(reason.contains("update-journal.json_corrupt_or_invalid"));
@@ -2371,10 +2387,26 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
 
     // 5. 纯只读性验证：检查前后 state 目录文件与元数据零副作用
     let files_before = fs::read_dir(state_dir).unwrap().count();
-    let _ = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    let _ = check_startup_guard_readonly(state_dir, Some(&releases_dir), Some(&current_link));
     let files_after = fs::read_dir(state_dir).unwrap().count();
     assert_eq!(
         files_before, files_after,
         "startup guard must have zero write side effects"
     );
+
+    // 6. 存在 Committed 事务但安装根未配置（None, None）-> 必须 Fail-Closed (RecoveryRequired)
+    let dec_unconfigured = check_startup_guard_readonly(state_dir, None, None);
+    match dec_unconfigured {
+        StartupDualCheckDecision::RecoveryRequired { reason } => {
+            assert!(
+                reason.contains("unconfigured_production_install_root"),
+                "unexpected reason: {}",
+                reason
+            );
+        }
+        other => panic!(
+            "Expected RecoveryRequired for unconfigured install root, got {:?}",
+            other
+        ),
+    }
 }
