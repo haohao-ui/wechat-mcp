@@ -2048,3 +2048,93 @@ fn test_atomic_commit_protocol_failure_and_crash_window_recovery() {
         other => panic!("Expected ManualInterventionRequired, got {:?}", other),
     }
 }
+
+#[test]
+fn test_real_built_release_package_verification_and_unlisted_rejection() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dist_dir = manifest_dir.join("target/test-dist");
+    if !dist_dir.exists() {
+        return;
+    }
+
+    let pubkey_path = dist_dir.join("test_pubkey.hex");
+    let envelope_path = dist_dir.join("envelope.json");
+    if !pubkey_path.exists() || !envelope_path.exists() {
+        return;
+    }
+
+    // 1. 读取真实导出的测试公钥并构造受信 Keystore
+    let pub_hex = fs::read_to_string(&pubkey_path).unwrap();
+    let trimmed_hex = pub_hex.trim();
+    assert_eq!(trimmed_hex.len(), 64);
+    let mut pubkey_bytes = Vec::with_capacity(32);
+    for i in (0..64).step_by(2) {
+        let b = u8::from_str_radix(&trimmed_hex[i..i + 2], 16).unwrap();
+        pubkey_bytes.push(b);
+    }
+    let key_store = TrustedKeyStore::new().with_key("test-root-v1", &pubkey_bytes);
+
+    // 2. 真实签名封套验签与清单解析
+    let env_bytes = fs::read(&envelope_path).unwrap();
+    let verified = VerifiedManifestEnvelope::verify_and_construct(
+        &env_bytes, &key_store, "arm64", "12.0", 1000,
+    )
+    .expect("Real built envelope must pass cryptographic verification");
+
+    let manifest = verified.manifest();
+    // 验证包含 15 个组件（含 gateway.test.json 与 gateway.example.json 两个 JSON 资源）
+    assert_eq!(manifest.components.len(), 15);
+    let json_components: Vec<_> = manifest
+        .components
+        .iter()
+        .filter(|c| c.path.ends_with(".json"))
+        .collect();
+    assert_eq!(json_components.len(), 2);
+    assert!(
+        json_components
+            .iter()
+            .any(|c| c.path == "Apps/微信客服助手.app/Contents/Resources/gateway.test.json")
+    );
+    assert!(
+        json_components
+            .iter()
+            .any(|c| c.path == "resources/gateway.example.json")
+    );
+
+    // 3. 真实归档文件哈希与大小核验
+    let tar_path = dist_dir.join(&manifest.artifact.filename);
+    assert!(tar_path.exists());
+    let tar_bytes = fs::read(&tar_path).unwrap();
+    assert_eq!(tar_bytes.len() as u64, manifest.artifact.size_bytes);
+    let actual_sha = calculate_sha256_bytes(&tar_bytes);
+    assert_eq!(actual_sha, manifest.artifact.sha256);
+
+    // 4. 真实受限流式解压与严格组件核验
+    let temp_staging = TempTestDir::new("real_pkg_staging");
+    safe_unpack_and_verify(
+        &tar_path,
+        &temp_staging.0,
+        &manifest.artifact,
+        &manifest.components,
+    )
+    .expect("Real built archive must safely unpack and strictly verify against manifest");
+
+    // 5. 负向验证：包内若存在任何未在 manifest 中列出的多余文件，必须严格拦截拒绝
+    let extra_file = temp_staging.0.join("resources/unlisted_payload.json");
+    fs::write(&extra_file, b"{\"unlisted\": true}").unwrap();
+    let err_unlisted =
+        safe_verify_staged_dir(&temp_staging.0, &manifest.artifact, &manifest.components)
+            .unwrap_err();
+    assert!(
+        err_unlisted
+            .to_string()
+            .contains("unexpected_file_in_staged_dir"),
+        "Unexpected error: {:?}",
+        err_unlisted
+    );
+    // 清理多余文件后恢复正常
+    fs::remove_file(&extra_file).unwrap();
+    assert!(
+        safe_verify_staged_dir(&temp_staging.0, &manifest.artifact, &manifest.components).is_ok()
+    );
+}
