@@ -215,7 +215,14 @@ public final class CoreSupervisor {
     private var process: Process?
     private var restartPolicy = RestartPolicy()
     private var manualStoppingPIDs = Set<Int32>()
-    private let maintenanceURL: URL
+    private(set) var maintenanceURL: URL
+    private var customMaintenanceURL = false
+    private var customJournalURL = false
+    private var customReleasesDirURL = false
+    private var customCurrentLinkURL = false
+    public var legacyStateDirURL: URL?
+    private var runningStateDir: String?
+    private var runningInstallRoot: String?
     // Process identity retained after stop; a nil cache or a new PID is not exit proof.
     private var maintenanceStoppedProcess: Process?
     private var maintenanceStoppedTransaction: String?
@@ -252,6 +259,7 @@ public final class CoreSupervisor {
         journalURL: URL? = nil,
         releasesDirURL: URL? = nil,
         currentLinkURL: URL? = nil,
+        legacyStateDirURL: URL? = nil,
         gracePeriod: TimeInterval = 240.0,
         pythonLoadedChecker: @escaping () -> Bool = checkPythonLaunchdLoaded
     ) {
@@ -259,13 +267,18 @@ public final class CoreSupervisor {
         let baseRpa = home.appendingPathComponent(".wechat-rpa")
         self.coreEnabledURL = coreEnabledURL ?? baseRpa.appendingPathComponent("core.enabled")
         let stateDir = self.coreEnabledURL.deletingLastPathComponent()
+        self.customMaintenanceURL = (maintenanceURL != nil)
         self.maintenanceURL = maintenanceURL ?? stateDir.appendingPathComponent("core.maintenance")
         self.binaryURL = binaryURL ?? baseRpa.appendingPathComponent("bin/wechat-mcp")
         self.configURL = configURL ?? home.appendingPathComponent(".WeChatRPABot/config.json")
         self.logURL = logURL ?? baseRpa.appendingPathComponent("logs/core.log")
+        self.customJournalURL = (journalURL != nil)
         self.journalURL = journalURL ?? stateDir.appendingPathComponent("update-journal.json")
+        self.customReleasesDirURL = (releasesDirURL != nil)
         self.releasesDirURL = releasesDirURL ?? baseRpa.appendingPathComponent("releases")
+        self.customCurrentLinkURL = (currentLinkURL != nil)
         self.currentLinkURL = currentLinkURL ?? baseRpa.appendingPathComponent("current")
+        self.legacyStateDirURL = legacyStateDirURL
         self.gracePeriod = gracePeriod
         self.pythonLoadedChecker = pythonLoadedChecker
     }
@@ -318,6 +331,11 @@ public final class CoreSupervisor {
 
     /// 精确核验 current 软链接物理目标必须落在受控 releasesDir 且等于预期 release_id 目录（基于固定 fd 逐级 NOFOLLOW 打开与内核 inode 比对，拒绝任何中间软链及逃逸）
     private func verifyCurrentLinkTarget(expectedReleaseID: String) -> Bool {
+        guard (releasesDirURL.path as NSString).isAbsolutePath,
+              (currentLinkURL.path as NSString).isAbsolutePath else {
+            return false
+        }
+
         // a. 校验 expectedReleaseID 命名格式安全
         guard !expectedReleaseID.isEmpty,
               expectedReleaseID != ".", expectedReleaseID != "..",
@@ -377,8 +395,97 @@ public final class CoreSupervisor {
         return targetStat.st_dev == releaseStat.st_dev && targetStat.st_ino == releaseStat.st_ino
     }
 
+    /// 启动前重新安全读取配置提取 state_dir 与 install_root（不信内存缓存，变更与运行 core 冲突必须 Fail-Closed）
+    private func reloadConfigPathsLocked() -> Bool {
+        let (cfgData, cfgErr) = readLimitedPrivateFile(url: configURL, maxBytes: 512 * 1024)
+        if cfgErr != nil {
+            return false
+        }
+        guard let data = cfgData else {
+            // 配置文件不存在 (ENOENT)，沿用已配置/默认路径
+            return true
+        }
+
+        guard let json = (try? JSONSerialization.jsonObject(with: data, options: [])) as? [String: Any] else {
+            return false
+        }
+
+        guard let stateDirStr = json["state_dir"] as? String,
+              !stateDirStr.isEmpty,
+              stateDirStr.hasPrefix("/") else {
+            return false
+        }
+
+        let installRootStr = json["install_root"] as? String
+        if let ir = installRootStr {
+            guard !ir.isEmpty, ir.hasPrefix("/") else {
+                return false
+            }
+        }
+
+        if let proc = process, proc.isRunning {
+            if let runningSD = runningStateDir, runningSD != stateDirStr {
+                return false
+            }
+            if let runningIR = runningInstallRoot, runningIR != (installRootStr ?? "") {
+                return false
+            }
+        }
+
+        let stateDirURL = URL(fileURLWithPath: stateDirStr)
+        if !customMaintenanceURL {
+            self.maintenanceURL = stateDirURL.appendingPathComponent("core.maintenance")
+        }
+        if !customJournalURL {
+            self.journalURL = stateDirURL.appendingPathComponent("update-journal.json")
+        }
+
+        if let ir = installRootStr {
+            let irURL = URL(fileURLWithPath: ir)
+            if !customReleasesDirURL {
+                self.releasesDirURL = irURL.appendingPathComponent("releases")
+            }
+            if !customCurrentLinkURL {
+                self.currentLinkURL = irURL.appendingPathComponent("current")
+            }
+        }
+
+        return true
+    }
+
+    /// 旧 legacy 状态根目录只读安全探测（遇到未完成维护标记或文件损坏严格 Fail-Closed，绝不删除或修改旧文件）
+    private func detectLegacyMaintenanceMarker() -> Bool {
+        guard let legacyURL = legacyStateDirURL else { return false }
+        let currentParent = maintenanceURL.deletingLastPathComponent().standardized.path
+        if legacyURL.standardized.path == currentParent {
+            return false
+        }
+
+        let legacyMaint = legacyURL.appendingPathComponent("core.maintenance")
+        let (mData, mErr) = readLimitedPrivateFile(url: legacyMaint, maxBytes: 128)
+        if mErr != nil || mData != nil {
+            return true
+        }
+
+        let legacyJson = legacyURL.appendingPathComponent("core.maintenance.json")
+        let (jData, jErr) = readLimitedPrivateFile(url: legacyJson, maxBytes: 4096)
+        if jErr != nil || jData != nil {
+            return true
+        }
+
+        return false
+    }
+
     /// 纯只读启动双检查 Guard：同时校验 core.maintenance 与 update-journal.json（零写入、零删除、Fail-Closed、防 TOCTOU）
     public func readStartupDualGuardLocked() -> CoreMaintenanceStatus {
+        guard reloadConfigPathsLocked() else {
+            return .recoveryRequired
+        }
+
+        if detectLegacyMaintenanceMarker() {
+            return .recoveryRequired
+        }
+
         // 1. 检查 core.maintenance（通过受控 readLimitedPrivateFile，严格 36 字节 ASCII UUID）
         let (maintData, maintErr) = readLimitedPrivateFile(url: maintenanceURL, maxBytes: 128)
         if maintErr != nil {
@@ -747,6 +854,12 @@ public final class CoreSupervisor {
         try proc.run()
         self.process = proc
         self.restartingAt = nil
+        let (cfgData, _) = readLimitedPrivateFile(url: configURL, maxBytes: 512 * 1024)
+        if let d = cfgData,
+           let json = (try? JSONSerialization.jsonObject(with: d, options: [])) as? [String: Any] {
+            self.runningStateDir = json["state_dir"] as? String
+            self.runningInstallRoot = json["install_root"] as? String ?? ""
+        }
     }
 
     private func handleProcessTermination(pid: Int32, exitCode: Int32, reason: Process.TerminationReason) {
@@ -754,6 +867,8 @@ public final class CoreSupervisor {
         defer { lock.unlock() }
 
         self.process = nil
+        self.runningStateDir = nil
+        self.runningInstallRoot = nil
         self.lastExitCode = exitCode
         self.isStopping = false
 

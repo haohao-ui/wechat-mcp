@@ -2589,6 +2589,7 @@ mod tests {
             }],
             ignorelist: None,
             state_dir: state_dir.to_path_buf(),
+            install_root: None,
             poll_seconds: 2,
             cooldown_seconds: 0,
             max_replies_per_hour: 20,

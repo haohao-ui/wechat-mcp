@@ -100,6 +100,8 @@ pub struct BotConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ignorelist: Option<Vec<AllowlistEntry>>,
     pub state_dir: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_root: Option<PathBuf>,
     pub poll_seconds: u64,
     pub cooldown_seconds: u64,
     pub max_replies_per_hour: u64,
@@ -560,6 +562,7 @@ impl BotConfig {
             "account_id",
             "allowlist",
             "state_dir",
+            "install_root",
             "poll_seconds",
             "cooldown_seconds",
             "max_replies_per_hour",
@@ -619,6 +622,18 @@ impl BotConfig {
         if !state_dir.is_absolute() {
             bail!("absolute private state_dir required");
         }
+
+        let install_root = map
+            .get("install_root")
+            .map(|v| {
+                let s = v.as_str().context("invalid install_root")?;
+                let p = PathBuf::from(s);
+                if !p.is_absolute() {
+                    bail!("absolute install_root required");
+                }
+                Ok::<PathBuf, anyhow::Error>(p)
+            })
+            .transpose()?;
 
         let capture_backend = map
             .get("capture_backend")
@@ -727,6 +742,7 @@ impl BotConfig {
             allowlist,
             ignorelist,
             state_dir,
+            install_root,
             poll_seconds,
             cooldown_seconds,
             max_replies_per_hour,

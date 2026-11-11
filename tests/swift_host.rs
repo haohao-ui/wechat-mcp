@@ -3081,6 +3081,8 @@ func checkMode() -> String {
     let releasesPath = args[2]
     let currentPath = args[3]
     let expectedMode = args[4]
+    let legacyPath = args.count > 5 ? args[5] : ""
+    let legacyURL = legacyPath.isEmpty ? nil : URL(fileURLWithPath: legacyPath)
 
     let stateURL = URL(fileURLWithPath: statePath)
     let releasesURL = URL(fileURLWithPath: releasesPath)
@@ -3093,7 +3095,8 @@ func checkMode() -> String {
         maintenanceURL: maintURL,
         journalURL: journalURL,
         releasesDirURL: releasesURL,
-        currentLinkURL: currentURL
+        currentLinkURL: currentURL,
+        legacyStateDirURL: legacyURL
     )
 
     let status = supervisor.maintenanceStatus
@@ -3307,4 +3310,151 @@ print(checkMode())
     )
     .unwrap();
     assert_eq!(run_guard("INACTIVE"), "INACTIVE");
+
+    // 场景 L: 注入 legacy 目录且存在未完成 core.maintenance -> 严格 RECOVERY_REQUIRED 且不删除现场
+    let legacy_dir = temp.path.join("legacy_state");
+    fs::create_dir_all(&legacy_dir).unwrap();
+    let legacy_maint = legacy_dir.join("core.maintenance");
+    let legacy_uuid = "00000000-0000-4000-8000-000000000099";
+    fs::write(&legacy_maint, legacy_uuid.as_bytes()).unwrap();
+    fs::set_permissions(&legacy_maint, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let run_guard_legacy = |expected: &str, leg: &Path| -> String {
+        let output = Command::new(&swift_test_bin)
+            .arg(state_dir.to_str().unwrap())
+            .arg(releases_dir.to_str().unwrap())
+            .arg(current_link.to_str().unwrap())
+            .arg(expected)
+            .arg(leg.to_str().unwrap())
+            .output()
+            .expect("failed to run dual_guard_bin with legacy");
+        assert!(
+            output.status.success(),
+            "run failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+
+    assert_eq!(
+        run_guard_legacy("RECOVERY_REQUIRED", &legacy_dir),
+        "RECOVERY_REQUIRED"
+    );
+    // 验证严格只读零删除现场
+    assert!(
+        legacy_maint.exists(),
+        "legacy maintenance marker must NOT be deleted by probe"
+    );
+
+    // 场景 M: legacy 损坏（非 36 字节）同样 Fail-Closed 判定 RECOVERY_REQUIRED 且不删除
+    fs::write(&legacy_maint, b"bad_content").unwrap();
+    assert_eq!(
+        run_guard_legacy("RECOVERY_REQUIRED", &legacy_dir),
+        "RECOVERY_REQUIRED"
+    );
+    assert!(
+        legacy_maint.exists(),
+        "corrupt legacy file must remain untouched"
+    );
+}
+
+#[test]
+fn test_swift_core_supervisor_reload_config_and_conflict_fail_closed() {
+    let temp = TempDir::new("swift_cfg_reload");
+    let root = repo_root();
+    let bin_path = temp.path.join("cfg_reload_bin");
+    let swift_src = temp.path.join("main.swift");
+
+    let cfg_file = temp.path.join("config.json");
+    let state_dir = temp.path.join("dyn_state");
+    fs::create_dir_all(&state_dir).unwrap();
+
+    let swift_code = r#"
+import Foundation
+
+func main() -> String {
+    let args = CommandLine.arguments
+    guard args.count >= 2 else { return "ERR_ARGS" }
+    let cfgPath = args[1]
+    let cfgURL = URL(fileURLWithPath: cfgPath)
+
+    let supervisor = CoreSupervisor(configURL: cfgURL)
+    let status = supervisor.maintenanceStatus
+    switch status {
+    case .inactive:
+        return "INACTIVE"
+    case .active(let id):
+        return "ACTIVE:\(id)"
+    case .recoveryRequired:
+        return "RECOVERY_REQUIRED"
+    }
+}
+
+print(main())
+"#;
+    fs::write(&swift_src, swift_code).unwrap();
+
+    let files = [
+        root.join("native")
+            .join("bootstrap")
+            .join("Supervisor.swift"),
+        root.join("native")
+            .join("bootstrap")
+            .join("CoreSupervisor.swift"),
+        swift_src,
+    ];
+
+    let mut cmd = Command::new("swiftc");
+    cmd.arg("-O");
+    for f in &files {
+        cmd.arg(f);
+    }
+    cmd.arg("-o").arg(&bin_path);
+    let comp = cmd.output().expect("compile swiftc");
+    assert!(
+        comp.status.success(),
+        "swiftc failed: {}",
+        String::from_utf8_lossy(&comp.stderr)
+    );
+
+    let run_bin = || -> String {
+        let out = Command::new(&bin_path)
+            .arg(cfg_file.to_str().unwrap())
+            .output()
+            .expect("run cfg_reload_bin");
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    // 1. 配置文件尚不存在 -> 默认允许 INACTIVE
+    assert_eq!(run_bin(), "INACTIVE");
+
+    // 2. 写入非法相对路径 state_dir -> 严格判定 RECOVERY_REQUIRED
+    let bad_cfg1 = serde_json::json!({
+        "schema_version": 1,
+        "state_dir": "relative/state"
+    });
+    fs::write(&cfg_file, serde_json::to_vec_pretty(&bad_cfg1).unwrap()).unwrap();
+    fs::set_permissions(&cfg_file, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(run_bin(), "RECOVERY_REQUIRED");
+
+    // 3. 写入非法相对路径 install_root -> 严格判定 RECOVERY_REQUIRED
+    let bad_cfg2 = serde_json::json!({
+        "schema_version": 1,
+        "state_dir": state_dir.to_str().unwrap(),
+        "install_root": "relative/install"
+    });
+    fs::write(&cfg_file, serde_json::to_vec_pretty(&bad_cfg2).unwrap()).unwrap();
+    assert_eq!(run_bin(), "RECOVERY_REQUIRED");
+
+    // 4. 修复为合法绝对路径 state_dir 与 install_root -> 成功解析并判定 INACTIVE
+    let install_dir = temp.path.join("dyn_install");
+    fs::create_dir_all(&install_dir).unwrap();
+    let good_cfg = serde_json::json!({
+        "schema_version": 1,
+        "state_dir": state_dir.to_str().unwrap(),
+        "install_root": install_dir.to_str().unwrap()
+    });
+    fs::write(&cfg_file, serde_json::to_vec_pretty(&good_cfg).unwrap()).unwrap();
+    assert_eq!(run_bin(), "INACTIVE");
 }

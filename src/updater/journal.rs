@@ -1026,6 +1026,23 @@ pub enum StartupDualCheckDecision {
     RecoveryRequired { reason: String },
 }
 
+/// 只读探测旧 legacy 状态根目录是否存在未完成维护标记或损坏状态
+/// 严格只读，遇未完成维护或文件损坏返回 true（指示需要抑制或恢复），绝不删除或修改旧文件
+pub fn detect_legacy_maintenance_marker(legacy_dir: &Path) -> bool {
+    let maint_path = legacy_dir.join("core.maintenance");
+    match read_limited_private_file(&maint_path, 128) {
+        Ok(Some(_)) => true,
+        Err(_) => true, // 权限/软链/无法安全打开均保守判定为需维护阻断
+        Ok(None) => {
+            let json_path = legacy_dir.join("core.maintenance.json");
+            match read_limited_private_file(&json_path, 4096) {
+                Ok(Some(_)) => true,
+                _ => false,
+            }
+        }
+    }
+}
+
 /// 纯只读启动双检查 Guard（零写入、零删除、零副作用、防 TOCTOU）
 pub fn check_startup_guard_readonly(
     state_dir: &Path,

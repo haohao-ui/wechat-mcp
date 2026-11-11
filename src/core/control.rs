@@ -2285,7 +2285,14 @@ pub fn execute_control_full_with_paths<W1: std::io::Write, W2: std::io::Write>(
             let config_path = config_file.unwrap_or(default_config_path);
             let state_dir = match BotConfig::load(&config_path) {
                 Ok(c) => c.state_dir,
-                Err(_) => base.join("state"),
+                Err(e) => {
+                    let _ = writeln!(
+                        stderr,
+                        "error: failed to load config from {}: {e}",
+                        config_path.display()
+                    );
+                    return 2;
+                }
             };
 
             let journal_res = crate::updater::journal::UpdateJournal::load_from_state(&state_dir);
@@ -2300,7 +2307,8 @@ pub fn execute_control_full_with_paths<W1: std::io::Write, W2: std::io::Write>(
                 Err(e) => (Value::Null, Some(format!("corrupt_sequence_file: {e}"))),
             };
 
-            let maintenance_active = state_dir.join("core.maintenance").exists();
+            let maintenance_active = state_dir.join("core.maintenance").exists()
+                || state_dir.join("core.maintenance.json").exists();
 
             let (tx_status, tx_id, tx_stage, tx_err, rec_req) = if journal_err.is_some()
                 || seq_err.is_some()
