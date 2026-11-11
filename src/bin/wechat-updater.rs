@@ -61,22 +61,10 @@ fn main() {
                 Err(e) => (None, Some(format!("corrupt_sequence_file: {e}"))),
             };
 
-            let maintenance = state_dir.join("core.maintenance").exists();
+            let maintenance = state_dir.join("core.maintenance.json").exists()
+                || state_dir.join("core.maintenance").exists();
 
             let status_str = if journal_err.is_some() || seq_err.is_some() {
-                if !maintenance {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    let tx_id = format!("tx-{}", uuid::Uuid::new_v4());
-                    let _ = journal::set_structured_maintenance_marker(
-                        &state_dir,
-                        &tx_id,
-                        "fail closed: corrupt journal or sequence file",
-                        now,
-                    );
-                }
                 "recovery_required"
             } else if let Some(ref j) = journal {
                 match j.stage {
@@ -174,8 +162,7 @@ fn main() {
 
             // 协调者限定批准：全部真实写操作入口必须无副作用返回 unsupported，不得写真实 state / 钥匙串 / 切换版本。
             eprintln!(
-                "error: unsupported: real update {} is disabled in this phase (fixture adapters only)",
-                action
+                "error: unsupported: real update {action} is disabled in this phase (fixture adapters only)"
             );
             std::process::exit(1);
         }
