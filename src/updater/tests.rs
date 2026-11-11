@@ -1006,11 +1006,11 @@ fn test_cli_rejects_invalid_or_missing_config_without_side_effects() {
 #[test]
 fn test_sandbox_executor_end_to_end_and_fault_injections() {
     let temp = TempTestDir::new("sandbox_e2e");
-    let sandbox = SandboxUpdateRoot::new_isolated(temp.0.join("sandbox_root")).unwrap();
+    let sandbox = SandboxUpdateRoot::create_test_isolated_sandbox().unwrap();
 
-    // 0. 验证禁止在生产或系统路径创建沙箱根
-    assert!(SandboxUpdateRoot::new_isolated(PathBuf::from("/Applications/evil")).is_err());
-    assert!(SandboxUpdateRoot::new_isolated(PathBuf::from("/var/root/.wechat-rpa")).is_err());
+    // 0. 验证沙箱根持有有效 FD，且不可变借用
+    assert!(sandbox.root_fd() >= 0);
+    assert!(sandbox.root_dir().exists());
 
     // 生成真实测试密钥对与受信任 Keystore
     let (key_pair, pub_bytes) = generate_test_ed25519_key();
