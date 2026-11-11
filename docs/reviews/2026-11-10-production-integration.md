@@ -1,29 +1,30 @@
-# Q1 完整版本集成与不回归验收审查报告 (第二轮集成修订版)
+# Q1 完整版本集成与不回归验收审查报告 (第三轮集成与测试修复闭环版)
 
 - **日期**：2026-11-11
-- **任务编号**：Q1（`task_af50d0ed9ca1` / Dispatch `ctx_b276557cae42`，协调者终端 `term_28f81ca3-a0aa-4f1f-99fb-bb139bd007ad`）
+- **任务编号**：Q1（`task_d663d077f300` / Dispatch `ctx_ef1c6be05c35`，前序 `task_af50d0ed9ca1` / `ctx_b276557cae42`，协调者终端 `term_28f81ca3-a0aa-4f1f-99fb-bb139bd007ad`）
 - **集成工作区**：`<workspace-root>/prod-integration-review`
-- **基线 Commit**：`23d6da10c85ee8d98d022b787ae883d65b2e0ae9`（分支 `work/prod-integration-review`）
-- **集成后 HEAD**：`e5854316a7f804fb56897bda52cb7ec18b843d1a`
-- **总体结果**：**partial（按序精确集成 7 个提交；Q1 原两项缺陷修复核验闭环；单线程专项测试通过；发现 1 项新缺陷退 Owner 且保留既有基线 ops_tools 失败；真实安装签名排空回退保持 unsupported；真机 9 项场景 pending；完整产物与默认并发测试仍为 unknown；非全项目验收通过）**
+- **基线 Commit**：`56d34d0bbf12781bca664790a369cfbb8fcf5e53`（分支 `work/prod-integration-review`）
+- **代码提交 HEAD**：`a86f0e21ea5c1488c94632c0d8c0b5fc917ffb2a`
+- **总体结果**：**partial（8 个提交全部精确按序集成；Q1 原有两项缺陷修复已闭环；Owner 最新提交 45d05d9 修复了测试 fixture，两项新增失败彻底消除；单线程全量核心测试仅剩既有基线 ops_tools 失败，退出码严格为 101，不混写为 0；真实安装签名排空回退保持 unsupported；真机 9 项场景 pending；默认并发与完整制品仍 unknown；非全项目验收通过）**
 
 ---
 
 ## 1. 本轮集成提交顺序与映射核对
 
-依据任务派发要求，本轮在原 `work/prod-integration-review`（基线 `23d6da1`）上精确按序合入了版本修复与绑定修复两组提交（父基线均已含 `2a55f45` / `9fc0cdf`）：
+依据任务派发要求，本轮在基线 `56d34d0` 上保护工作区并合入了 Owner 交付的单一修复提交 `45d05d903b9f557f7e1134da1ae27de06e0c43f0`。全量集成提交链条如下：
 
 | 序号 | 目标 Commit | 集成后 Commit | 模块与语义 | 集成处理说明 |
 |:---:|:---:|:---:|:---|:---|
-| 1 | `b3f8eb8` | `7168c19` | fix(update-ui): 适配nullable release与防降级高水位隔离，独立核心编译标签与安全读模型 | 无冲突，快速合入 |
-| 2 | `b71f54e` | `e386c04` | feat(updater): correct update-status release contract and isolate sequence guard | 无冲突（等价 `bc8812e`，未重复 pick） |
-| 3 | `9c68fb9` | `5107e24` | test(update-ui): 闭环真实编译core与Swift客户端隔离联测，覆盖高水位隔离与异常免疫 | 无冲突，联测用例合入 |
-| 4 | `c66b9a5` | `c3bafe9` | fix(brain-ui): implement override forms, draft CAS preservation, and allowlist-only contract | 无冲突，UI 增删改表单及契约合入 |
-| 5 | `16691c6` | `b34d179` | feat(brain): add allowlist contacts readonly projection and responsive bindings layout | **机械冲突**：`src/core/control.rs` 尾部单元测试冲突；按要求完整保留 HEAD 侧 update-status 测试组与 incoming 侧 contacts projection 测试，不丢测试 |
-| 6 | `8069449` | `a000bff` | fix(brain): eliminate projection error swallowing, enforce kind restriction and add inflight cas handler tests | 自动合并，合入投影错误不吞咽与 CAS 在途保护 |
-| 7 | `70d02e5` | `e585431` | fix(brain): enforce readonly transaction snapshot, add fail-closed regressions and refine 680 table columns | 自动合并，合入同事务只读快照与 680 列宽优化 |
+| 1 | `b3f8eb8` | `7168c19` | fix(update-ui): 适配nullable release与防降级高水位隔离，独立核心编译标签与安全读模型 | 无冲突合入 |
+| 2 | `b71f54e` | `e386c04` | feat(updater): correct update-status release contract and isolate sequence guard | 无冲突合入（等价 `bc8812e`） |
+| 3 | `9c68fb9` | `5107e24` | test(update-ui): 闭环真实编译core与Swift客户端隔离联测，覆盖高水位隔离与异常免疫 | 无冲突合入 |
+| 4 | `c66b9a5` | `c3bafe9` | fix(brain-ui): implement override forms, draft CAS preservation, and allowlist-only contract | 无冲突合入 |
+| 5 | `16691c6` | `b34d179` | feat(brain): add allowlist contacts readonly projection and responsive bindings layout | 机械冲突解决，双侧测试完整保留 |
+| 6 | `8069449` | `a000bff` | fix(brain): eliminate projection error swallowing, enforce kind restriction and add inflight cas handler tests | 自动合并合入 |
+| 7 | `70d02e5` | `e585431` | fix(brain): enforce readonly transaction snapshot, add fail-closed regressions and refine 680 table columns | 自动合并合入 |
+| 8 | `45d05d9` | `a86f0e2` | test(brain): fix core initialize and turn retry fixtures with migrated history db and real access | **无冲突合入**；生产 Store.resolve 与 None=>false 保持不变，将测试假 fixture 迁移为真实 history.sqlite3 数据库与 BrainAccess，彻底消除两项新增失败 |
 
-- **新 HEAD**：`e5854316a7f804fb56897bda52cb7ec18b843d1a`。工作区完全干净，无未解决冲突。
+- **代码提交 HEAD**：`a86f0e21ea5c1488c94632c0d8c0b5fc917ffb2a`。工作区完全干净。
 
 ---
 
@@ -55,7 +56,7 @@
 |---|---|---|---|---|
 | **投影只读事务** | `src/core/control.rs:2582-2663` | `compute_allowlist_contacts_projection` | 在同一个只读事务隔离快照内执行 `BrainAccess::load` 与 contacts 枚举，出错整批返回 unavailable，不部分 ready | **PASS**（4 项专用测试通过） |
 | **无 DB Fresh/绑定** | `src/core/control.rs:7738-7880` | `test_control_fail_closed_access_across_operations_without_db` | 无 history.sqlite3 时：fresh 角色/知识/无覆盖默认绑定/激活/回退可用；但包含 contact 覆盖时保存严格被拒绝（fail-closed，返回 `not_found`） | **PASS**（7 阶段全流程断言通过） |
-| **Swift 绑定管理** | `native/bootstrap/BrainPage.swift:1355-1550` | `overrideTable`, `contactPopup`, `rolePopup` | 支持增删改草稿、CAS 失败保护输入、680w 宽度列截断但悬停/编辑可查看完整值 | **PASS**（通过 70 项纯逻辑 + 33 项契约断言） |
+| **Swift 绑定管理** | `native/bootstrap/BrainPage.swift:1355-1550` | `overrideTable`, `contactPopup`, `rolePopup` | 支持增删改草稿、CAS 失败保护输入、680w 宽度列截断但悬停/编辑可查看完整值 | **PASS**（通过 70 项纯逻辑 + 33 项契约断言，共 103 项） |
 | **更新状态与高水位** | `src/core/control.rs:2270-2390` | `current_release`, `guard`, `transaction` | release_id/sequence nullable；core_version 独立；拒绝未签名 VERSION 文件冒充 | **PASS**（92 项断言通过） |
 | **更新器写操作** | `src/bin/wechat-updater.rs`, `src/updater/mod.rs` | `apply`, `rollback`, `recover` | CLI 副作用入口全部关闭（退出码 1，提示 unsupported）；未配置公钥根 strict fail-closed；DB 回退守卫报错 `unsupported_db_rollback` | **UNSUPPORTED**（保持禁用，无真实写操作） |
 | **备份与恢复** | `src/core/backup.rs` | Manifest v3, SHA-256 校验, staging 原子替换 | 升级至 Manifest v3，完整包含 `brain-profiles/`、`brain-bindings.json` 及 `brain_turns`；恢复旧备份拒绝混用 | **PASS**（仅支持离线恢复） |
@@ -74,54 +75,43 @@
 | **门禁夹具集** | `bash scripts/test-gate-fixtures.sh` | 0 | 2.3s | PASS（18 个独立夹具反向用例全部通过） |
 | **格式门禁 (CI定义)**| `rustfmt --edition 2024 --check $(git ls-files '*.rs' \| grep -v '^src/interaction.rs$')` | 0 | 3.5s | PASS（CI 既有排除规则下通过） |
 | **格式门禁 (全量检查)**| `cargo fmt --all -- --check` | 0 | 0.9s | PASS（全量检查通过，无差异输出） |
-| **Lint 门禁** | `cargo clippy --tests` | 0 | 8.4s | PASS（退出码 0，无 error，保持既有基线 warning） |
+| **Lint 门禁** | `cargo clippy --tests` | 0 | 6.8s | PASS（退出码 0，无 error，保持既有基线 warning） |
 | **I1 存储模块** | `cargo test --locked --bins -- brain_profiles` | 0 | 1.1s | PASS（40 passed, 0 failed） |
 | **更新核心与校验** | `cargo test --locked --lib updater::tests` | 0 | 0.2s | PASS（14 passed, 0 failed） |
-| **协议 Smoke** | `cargo test --locked --test protocol_smoke -- --test-threads=1` | 0 | 1.4s | PASS（2 passed；经隔离 HOME 环境变量执行，避免沙箱拦截真实桌面资源锁） |
+| **协议 Smoke** | `cargo test --locked --test protocol_smoke -- --test-threads=1` | 0 | 1.4s | PASS（2 passed；经隔离环境执行，避免沙箱拦截真实桌面资源锁） |
 | **Swift 纯逻辑** | `cargo test --locked --test swift_common_layer --test swift_time_labels --test swift_voice --test swift_bounded -- --test-threads=1` | 0 | 5.8s | PASS（14 passed：common 7, time 1, voice 3, bounded 3） |
 | **Swift 生命周期断言**| `swiftc -warnings-as-errors native/bootstrap/Supervisor.swift native/bootstrap/CoreSupervisor.swift native/tests/LifecycleTests.swift -o /tmp/wechat-lifecycle-tests && /tmp/wechat-lifecycle-tests` | 0 | 3.2s | PASS（169 条断言全部通过，含完成阶段故障注入与 recoveryRequired 抑制） |
 | **Swift 宿主完整集成**| `cargo test --locked --test swift_host -- --test-threads=1` | 0 | 35.9s | PASS（74 passed, 0 failed，包含 17 项 supervisor 与 57 项宿主用例） |
-| **大脑界面与契约** | `cargo test --test swift_brain_ui --locked` | 0 | 23.8s | PASS（103 条断言全部通过，含 680w 离屏渲染与真实 Rust control 契约测试） |
+| **大脑界面与契约** | `cargo test --test swift_brain_ui --locked` | 0 | 21.6s | PASS（103 条断言全部通过，含 680w 离屏渲染与真实 Rust control 契约测试） |
 | **更新界面与契约** | `cargo test --test swift_update_ui --locked` | 0 | 21.9s | PASS（92 条断言全部通过，含 680w/720w 双画幅离屏渲染与真实 core 联测） |
 | **Control 重点用例** | `cargo test --locked --bin wechat-mcp test_control_brain_list` | 0 | 0.1s | PASS（4 passed：只读事务、列缺失拒绝、损坏行解码失败 unavailable、白名单与撤销） |
-| **核心单测集** | `cargo test --locked --bin wechat-mcp -- --test-threads=1` | 101 | 65.5s | **977 passed, 3 failed, 0 ignored**（失败明细见 5.2 节：1 项既有基线失败 + 2 项因 ControlContactAccess fail-closed 引起的连锁失败） |
+| **Control 无DB守卫** | `cargo test --locked --bin wechat-mcp test_control_fail_closed` | 0 | 0.1s | PASS（1 passed：全阶段无 DB fail-closed 阻断） |
+| **修复单测 1 验证** | `cargo test --locked --bin wechat-mcp test_brain_initialize_control` | 0 | 0.2s | PASS（1 passed；前序失败消除，退出码 0） |
+| **修复单测 2 验证** | `cargo test --locked --bin wechat-mcp test_turn_model_retry_pins_initial_snapshot_version` | 0 | 0.1s | PASS（1 passed；前序失败消除，退出码 0） |
+| **核心单测全套** | `cargo test --locked --bin wechat-mcp -- --test-threads=1` | 101 | 67.7s | **979 passed, 1 failed, 0 ignored**（共 980 个用例；唯一失败为既有基线 ops_tools，命令退出码严格为 101，不能混写为 0；两项前序失败已彻底消除） |
 
 ---
 
-## 5. 缺陷核对与剩余缺陷定性（退 Owner 修复）
+## 5. 两项新增失败消除证据与剩余缺陷核对
 
-### 5.1 既有基线失败（保持原样记录）
+### 5.1 前序两项新增失败消除证据
+在集成 `45d05d9` 之前，单线程核心测试曾出现 2 项失败：
+1. `core::control::tests::test_brain_initialize_control`（此前因 `DummyAccess` / 无 DB 传入 `ControlContactAccess { conn: None, brain_access: None }` 导致 `permits` 返回 `false`，使得 `store.resolve` panic 报错 `Error("not_found")`）；
+2. `core::turns::tests::test_turn_model_retry_pins_initial_snapshot_version`（此前因未初始化 `history.sqlite3`，`turns.rs` 自动构建的 `ControlContactAccess` 缺乏 `brain_access`，导致 `store.resolve` 返回 `Err`，未生成 `fixed_snapshot` 从而断言失败）。
+
+#### 修复与闭环消除证据：
+- **生产代码保持严格 fail-closed**：Owner 提交 `45d05d9` 严格遵守协调者要求，未随意放宽生产代码中的 `ControlContactAccess::permits`（仍保持 `None => false` 的 fail-closed 契约），亦未擅改 `Store::resolve`；
+- **测试 Fixture 真实化**：
+  - 在 `test_brain_initialize_control` 中，测试补全了 `history.sqlite3`（包含 `contacts` 与 `contact_names`，真实 `contact_id: c_legacy_cust` 与配置姓名 `客户张三` 严格解耦），通过 `BrainAccess::load` 构建真实的 `ControlContactAccess`；并追加了未知联系人、未授权联系人、跨账号联系人及跨账号上下文的 4 项 `is_err()` 阻断断言；
+  - 在 `test_turn_model_retry_pins_initial_snapshot_version` 中，移除假 `DummyAccess`，创建真实的 `history.sqlite3` 数据库与合法联系人映射，使 `turns.rs` 能够在运行时正确解析初始快照并锁定 `fixed_snapshot`；
+- **执行结果**：
+  - `cargo test --locked --bin wechat-mcp test_brain_initialize_control`：退出码 **0**，耗时 0.16s，**ok**；
+  - `cargo test --locked --bin wechat-mcp test_turn_model_retry_pins_initial_snapshot_version`：退出码 **0**，耗时 0.13s，**ok**；
+  - 全套回归中两项测试均以 `ok` 通过，失败计数从 3 项下降至 1 项。
+
+### 5.2 既有基线失败（保持原样记录，不擅改快照）
 - **用例**：`core::open_api::compat_tests::ops_tools_list_unchanged`（`src/core/open_api/compat_tests.rs:49`）
-- **定性**：全量 51 个工具中，`desktop_act` 存在历史描述变更与 `timeout_seconds` 参数差异，系历史提交 `7e41e7a` 遗留，保持原样记录，不擅自修改测试快照。
-
-### 5.2 新发现实际缺陷（退 I3 / 绑定修复 Owner）
-在执行单线程全核心回归时，发现以下 2 项新增失败：
-1. `core::control::tests::test_brain_initialize_control`（panic at `src/core/control.rs:6902: called Result::unwrap() on an Err value: Error("not_found")`）；
-2. `core::turns::tests::test_turn_model_retry_pins_initial_snapshot_version`（panic at `src/core/turns.rs:8761: 必须锁定初始快照 fixed_snapshot`）。
-
-#### 根因分析与调用链证据：
-- 在提交 `8069449` 中，为实现“无 DB 时 contact 覆盖严格 fail-closed”，将 `ControlContactAccess::permits`（`src/core/control.rs:2501`）实现调整为：
-  ```rust
-  impl crate::core::brain_profiles::ContactAccess for ControlContactAccess {
-      fn permits(&self, account: &str, contact: &str, _kind: &ChatKind) -> bool {
-          if account != self.account_id { return false; }
-          if let Some(ba) = &self.brain_access {
-              ba.permit(contact)
-          } else {
-              false // 8069449 由 true 改为 false
-          }
-      }
-  }
-  ```
-- 然而，`store.resolve(&ctx, contact, kind, access)`（`src/core/brain_profiles/store.rs:405`）的首行检查为：
-  ```rust
-  require(access.permits(&ctx.account_id, contact, kind), "not_found")?;
-  ```
-- **连锁反应**：
-  1. 在 `test_brain_initialize_control` 中，验证旧无 mode 配置升级后，测试直接调用 `store_legacy.resolve(&ctx_legacy, "c_any", &Private, &ControlContactAccess { conn: None, brain_access: None, .. })` 试图获取默认角色。由于 `brain_access: None` 时 `permits` 直接返回 `false`，导致即使存在默认激活角色，`store.resolve` 也直接被 `not_found` 阻断并报错；
-  2. 在 `test_turn_model_retry_pins_initial_snapshot_version` 中，未初始化 `history.sqlite3` 数据库，`turns.rs:1719` 自动构造的 `ControlContactAccess` 的 `brain_access` 为 `None`，导致 `store.resolve` 返回 `Err(not_found)`；在 Legacy 模式下无法装配角色与快照，未生成 `fixed_snapshot`，导致后续模型重试锁定断言失败。
-- **行动建议（退 Owner）**：
-  请 I3 / 绑定修复 Owner 厘清“联系人覆盖的访问检查（override check）”与“无覆盖时回退默认角色的联系人准入检查”的语义边界，或在 `ControlContactAccess` / `store.resolve` 中针对无覆盖且已激活默认角色的场景提供合理的准入判定，修复上述 2 项测试失败。集成方遵循“不顺手改业务，保持事实报告”原则，不擅自越权修改该授权逻辑。
+- **定性**：全量 51 个工具中，`desktop_act` 存在历史描述变更与 `timeout_seconds` 参数差异，系历史提交 `7e41e7a` 遗留。全套单测执行因该用例失败而返回退出码 **101**。依据指示保持原样记录，不顺手修改快照掩盖，不混写为退出码 0。
 
 ---
 
@@ -149,7 +139,7 @@
 
 ## 7. 审查结论与交付说明
 
-- **交付状态**：**partial**（7 个指定提交集成完毕；Q1 原有两项缺陷已闭环修复；发现 1 项由 fail-closed 调整引发的默认角色解析缺陷，已留存确凿证据并退 Owner；真实安装、签名、排空、恢复保持 unsupported；真机 9 场景保持 pending；无 Python / 真实消息模型 / 钥匙串 / 部署推送）。
+- **交付状态**：**partial**（8 个提交集成完毕；Q1 原有两项缺陷已闭环修复；前序两项新增失败彻底消除；单线程全量测试仅剩既有基线 ops_tools 失败，退出码严格为 101；真实安装、签名、排空、恢复保持 unsupported；真机 9 场景保持 pending；无 Python / 真实消息模型 / 钥匙串 / 部署推送）。
 - **主要文件**：
   - `docs/reviews/2026-11-10-production-integration.md`（本审查报告）
-- **集成后 HEAD**：`e5854316a7f804fb56897bda52cb7ec18b843d1a`
+- **代码提交 HEAD**：`a86f0e21ea5c1488c94632c0d8c0b5fc917ffb2a`
