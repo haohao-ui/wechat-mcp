@@ -142,6 +142,25 @@ impl TrustedKeyStore {
     }
 }
 
+/// 为测试或受控构建提供规范的 Ed25519 签名生成（RFC 8785 规范化 + 域分离）
+pub fn sign_manifest_with_ed25519_key(
+    key_pair: &ring::signature::Ed25519KeyPair,
+    manifest: &ReleaseManifest,
+) -> Result<String> {
+    let manifest_val = serde_json::to_value(manifest)?;
+    let canonical = serde_json_canonicalizer::to_vec(&manifest_val)?;
+    let mut message = Vec::with_capacity(MANIFEST_DOMAIN_PREFIX.len() + canonical.len());
+    message.extend_from_slice(MANIFEST_DOMAIN_PREFIX);
+    message.extend_from_slice(&canonical);
+
+    let sig = key_pair.sign(&message);
+    let mut s = String::with_capacity(sig.as_ref().len() * 2);
+    for b in sig.as_ref() {
+        s.push_str(&format!("{:02x}", b));
+    }
+    Ok(s)
+}
+
 fn hex_or_base64_decode(s: &str) -> Result<Vec<u8>> {
     let trimmed = s.trim();
     if trimmed.len() == 128 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
