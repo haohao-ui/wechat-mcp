@@ -4,11 +4,13 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use super::journal::{
-    CurrentReleaseMetadata, TransactionStage, UpdateJournal, acquire_update_lock,
-    clear_maintenance_if_safe, load_highest_accepted_sequence, save_current_release_metadata,
-    save_highest_accepted_sequence, set_maintenance_active,
+    CurrentReleaseCommitRecord, TransactionStage, UpdateJournal, acquire_update_lock,
+    atomic_commit_release_record, clear_maintenance_for_tx, load_highest_accepted_sequence,
+    set_structured_maintenance_marker, sync_dir,
 };
-use super::manifest::{ReleaseManifest, SignedEnvelope, TrustedKeyStore, validate_manifest_compatibility};
+use super::manifest::{
+    ReleaseManifest, SignedEnvelope, TrustedKeyStore, validate_manifest_compatibility,
+};
 use super::rollback::{rollback_release_atomic, switch_release_atomic};
 use super::signing::LocalSigner;
 use super::unpack::safe_unpack_and_verify;
@@ -159,6 +161,17 @@ pub struct SandboxUpdateExecutor<'a> {
     pub fault: FaultInjection,
 }
 
+/// 严格发布标识校验：字母、数字、点、下划线、短横线，长度 1..=64，严禁穿越符或分隔符
+pub fn is_valid_release_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id != "."
+        && id != ".."
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+}
+
 impl<'a> SandboxUpdateExecutor<'a> {
     pub fn new(sandbox: &'a SandboxUpdateRoot) -> Self {
         Self {
@@ -185,6 +198,11 @@ impl<'a> SandboxUpdateExecutor<'a> {
         let releases_dir = self.sandbox.releases_dir();
         let current_link = self.sandbox.current_link();
 
+        // 校验 release_id 命名合法性
+        if !is_valid_release_id(&manifest.release_id) {
+            bail!("invalid_release_id: '{}'", manifest.release_id);
+        }
+
         // 1. 全程持有排他更新锁
         let _lock = acquire_update_lock(&state_dir)?;
 
@@ -198,15 +216,44 @@ impl<'a> SandboxUpdateExecutor<'a> {
             );
         }
 
-        // 识别 source_release_id
-        let source_release_id = if current_link.exists() || fs::symlink_metadata(&current_link).is_ok() {
-            fs::read_link(&current_link)
-                .ok()
-                .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()))
-                .unwrap_or_else(|| "0.0.0-unknown".into())
-        } else {
-            "none".to_string()
-        };
+        // 识别 source_release_id（严格校验，绝不把未知 current 当旧版安全）
+        let source_release_id =
+            if current_link.exists() || fs::symlink_metadata(&current_link).is_ok() {
+                let link_target = fs::read_link(&current_link)
+                    .map_err(|e| anyhow::anyhow!("cannot_read_current_symlink: {}", e))?;
+                let target_leaf = link_target
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "invalid_current_symlink_target: '{}'",
+                            link_target.display()
+                        )
+                    })?;
+
+                if !is_valid_release_id(target_leaf) {
+                    bail!("current_symlink_target_name_invalid: '{}'", target_leaf);
+                }
+                let target_dir = releases_dir.join(target_leaf);
+                if !target_dir.is_dir() {
+                    bail!(
+                        "current_symlink_target_not_found_or_not_dir: '{}'",
+                        target_dir.display()
+                    );
+                }
+                target_leaf.to_string()
+            } else {
+                "none".to_string()
+            };
+
+        // 检查 releases/<release_id> 是否已存在，严禁覆盖或删除已有版本目录
+        let target_release_dir = releases_dir.join(&manifest.release_id);
+        if target_release_dir.exists() {
+            bail!(
+                "release_directory_already_exists: '{}'",
+                target_release_dir.display()
+            );
+        }
 
         let tx_id = format!("tx-{}", uuid::Uuid::new_v4());
         let mut journal = UpdateJournal::new(
@@ -217,16 +264,13 @@ impl<'a> SandboxUpdateExecutor<'a> {
             now,
         );
 
-        // 3. 准备解压目标目录 releases/<release_id>
-        let target_release_dir = releases_dir.join(&manifest.release_id);
-        if target_release_dir.exists() {
-            // 已存在同版本目录，清理旧暂存
-            fs::remove_dir_all(&target_release_dir)?;
-        }
-        fs::create_dir_all(&target_release_dir)?;
-        fs::set_permissions(&target_release_dir, fs::Permissions::from_mode(0o700))?;
+        // 使用隔离临时暂存目录 staging/<tx_id>，全部校验和重签名完成前不进入 releases/
+        let staging_root = self.sandbox.root_dir.join("staging");
+        let staging_dir = staging_root.join(&tx_id);
+        fs::create_dir_all(&staging_dir)?;
+        fs::set_permissions(&staging_dir, fs::Permissions::from_mode(0o700))?;
 
-        // 阶段 1: Staged (解压与白名单/摘要逐文件校验)
+        // 阶段 1: Staged (解压与白名单/摘要逐文件校验至受限 staging 目录)
         journal.stage = TransactionStage::Staged;
         journal.persist_atomic(&state_dir)?;
         if self.fault.fail_after_stage == Some(TransactionStage::Staged) {
@@ -235,7 +279,7 @@ impl<'a> SandboxUpdateExecutor<'a> {
 
         safe_unpack_and_verify(
             archive_path,
-            &target_release_dir,
+            &staging_dir,
             &manifest.artifact,
             &manifest.components,
         )?;
@@ -247,10 +291,10 @@ impl<'a> SandboxUpdateExecutor<'a> {
             bail!("injected_fault_after_publisher_verified");
         }
 
-        // 阶段 3: LocalSigned (本机代码重签名)
+        // 阶段 3: LocalSigned (本机代码重签名在 staging 中完成)
         for comp in &manifest.components {
             if comp.kind == "executable" {
-                let bin_path = target_release_dir.join(&comp.path);
+                let bin_path = staging_dir.join(&comp.path);
                 signer.sign_and_verify(&bin_path)?;
             }
         }
@@ -260,8 +304,12 @@ impl<'a> SandboxUpdateExecutor<'a> {
             bail!("injected_fault_after_local_signed");
         }
 
-        // 阶段 4: Draining (模拟排空)
-        set_maintenance_active(&state_dir, "updater draining")?;
+        // 解压与校验签名均已在受限 staging 目录中完成，原子发布到 releases/<release_id>
+        fs::rename(&staging_dir, &target_release_dir)?;
+        sync_dir(&releases_dir)?;
+
+        // 阶段 4: Draining (模拟排空，设置带 tx_id 绑定的结构化维护标记)
+        set_structured_maintenance_marker(&state_dir, &tx_id, "updater draining", now)?;
         journal.stage = TransactionStage::Draining;
         journal.maintenance_marker_confirmed = true;
         journal.persist_atomic(&state_dir)?;
@@ -294,19 +342,20 @@ impl<'a> SandboxUpdateExecutor<'a> {
             journal.stage = TransactionStage::Committed;
             journal.persist_atomic(&state_dir)?;
 
-            // 提升最高水位与持久化当前 Release 元数据
-            save_highest_accepted_sequence(&state_dir, manifest.sequence)?;
-            let meta = CurrentReleaseMetadata {
+            // 单一权威提交记录：原子写入 current_release.json（含最高水位与 manifest 摘要）
+            let commit_record = CurrentReleaseCommitRecord {
+                record_schema: 1,
+                tx_id: tx_id.clone(),
                 release_id: manifest.release_id.clone(),
                 sequence: manifest.sequence,
                 channel: manifest.channel.clone(),
-                components_consistent: true,
+                manifest_digest: manifest.artifact.sha256.clone(),
                 installed_at: now,
             };
-            save_current_release_metadata(&state_dir, &meta)?;
+            atomic_commit_release_record(&state_dir, &commit_record)?;
 
-            // 清除维护态标志
-            clear_maintenance_if_safe(&state_dir)?;
+            // 清除本事务的维护态标志
+            clear_maintenance_for_tx(&state_dir, &tx_id)?;
 
             Ok(journal)
         } else {
@@ -316,11 +365,16 @@ impl<'a> SandboxUpdateExecutor<'a> {
             journal.persist_atomic(&state_dir)?;
 
             if self.fault.simulate_new_business_data_on_rollback {
-                // 模拟已产生新业务数据，严禁静默回退，必须保留维护态
+                // 模拟已产生新业务数据，严禁静默回退，必须保留维护态并标记 RecoveryRequired
                 journal.stage = TransactionStage::RecoveryRequired;
                 journal.error = Some("new_business_data_detected_cannot_auto_rollback".into());
                 journal.persist_atomic(&state_dir)?;
-                set_maintenance_active(&state_dir, "manual recovery required: new business data conflict")?;
+                set_structured_maintenance_marker(
+                    &state_dir,
+                    &tx_id,
+                    "manual recovery required: new business data conflict",
+                    now,
+                )?;
                 return Ok(journal);
             }
 
@@ -328,8 +382,8 @@ impl<'a> SandboxUpdateExecutor<'a> {
             journal.stage = TransactionStage::RolledBack;
             journal.persist_atomic(&state_dir)?;
 
-            // 回退成功，安全清除维护标志
-            clear_maintenance_if_safe(&state_dir)?;
+            // 回退成功，安全清除本事务的维护标志
+            clear_maintenance_for_tx(&state_dir, &tx_id)?;
             Ok(journal)
         }
     }

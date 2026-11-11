@@ -256,7 +256,10 @@ fn unpack_from_verified_reader(
                 }
                 other => {
                     cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-                    bail!("pax_or_gnu_extensions_rejected: unsupported entry type {:?}", other);
+                    bail!(
+                        "pax_or_gnu_extensions_rejected: unsupported entry type {:?}",
+                        other
+                    );
                 }
             }
 
@@ -400,17 +403,14 @@ fn unpack_from_verified_reader(
             }
 
             // 使用 openat + O_CREAT | O_EXCL | O_NOFOLLOW 锚定创建文件，防跟随软链接
-            let mut out_file = match open_file_secure_at(
-                staging_fd_guard.0,
-                &norm_path,
-                expected_mode,
-            ) {
-                Ok(f) => f,
-                Err(e) => {
-                    cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-                    bail!("failed_to_create_file '{}': {}", norm_path, e);
-                }
-            };
+            let mut out_file =
+                match open_file_secure_at(staging_fd_guard.0, &norm_path, expected_mode) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
+                        bail!("failed_to_create_file '{}': {}", norm_path, e);
+                    }
+                };
 
             let mut file_hasher = Sha256::new();
             let mut written_bytes: u64 = 0;
@@ -520,7 +520,9 @@ fn unpack_from_verified_reader(
     let extra_raw = raw_file.read(&mut raw_tail)?;
     if extra_raw > 0 {
         cleanup_staged_content(staging_dir, &unpacked_components, &seen_dirs);
-        bail!("trailing_data_in_archive: extra trailing bytes or multi-member gzip stream detected");
+        bail!(
+            "trailing_data_in_archive: extra trailing bytes or multi-member gzip stream detected"
+        );
     }
 
     // 白名单闭合校验：解出的组件必须与 expected_components 1:1 闭合匹配
@@ -596,7 +598,11 @@ fn create_dir_all_secure_at(root_fd: RawFd, rel_path: &str) -> Result<()> {
                 current_fd = new_child;
             } else {
                 unsafe { libc::close(current_fd) };
-                bail!("symlink_in_directory_path: segment '{}' error: {}", seg, err);
+                bail!(
+                    "symlink_in_directory_path: segment '{}' error: {}",
+                    seg,
+                    err
+                );
             }
         }
     }
