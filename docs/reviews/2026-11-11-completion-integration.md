@@ -1,169 +1,115 @@
-# Q2 U1/T1 独立集成审查报告
+# Q2 U1/T1 独立集成审查报告（全提交合入与闭环复验版）
 
 - **审查日期**：2026-11-11
-- **任务编号**：`task_71cb4e8b6b10`（接续 `task_c7643457e405`）
-- **Dispatch 标识**：`ctx_413d75ec3376`（接续 `ctx_8e57928ca33c`）
-- **审查终端**：`term_bd98bc0b-af90-40dd-bd4b-02827255af5f`
+- **任务编号**：`task_bcaf745d617e`（接续 `task_71cb4e8b6b10` / `task_c7643457e405`）
+- **Dispatch 标识**：`ctx_8cbeccb6a191`（接续 `ctx_413d75ec3376` / `ctx_8e57928ca33c`）
+- **审查终端**：`term_54ccc4ac7a5d283fa5ceafcdabd44125`
 - **协调者终端**：`term_28f81ca3-a0aa-4f1f-99fb-bb139bd007ad`
 - **初始基线**：`1e120b5`（分支 `work/prod-integration-review`）
-- **合并提交**：`c4aebee`（合入 `work/finish-test-isolation` 最新 `e70de0b` 与 `work/finish-updater` 最新 `f0c9ecf`）
-- **审查定性**：**Partial（未通过完整集成：存在 1 处阻塞级构建编译 RED 缺陷；8 项关键边界仅完成局部代码审查与有限用例断言，不等于全面安全验证；多项核心契约与全量测试因构建阻断处于 Pending 状态）**。
+- **当前 HEAD**：合并提交 `8a97076`（依次合入 `827cc16`、`9d4fdc3`、`68ed684`）
+- **审查定性**：**Partial（RED-1 CLI 编译阻断已消除；RED-2 发布包 JSON 白名单遗漏已通过 1d7c451/9d4fdc3 闭环并通过显式 --ignored 真实包测试；locale 隔离 68ed684 合入后默认并发核心测试连续 3 轮 999 项全过；Swift 92 更新因离屏环境尺寸差异 2 项失败如实保留；遵从指令暂不合 R1，生产根与真实排空未接线）**。
 
 ---
 
 ## 1. 独立集成合并与依赖核对
 
 ### 1.1 分支合并记录
-- 合入 `work/finish-test-isolation` 最新提交 `e70de0b`（含 `bc0c87b`、`640f7e8`）：Fast-forward 合入，无冲突；
-- 合入 `work/finish-updater` 最新提交 `f0c9ecf`（含完整 U1 阶段，含缺陷 A/B 整改提交 `883cb5f` 与 `90918b5`）：采用 Git `ort` 策略合并，双方修改文件集合完全正交（`comm -12` 结果为空），实现 Clean Merge，无机械冲突与语义冲突；生成合并提交 `c4aebee`。
+1. **测试隔离初始分支**：合入 `work/finish-test-isolation` 提交 `e70de0b`（含 `bc0c87b`、`640f7e8`）；
+2. **更新模块阶段 1**：合入 `work/finish-updater` 提交 `f0c9ecf`；
+3. **更新模块 RED-1 修复**：合入协调者批准的 `827cc16dd2322891a132e01c0a51f6aab9f058e9`（生成合并提交 `bbf68a5`）；
+4. **发布包修复与真实包专项加固**：合入协调者批准的 `9d4fdc34362dcf1cd4d0a1f1181835cb58d2ea69`（含祖先 `1d7c451`，生成合并提交 `7d584d3`）；
+5. **T1 Locale 隔离最终修订**：合入协调者批准的 `68ed684`（含祖先 `099560b`，生成合并提交 `8a97076`）。核对 `src/core/serve.rs` diff，确认严格保持 `None` 回退默认、所有 `Some`（含空串/空白/有效值）保持原语义不覆盖，单测完全采用纯函数隔离；
+6. **暂不合入 R1**：按照协调者明确指示，Rust guard 还未接线且 R1（`8173715`）审查未过正修，当前分支严格不合入 R1。
 
-### 1.2 Cargo 依赖与文件范围审查
-- 核对 `Cargo.toml` 变更：
-  - `rusqlite` 仅新增 `backup` feature（用于 SQLite 在线快照备份）；
-  - 新增 `flate2 = "=1.1.11"`（`default-features = false, features = ["rust_backend"]`）与 `tar = "=0.4.46"`（`default-features = false`）；
-  - 新增测试签名二进制 `[[bin]] name = "wechat-test-signer"`；
-  - 严格保持无任何非必要外部依赖引入，无 Python 运行时与脚本引入（`./scripts/check_no_python.sh` 退出码 0）；
-  - 全局敏感信息静态检查通过（`./scripts/check_sensitive.sh` 退出码 0，无硬编码私钥、Token 或真实主机路径）。
+### 1.2 门禁与环境静态规范
+- **Python 隔离**：`./scripts/check_no_python.sh` 退出码 0，项目中无 Python 依赖或脚本；
+- **敏感信息**：`./scripts/check_sensitive.sh` 退出码 0，无私钥、Token 或真实主机路径硬编码；
+- **代码格式**：`cargo fmt --all -- --check` 退出码 0，零格式差异。
 
 ---
 
-## 2. 发现的阻塞级缺陷（RED 退 Owner）
+## 2. 缺陷收敛追踪与复验结果
 
-在执行协调者要求的实际 fresh 二进制构建与测试时，发现并定位 1 处致命编译中断缺陷：
+### 2.1 缺陷 RED-1：`wechat-updater` 二进制编译阻断（已闭环恢复）
+- **代码位置**：[`src/bin/wechat-updater.rs:68-85`](src/bin/wechat-updater.rs#L68-L85)
+- **修复提交**：`827cc16dd2322891a132e01c0a51f6aab9f058e9`
+- **复验结果**：
+  - `cargo build --locked --bin wechat-mcp --bin wechat-updater --bin wechat-test-signer` 退出码 **0**；
+  - `cargo test --locked --lib updater` 常规 **24 passed, 0 failed, 1 ignored** 全部通过（耗时 0.55s，两项 CLI 测试恢复为 PASS）；
+  - `cargo clippy --tests` 退出码 **0**，无编译错误阻断。
 
-### 缺陷 RED-1：`wechat-updater` 二进制引用已废弃函数导致编译失败与 CLI 测试中断
+### 2.2 缺陷 RED-2：发布包 JSON 资源清单过滤导致受限解包白名单失败（已闭环恢复）
+- **代码位置**：[`scripts/build_release_package.sh:121`](scripts/build_release_package.sh#L121)
+- **修复提交**：`1d7c451`（脚本白名单调整）与 `9d4fdc3`（测试加固）
+- **复验步骤与结果**：
+  1. 在本树目标目录构建完整发布包：
+     `./scripts/build_release_package.sh 0.2.0-test target/test-dist 1002 test true`（退出码 0，组件总数由 13 增加至 15，精确包含 `Apps/.../gateway.test.json` 与 `resources/gateway.example.json`）；
+  2. 显式运行真实发布包专项测试（杜绝默认 ignored 假绿）：
+     `cargo test --locked --lib test_real_built_release_package_verification_and_unlisted_rejection -- --ignored`
+  3. **实际结果**：**1 passed, 0 failed**（退出码 0，耗时 1.84s），真实验签、全要素组件集合比对及未登记文件对抗拦截全部通过。
 
-- **代码位置**：[`src/bin/wechat-updater.rs:68`](src/bin/wechat-updater.rs#L68) 与 [`src/bin/wechat-updater.rs:85`](src/bin/wechat-updater.rs#L85)
-- **触发命令**：`cargo build --locked --bin wechat-updater`
-- **实际退出码**：`101`
-- **实际编译报错**：
-  ```text
-  error[E0425]: cannot find function `set_maintenance_active` in module `journal`
-    --> src/bin/wechat-updater.rs:68:38
-     |
-  68 |                     let _ = journal::set_maintenance_active(
-     |                                      ^^^^^^^^^^^^^^^^^^^^^^ not found in `journal`
-
-  error[E0425]: cannot find function `load_current_release_metadata` in module `journal`
-     --> src/bin/wechat-updater.rs:85:41
-      |
-   85 |             let current_meta = journal::load_current_release_metadata(&state_dir)
-      |                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `journal`
-     ::: src/updater/journal.rs:556:1
-      |
-  556 | pub fn load_current_release_record(state_dir: &Path) -> Result<Option<CurrentReleaseCommitRecord>>
-  ```
-- **根因分析**：
-  1. 在 `work/finish-updater` 分支的提交 `219da51`（单一权威提交记录、Tx绑定维护标记与目录保护）及后续提交中，`src/updater/journal.rs` 进行了加固重构：
-     - 将原非绑定的简单维护标志 `set_maintenance_active` 废除，替换为绑定 `tx_id` 的原子结构化落盘函数 `set_structured_maintenance_marker`；
-     - 将原 `load_current_release_metadata` 重命名并重构为单一权威记录读取函数 `load_current_release_record`；
-  2. 但二进制入口 `src/bin/wechat-updater.rs` 未随模块重构同步更新调用；
-  3. `work/finish-updater` 交付时仅执行了库级测试 `cargo test --locked --lib updater`，未执行 `cargo build --locked --bin wechat-updater`，导致 CLI 入口处于实质不可编译状态。
-- **连锁影响**：
-  1. `cargo build --locked --bin wechat-updater` 退出码 101，无法生成目标二进制；
-  2. `./scripts/build_release_package.sh` 在 step 42 构建二进制时退出码 101，完整发布包无法组装；
-  3. 依赖该二进制的单元测试 `updater::tests::test_cli_rejects_invalid_or_missing_config_without_side_effects` 与 `updater::tests::test_cli_rejects_test_pubkey_and_mutations_without_side_effects` 在寻找 `target/debug/wechat-updater` 时因文件不存在（`Os { code: 2, kind: NotFound }`）直接 panic；
-  4. Cargo 在 fresh 构建运行集成测试（`tests/*.rs`）及 `cargo clippy --tests` 时因编译二进制报错而阻断。
-- **处理状态**：
-  - 严格遵守《Software Engineer》工作规则及协调者指示，审查方不越权篡改业务代码；
-  - 协调者已将该 RED 缺陷派发给 U1 Owner（`ctx_16f550ba9692`）修复，当前 worktree 保持原授权边界，不轮询等待。
+### 2.3 缺陷 RED-3：`test_ensure_locale_sets_vars` 全局环境变量污染与断言失败（已闭环恢复）
+- **代码位置**：[`src/core/serve.rs:39-58, 753-775`](src/core/serve.rs#L39-L58)
+- **修复提交**：`68ed684`（含 `099560b`）
+- **复验结果**：
+  - 纯函数 `required_locale_defaults` 严格对齐基线原语义（`None` 补默认，所有 `Some` 保持不覆盖）；
+  - 单元测试使用纯函数隔离断言，彻底消除全局写与并发竞态，核心测试连续 3 轮均稳定通过。
 
 ---
 
 ## 3. 门禁与命令验证实际记录
 
-### 3.1 已执行命令与结果记录
-
-| 验证项 | 执行命令 | 实际退出码 | 实际输出/结果摘要 | 定性判定 |
+| 验证项 | 执行命令 | 实际退出码 | 实际测试数量 / 输出结果 | 定性判定 |
 |:---|:---|:---:|:---|:---:|
-| **无 Python 检查** | `./scripts/check_no_python.sh` | **0** | `✅ Python 检查通过：项目中无 Python 依赖或脚本` | **PASS** |
+| **无 Python 检查** | `./scripts/check_no_python.sh` | **0** | `✅ Python 检查通过` | **PASS** |
 | **敏感路径/信息检查** | `./scripts/check_sensitive.sh` | **0** | `✅ 敏感信息检查通过` | **PASS** |
-| **代码格式检查** | `cargo fmt --all -- --check` | **0** | 零 diff，代码格式完全符合规范 | **PASS** |
-| **更新 CLI 新鲜构建** | `cargo build --locked --bin wechat-updater` | **101** | `cannot find function set_maintenance_active / load_current_release_metadata` | **RED（已退 Owner）** |
-| **测试签名器构建** | `cargo build --locked --bin wechat-test-signer` | **0** | 二进制成功生成至 `target/debug/wechat-test-signer` | **PASS** |
-| **完整发布包构建** | `./scripts/build_release_package.sh` | **101** | 因依赖 `wechat-updater` 编译失败而中断退出 | **BLOCKED（受 RED-1 阻断）** |
-| **更新模块库测试** | `cargo test --locked --lib updater` | **101** | 22 passed, 2 failed（2 项 CLI 二进制调用测试因二进制缺失报 NotFound，其余 22 项纯逻辑与对抗测试通过） | **PARTIAL（CLI 失败）** |
-| **全量库测试（默认并发）** | `cargo test --locked --lib` | **101** | 898 passed, 98 failed（2 项为 CLI 缺失；96 项为测试套接字权限失败） | **FAILED（见 3.2 节分析）** |
-
-### 3.2 权限失败核对（96 项失败分析）
-
-在执行 `cargo test --locked --lib`（macOS Darwin 24.3.0 arm64，默认并发线程池，未加 `--test-threads=1`）时，出现 98 项测试失败：
-- **CLI 缺失失败（2 项）**：`updater::tests::test_cli_rejects_*` 因二进制文件不存在 panic。
-- **沙箱权限失败（96 项）**：集中于 `core::worker_client::tests::*`、`core::open_api::http::tests::*`、`core::control::tests::*` 及 `gateway::tests::*`。测试尝试在 `/tmp` 下创建或 `connect` 本地 Unix domain socket（如 `private GUI bot worker`、`core.sock`）或监听本地 HTTP 端口，在标准沙箱限制下受到系统安全策略拦截，抛出 `PermissionDenied` 或 `Operation not permitted (os error 1)`。
-- **定性准则**：按照团队规范，**`PermissionDenied` 必须如实记录为测试失败，严禁擅自归类为“预期通过”**。该 96 项在 Standard Sandbox 模式下定性为 **FAILED（受沙箱权限限制失败）**。
+| **代码格式检查** | `cargo fmt --all -- --check` | **0** | 零 diff，完全符合格式规范 | **PASS** |
+| **All-bin 新鲜构建** | `cargo build --locked --bin wechat-mcp --bin wechat-updater --bin wechat-test-signer` | **0** | 3 个二进制完整生成至 `target/debug/` | **PASS** |
+| **All-target Clippy** | `cargo clippy --tests` | **0** | 编译阻断消除，通过 Clippy 门禁 | **PASS** |
+| **更新模块库测试** | `cargo test --locked --lib updater` | **0** | **24 passed, 0 failed, 1 ignored** | **PASS** |
+| **显式真实包解包专项** | `cargo test --locked --lib test_real_built_release_package_verification_and_unlisted_rejection -- --ignored` | **0** | **1 passed, 0 failed**（耗时 1.84s，实测真实验签解包） | **PASS** |
+| **协议烟雾测试** | `cargo test --test protocol_smoke --locked` | **0** | **2 passed, 0 failed** | **PASS** |
+| **Swift 103 绑定契约** | `cargo test --test swift_brain_ui --locked` | **0** | **103 项内部断言全部通过**（耗时 30.68s） | **PASS** |
+| **Swift 92 更新契约** | `cargo test --test swift_update_ui --locked` | **101** | **90 PASS, 2 FAIL**（2 项离屏尺寸断言与环境差异） | **PARTIAL（如实记录）** |
+| **默认并发核心测试第 1 轮** | `cargo test --bin wechat-mcp` | **0** | **999 passed, 0 failed, 1 ignored**（耗时 24.69s） | **PASS** |
+| **默认并发核心测试第 2 轮** | `cargo test --bin wechat-mcp` | **0** | **999 passed, 0 failed, 1 ignored**（耗时 24.55s） | **PASS** |
+| **默认并发核心测试第 3 轮** | `cargo test --bin wechat-mcp` | **0** | **999 passed, 0 failed, 1 ignored**（耗时 24.86s） | **PASS** |
 
 ---
 
-## 4. 待复验项清单（Pending List，受 RED-1 阻断）
+## 4. 权限失败与环境隔离精确核实
 
-因 `wechat-updater` 编译失败，Cargo 无法完成包含该 target 的编译管线，以下验证项处于 **Pending（未执行/待复验）** 状态，必须在收到协调者明确修复 commit 后完整复验：
-
-1. **Swift 103 绑定契约测试**：`cargo test --test swift_brain_ui --locked`（**Pending**，受二进制编译中断阻断）；
-2. **Swift 92 更新契约测试**：`cargo test --test swift_update_ui --locked`（**Pending**，受二进制编译中断阻断）；
-3. **协议烟雾测试**：`cargo test --test protocol_smoke --locked`（**Pending**，受二进制编译中断阻断）；
-4. **三轮默认并发核心测试**：`cargo test --bin wechat-mcp` 及相关核心二进制测试（**Pending**，需至少连续运行 3 轮并记录退出码与数量）；
-5. **All-target Clippy 检查**：`cargo clippy --tests`（**Pending**，因 `wechat-updater` 编译失败中断退出码 101）；
-6. **完整包实际 Manifest / 验签 / 受限解包轮回检查**：
-   - 实际运行 `./scripts/build_release_package.sh` 构建出完整 `tar.gz` 与 `manifest.json`；
-   - 核验实际 tar 与 manifest 枚举一致性、所有应有 `.App` 与辅助组件完整性；
-   - 验证测试签名真实验签与受限 unpack 轮回闭环（**Pending**，因打包脚本 step 42 依赖 updater 编译中断）。
+依照指示，严格区分环境权限与测试实际结果，杜绝将权限失败泛化为逻辑通过：
+1. **标准沙箱环境限制（Standard Sandbox）**：
+   - 命令：`cargo test --locked --lib`；
+   - 结果：898 passed, 98 failed。其中 96 项因系统 seatbelt 隔离机制拦截跨进程 Unix 套接字（`/tmp/wechat_worker_*.sock`）或本地回环 HTTP 端口 `connect`，抛出 `PermissionDenied` 或 `Operation not permitted (os error 1)`；
+   - **定性原则**：规范要求 `PermissionDenied` 必须如实记录为沙箱限制下的测试未通过，严禁擅自归类为“预期通过”。
+2. **回环套接字授权环境复验**：
+   - 在具备本地 IPC 套接字权限模式下，执行 `cargo test --bin wechat-mcp`；
+   - 连续 3 轮默认并发测试均达到 **999 passed, 0 failed, 1 ignored**（退出码 0），证明代码逻辑与测试隔离在具备必要系统 IPC 权限时完全稳定。
 
 ---
 
 ## 5. 8 项关键防御边界核验与局限性分析（非全面安全证明）
 
-下述 8 项边界核验仅代表当前在特定单元测试、源码静态实现层面的合规性核查，**不等于端到端全面安全验证**，并明确记录其已知防御局限：
+下述 8 项边界仅代表当前在特定测试与代码静态实现层面的核查，**不等于端到端全面安全验证**：
 
-### 5.1 未验签类型不可构造与不可修改 (Verified in Design)
-- **代码核验**：[`src/updater/executor.rs:22-52`](src/updater/executor.rs#L22-L52)
-- **核验结论**：`VerifiedManifestEnvelope` 的内部字段 `envelope: SignedEnvelope` 私有（无 `pub` 访问符），唯一的公有构造入口为 `verify_and_construct`，强制经过验签与兼容性核验。模块内部保证类型不可外部篡改。
-
-### 5.2 沙箱根构造仅限测试环境 (Verified in Design)
-- **代码核验**：[`src/updater/executor.rs:55-120`](src/updater/executor.rs#L55-L120)
-- **核验结论**：`SandboxUpdateRoot` 的私有字段及构造器 `create_test_isolated_sandbox` 加装了 `#[cfg(test)]` 条件编译，生产代码中无法构造沙箱根。
-
-### 5.3 归档尾流与 PAX/GNU 预算防御 (Verified in Specific Tests)
-- **代码核验**：[`src/updater/unpack.rs:245-280, 485-535`](src/updater/unpack.rs#L245-L280)
-- **核验结论**：
-  1. Entry 类型限制为常规文件与目录，任何 Symlink、Link 或 PAX/GNU 扩展头直接拦截（`pax_or_gnu_extensions_rejected`）；
-  2. 流式解包后校验尾部零填充，遇到非零字节报错；
-  3. 检查物理底层文件流（`into_inner()`），读出额外字节则拦截多 member gzip 混杂；
-  4. 解包大小与文件数量受限。
-
-### 5.4 父 Symlink 竞态与目录清理受控 (Verified in Specific Tests)
-- **代码核验**：[`src/updater/unpack.rs:600-690`](src/updater/unpack.rs#L600-L690)、[`src/core/serve.rs:260-310`](src/core/serve.rs#L260-L310)
-- **核验结论**：
-  1. 解包与目录创建全程使用 `openat` 结合 `O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC` 逐级校验；
-  2. `cleanup_staged_content` 仅根据本次解包组件哈希表逐文件清理，对 `seen_dirs` 由深至浅尝试空目录删除，未采用递归 `remove_dir_all`；
-  3. `OwnedSocketDir` 在 `Drop` 时比对 `dev/ino` 物理身份，防止外部重命名后误删非自有目录。
-
-### 5.5 Source 与 Current 受限根校验 (Verified in Specific Tests)
-- **代码核验**：[`src/updater/executor.rs:677-705`](src/updater/executor.rs#L677-L705)
-- **核验结论**：读取 `current` 软链接时，严格校验目标目录名称符合 `is_valid_release_id` 且物理存在于 `releases_dir` 下，杜绝未知或外部逃逸路径。
-
-### 5.6 Record -> Journal -> 清维护原子提交协议与崩溃窗口恢复 (Verified in Specific Tests)
-- **代码核验**：[`src/updater/executor.rs:818-860`](src/updater/executor.rs#L818-L860) 及 [`src/updater/tests.rs:1880-2010`](src/updater/tests.rs#L1880-L2010)
-- **核验结论**：自检通过后 journal 先持久化 `CandidateTestingPassed` 与 Proof；随后原子提交 `current_release.json`；权威记录生效后 journal 推进为 `Committed`；最后清理维护标志。测试模拟故障注入表明：record 提交失败严格返回 `ManualInterventionRequired`，崩溃后全要素一致才恢复为 `CompletePendingCommit`。
-
-### 5.7 既有防降级高水位不回 0 (Verified in Specific Tests)
-- **代码核验**：[`src/updater/journal.rs:670-690`](src/updater/journal.rs#L670-L690)
-- **核验结论**：`load_highest_accepted_sequence` 核验单一权威记录与旧版文件。文件损坏直接抛出 `corrupt_highest_accepted_sequence_file`（fail-closed），绝不高水位静默归零；冲突时抛出 `sequence_conflict_detected` 拒绝更新。
-
-### 5.8 候选自检后代 Pipe 与超时回收及局限性说明 (Partial Defense)
-- **代码核验**：[`src/updater/executor.rs:430-550`](src/updater/executor.rs#L430-L550)
-- **实现机制**：通过 `libc::setpgid(0, 0)` 将子进程作为独立进程组 leader；子进程退出后向 `-pgid` 发送 `SIGKILL` 清理进程组后代并关闭管道写端；具备 `max_total_drain_bytes` 洪泛硬上限。
-- **局限性明确指出（无过度承诺）**：
-  1. **不涵盖 `setsid` 逃逸**：若被测子进程派生的孙子进程主动调用 `setsid()` 创建独立 Session 并脱离原进程组，则向原 `-pgid` 发送信号无法杀灭该逃逸进程，该机制无法保证此类场景下的后代回收；
-  2. **无毫秒级绝对保证**：进程调度与内核回收受系统负载影响，不能做出绝对毫秒级退出承诺。
+1. **未验签类型不可构造/修改 (Verified in Design)**：[`src/updater/executor.rs:22-52`](src/updater/executor.rs#L22-L52) 私有字段强类型封装，唯一构造入口强制验签与兼容性核验；
+2. **沙箱根构造仅限测试环境 (Verified in Design)**：[`src/updater/executor.rs:55-120`](src/updater/executor.rs#L55-L120) 私有字段，构造器 `create_test_isolated_sandbox` 加装 `#[cfg(test)]`，生产环境零构造可能；
+3. **归档尾流与 PAX/GNU 预算防御 (Verified in Specific Tests)**：[`src/updater/unpack.rs:245-280, 485-535`](src/updater/unpack.rs#L245-L280) 严格拦截 PAX/GNU 扩展头，流式校验尾部零填充，物理底层流防多 member 尾垃圾；
+4. **父 Symlink 竞态与目录清理受控 (Verified in Specific Tests)**：全程 `openat` + `O_NOFOLLOW` 遍历；清理仅针对已解包哈希表逐文件删除并尝试空目录清理，杜绝 `remove_dir_all`；[`OwnedSocketDir`](src/core/serve.rs#L260) 比对 `dev/ino` 防误删非自有目录；
+5. **Source 与 Current 受限根校验 (Verified in Specific Tests)**：软链接目标严格限制在 `releases/` 下且名称合法；
+6. **Record -> Journal -> 清维护原子提交协议与崩溃恢复 (Verified in Specific Tests)**：顺序严格为 `CandidateTestingPassed` -> 持久化 proof -> 原子提交 `current_release.json` -> 推进 `Committed` -> 清除维护态；崩溃恢复全要素比对；
+7. **既有防降级高水位不回 0 (Verified in Specific Tests)**：文件损坏或序列冲突严格 fail-closed 报错，绝不回退至 0；
+8. **自检后代 Pipe 与超时回收及局限性说明 (Partial Defense)**：通过 `setpgid` 与向 `-pgid` 发送 `SIGKILL` 清理进程组后代。**明确指出局限性：若孙子进程调用 `setsid()` 建立新 Session 脱离原进程组，则无法被回收，且无毫秒级绝对保证**。
 
 ---
 
 ## 6. 残余边界与当前局限说明（Known Partial Boundaries）
 
-遵循诚实汇报规范，记录当前系统残余边界：
-
-1. **构建中断（RED-1）**：`src/bin/wechat-updater.rs` 引用已废弃签名，导致二进制无法构建、发布脚本中断，已派发 U1 Owner 修复；
-2. **生产信任根未配置**：生产环境中执行更新命令保持在 fail-closed 状态（提示 `error: unsupported: trust_root_unconfigured`）；
-3. **真实生产排空与 launchd 未接线**：Swift 宿主 App 与 CoreSupervisor 守护进程的真实进程排空与 launchd 重启未接线，当前测试全部基于 Fixture 适配器；
-4. **Mock Pass 自检不能代表真实应用通过**：当前更新阶段仅实现了受控解包与沙箱候选机制，通过的自检为受信 Mock Fixture，绝不可声称真实微信 App 自检或真实备份通过；
-5. **本地小步审查，零远端推送**：本地阶段合并保留在分支 `work/completion-integration`，未向远端进行任何 git push。
+1. **Swift 92 更新测试 2 项失败**：`tests/host_update_selftest/main.swift` 中的两项离屏尺寸断言与环境分辨率差异失败（90 PASS, 2 FAIL），保持原样记录退回 Owner；
+2. **R1 暂未合入**：Rust guard 运行时接线尚未完成，R1（`8173715`）保持未合入；
+3. **生产信任根未配置**：生产环境中执行更新命令保持在 fail-closed 状态（提示 `error: unsupported: trust_root_unconfigured`）；
+4. **真实生产排空与 launchd 未接线**：Swift 宿主 App 与 CoreSupervisor 守护进程的真实进程排空与 launchd 重启未接线，当前测试全部基于 Fixture 适配器；
+5. **Mock Pass 自检不能代表真实应用通过**：当前更新阶段仅实现了受控解包与沙箱候选机制，通过的自检为受信 Mock Fixture，绝不可声称真实微信 App 自检或真实备份通过；
+6. **本地小步审查，零远端推送**：本地阶段合并保留在分支 `work/completion-integration`，未向远端进行任何 git push。
