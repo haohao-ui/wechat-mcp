@@ -2,7 +2,9 @@ use anyhow::{Context, Result, bail};
 use ring::signature::KeyPair;
 use std::fs;
 use std::path::PathBuf;
-use wechat_mcp::updater::manifest::{ReleaseManifest, SignedEnvelope, sign_manifest_with_ed25519_key};
+use wechat_mcp::updater::manifest::{
+    ReleaseManifest, SignedEnvelope, sign_manifest_with_ed25519_key,
+};
 
 fn print_usage() {
     eprintln!(
@@ -67,8 +69,9 @@ fn main() -> Result<()> {
     }
 
     if let Some(ref pub_path) = pub_out {
-        fs::write(pub_path, &pub_hex)
-            .with_context(|| format!("failed to write public key hex to '{}'", pub_path.display()))?;
+        fs::write(pub_path, &pub_hex).with_context(|| {
+            format!("failed to write public key hex to '{}'", pub_path.display())
+        })?;
     }
 
     let sig_hex = sign_manifest_with_ed25519_key(&key_pair, &manifest)?;
@@ -85,7 +88,10 @@ fn main() -> Result<()> {
     fs::write(&out_p, envelope_json)
         .with_context(|| format!("failed to write signed envelope to '{}'", out_p.display()))?;
 
-    println!("Signed envelope successfully written to '{}'", out_p.display());
+    println!(
+        "Signed envelope successfully written to '{}'",
+        out_p.display()
+    );
     if let Some(ref pub_path) = pub_out {
         println!("Public key hex written to '{}'", pub_path.display());
     }

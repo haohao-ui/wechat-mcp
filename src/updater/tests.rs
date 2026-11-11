@@ -220,7 +220,11 @@ fn test_safe_unpack_and_verify_valid_and_adversarial() {
     // 1. 验证正常解包通过
     let stage_valid = temp.0.join("stage_valid");
     let res = safe_unpack_and_verify(&valid_archive, &stage_valid, &artifact, &components);
-    assert!(res.is_ok(), "Expected valid unpack to succeed: {:?}", res.err());
+    assert!(
+        res.is_ok(),
+        "Expected valid unpack to succeed: {:?}",
+        res.err()
+    );
 
     // 2. 对抗包测试：软链接注入拒绝
     let symlink_archive = temp.0.join("symlink_evil.tar.gz");
@@ -252,7 +256,12 @@ fn test_safe_unpack_and_verify_valid_and_adversarial() {
     };
     let sym_res = safe_unpack_and_verify(&symlink_archive, &staging, &sym_artifact, &components);
     assert!(sym_res.is_err());
-    assert!(sym_res.unwrap_err().to_string().contains("symlink_rejected"));
+    assert!(
+        sym_res
+            .unwrap_err()
+            .to_string()
+            .contains("symlink_rejected")
+    );
 
     // 3. 对抗包测试：路径穿越逃逸拒绝 (../escaped)
     let traversal_archive = temp.0.join("traversal_evil.tar.gz");
@@ -283,7 +292,12 @@ fn test_safe_unpack_and_verify_valid_and_adversarial() {
     };
     let tr_res = safe_unpack_and_verify(&traversal_archive, &staging, &tr_artifact, &components);
     assert!(tr_res.is_err());
-    assert!(tr_res.unwrap_err().to_string().contains("invalid_relative_path"));
+    assert!(
+        tr_res
+            .unwrap_err()
+            .to_string()
+            .contains("invalid_relative_path")
+    );
 
     // 4. 对抗包测试：大小写冲突攻击
     let collision_archive = temp.0.join("collision_evil.tar.gz");
@@ -296,13 +310,17 @@ fn test_safe_unpack_and_verify_valid_and_adversarial() {
         h1.set_size(content.len() as u64);
         h1.set_mode(0o755);
         h1.set_cksum();
-        builder.append_data(&mut h1, "bin/wechat-mcp", &content[..]).unwrap();
+        builder
+            .append_data(&mut h1, "bin/wechat-mcp", &content[..])
+            .unwrap();
 
         let mut h2 = tar::Header::new_gnu();
         h2.set_size(content.len() as u64);
         h2.set_mode(0o755);
         h2.set_cksum();
-        builder.append_data(&mut h2, "bin/WeChat-MCP", &content[..]).unwrap();
+        builder
+            .append_data(&mut h2, "bin/WeChat-MCP", &content[..])
+            .unwrap();
 
         let enc = builder.into_inner().unwrap();
         enc.finish().unwrap();
@@ -317,10 +335,15 @@ fn test_safe_unpack_and_verify_valid_and_adversarial() {
         max_file_count: 10,
     };
     let stage_col = temp.0.join("stage_col");
-    let col_res = safe_unpack_and_verify(&collision_archive, &stage_col, &col_artifact, &components);
+    let col_res =
+        safe_unpack_and_verify(&collision_archive, &stage_col, &col_artifact, &components);
     assert!(col_res.is_err());
     let err_str = col_res.unwrap_err().to_string();
-    assert!(err_str.contains("case_collision_detected"), "Actual error was: {}", err_str);
+    assert!(
+        err_str.contains("case_collision_detected"),
+        "Actual error was: {}",
+        err_str
+    );
 
     // 5. 对抗包测试：解压大小炸弹攻击 (超出 max_unpacked_bytes)
     let bomb_artifact = ArtifactSpec {
@@ -332,7 +355,12 @@ fn test_safe_unpack_and_verify_valid_and_adversarial() {
     };
     let bomb_res = safe_unpack_and_verify(&valid_archive, &staging, &bomb_artifact, &components);
     assert!(bomb_res.is_err());
-    assert!(bomb_res.unwrap_err().to_string().contains("unpacked_size_limit_exceeded"));
+    assert!(
+        bomb_res
+            .unwrap_err()
+            .to_string()
+            .contains("unpacked_size_limit_exceeded")
+    );
 
     // 6. 对抗包测试：条目数超限
     let count_bomb_artifact = ArtifactSpec {
@@ -342,9 +370,15 @@ fn test_safe_unpack_and_verify_valid_and_adversarial() {
         max_unpacked_bytes: 10000,
         max_file_count: 0, // 允许 0 个文件
     };
-    let count_res = safe_unpack_and_verify(&valid_archive, &staging, &count_bomb_artifact, &components);
+    let count_res =
+        safe_unpack_and_verify(&valid_archive, &staging, &count_bomb_artifact, &components);
     assert!(count_res.is_err());
-    assert!(count_res.unwrap_err().to_string().contains("file_count_limit_exceeded"));
+    assert!(
+        count_res
+            .unwrap_err()
+            .to_string()
+            .contains("file_count_limit_exceeded")
+    );
 
     // 7. 对抗包测试：未在 components 清单声明的未知文件
     let unknown_archive = temp.0.join("unknown_evil.tar.gz");
@@ -357,7 +391,9 @@ fn test_safe_unpack_and_verify_valid_and_adversarial() {
         h1.set_size(content.len() as u64);
         h1.set_mode(0o755);
         h1.set_cksum();
-        builder.append_data(&mut h1, "bin/unknown_backdoor", &content[..]).unwrap();
+        builder
+            .append_data(&mut h1, "bin/unknown_backdoor", &content[..])
+            .unwrap();
 
         let enc = builder.into_inner().unwrap();
         enc.finish().unwrap();
@@ -373,7 +409,12 @@ fn test_safe_unpack_and_verify_valid_and_adversarial() {
     };
     let unk_res = safe_unpack_and_verify(&unknown_archive, &staging, &unk_artifact, &components);
     assert!(unk_res.is_err());
-    assert!(unk_res.unwrap_err().to_string().contains("unexpected_file_in_archive"));
+    assert!(
+        unk_res
+            .unwrap_err()
+            .to_string()
+            .contains("unexpected_file_in_archive")
+    );
 
     // 8. 对抗包测试：非法权限位 (setuid)
     let setuid_archive = temp.0.join("setuid_evil.tar.gz");
@@ -386,7 +427,9 @@ fn test_safe_unpack_and_verify_valid_and_adversarial() {
         h1.set_size(content.len() as u64);
         h1.set_mode(0o4755); // setuid
         h1.set_cksum();
-        builder.append_data(&mut h1, "bin/wechat-mcp", &content[..]).unwrap();
+        builder
+            .append_data(&mut h1, "bin/wechat-mcp", &content[..])
+            .unwrap();
 
         let enc = builder.into_inner().unwrap();
         enc.finish().unwrap();
@@ -402,7 +445,12 @@ fn test_safe_unpack_and_verify_valid_and_adversarial() {
     };
     let su_res = safe_unpack_and_verify(&setuid_archive, &staging, &su_artifact, &components);
     assert!(su_res.is_err());
-    assert!(su_res.unwrap_err().to_string().contains("forbidden_special_permissions"));
+    assert!(
+        su_res
+            .unwrap_err()
+            .to_string()
+            .contains("forbidden_special_permissions")
+    );
 
     // 9. 对抗包测试：尾部附加非零垃圾数据拒绝
     let trailing_archive = temp.0.join("trailing_garbage.tar.gz");
@@ -462,7 +510,12 @@ fn test_safe_unpack_and_verify_valid_and_adversarial() {
     let stage_nu = temp.0.join("stage_nu");
     let nu_res = safe_unpack_and_verify(&non_utf8_archive, &stage_nu, &nu_artifact, &components);
     assert!(nu_res.is_err());
-    assert!(nu_res.unwrap_err().to_string().contains("invalid_utf8_in_entry_path"));
+    assert!(
+        nu_res
+            .unwrap_err()
+            .to_string()
+            .contains("invalid_utf8_in_entry_path")
+    );
 
     // 11. 对抗测试：解压目标祖先目录被替换为 symlink 拒绝
     let stage_sym_ancestor = temp.0.join("stage_sym_anc");
@@ -471,9 +524,15 @@ fn test_safe_unpack_and_verify_valid_and_adversarial() {
     fs::create_dir_all(&real_other).unwrap();
     // 将 bin 目录软链接指向外部目录
     std::os::unix::fs::symlink(&real_other, stage_sym_ancestor.join("bin")).unwrap();
-    let anc_res = safe_unpack_and_verify(&valid_archive, &stage_sym_ancestor, &artifact, &components);
+    let anc_res =
+        safe_unpack_and_verify(&valid_archive, &stage_sym_ancestor, &artifact, &components);
     assert!(anc_res.is_err());
-    assert!(anc_res.unwrap_err().to_string().contains("symlink_in_directory_path"));
+    assert!(
+        anc_res
+            .unwrap_err()
+            .to_string()
+            .contains("symlink_in_directory_path")
+    );
 }
 
 #[test]
@@ -750,31 +809,56 @@ fn test_update_lock_exclusive_and_release_metadata() {
     // 1. 排他锁测试
     let guard1 = acquire_update_lock(&state_dir).unwrap();
     let err_lock2 = acquire_update_lock(&state_dir).unwrap_err();
-    assert!(err_lock2.to_string().contains("concurrent_update_in_progress"));
+    assert!(
+        err_lock2
+            .to_string()
+            .contains("concurrent_update_in_progress")
+    );
     drop(guard1);
 
     // 释放后可再次获取
     let _guard3 = acquire_update_lock(&state_dir).unwrap();
 
-    // 2. 当前 Release 元数据保存与恢复测试
-    let meta = CurrentReleaseMetadata {
+    // 2. 单一权威 Release 提交记录原子保存与恢复测试
+    let record = CurrentReleaseCommitRecord {
+        record_schema: 1,
+        tx_id: "tx-test-12345".into(),
         release_id: "0.2.0-test".into(),
         sequence: 1002,
         channel: "test".into(),
-        components_consistent: true,
+        manifest_digest: "sha256-test-digest".into(),
         installed_at: 1794368000,
     };
-    save_current_release_metadata(&state_dir, &meta).unwrap();
-    let loaded_meta = load_current_release_metadata(&state_dir).unwrap().unwrap();
-    assert_eq!(loaded_meta, meta);
+    atomic_commit_release_record(&state_dir, &record).unwrap();
+    let loaded_record = load_current_release_record(&state_dir).unwrap().unwrap();
+    assert_eq!(loaded_record, record);
 
-    // 3. 维护态标记设置与清除
-    set_maintenance_active(&state_dir, "test maintenance reason").unwrap();
+    // 且水位同时原子同步更新
+    assert_eq!(load_highest_accepted_sequence(&state_dir).unwrap(), 1002);
+
+    // 3. 结构化维护态标记设置与精确 tx 清除测试
+    set_structured_maintenance_marker(
+        &state_dir,
+        "tx-test-12345",
+        "test maintenance reason",
+        1794368000,
+    )
+    .unwrap();
+    assert!(state_dir.join("core.maintenance.json").exists());
     assert!(state_dir.join("core.maintenance").exists());
-    let maint_bytes = fs::read(state_dir.join("core.maintenance")).unwrap();
-    assert_eq!(maint_bytes, b"test maintenance reason");
 
-    clear_maintenance_if_safe(&state_dir).unwrap();
+    // 尝试用错误的 tx_id 清除维护态，必须被拒绝！
+    let err_clear = clear_maintenance_for_tx(&state_dir, "tx-wrong-id").unwrap_err();
+    assert!(
+        err_clear
+            .to_string()
+            .contains("maintenance_marker_tx_mismatch")
+    );
+    assert!(state_dir.join("core.maintenance.json").exists());
+
+    // 用匹配的 tx_id 清除维护态，成功清除
+    clear_maintenance_for_tx(&state_dir, "tx-test-12345").unwrap();
+    assert!(!state_dir.join("core.maintenance.json").exists());
     assert!(!state_dir.join("core.maintenance").exists());
 }
 
@@ -1140,11 +1224,7 @@ fn test_sandbox_executor_end_to_end_and_fault_injections() {
 
     // 强类型验证通过构造 VerifiedManifestEnvelope
     let verified = VerifiedManifestEnvelope::verify_and_construct(
-        &env_bytes,
-        &key_store,
-        "arm64",
-        "13.0",
-        1000, // highest accepted
+        &env_bytes, &key_store, "arm64", "13.0", 1000, // highest accepted
     )
     .unwrap();
 
@@ -1165,12 +1245,19 @@ fn test_sandbox_executor_end_to_end_and_fault_injections() {
     let highest = load_highest_accepted_sequence(&sandbox.state_dir()).unwrap();
     assert_eq!(highest, 1005);
 
-    // CurrentReleaseMetadata 已写入
-    let current_meta = load_current_release_metadata(&sandbox.state_dir()).unwrap().unwrap();
+    // CurrentReleaseCommitRecord 已写入
+    let current_meta = load_current_release_record(&sandbox.state_dir())
+        .unwrap()
+        .unwrap();
     assert_eq!(current_meta.release_id, "0.2.0-1005");
     assert_eq!(current_meta.sequence, 1005);
+    assert_eq!(
+        current_meta.manifest_digest,
+        verified.manifest().artifact.sha256
+    );
 
     // 维护态已安全清除
+    assert!(!sandbox.state_dir().join("core.maintenance.json").exists());
     assert!(!sandbox.state_dir().join("core.maintenance").exists());
 
     // 2. 候选自检失败注入测试：自动回滚切回 previous
@@ -1200,18 +1287,18 @@ fn test_sandbox_executor_end_to_end_and_fault_injections() {
         fail_candidate_testing: true,
         ..Default::default()
     });
-    let res_fail = fail_test_executor.execute_transaction(
-        &verified2,
-        &archive_path,
-        &signer,
-        1794369000,
-    );
+    let res_fail =
+        fail_test_executor.execute_transaction(&verified2, &archive_path, &signer, 1794369000);
     assert!(res_fail.is_ok());
     let journal_fail = res_fail.unwrap();
     assert_eq!(journal_fail.stage, TransactionStage::RolledBack);
     // current 指针切回 0.2.0-1005
     let target_after_rollback = fs::read_link(sandbox.current_link()).unwrap();
-    assert!(target_after_rollback.to_string_lossy().contains("0.2.0-1005"));
+    assert!(
+        target_after_rollback
+            .to_string_lossy()
+            .contains("0.2.0-1005")
+    );
 
     // 3. 产生新业务数据冲突注入测试：严禁静默回退，保持维护态 RecoveryRequired
     let mut manifest3 = verified.manifest().clone();
@@ -1240,15 +1327,115 @@ fn test_sandbox_executor_end_to_end_and_fault_injections() {
         simulate_new_business_data_on_rollback: true,
         ..Default::default()
     });
-    let res_conflict = conflict_executor.execute_transaction(
-        &verified3,
-        &archive_path,
-        &signer,
-        1794370000,
-    );
+    let res_conflict =
+        conflict_executor.execute_transaction(&verified3, &archive_path, &signer, 1794370000);
     assert!(res_conflict.is_ok());
     let journal_conflict = res_conflict.unwrap();
     assert_eq!(journal_conflict.stage, TransactionStage::RecoveryRequired);
     // 维护标志保持激活状态，绝不自动清除
     assert!(sandbox.state_dir().join("core.maintenance").exists());
+}
+
+#[test]
+fn test_release_id_validation_and_existing_directory_protection() {
+    // 1. 字符集与路径穿越校验
+    assert!(is_valid_release_id("0.2.0-alpha.1"));
+    assert!(is_valid_release_id("v1.0.0-rc_2"));
+    assert!(!is_valid_release_id(""));
+    assert!(!is_valid_release_id("."));
+    assert!(!is_valid_release_id(".."));
+    assert!(!is_valid_release_id("../escape"));
+    assert!(!is_valid_release_id("release/nested"));
+    assert!(!is_valid_release_id("has space"));
+    assert!(!is_valid_release_id("null\0byte"));
+
+    // 2. 已存在 Release 目录保护：严禁覆盖或删除已有版本
+    let sandbox = SandboxUpdateRoot::create_test_isolated_sandbox().unwrap();
+    let protected_dir = sandbox.releases_dir().join("0.2.0-existing");
+    fs::create_dir_all(&protected_dir).unwrap();
+    let canary_file = protected_dir.join("canary.txt");
+    fs::write(&canary_file, b"precious_canary_data").unwrap();
+
+    let (key_pair, pub_bytes) = generate_test_ed25519_key();
+    let key_store = TrustedKeyStore::new().with_key("test-root-v1", &pub_bytes);
+
+    let archive_path = sandbox.root_dir().join("dummy.tar.gz");
+    fs::write(&archive_path, b"dummy").unwrap();
+
+    let mut manifest = sample_manifest(2001, "arm64");
+    manifest.release_id = "0.2.0-existing".into();
+    let sig_hex = sign_manifest(&key_pair, &manifest);
+    let envelope = SignedEnvelope {
+        envelope_schema: 1,
+        key_id: "test-root-v1".into(),
+        signature_algorithm: "ed25519".into(),
+        signature: sig_hex,
+        manifest: manifest.clone(),
+    };
+    let env_bytes = serde_json::to_vec(&envelope).unwrap();
+    let verified =
+        VerifiedManifestEnvelope::verify_and_construct(&env_bytes, &key_store, "arm64", "13.0", 0)
+            .unwrap();
+
+    let signer = LocalSigner::for_test_mock();
+    let executor = SandboxUpdateExecutor::new(&sandbox);
+    let err = executor
+        .execute_transaction(&verified, &archive_path, &signer, 1794360100)
+        .unwrap_err();
+
+    assert!(
+        err.to_string().contains("release_directory_already_exists"),
+        "Unexpected error: {:?}",
+        err
+    );
+
+    // 验证金丝雀文件依然完好无损，目录未被删除或清空！
+    assert_eq!(fs::read(&canary_file).unwrap(), b"precious_canary_data");
+}
+
+#[test]
+fn test_recovery_evaluation_rejects_unknown_external_or_invalid_targets() {
+    let temp = TempTestDir::new("rec_eval");
+    let releases_dir = temp.0.join("releases");
+    let external_dir = temp.0.join("external");
+    fs::create_dir_all(&releases_dir).unwrap();
+    fs::create_dir_all(&external_dir).unwrap();
+
+    let current_link = temp.0.join("current");
+
+    let journal = UpdateJournal {
+        transaction_id: "tx-test-eval".into(),
+        stage: TransactionStage::Switching,
+        source_release_id: "0.1.0".into(),
+        target_release_id: "0.2.0".into(),
+        target_sequence: 1002,
+        timestamp: 1794360000,
+        backup_path: None,
+        error: None,
+        maintenance_marker_confirmed: true,
+    };
+
+    // 1. current 指向外部目录（不在 releases_dir 内）
+    std::os::unix::fs::symlink(&external_dir, &current_link).unwrap();
+    let rec1 = journal.evaluate_recovery(&releases_dir, &current_link);
+    match rec1 {
+        RecoveryAction::ManualInterventionRequired(msg) => {
+            assert!(
+                msg.contains("current_target_not_a_directory")
+                    || msg.contains("unknown_current_target")
+            );
+        }
+        other => panic!("Expected ManualInterventionRequired, got {:?}", other),
+    }
+
+    // 2. current 指向 releases_dir 内不存在的非目录/软链断裂
+    let _ = fs::remove_file(&current_link);
+    std::os::unix::fs::symlink(releases_dir.join("nonexistent_release"), &current_link).unwrap();
+    let rec2 = journal.evaluate_recovery(&releases_dir, &current_link);
+    match rec2 {
+        RecoveryAction::ManualInterventionRequired(msg) => {
+            assert!(msg.contains("current_target_not_a_directory"));
+        }
+        other => panic!("Expected ManualInterventionRequired, got {:?}", other),
+    }
 }

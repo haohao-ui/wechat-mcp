@@ -117,17 +117,23 @@ impl UpdateJournal {
     }
 
     /// 评估断电/崩溃后的恢复动作（采用严格规范化路径精确匹配，绝不使用 contains 模糊匹配，绝不把未知 current 当旧版安全）
-    pub fn evaluate_recovery(&self, _releases_dir: &Path, current_link: &Path) -> RecoveryAction {
+    pub fn evaluate_recovery(&self, releases_dir: &Path, current_link: &Path) -> RecoveryAction {
         match self.stage {
             TransactionStage::Staged
             | TransactionStage::PublisherVerified
             | TransactionStage::LocalSigned => RecoveryAction::DiscardCandidate,
             TransactionStage::Draining | TransactionStage::BackupVerified => {
-                // 尚未切换指针，安全恢复旧版
-                RecoveryAction::ResumeOldRelease
+                // 尚未切换指针，若存在旧版则安全恢复旧版，若首次安装则需人工介入
+                if self.source_release_id == "none" {
+                    RecoveryAction::ManualInterventionRequired(
+                        "initial_install_interrupted_no_source_release".into(),
+                    )
+                } else {
+                    RecoveryAction::ResumeOldRelease
+                }
             }
             TransactionStage::Switching => {
-                // 检查实际 current 指向（必须精确匹配，绝不能模糊 contains）
+                // 检查实际 current 指向（必须受限在 releases_dir 内，且精确匹配）
                 match fs::read_link(current_link) {
                     Ok(target) => {
                         let target_str = target.to_string_lossy().to_string();
@@ -135,6 +141,15 @@ impl UpdateJournal {
                             .file_name()
                             .map(|s| s.to_string_lossy().to_string())
                             .unwrap_or_default();
+
+                        // 验证目标必须在 releases_dir 真实存在且为目录
+                        let target_dir = releases_dir.join(&target_leaf);
+                        if !target_dir.is_dir() {
+                            return RecoveryAction::ManualInterventionRequired(format!(
+                                "current_target_not_a_directory: '{}'",
+                                target_dir.display()
+                            ));
+                        }
 
                         if target_leaf == self.target_release_id
                             || target_str.ends_with(&format!("/{}", self.target_release_id))
@@ -203,27 +218,32 @@ pub fn acquire_update_lock(state_dir: &Path) -> Result<UpdateLockGuard> {
     })
 }
 
-/// 已安装 release 元数据闭合结构
+/// 单一权威提交记录：闭合版本化，原子绑定 tx_id、最高水位、manifest 摘要与元数据
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct CurrentReleaseMetadata {
+pub struct CurrentReleaseCommitRecord {
+    pub record_schema: u32,
+    pub tx_id: String,
     pub release_id: String,
     pub sequence: u64,
     pub channel: String,
-    pub components_consistent: bool,
+    pub manifest_digest: String,
     pub installed_at: u64,
 }
 
-pub fn save_current_release_metadata(
+pub fn atomic_commit_release_record(
     state_dir: &Path,
-    meta: &CurrentReleaseMetadata,
+    record: &CurrentReleaseCommitRecord,
 ) -> Result<()> {
-    let meta_path = state_dir.join("current_release_metadata.json");
-    let tmp_path = state_dir.join(format!(
-        "current_release_metadata.tmp.{}",
-        uuid::Uuid::new_v4()
-    ));
-    let json_bytes = serde_json::to_vec_pretty(meta)?;
+    if !state_dir.exists() {
+        fs::create_dir_all(state_dir)?;
+        fs::set_permissions(state_dir, fs::Permissions::from_mode(0o700))?;
+    }
+
+    let record_path = state_dir.join("current_release.json");
+    let tmp_path = state_dir.join(format!("current_release.tmp.{}", uuid::Uuid::new_v4()));
+
+    let json_bytes = serde_json::to_vec_pretty(record)?;
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -232,37 +252,95 @@ pub fn save_current_release_metadata(
     file.write_all(&json_bytes)?;
     file.sync_all()?;
     drop(file);
-    fs::rename(&tmp_path, &meta_path)?;
+
+    fs::rename(&tmp_path, &record_path)?;
+
+    // 同时原子更新高水位文件，确保旧组件读取兼容
+    save_highest_accepted_sequence(state_dir, record.sequence)?;
+
     sync_dir(state_dir)?;
     Ok(())
 }
 
-pub fn load_current_release_metadata(state_dir: &Path) -> Result<Option<CurrentReleaseMetadata>> {
-    let meta_path = state_dir.join("current_release_metadata.json");
-    if !meta_path.exists() {
+pub fn load_current_release_record(state_dir: &Path) -> Result<Option<CurrentReleaseCommitRecord>> {
+    let record_path = state_dir.join("current_release.json");
+    if !record_path.exists() {
         return Ok(None);
     }
-    let bytes = fs::read(&meta_path)?;
-    let meta: CurrentReleaseMetadata = serde_json::from_slice(&bytes)?;
-    Ok(Some(meta))
+    let bytes = fs::read(&record_path)?;
+    let record: CurrentReleaseCommitRecord = serde_json::from_slice(&bytes)?;
+    Ok(Some(record))
 }
 
-pub fn set_maintenance_active(state_dir: &Path, reason: &str) -> Result<()> {
-    let m_path = state_dir.join("core.maintenance");
+/// 沙箱内部结构化维护标志
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MaintenanceMarker {
+    pub marker_schema: u32,
+    pub tx_id: String,
+    pub reason: String,
+    pub timestamp: u64,
+}
+
+pub fn set_structured_maintenance_marker(
+    state_dir: &Path,
+    tx_id: &str,
+    reason: &str,
+    now: u64,
+) -> Result<()> {
+    let marker_path = state_dir.join("core.maintenance.json");
     let tmp_path = state_dir.join(format!("core.maintenance.tmp.{}", uuid::Uuid::new_v4()));
-    fs::write(&tmp_path, reason.as_bytes())?;
-    fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600))?;
-    fs::rename(&tmp_path, &m_path)?;
+
+    let marker = MaintenanceMarker {
+        marker_schema: 1,
+        tx_id: tx_id.to_string(),
+        reason: reason.to_string(),
+        timestamp: now,
+    };
+
+    let json_bytes = serde_json::to_vec_pretty(&marker)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp_path)?;
+    file.write_all(&json_bytes)?;
+    file.sync_all()?;
+    drop(file);
+
+    fs::rename(&tmp_path, &marker_path)?;
+
+    // 兼容原有的 core.maintenance 纯标志文件
+    let raw_flag = state_dir.join("core.maintenance");
+    let _ = fs::write(raw_flag, reason.as_bytes());
+
     sync_dir(state_dir)?;
     Ok(())
 }
 
-pub fn clear_maintenance_if_safe(state_dir: &Path) -> Result<()> {
-    let m_path = state_dir.join("core.maintenance");
-    if m_path.exists() {
-        fs::remove_file(&m_path)?;
-        sync_dir(state_dir)?;
+pub fn clear_maintenance_for_tx(state_dir: &Path, current_tx_id: &str) -> Result<()> {
+    let marker_path = state_dir.join("core.maintenance.json");
+    if marker_path.exists() {
+        let bytes = fs::read(&marker_path)?;
+        let marker: MaintenanceMarker = serde_json::from_slice(&bytes)
+            .map_err(|e| anyhow::anyhow!("corrupt_maintenance_marker: {}", e))?;
+
+        if marker.tx_id != current_tx_id {
+            bail!(
+                "maintenance_marker_tx_mismatch: existing marker belongs to tx '{}', cannot clear by tx '{}'",
+                marker.tx_id,
+                current_tx_id
+            );
+        }
+        fs::remove_file(&marker_path)?;
     }
+
+    let raw_flag = state_dir.join("core.maintenance");
+    if raw_flag.exists() {
+        let _ = fs::remove_file(raw_flag);
+    }
+
+    sync_dir(state_dir)?;
     Ok(())
 }
 

@@ -82,7 +82,9 @@ fn main() {
                 "idle"
             };
 
-            let current_meta = journal::load_current_release_metadata(&state_dir).ok().flatten();
+            let current_meta = journal::load_current_release_metadata(&state_dir)
+                .ok()
+                .flatten();
 
             let out = serde_json::json!({
                 "status": status_str,
