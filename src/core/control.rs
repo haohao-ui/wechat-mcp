@@ -4076,6 +4076,61 @@ mod tests {
     }
 
     #[test]
+    fn test_control_paths_core_socket_file_equivalence_with_default_socket_path() {
+        // 1. WECHAT_CORE_SOCK 存在时的等价性
+        {
+            let cp = ControlPaths {
+                home: PathBuf::from("/opt/fake_user_dir"),
+                core_sock: Some(PathBuf::from("/tmp/custom.sock")),
+            };
+            assert_eq!(cp.core_socket_file(), PathBuf::from("/tmp/custom.sock"));
+        }
+
+        // 2. WECHAT_CORE_SOCK 缺失且 HOME 有效
+        {
+            let cp = ControlPaths {
+                home: PathBuf::from("/opt/fake_user_dir"),
+                core_sock: None,
+            };
+            assert_eq!(
+                cp.core_socket_file(),
+                PathBuf::from("/opt/fake_user_dir/.wechat-rpa/core.sock")
+            );
+        }
+
+        // 3. WECHAT_CORE_SOCK 缺失且 HOME 为空值
+        {
+            let cp = ControlPaths {
+                home: PathBuf::from(""),
+                core_sock: None,
+            };
+            assert_eq!(
+                cp.core_socket_file(),
+                PathBuf::from(".wechat-rpa/core.sock")
+            );
+        }
+
+        // 4. WECHAT_CORE_SOCK 缺失且 HOME 缺失（回退到 /）
+        {
+            let cp = ControlPaths {
+                home: PathBuf::from("/"),
+                core_sock: None,
+            };
+            assert_eq!(
+                cp.core_socket_file(),
+                PathBuf::from("/.wechat-rpa/core.sock")
+            );
+        }
+
+        // 5. 与 external_brain::default_socket_path 在当前环境下的完全等价
+        assert_eq!(
+            ControlPaths::from_env().core_socket_file(),
+            crate::core::external_brain::default_socket_path(),
+            "ControlPaths::from_env().core_socket_file() must match external_brain::default_socket_path()"
+        );
+    }
+
+    #[test]
     fn test_python_parity_golden_values() {
         let dir = TempDir::new();
         let paths = ControlPaths::isolated(dir.path());

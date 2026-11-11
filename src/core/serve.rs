@@ -136,6 +136,28 @@ fn now_secs() -> f64 {
         .as_secs_f64()
 }
 
+#[derive(Debug)]
+struct OwnedSocketDir {
+    dir: PathBuf,
+}
+
+impl Drop for OwnedSocketDir {
+    fn drop(&mut self) {
+        // 安全清理：
+        // 1. 获取 symlink_metadata，绝不跟随符号链接 (follow symlink)
+        // 2. 如果是真实目录且不是符号链接，才递归删除
+        // 3. 如果是符号链接，只删除该符号链接本身，绝不删除外部目标目录中的内容
+        if let Ok(meta) = fs::symlink_metadata(&self.dir) {
+            let file_type = meta.file_type();
+            if file_type.is_symlink() {
+                let _ = fs::remove_file(&self.dir);
+            } else if file_type.is_dir() {
+                let _ = fs::remove_dir_all(&self.dir);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ServePaths {
     pub home: PathBuf,
@@ -143,13 +165,18 @@ pub struct ServePaths {
     pub worker_sock: PathBuf,
     pub bot_worker_sock: PathBuf,
     pub gateway_db: Option<Option<PathBuf>>,
+    /// 仅测试 isolated 环境独占持有的临时目录 guard。
+    /// 生产环境 from_env() 始终为 None，永不清理任何目录。
+    /// 使用 Arc 保证 Clone 共享所有权，只有所有 Clone 均 Drop 后才触发清理。
+    #[allow(dead_code)]
+    temp_dir_guard: Option<std::sync::Arc<OwnedSocketDir>>,
 }
 
 impl ServePaths {
     pub fn from_env() -> Self {
         let home = std::env::var("HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("."));
+            .unwrap_or_else(|_| PathBuf::from("/"));
         let base_dir = home.join(".wechat-rpa");
         let core_sock = crate::core::external_brain::default_socket_path();
         let worker_sock = base_dir.join("worker.sock");
@@ -160,36 +187,55 @@ impl ServePaths {
             worker_sock,
             bot_worker_sock,
             gateway_db: None,
+            temp_dir_guard: None,
         }
     }
 
-    pub fn isolated(dir: &Path) -> Self {
+    /// 尝试创建隔离的 ServePaths 环境，若目录创建或权限设置失败则返回错误，绝不静默吞错。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn try_isolated(dir: &Path) -> Result<Self> {
         let base_dir = dir.join(".wechat-rpa");
-        let _ = fs::create_dir_all(&base_dir);
-        let _ = fs::set_permissions(&base_dir, fs::Permissions::from_mode(0o700));
+        fs::create_dir_all(&base_dir)
+            .with_context(|| format!("failed to create base dir {}", base_dir.display()))?;
+        fs::set_permissions(&base_dir, fs::Permissions::from_mode(0o700)).with_context(|| {
+            format!(
+                "failed to set permissions for base dir {}",
+                base_dir.display()
+            )
+        })?;
+
         // Unix domain socket 路径受 sockaddr_un.sun_path 限制（macOS 上为 104 字节）。
-        // 测试临时目录路径通常较深，因此 socket 统一挂在短前缀 /tmp/wc_{uuid} 下
+        // 测试临时目录路径通常较深，因此 socket 统一挂在短前缀 /tmp/wc_{uuid} 下。
         let short_id = uuid::Uuid::new_v4().simple();
         let sock_dir = PathBuf::from(format!("/tmp/wc_{short_id}"));
-        let _ = fs::create_dir_all(&sock_dir);
-        let _ = fs::set_permissions(&sock_dir, fs::Permissions::from_mode(0o700));
-        Self {
+        fs::create_dir(&sock_dir).with_context(|| {
+            format!("failed to create isolated sock dir {}", sock_dir.display())
+        })?;
+        fs::set_permissions(&sock_dir, fs::Permissions::from_mode(0o700)).with_context(|| {
+            format!(
+                "failed to set permissions for sock dir {}",
+                sock_dir.display()
+            )
+        })?;
+
+        Ok(Self {
             home: dir.to_path_buf(),
             core_sock: sock_dir.join("c.sock"),
             worker_sock: sock_dir.join("w.sock"),
             bot_worker_sock: sock_dir.join("bw.sock"),
             gateway_db: Some(Some(dir.join("gateway.sqlite3"))),
-        }
+            temp_dir_guard: Some(std::sync::Arc::new(OwnedSocketDir { dir: sock_dir })),
+        })
     }
-}
 
-impl Drop for ServePaths {
-    fn drop(&mut self) {
-        if self.core_sock.starts_with("/tmp/wc_") {
-            if let Some(parent) = self.core_sock.parent() {
-                let _ = fs::remove_dir_all(parent);
-            }
-        }
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn isolated(dir: &Path) -> Self {
+        Self::try_isolated(dir).expect("failed to create isolated ServePaths")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn socket_dir(&self) -> Option<PathBuf> {
+        self.temp_dir_guard.as_ref().map(|g| g.dir.clone())
     }
 }
 
@@ -1047,5 +1093,131 @@ mod tests {
 
         SHARED_STOP.store(std::ptr::null_mut(), Ordering::SeqCst);
         STOP_SIGNAL.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn test_serve_paths_from_env_never_deletes_directory() {
+        let temp = TempDir::new();
+        let custom_sock_dir = temp.path().join("custom_socks");
+        fs::create_dir_all(&custom_sock_dir).unwrap();
+        let sock_file = custom_sock_dir.join("core.sock");
+        fs::write(&sock_file, b"socket placeholder").unwrap();
+
+        let paths = ServePaths {
+            home: temp.path().to_path_buf(),
+            core_sock: sock_file.clone(),
+            worker_sock: custom_sock_dir.join("w.sock"),
+            bot_worker_sock: custom_sock_dir.join("bw.sock"),
+            gateway_db: None,
+            temp_dir_guard: None,
+        };
+
+        drop(paths);
+        assert!(
+            custom_sock_dir.exists(),
+            "from_env paths must never delete custom directory"
+        );
+        assert!(
+            sock_file.exists(),
+            "from_env paths must never delete custom socket file"
+        );
+    }
+
+    #[test]
+    fn test_serve_paths_isolated_cleans_up_on_drop() {
+        let temp = TempDir::new();
+        let sock_dir;
+        {
+            let paths = ServePaths::isolated(temp.path());
+            sock_dir = paths
+                .socket_dir()
+                .expect("isolated paths must have socket_dir");
+            assert!(
+                sock_dir.exists(),
+                "socket directory must exist while paths is alive"
+            );
+        }
+        assert!(
+            !sock_dir.exists(),
+            "isolated socket directory must be removed on drop"
+        );
+    }
+
+    #[test]
+    fn test_serve_paths_clone_lifecycle_shares_ownership_without_early_deletion() {
+        let temp = TempDir::new();
+        let p1 = ServePaths::isolated(temp.path());
+        let sock_dir = p1.socket_dir().unwrap();
+        assert!(sock_dir.exists());
+
+        let p2 = p1.clone();
+        let p3 = p2.clone();
+
+        drop(p1);
+        assert!(
+            sock_dir.exists(),
+            "directory must still exist after dropping p1"
+        );
+
+        drop(p2);
+        assert!(
+            sock_dir.exists(),
+            "directory must still exist after dropping p2"
+        );
+
+        drop(p3);
+        assert!(
+            !sock_dir.exists(),
+            "directory must be removed after dropping final clone p3"
+        );
+    }
+
+    #[test]
+    fn test_serve_paths_try_isolated_directory_creation_failure() {
+        let temp = TempDir::new();
+        let file_as_dir = temp.path().join("not_a_dir");
+        fs::write(&file_as_dir, b"regular file").unwrap();
+
+        let res = ServePaths::try_isolated(&file_as_dir);
+        assert!(
+            res.is_err(),
+            "try_isolated must return Err when base dir creation fails"
+        );
+        let err_str = res.err().unwrap().to_string();
+        assert!(
+            err_str.contains("failed to create base dir")
+                || err_str.contains("failed to set permissions"),
+            "Error should describe failure context: {err_str}"
+        );
+    }
+
+    #[test]
+    fn test_serve_paths_symlink_replacement_safe_does_not_delete_external_target() {
+        let temp = TempDir::new();
+        let external_target_dir = temp.path().join("external_important_data");
+        fs::create_dir_all(&external_target_dir).unwrap();
+        let canary_file = external_target_dir.join("must_survive.txt");
+        fs::write(&canary_file, b"precious contents").unwrap();
+
+        let paths = ServePaths::isolated(temp.path());
+        let owned_sock_dir = paths.socket_dir().unwrap();
+        assert!(owned_sock_dir.exists());
+
+        fs::remove_dir_all(&owned_sock_dir).unwrap();
+        std::os::unix::fs::symlink(&external_target_dir, &owned_sock_dir).unwrap();
+        assert!(owned_sock_dir.is_symlink());
+
+        drop(paths);
+
+        assert!(
+            external_target_dir.exists(),
+            "external target must remain intact"
+        );
+        assert!(
+            canary_file.exists(),
+            "canary file in external target must not be deleted"
+        );
+        assert_eq!(fs::read(&canary_file).unwrap(), b"precious contents");
+        assert!(!owned_sock_dir.exists(), "symlink itself must be removed");
     }
 }
