@@ -2289,50 +2289,46 @@ fn test_maintenance_marker_strict_36_bytes_uuid_and_startup_dual_check() {
     journal.manifest_digest = Some(valid_sha256.into());
     journal.persist_atomic(state_dir).unwrap();
 
-    // 4h. RolledBack 终态核查：无法证明 source_release_id 真实生效时 failclosed
+    // 4h. RolledBack 统一收紧核验：本阶段尚无独立恢复协议前，处于 RolledBack 一律 RecoveryRequired
     journal.stage = TransactionStage::RolledBack;
     journal.source_release_id = "0.1.0".into();
     journal.persist_atomic(state_dir).unwrap();
-    // 此时 current 仍指向 0.2.0-test，与 source_release_id 0.1.0 不符 -> 必须拦截
-    let dec_rollback_mismatch =
-        check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
-    match dec_rollback_mismatch {
+    let dec_rollback = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    match dec_rollback {
         StartupDualCheckDecision::RecoveryRequired { reason } => {
-            assert!(reason.contains("rollback_target_verification_failed"));
+            assert!(reason.contains("rolled_back_stage_requires_recovery_protocol"));
         }
         other => panic!(
-            "Expected RecoveryRequired for rollback mismatch, got {:?}",
-            other
-        ),
-    }
-    // 建立 0.1.0 目录并切换 current 指向 0.1.0
-    let source_dir = releases_dir.join("0.1.0");
-    fs::create_dir_all(&source_dir).unwrap();
-    fs::remove_file(&current_link).unwrap();
-    std::os::unix::fs::symlink(&source_dir, &current_link).unwrap();
-
-    // 4h2. 软链接已切回 0.1.0，但 current_release.json 仍为 0.2.0-test -> 必须拦截！
-    let dec_rollback_record_mismatch =
-        check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
-    match dec_rollback_record_mismatch {
-        StartupDualCheckDecision::RecoveryRequired { reason } => {
-            assert!(reason.contains("rollback_release_record_mismatch"));
-        }
-        other => panic!(
-            "Expected RecoveryRequired for rollback record mismatch, got {:?}",
+            "Expected RecoveryRequired for RolledBack stage, got {:?}",
             other
         ),
     }
 
-    // 4h3. 正确更新 current_release.json 为 0.1.0 后，全要素一致 -> AllowStartup
-    let rollback_rec = CurrentReleaseCommitRecord {
-        release_id: "0.1.0".into(),
-        sequence: 1000,
-        ..correct_rec
-    };
-    atomic_commit_release_record(state_dir, &rollback_rec).unwrap();
-    let dec_rollback_ok = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
-    assert_eq!(dec_rollback_ok, StartupDualCheckDecision::AllowStartup);
+    // 4h2. 即使 source_release_id 为 "none"，同样严格 RecoveryRequired
+    journal.source_release_id = "none".into();
+    journal.persist_atomic(state_dir).unwrap();
+    let dec_rollback_none = check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    match dec_rollback_none {
+        StartupDualCheckDecision::RecoveryRequired { reason } => {
+            assert!(reason.contains("rolled_back_stage_requires_recovery_protocol"));
+        }
+        other => panic!(
+            "Expected RecoveryRequired for RolledBack none, got {:?}",
+            other
+        ),
+    }
+
+    // 恢复合法 Committed 状态
+    journal.stage = TransactionStage::Committed;
+    journal.source_release_id = "0.1.0".into();
+    journal.manifest_digest = Some(valid_sha256.into());
+    journal.persist_atomic(state_dir).unwrap();
+    let dec_restore_committed =
+        check_startup_guard_readonly(state_dir, &releases_dir, &current_link);
+    assert_eq!(
+        dec_restore_committed,
+        StartupDualCheckDecision::AllowStartup
+    );
 
     // 4i. 负向测试：update-journal.json 缺失 journal_schema 必须 Fail-Closed
     let journal_raw_missing_schema = serde_json::json!({

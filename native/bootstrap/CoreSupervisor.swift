@@ -316,7 +316,7 @@ public final class CoreSupervisor {
         return (Data(buffer), nil)
     }
 
-    /// 精确核验 current 软链接物理目标必须落在 releasesDir 且等于预期 release_id 目录（拒绝外部目录逃逸或悬空）
+    /// 精确核验 current 软链接物理目标必须落在受控 releasesDir 且等于预期 release_id 目录（基于固定 fd 逐级 NOFOLLOW 打开与内核 inode 比对，拒绝任何中间软链及逃逸）
     private func verifyCurrentLinkTarget(expectedReleaseID: String) -> Bool {
         // a. 校验 expectedReleaseID 命名格式安全
         guard !expectedReleaseID.isEmpty,
@@ -332,25 +332,31 @@ public final class CoreSupervisor {
             return false
         }
 
-        // c. 锚定 releasesDir 必须为物理目录且非符号链接
-        var releasesStat = stat()
-        guard lstat(releasesDirURL.path, &releasesStat) == 0,
-              (releasesStat.st_mode & S_IFMT) == S_IFDIR,
-              (releasesStat.st_mode & S_IFMT) != S_IFLNK else {
+        // c. 打开受控 releasesDir 固定 root fd（O_DIRECTORY | O_NOFOLLOW）
+        let rootFd = open(releasesDirURL.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard rootFd >= 0 else { return false }
+        defer { close(rootFd) }
+
+        var rootStat = stat()
+        guard fstat(rootFd, &rootStat) == 0,
+              (rootStat.st_mode & S_IFMT) == S_IFDIR,
+              rootStat.st_uid == geteuid() else {
             return false
         }
 
-        // d. 核验 releasesDir 下 expectedReleaseID 必须为真实物理目录且绝对不可为符号链接
-        let expectedURL = releasesDirURL.appendingPathComponent(expectedReleaseID)
-        var expStat = stat()
-        guard lstat(expectedURL.path, &expStat) == 0,
-              (expStat.st_mode & S_IFMT) == S_IFDIR,
-              (expStat.st_mode & S_IFMT) != S_IFLNK,
-              expStat.st_uid == geteuid() else {
+        // d. 在 rootFd 上使用 openat 相对打开 expectedReleaseID（O_DIRECTORY | O_NOFOLLOW）
+        let releaseFd = openat(rootFd, expectedReleaseID, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard releaseFd >= 0 else { return false }
+        defer { close(releaseFd) }
+
+        var releaseStat = stat()
+        guard fstat(releaseFd, &releaseStat) == 0,
+              (releaseStat.st_mode & S_IFMT) == S_IFDIR,
+              releaseStat.st_uid == geteuid() else {
             return false
         }
 
-        // e. 解析 current 软链接物理目标
+        // e. 解析 current 软链接物理目标，打开并比对内核 (st_dev, st_ino)
         guard let dest = try? FileManager.default.destinationOfSymbolicLink(atPath: currentLinkURL.path) else {
             return false
         }
@@ -358,13 +364,17 @@ public final class CoreSupervisor {
             ? URL(fileURLWithPath: dest)
             : currentLinkURL.deletingLastPathComponent().appendingPathComponent(dest)
 
-        let resolvedTarget = targetURL.standardized.resolvingSymlinksInPath().path
-        let resolvedExpected = expectedURL.standardized.resolvingSymlinksInPath().path
-        guard resolvedTarget == resolvedExpected else {
+        let targetFd = open(targetURL.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard targetFd >= 0 else { return false }
+        defer { close(targetFd) }
+
+        var targetStat = stat()
+        guard fstat(targetFd, &targetStat) == 0 else {
             return false
         }
 
-        return true
+        // f. 终极内核凭据比对
+        return targetStat.st_dev == releaseStat.st_dev && targetStat.st_ino == releaseStat.st_ino
     }
 
     /// 纯只读启动双检查 Guard：同时校验 core.maintenance 与 update-journal.json（零写入、零删除、Fail-Closed、防 TOCTOU）
@@ -413,39 +423,8 @@ public final class CoreSupervisor {
                 return .active(transactionID: jTxID)
 
             case "RolledBack":
-                // 真实回滚终态全要素校验（严格不吞错误，且核查元数据一致性）
-                let sourceRel = (jObj["source_release_id"] as? String) ?? "none"
-                if sourceRel == "none" {
-                    var lStat = stat()
-                    if lstat(currentLinkURL.path, &lStat) == 0 {
-                        return .recoveryRequired
-                    }
-                    if errno != ENOENT {
-                        return .recoveryRequired
-                    }
-                } else {
-                    guard verifyCurrentLinkTarget(expectedReleaseID: sourceRel) else {
-                        return .recoveryRequired
-                    }
-                    // 核验 current_release.json：若存在，其 release_id 必须等于 sourceRel
-                    let recordURL = journalURL.deletingLastPathComponent().appendingPathComponent("current_release.json")
-                    let (rData, rErr) = readLimitedPrivateFile(url: recordURL, maxBytes: 64 * 1024)
-                    if rErr != nil {
-                        return .recoveryRequired
-                    }
-                    if let rBytes = rData {
-                        guard let rObj = (try? JSONSerialization.jsonObject(with: rBytes, options: [])) as? [String: Any],
-                              let rReleaseID = rObj["release_id"] as? String,
-                              rReleaseID == sourceRel else {
-                            return .recoveryRequired
-                        }
-                    }
-                }
-
-                if let atid = activeTxID {
-                    return .active(transactionID: atid)
-                }
-                return .inactive
+                // 本阶段尚无真实 rollback 恢复协议，处于 RolledBack 统一判为 recoveryRequired，严禁猜测放行
+                return .recoveryRequired
 
             case "Committed":
                 // 终态全要素二次只读核验：严禁仅凭 Committed 标签放行！

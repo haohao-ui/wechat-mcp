@@ -739,13 +739,21 @@ pub fn validate_release_id_safe(release_id: &str) -> Result<()> {
 }
 
 /// 精确核验 current 软链接的目标必须是受控 releases_dir 下指定的物理目录，拒绝任何外部逃逸或悬空
+struct SafeFd(libc::c_int);
+impl Drop for SafeFd {
+    fn drop(&mut self) {
+        if self.0 >= 0 {
+            unsafe { libc::close(self.0) };
+        }
+    }
+}
+
+/// 精确核验 current 软链接的目标必须是受控 releases_dir 下指定的物理目录，拒绝任何外部逃逸或悬空
 pub fn verify_current_link_target(
     current_link: &Path,
     releases_dir: &Path,
     expected_release_id: &str,
 ) -> Result<()> {
-    use std::os::unix::fs::MetadataExt;
-
     // a. 校验 release_id 命名格式安全
     validate_release_id_safe(expected_release_id)?;
 
@@ -766,76 +774,133 @@ pub fn verify_current_link_target(
         bail!("current_link_must_be_symlink: '{}'", current_link.display());
     }
 
-    // c. 锚定受控 releases_dir：自身必须是真实物理目录且不可为符号链接
-    let releases_meta = match fs::symlink_metadata(releases_dir) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+    // c. 锚定受控 releases_dir：以 O_DIRECTORY | O_NOFOLLOW 打开固定 root fd
+    let c_releases = std::ffi::CString::new(
+        releases_dir
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("invalid_releases_dir_path"))?,
+    )?;
+    let root_fd = unsafe {
+        libc::open(
+            c_releases.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if root_fd < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::NotFound {
             bail!("releases_dir_does_not_exist: '{}'", releases_dir.display());
         }
-        Err(e) => bail!(
-            "cannot_stat_releases_dir: '{}' ({})",
-            releases_dir.display(),
-            e
-        ),
-    };
-    if releases_meta.file_type().is_symlink() {
+        if err.raw_os_error() == Some(libc::ELOOP) {
+            bail!(
+                "releases_dir_must_not_be_symlink: '{}'",
+                releases_dir.display()
+            );
+        }
         bail!(
-            "releases_dir_must_not_be_symlink: '{}'",
-            releases_dir.display()
+            "cannot_open_releases_dir: '{}' ({})",
+            releases_dir.display(),
+            err
         );
     }
-    if !releases_meta.file_type().is_dir() {
+    let _root_guard = SafeFd(root_fd);
+
+    let mut root_stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(root_fd, &mut root_stat) } != 0 {
+        bail!("cannot_fstat_releases_dir: '{}'", releases_dir.display());
+    }
+    if (root_stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
         bail!(
             "releases_dir_must_be_directory: '{}'",
             releases_dir.display()
         );
     }
-    let canonical_releases = releases_dir.canonicalize().with_context(|| {
-        format!(
-            "cannot_canonicalize_releases_dir: '{}'",
-            releases_dir.display()
-        )
-    })?;
-
-    // d. 核验受控目录下 expected_release_id：必须存在、必须是真实物理目录、绝对不能是软链接！
-    let expected_path = releases_dir.join(expected_release_id);
-    let exp_meta = match fs::symlink_metadata(&expected_path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            bail!(
-                "expected_release_dir_does_not_exist: '{}'",
-                expected_path.display()
-            );
-        }
-        Err(e) => bail!(
-            "cannot_stat_expected_release_dir: '{}' ({})",
-            expected_path.display(),
-            e
-        ),
-    };
-    if exp_meta.file_type().is_symlink() {
-        bail!(
-            "expected_release_dir_must_not_be_symlink: '{}'",
-            expected_path.display()
-        );
-    }
-    if !exp_meta.file_type().is_dir() {
-        bail!(
-            "expected_release_path_must_be_directory: '{}'",
-            expected_path.display()
-        );
-    }
     let current_uid = unsafe { libc::geteuid() };
-    if exp_meta.uid() != current_uid {
+    if root_stat.st_uid != current_uid {
         bail!(
-            "expected_release_dir_uid_mismatch: '{}' (owner: {}, current: {})",
-            expected_path.display(),
-            exp_meta.uid(),
+            "releases_dir_uid_mismatch: '{}' (owner: {}, current: {})",
+            releases_dir.display(),
+            root_stat.st_uid,
             current_uid
         );
     }
 
-    // e. 读取 current 目标并核验
+    // d. 在受控 root_fd 相对使用 openat 逐级打开 expected_release_id 物理目录（O_DIRECTORY | O_NOFOLLOW 拒绝中间及自身符号链接）
+    let c_expected = std::ffi::CString::new(expected_release_id)?;
+    let release_fd = unsafe {
+        libc::openat(
+            root_fd,
+            c_expected.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if release_fd < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::NotFound {
+            bail!(
+                "expected_release_dir_does_not_exist: '{}'",
+                expected_release_id
+            );
+        }
+        if err.raw_os_error() == Some(libc::ELOOP) {
+            bail!(
+                "expected_release_dir_must_not_be_symlink: '{}'",
+                expected_release_id
+            );
+        }
+        if err.raw_os_error() == Some(libc::ENOTDIR) {
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe {
+                libc::fstatat(
+                    root_fd,
+                    c_expected.as_ptr(),
+                    &mut st,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            } == 0
+                && (st.st_mode & libc::S_IFMT) == libc::S_IFLNK
+            {
+                bail!(
+                    "expected_release_dir_must_not_be_symlink: '{}'",
+                    expected_release_id
+                );
+            }
+            bail!(
+                "expected_release_path_must_be_directory: '{}'",
+                expected_release_id
+            );
+        }
+        bail!(
+            "cannot_open_expected_release_dir: '{}' ({})",
+            expected_release_id,
+            err
+        );
+    }
+    let _release_guard = SafeFd(release_fd);
+
+    let mut release_stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(release_fd, &mut release_stat) } != 0 {
+        bail!(
+            "cannot_fstat_expected_release_dir: '{}'",
+            expected_release_id
+        );
+    }
+    if (release_stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
+        bail!(
+            "expected_release_path_must_be_directory: '{}'",
+            expected_release_id
+        );
+    }
+    if release_stat.st_uid != current_uid {
+        bail!(
+            "expected_release_dir_uid_mismatch: '{}' (owner: {}, current: {})",
+            expected_release_id,
+            release_stat.st_uid,
+            current_uid
+        );
+    }
+
+    // e. 读取 current 软链接物理目标，打开并比对内核 (st_dev, st_ino) 身份凭证
     let raw_target = fs::read_link(current_link)
         .with_context(|| format!("cannot_read_link: '{}'", current_link.display()))?;
 
@@ -848,27 +913,40 @@ pub fn verify_current_link_target(
         raw_target.clone()
     };
 
-    let canonical_target = target_path
-        .canonicalize()
-        .map_err(|e| anyhow::anyhow!("current_target_canonicalize_failed: {}", e))?;
-    let canonical_expected = expected_path
-        .canonicalize()
-        .map_err(|e| anyhow::anyhow!("expected_release_dir_canonicalize_failed: {}", e))?;
-
-    // f. 目标必须与 canonical_releases/expected_release_id 完全一致（拒绝任何逃逸）
-    let anchored_expected = canonical_releases.join(expected_release_id);
-    if canonical_expected != anchored_expected {
+    let c_target = std::ffi::CString::new(
+        target_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("invalid_target_path"))?,
+    )?;
+    let target_fd = unsafe {
+        libc::open(
+            c_target.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if target_fd < 0 {
+        let err = std::io::Error::last_os_error();
         bail!(
-            "expected_release_dir_escaped_releases_dir: '{}' != '{}'",
-            canonical_expected.display(),
-            anchored_expected.display()
+            "current_target_cannot_be_opened: '{}' ({})",
+            target_path.display(),
+            err
         );
     }
-    if canonical_target != anchored_expected {
+    let _target_guard = SafeFd(target_fd);
+
+    let mut target_stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(target_fd, &mut target_stat) } != 0 {
+        bail!("cannot_fstat_current_target: '{}'", target_path.display());
+    }
+
+    // f. 终极内核凭据核验：(st_dev, st_ino) 必须与被锁定的 release_fd 严格一致！
+    if target_stat.st_dev != release_stat.st_dev || target_stat.st_ino != release_stat.st_ino {
         bail!(
-            "current_target_escape_detected: points to '{}', expected '{}'",
-            canonical_target.display(),
-            anchored_expected.display()
+            "current_target_escape_detected: target (dev:{}, ino:{}) does not match anchored release (dev:{}, ino:{})",
+            target_stat.st_dev,
+            target_stat.st_ino,
+            release_stat.st_dev,
+            release_stat.st_ino
         );
     }
 
@@ -1040,83 +1118,9 @@ pub fn check_startup_guard_readonly(
                     }
                 }
                 TransactionStage::RolledBack => {
-                    // 真实回滚终态二次只读校验
-                    if journal.source_release_id == "none" {
-                        match fs::symlink_metadata(current_link) {
-                            Ok(_) => {
-                                return StartupDualCheckDecision::RecoveryRequired {
-                                    reason: "rolled_back_to_none_but_current_link_still_exists"
-                                        .into(),
-                                };
-                            }
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                            Err(e) => {
-                                return StartupDualCheckDecision::RecoveryRequired {
-                                    reason: format!(
-                                        "cannot_stat_current_link_on_rollback_none: {}",
-                                        e
-                                    ),
-                                };
-                            }
-                        }
-                    } else {
-                        // 核验回滚目标物理目录与软链接
-                        if let Err(e) = verify_current_link_target(
-                            current_link,
-                            releases_dir,
-                            &journal.source_release_id,
-                        ) {
-                            return StartupDualCheckDecision::RecoveryRequired {
-                                reason: format!("rollback_target_verification_failed: {}", e),
-                            };
-                        }
-
-                        // 核验当前生效记录 current_release.json：若存在，其 release_id 必须为 source_release_id
-                        let record_path = state_dir.join("current_release.json");
-                        match read_limited_private_file(&record_path, 64 * 1024) {
-                            Ok(Some(rec_bytes)) => {
-                                let commit_record: CurrentReleaseCommitRecord =
-                                    match serde_json::from_slice(&rec_bytes) {
-                                        Ok(r) => r,
-                                        Err(e) => {
-                                            return StartupDualCheckDecision::RecoveryRequired {
-                                                reason: format!(
-                                                    "rollback_current_release_record_corrupt: {}",
-                                                    e
-                                                ),
-                                            };
-                                        }
-                                    };
-                                if commit_record.release_id != journal.source_release_id {
-                                    return StartupDualCheckDecision::RecoveryRequired {
-                                        reason: format!(
-                                            "rollback_release_record_mismatch: record has '{}', expected source '{}'",
-                                            commit_record.release_id, journal.source_release_id
-                                        ),
-                                    };
-                                }
-                            }
-                            Ok(None) => {
-                                // baseline 首次安装回滚尚无记录，允许
-                            }
-                            Err(e) => {
-                                return StartupDualCheckDecision::RecoveryRequired {
-                                    reason: format!(
-                                        "cannot_read_rollback_current_release_record: {}",
-                                        e
-                                    ),
-                                };
-                            }
-                        }
-                    }
-
-                    if let Some(uid) = maint_uuid {
-                        StartupDualCheckDecision::MaintenanceSuppressed {
-                            tx_id: uid,
-                            stage: Some(TransactionStage::RolledBack),
-                        }
-                    } else {
-                        StartupDualCheckDecision::AllowStartup
+                    // 本阶段尚无真实 rollback 恢复协议，处于 RolledBack 的日志一律判为 RecoveryRequired，严禁凭猜测放行
+                    StartupDualCheckDecision::RecoveryRequired {
+                        reason: "rolled_back_stage_requires_recovery_protocol".into(),
                     }
                 }
                 TransactionStage::Committed => {
