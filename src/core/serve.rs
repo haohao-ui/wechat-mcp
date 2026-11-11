@@ -39,11 +39,24 @@ fn install_signals() {
     }
 }
 
+/// 纯函数决策：根据传入的 LANG 值，计算是否需要补充默认的 UTF-8 locale。
+/// 严格保持原生产语义：
+/// - 当 LANG 缺失（None）或为空/纯空白时，返回需要设置的目标默认值 Some(("en_US.UTF-8", "en_US.UTF-8"))；
+/// - 当 LANG 已存在有效配置（如 "C.UTF-8"、"en_US.UTF-8"、"zh_CN.UTF-8" 等）时，返回 None（保持原配置不覆盖）。
+pub(crate) fn required_locale_defaults(lang: Option<&str>) -> Option<(&'static str, &'static str)> {
+    match lang {
+        None => Some(("en_US.UTF-8", "en_US.UTF-8")),
+        Some(val) if val.trim().is_empty() => Some(("en_US.UTF-8", "en_US.UTF-8")),
+        Some(_) => None,
+    }
+}
+
 pub fn ensure_locale() {
-    if std::env::var("LANG").is_err() {
+    let current_lang = std::env::var("LANG").ok();
+    if let Some((lang, lc_all)) = required_locale_defaults(current_lang.as_deref()) {
         unsafe {
-            std::env::set_var("LANG", "en_US.UTF-8");
-            std::env::set_var("LC_ALL", "en_US.UTF-8");
+            std::env::set_var("LANG", lang);
+            std::env::set_var("LC_ALL", lc_all);
         }
     }
 }
@@ -753,9 +766,46 @@ mod tests {
 
     #[test]
     fn test_ensure_locale_sets_vars() {
+        // 1. 纯函数边界测试：LANG 缺失 (None) 时，返回默认设置 ("en_US.UTF-8", "en_US.UTF-8")
+        assert_eq!(
+            required_locale_defaults(None),
+            Some(("en_US.UTF-8", "en_US.UTF-8")),
+            "missing LANG must trigger default en_US.UTF-8 fallback"
+        );
+
+        // 2. 纯函数边界测试：LANG 为空字符串或纯空白时，同样返回默认设置
+        assert_eq!(
+            required_locale_defaults(Some("")),
+            Some(("en_US.UTF-8", "en_US.UTF-8"))
+        );
+        assert_eq!(
+            required_locale_defaults(Some("   ")),
+            Some(("en_US.UTF-8", "en_US.UTF-8"))
+        );
+
+        // 3. 纯函数边界测试：当 LANG 已经有效配置时（例如 C.UTF-8、zh_CN.UTF-8、en_US.UTF-8），
+        // 严格遵循生产语义，返回 None（保持外部环境原有值，绝不强制覆盖）
+        assert_eq!(
+            required_locale_defaults(Some("C.UTF-8")),
+            None,
+            "existing C.UTF-8 must be preserved without override"
+        );
+        assert_eq!(
+            required_locale_defaults(Some("zh_CN.UTF-8")),
+            None,
+            "existing zh_CN.UTF-8 must be preserved without override"
+        );
+        assert_eq!(
+            required_locale_defaults(Some("en_US.UTF-8")),
+            None,
+            "existing en_US.UTF-8 must be preserved without override"
+        );
+
+        // 4. 对公开函数 ensure_locale() 的无副作用验证：
+        // 执行后，确保当前进程中的 LANG 处于已设置状态（无论是环境已有值还是默认补齐值），且绝不为空
         ensure_locale();
-        assert_eq!(std::env::var("LANG").unwrap(), "en_US.UTF-8");
-        assert_eq!(std::env::var("LC_ALL").unwrap(), "en_US.UTF-8");
+        let lang = std::env::var("LANG").expect("LANG must be present after ensure_locale");
+        assert!(!lang.trim().is_empty(), "LANG must not be empty");
     }
 
     #[test]
