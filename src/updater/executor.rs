@@ -15,10 +15,10 @@ use super::unpack::safe_unpack_and_verify;
 
 pub const SANDBOX_MARKER_FILE: &str = ".sandbox_update_marker";
 
-/// 仅能通过公钥验签与兼容性核验生成的强类型发布封套，防止未经审核的 Manifest 传入写执行器
+/// 仅能通过公钥验签与兼容性核验生成的强类型发布封套，内部字段私有不可篡改
 #[derive(Debug, Clone)]
 pub struct VerifiedManifestEnvelope {
-    pub envelope: SignedEnvelope,
+    envelope: SignedEnvelope,
 }
 
 impl VerifiedManifestEnvelope {
@@ -43,59 +43,89 @@ impl VerifiedManifestEnvelope {
     pub fn manifest(&self) -> &ReleaseManifest {
         &self.envelope.manifest
     }
+
+    pub fn envelope(&self) -> &SignedEnvelope {
+        &self.envelope
+    }
 }
 
-/// 隔离沙箱更新根目录，必须显式携带安全标记文件，禁止指向系统或生产目录
-#[derive(Debug, Clone)]
+/// 隔离沙箱更新根目录：私有字段，禁止接受任意 Path 构造或生产调用
+#[derive(Debug)]
 pub struct SandboxUpdateRoot {
-    pub root_dir: PathBuf,
+    root_dir: PathBuf,
+    root_fd: std::os::unix::io::RawFd,
+}
+
+impl Drop for SandboxUpdateRoot {
+    fn drop(&mut self) {
+        if self.root_fd >= 0 {
+            unsafe {
+                libc::close(self.root_fd);
+            }
+        }
+        let _ = fs::remove_dir_all(&self.root_dir);
+    }
 }
 
 impl SandboxUpdateRoot {
-    pub fn new_isolated(root_dir: impl Into<PathBuf>) -> Result<Self> {
-        let root = root_dir.into();
-        Self::validate_not_production_or_system(&root)?;
+    #[cfg(test)]
+    pub fn create_test_isolated_sandbox() -> Result<Self> {
+        use std::ffi::CString;
+        use std::os::unix::fs::MetadataExt;
+        let base_temp = std::env::temp_dir();
+        let unique_dir = base_temp.join(format!(
+            "wechat_mcp_sandbox_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
 
-        if !root.exists() {
-            fs::create_dir_all(&root)?;
-            fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
+        // 原子创建 0700 专用测试根
+        fs::create_dir_all(&unique_dir)?;
+        fs::set_permissions(&unique_dir, fs::Permissions::from_mode(0o700))?;
+
+        // 校验 ownership 与无 symlink
+        let meta = fs::symlink_metadata(&unique_dir)?;
+        if meta.file_type().is_symlink() {
+            bail!("sandbox_root_must_not_be_symlink");
+        }
+        let current_uid = unsafe { libc::getuid() };
+        if meta.uid() != current_uid {
+            bail!("sandbox_root_uid_mismatch");
         }
 
-        let marker = root.join(SANDBOX_MARKER_FILE);
-        if !marker.exists() {
-            fs::write(&marker, b"wechat-mcp-isolated-test-sandbox")?;
-            fs::set_permissions(&marker, fs::Permissions::from_mode(0o600))?;
+        // 打开该目录持有持续根 FD (O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        let c_path = CString::new(unique_dir.to_str().unwrap())?;
+        let fd = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            let err = std::io::Error::last_os_error();
+            bail!("failed_to_open_sandbox_root_fd: {}", err);
         }
 
         // 初始化必要子目录
-        let releases_dir = root.join("releases");
-        let state_dir = root.join("state");
+        let releases_dir = unique_dir.join("releases");
+        let state_dir = unique_dir.join("state");
         fs::create_dir_all(&releases_dir)?;
         fs::create_dir_all(&state_dir)?;
         fs::set_permissions(&releases_dir, fs::Permissions::from_mode(0o700))?;
         fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700))?;
 
-        Ok(Self { root_dir: root })
+        Ok(Self {
+            root_dir: unique_dir,
+            root_fd: fd,
+        })
     }
 
-    fn validate_not_production_or_system(path: &Path) -> Result<()> {
-        let path_str = path.to_string_lossy();
-        if path_str == "/"
-            || path_str.starts_with("/System")
-            || path_str.starts_with("/Library")
-            || path_str.starts_with("/Applications")
-            || path_str.starts_with("/usr")
-            || path_str.starts_with("/bin")
-            || path_str.starts_with("/sbin")
-            || path_str.contains(".wechat-rpa")
-            || path_str.contains(".wechat-mcp")
-        {
-            bail!(
-                "prohibited_sandbox_path: '{}' is a production or system directory",
-                path.display()
-            );
-        }
-        Ok(())
+    pub fn root_dir(&self) -> &Path {
+        &self.root_dir
+    }
+
+    pub fn root_fd(&self) -> std::os::unix::io::RawFd {
+        self.root_fd
     }
 
     pub fn state_dir(&self) -> PathBuf {
