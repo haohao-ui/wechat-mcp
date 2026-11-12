@@ -11,15 +11,21 @@ final class TextRecognizer {
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = false
         try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
-        let lines = (request.results ?? []).compactMap { item -> RuntimeText? in
+        let observations: [VNRecognizedTextObservation] = request.results ?? []
+        var lines: [RuntimeText] = []
+        for item in observations {
             guard let candidate = item.topCandidates(1).first,
-                  !candidate.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                  !candidate.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
             let box = item.boundingBox
-            return RuntimeText(text: candidate.string,
-                bounds: RegionRect(x: max(0, box.minX), y: max(0, 1 - box.maxY),
-                                   width: min(box.width, 1 - max(0, box.minX)), height: min(box.height, box.maxY)),
-                confidence: Double(candidate.confidence))
-        }.sorted { $0.bounds.y == $1.bounds.y ? $0.bounds.x < $1.bounds.x : $0.bounds.y < $1.bounds.y }
+            let x = max(0, Double(box.minX))
+            let y = max(0, 1 - Double(box.maxY))
+            let width = min(Double(box.width), 1 - x)
+            let height = min(Double(box.height), Double(box.maxY))
+            lines.append(RuntimeText(text: candidate.string,
+                bounds: RegionRect(x: x, y: y, width: width, height: height),
+                confidence: Double(candidate.confidence)))
+        }
+        lines.sort { $0.bounds.y == $1.bounds.y ? $0.bounds.x < $1.bounds.x : $0.bounds.y < $1.bounds.y }
         cache[region] = (digest, lines)
         return (lines, false)
     }
