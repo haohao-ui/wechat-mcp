@@ -1061,11 +1061,12 @@ public final class BrainClient {
 
 // MARK: - BrainPageController (AppKit View Controller)
 
-public final class BrainPageController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+public final class BrainPageController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSTextViewDelegate {
     private let context: StatusPanelController
     private var client: BrainClient
     private var listPayload: BrainListPayload?
     private var selectedRoleIndex: Int = -1
+    private var preferredRoleId: String?
     private var currentDraftRole: BrainRoleRevision?
     private var localUnsavedChanges: Bool = false
 
@@ -1076,8 +1077,8 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
 
     // UI - Header Area
     private let accountLabel = NSTextField(labelWithString: "当前账号: -")
-    private let modeLabel = NSTextField(labelWithString: "模式: 内置 · 模型: 已配置")
-    private let toMcpButton = NSButton(title: "前往 MCP", target: nil, action: nil)
+    private let modeLabel = NSTextField(labelWithString: "回复方式：待加载")
+    private let toMcpButton = NSButton(title: "模型与连接…", target: nil, action: nil)
     private let statusMessageLabel = NSTextField(wrappingLabelWithString: "")
     private let loadErrorLabel = NSTextField(wrappingLabelWithString: "")
 
@@ -1087,7 +1088,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     private let archiveRoleButton = NSButton(title: "归档角色", target: nil, action: nil)
 
     // UI - Tab Segment
-    private let sectionSegment = NSSegmentedControl(labels: ["定义", "知识", "话术", "绑定", "版本", "合成测试"], trackingMode: .selectOne, target: nil, action: nil)
+    private let sectionSegment = NSSegmentedControl(labels: ["角色设定", "知识", "异常回复", "适用会话", "版本", "预览"], trackingMode: .selectOne, target: nil, action: nil)
     private let tabContainer = NSView()
 
     // Tab Views
@@ -1245,7 +1246,8 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         archiveRoleButton.target = self
         archiveRoleButton.action = #selector(handleArchiveRole)
 
-        btnStack.addArrangedSubview(newRoleButton)
+        parent.addSubview(newRoleButton)
+        newRoleButton.translatesAutoresizingMaskIntoConstraints = false
         btnStack.addArrangedSubview(copyRoleButton)
         btnStack.addArrangedSubview(archiveRoleButton)
 
@@ -1259,7 +1261,10 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             titleLabel.leadingAnchor.constraint(equalTo: parent.leadingAnchor, constant: 12),
             titleLabel.trailingAnchor.constraint(equalTo: parent.trailingAnchor, constant: -12),
 
-            scroll.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8),
+            newRoleButton.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 10),
+            newRoleButton.leadingAnchor.constraint(equalTo: parent.leadingAnchor, constant: 8),
+            newRoleButton.trailingAnchor.constraint(equalTo: parent.trailingAnchor, constant: -8),
+            scroll.topAnchor.constraint(equalTo: newRoleButton.bottomAnchor, constant: 10),
             scroll.leadingAnchor.constraint(equalTo: parent.leadingAnchor, constant: 8),
             scroll.trailingAnchor.constraint(equalTo: parent.trailingAnchor, constant: -8),
             scroll.bottomAnchor.constraint(equalTo: btnStack.topAnchor, constant: -10),
@@ -1283,10 +1288,11 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         toMcpButton.target = self
         toMcpButton.action = #selector(handleToMcp)
 
-        let topRow = NSStackView(views: [accountLabel, modeLabel, toMcpButton])
+        let topRow = NSStackView(views: [accountLabel, toMcpButton])
         topRow.orientation = .horizontal
         topRow.spacing = 10
         headerStack.addArrangedSubview(topRow)
+        headerStack.addArrangedSubview(modeLabel)
 
         statusMessageLabel.font = NSFont.systemFont(ofSize: 11)
         loadErrorLabel.font = NSFont.systemFont(ofSize: 11)
@@ -1318,6 +1324,11 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         revisionStatusLabel.lineBreakMode = .byWordWrapping
         revisionStatusLabel.preferredMaxLayoutWidth = 500
 
+        saveDraftButton.bezelStyle = .rounded
+        saveDraftButton.bezelColor = .controlAccentColor
+        saveDraftButton.contentTintColor = .white
+        saveDraftButton.keyEquivalent = "s"
+        saveDraftButton.keyEquivalentModifierMask = [.command]
         saveDraftButton.target = self
         saveDraftButton.action = #selector(handleSaveDraft)
         activateButton.target = self
@@ -1327,8 +1338,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
 
         let actionRow = NSStackView(views: [
             saveDraftButton,
-            activateButton,
-            rollbackButton
+            activateButton
         ])
         actionRow.orientation = .horizontal
         actionRow.spacing = 10
@@ -1399,11 +1409,17 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         toneField.widthAnchor.constraint(equalToConstant: 240).isActive = true
         stack.addArrangedSubview(toneRow)
 
-        stack.addArrangedSubview(NSTextField(labelWithString: "身份与业务范围 (Persona):"))
+        stack.addArrangedSubview(NSTextField(labelWithString: "身份与业务范围："))
         let personaScroll = NSScrollView()
         personaScroll.hasVerticalScroller = true
         personaField.isRichText = false
         personaField.font = NSFont.systemFont(ofSize: 12)
+        personaField.frame = NSRect(x: 0, y: 0, width: 460, height: 120)
+        personaField.isVerticallyResizable = true
+        personaField.isHorizontallyResizable = false
+        personaField.autoresizingMask = [.width]
+        personaField.textContainer?.widthTracksTextView = true
+        personaField.textContainerInset = NSSize(width: 8, height: 8)
         personaScroll.documentView = personaField
         personaScroll.heightAnchor.constraint(equalToConstant: 120).isActive = true
         personaScroll.widthAnchor.constraint(equalToConstant: 460).isActive = true
@@ -1724,6 +1740,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         verBox.widthAnchor.constraint(equalToConstant: 480).isActive = true
         stack.addArrangedSubview(verBox)
 
+        stack.addArrangedSubview(rollbackButton)
         versionView.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: versionView.topAnchor),
@@ -1832,20 +1849,22 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     private func updateUIWithList(_ payload: BrainListPayload) {
         accountLabel.stringValue = "当前账号: \(payload.accountId ?? "未知")"
         if let summary = payload.modelSummary {
-            modeLabel.stringValue = "模式: \(summary.mode) · 模型: 已配置"
+            modeLabel.stringValue = "回复方式：\(summary.mode == "builtin" ? "内置大脑" : summary.mode)"
         }
         loadErrorLabel.stringValue = ""
 
         roleTable.reloadData()
         updateBindingsUI()
         if !payload.roles.isEmpty {
+            if let preferred = preferredRoleId, let index = payload.roles.firstIndex(where: { $0.roleId == preferred }) { selectedRoleIndex = index }
+            preferredRoleId = nil
             if selectedRoleIndex < 0 || selectedRoleIndex >= payload.roles.count {
                 selectedRoleIndex = 0
             }
             roleTable.selectRowIndexes(IndexSet(integer: selectedRoleIndex), byExtendingSelection: false)
             loadSelectedRole()
         } else {
-            statusMessageLabel.stringValue = "暂无角色，请点击「新增角色」创建"
+            statusMessageLabel.stringValue = "先点左侧「新增角色」→ 保存草稿 → 在「适用会话」设置范围 → 启用配置"
         }
     }
 
@@ -2207,7 +2226,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         self.currentDraftRole = role
         self.accountLabel.stringValue = "当前账号: \(accountId)"
         if let summary = payload.modelSummary {
-            self.modeLabel.stringValue = "模式: \(summary.mode) · 模型: 已配置"
+            self.modeLabel.stringValue = "回复方式：\(summary.mode == "builtin" ? "内置大脑" : summary.mode)"
         }
         self.statusMessageLabel.stringValue = "草稿已加载，可编辑后保存或合成预览"
         self.loadErrorLabel.stringValue = ""
@@ -2221,6 +2240,9 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     }
 
     private func populateRoleForm(_ role: BrainRoleRevision, entry: BrainRoleEntry) {
+        localUnsavedChanges = false
+        for field in [roleNameField, toneField, goalsField, rulesField, greetingField, insufficientInfoField, unreadableTypeField, unreadableLargeField] { field.delegate = self }
+        personaField.delegate = self
         roleNameField.stringValue = role.name
         toneField.stringValue = role.tone
         personaField.string = role.persona
@@ -2242,6 +2264,16 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             let refTexts = role.knowledgeRefs.map { "\($0.knowledgeId) (\($0.revisionId), sha:\($0.contentSha256.prefix(8))...)" }
             knowledgeRefsSummaryLabel.stringValue = refTexts.joined(separator: "\n")
         }
+    }
+
+    public func controlTextDidChange(_ notification: Notification) {
+        localUnsavedChanges = true
+        statusMessageLabel.stringValue = "角色有未保存的修改 · ⌘S 保存草稿"
+    }
+
+    public func textDidChange(_ notification: Notification) {
+        localUnsavedChanges = true
+        statusMessageLabel.stringValue = "角色有未保存的修改 · ⌘S 保存草稿"
     }
 
     @objc private func handleImportKnowledge() {
@@ -2302,7 +2334,11 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         )
         currentDraftRole = newRole
         populateRoleForm(newRole, entry: BrainRoleEntry(roleId: newRole.roleId, draftRevisionId: newRole.revisionId, name: newRole.name))
-        statusMessageLabel.stringValue = "已创建新角色草稿，编辑后点击「保存草稿」"
+        localUnsavedChanges = true
+        sectionSegment.selectedSegment = 0
+        switchTab(index: 0)
+        view.window?.makeFirstResponder(roleNameField)
+        statusMessageLabel.stringValue = "尚未保存：填写角色设定后按 ⌘S 保存，再设置适用会话"
     }
 
     @objc private func handleCopyRole() {
@@ -2310,6 +2346,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         let copy = BrainPageLogic.prepareRoleCopy(from: current, newRoleId: "role_\(UUID().uuidString.prefix(8))", newName: "\(current.name) (副本)")
         currentDraftRole = copy
         populateRoleForm(copy, entry: BrainRoleEntry(roleId: copy.roleId, draftRevisionId: copy.revisionId, name: copy.name))
+        localUnsavedChanges = true
         statusMessageLabel.stringValue = "已复制角色，编辑后点击「保存草稿」"
     }
 
@@ -2367,7 +2404,9 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             do {
                 _ = try self.client.saveRole(draft, expectedGeneration: gen)
                 DispatchQueue.main.async {
-                    self.statusMessageLabel.stringValue = "草稿保存成功"
+                    self.localUnsavedChanges = false
+                    self.preferredRoleId = draft.roleId
+                    self.statusMessageLabel.stringValue = "草稿已保存。请在「适用会话」设置回复范围，再启用配置。"
                     self.reloadBrainData()
                 }
             } catch {
@@ -2380,10 +2419,17 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     }
 
     @objc private func handleActivate() {
-        guard let payload = listPayload, let current = currentDraftRole else { return }
+        guard let payload = listPayload, currentDraftRole != nil else {
+            statusMessageLabel.stringValue = "请先新建并保存角色，再设置适用会话。"
+            return
+        }
+        guard !localUnsavedChanges, !hasUnsavedBindingsChanges else {
+            statusMessageLabel.stringValue = "尚有未保存的修改，请先保存角色草稿及会话绑定，再启用。"
+            return
+        }
         let alert = NSAlert()
         alert.messageText = "确认启用大脑配置"
-        alert.informativeText = "即将启用角色「\(current.name)」的草稿版本（\(current.revisionId)）。\n注意：配置生效仅作用于新到达的对话轮次，在途轮次不受影响。"
+        alert.informativeText = "即将启用已保存的会话绑定配置（含默认角色和专属角色）。请先在「适用会话」确认范围。\n仅影响新到达的对话轮次，在途轮次不受影响。"
         alert.addButton(withTitle: "确认启用")
         alert.addButton(withTitle: "取消")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -2427,6 +2473,10 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     }
 
     @objc private func handleRunPreview() {
+        guard !localUnsavedChanges else {
+            previewResultTextView.string = "请先保存角色草稿，再预览已保存的版本。"
+            return
+        }
         guard let role = currentDraftRole else { return }
         let text = previewInputField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
