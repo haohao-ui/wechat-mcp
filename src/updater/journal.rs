@@ -1122,17 +1122,9 @@ pub fn detect_legacy_maintenance_marker(legacy_dir: &Path) -> bool {
 
     let journal_path = legacy_dir.join("update-journal.json");
     match read_limited_private_file(&journal_path, 64 * 1024) {
-        Ok(Some(bytes)) => {
-            // 如果存在旧 journal，必须校验其是否为已结束终态；损坏或未完成事务均必须阻断
-            match serde_json::from_slice::<UpdateJournal>(&bytes) {
-                Ok(j) => {
-                    if j.journal_schema != 1 || j.stage != TransactionStage::Committed {
-                        return true;
-                    }
-                }
-                Err(_) => return true,
-            }
-        }
+        // The legacy root has no trusted installation mapping. Even Committed
+        // cannot establish record/current consistency without explicit recovery.
+        Ok(Some(_)) => return true,
         Err(_) => return true,
         Ok(None) => {}
     }

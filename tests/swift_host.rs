@@ -3364,6 +3364,16 @@ print(checkMode())
         legacy_maint.exists(),
         "corrupt legacy file must remain untouched"
     );
+    fs::remove_file(&legacy_maint).unwrap();
+    let old_journal = legacy_dir.join("update-journal.json");
+    let committed_label = br#"{"journal_schema":1,"stage":"Committed"}"#;
+    fs::write(&old_journal, committed_label).unwrap();
+    fs::set_permissions(&old_journal, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        run_guard_legacy("RECOVERY_REQUIRED", &legacy_dir),
+        "RECOVERY_REQUIRED"
+    );
+    assert_eq!(fs::read(&old_journal).unwrap(), committed_label);
 }
 
 #[test]

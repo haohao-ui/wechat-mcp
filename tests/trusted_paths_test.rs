@@ -149,6 +149,25 @@ fn test_legacy_state_maintenance_detected_without_deletion() {
 }
 
 #[test]
+fn test_legacy_committed_label_without_installation_proof_blocks() {
+    let dir = TempDir::new("legacy_committed_unproven");
+    let mut record = journal::UpdateJournal::new(
+        "00000000-0000-4000-8000-000000000001",
+        "1.0.0",
+        "1.0.1",
+        2,
+        1000,
+    );
+    record.stage = journal::TransactionStage::Committed;
+    record.persist_atomic(&dir.path).unwrap();
+    assert!(
+        journal::detect_legacy_maintenance_marker(&dir.path),
+        "a legacy stage label cannot prove the old installation settled"
+    );
+    assert!(dir.path.join("update-journal.json").exists());
+}
+
+#[test]
 fn test_bot_config_install_root_invalid_types_rejected() {
     let dir = TempDir::new("cfg_types_test");
     let (cfg_base, _) = write_config_json(&dir.path, None);
