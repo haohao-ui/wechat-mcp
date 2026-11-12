@@ -93,10 +93,12 @@ func runTests() -> Int32 {
         // 验证旧结构缺字段时向后兼容：status 默认 unavailable
         check("brain_list_legacy_shape_status", payload.allowlistContactsStatus == "unavailable")
         check("brain_list_legacy_shape_contacts_empty", payload.allowlistContacts.isEmpty)
+        check("brain_list_legacy_account_unknown", payload.accountId == nil)
 
         // 验证新结构包含权威白名单投影：
         let modernListJson = """
         {
+            "account_id": "wxid_current_fixture",
             "generation": 11,
             "execution_mode": "managed",
             "roles": [],
@@ -108,6 +110,7 @@ func runTests() -> Int32 {
         }
         """
         if let modernPayload = try? BrainPageLogic.parseBrainList(jsonString: modernListJson) {
+            check("brain_list_authoritative_account", modernPayload.accountId == "wxid_current_fixture")
             check("brain_list_modern_shape_status", modernPayload.allowlistContactsStatus == "ready")
             check("brain_list_modern_shape_contacts_count", modernPayload.allowlistContacts.count == 1)
             check("brain_list_modern_shape_contact_id", modernPayload.allowlistContacts[0].contactId == "c_zhangsan")
