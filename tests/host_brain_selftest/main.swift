@@ -704,6 +704,23 @@ func runTests() -> Int32 {
         check("sessions_page_png_written", sessOK && FileManager.default.fileExists(atPath: sessURL.path))
         check("sessions_page_png_size_valid", ((try? Data(contentsOf: sessURL))?.count ?? 0) > 10240)
 
+        let templateURL = URL(fileURLWithPath: "native/bootstrap/brain-default-role.json")
+        do {
+            let template = try BrainDefaultRoleTemplate.load(from: templateURL)
+            let first = template.makeRole()
+            let second = template.makeRole()
+            check("default_role_template_content", first.name == "默认客服助手" && !first.persona.isEmpty && !first.businessRules.isEmpty)
+            check("default_role_template_fallbacks", first.templates.greeting != nil && first.templates.insufficientInformation != nil)
+            check("default_role_template_account_isolation", first.ownerAccountId.isEmpty && first.roleId != second.roleId && first.knowledgeRefs.isEmpty)
+            brainController.applyFixtureState(payload: mockPayload, role: mockRole, accountId: "corp_support_01")
+            let overridesBeforeDefault = brainController.currentDraftBindings.overrides
+            _ = brainController.perform(NSSelectorFromString("handleUseAsDefault"))
+            check("role_shortcut_selects_default", brainController.currentDraftBindings.defaultRef?.roleId == mockRole.roleId && brainController.hasUnsavedBindingsChanges)
+            check("role_shortcut_preserves_overrides", brainController.currentDraftBindings.overrides == overridesBeforeDefault)
+        } catch {
+            check("default_role_template_load", false, error.localizedDescription)
+        }
+
         // Unsaved-role actions must not invoke preview or activation against an older revision.
         _ = brainController.perform(NSSelectorFromString("handleNewRole"))
         _ = brainController.perform(NSSelectorFromString("handleRunPreview"))

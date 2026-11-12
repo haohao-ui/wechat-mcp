@@ -131,6 +131,7 @@ if [ $APP -eq 1 ]; then
     install -m 0755 "/tmp/wechat-cs-host.$TS" "$APP/Contents/MacOS/wechat-cs-host"; rm -f "/tmp/wechat-cs-host.$TS"
     cp native/bootstrap/Info.plist "$APP/Contents/Info.plist"
     plutil -replace CFBundleVersion -string "$APP_VERSION" "$APP/Contents/Info.plist" 2>/dev/null || sed -i "" "s|<key>CFBundleVersion</key><string>.*</string>|<key>CFBundleVersion</key><string>$APP_VERSION</string>|" "$APP/Contents/Info.plist"
+    cp native/bootstrap/brain-default-role.json "$APP/Contents/Resources/brain-default-role.json"
     cp native/bootstrap/gateway.test.json "$APP/Contents/Resources/gateway.test.json"
     cp native/bootstrap/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
     sign_file "$HOME/Applications/微信客服助手.app"'

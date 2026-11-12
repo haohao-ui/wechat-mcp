@@ -150,6 +150,26 @@ public struct BrainRoleRef: Codable, Equatable {
     }
 }
 
+/// Editable starter content is shipped as a resource, then saved through the normal role editor.
+public struct BrainDefaultRoleTemplate: Decodable {
+    public var name: String
+    public var persona: String
+    public var goals: [String]
+    public var tone: String
+    public var businessRules: [String]
+    public var templates: BrainTemplates
+
+    public static func load(from url: URL) throws -> BrainDefaultRoleTemplate {
+        try JSONDecoder().decode(BrainDefaultRoleTemplate.self, from: Data(contentsOf: url))
+    }
+
+    public func makeRole() -> BrainRoleRevision {
+        BrainRoleRevision(roleId: "role_\(UUID().uuidString.prefix(8))", revisionId: "rev_1",
+                          name: name, persona: persona, goals: goals, tone: tone,
+                          businessRules: businessRules, templates: templates)
+    }
+}
+
 public struct BrainRoleRevision: Codable, Equatable {
     public var schemaVersion: UInt32
     public var ownerAccountId: String
@@ -1084,6 +1104,8 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
 
     // UI - Role Management Buttons
     private let newRoleButton = NSButton(title: "新增角色", target: nil, action: nil)
+    private let defaultRoleButton = NSButton(title: "添加默认角色", target: nil, action: nil)
+    private let useAsDefaultButton = NSButton(title: "设为默认角色…", target: nil, action: nil)
     private let copyRoleButton = NSButton(title: "复制角色", target: nil, action: nil)
     private let archiveRoleButton = NSButton(title: "归档角色", target: nil, action: nil)
 
@@ -1246,6 +1268,10 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         archiveRoleButton.target = self
         archiveRoleButton.action = #selector(handleArchiveRole)
 
+        defaultRoleButton.target = self
+        defaultRoleButton.action = #selector(handleAddDefaultRole)
+        parent.addSubview(defaultRoleButton)
+        defaultRoleButton.translatesAutoresizingMaskIntoConstraints = false
         parent.addSubview(newRoleButton)
         newRoleButton.translatesAutoresizingMaskIntoConstraints = false
         btnStack.addArrangedSubview(copyRoleButton)
@@ -1264,7 +1290,10 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             newRoleButton.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 10),
             newRoleButton.leadingAnchor.constraint(equalTo: parent.leadingAnchor, constant: 8),
             newRoleButton.trailingAnchor.constraint(equalTo: parent.trailingAnchor, constant: -8),
-            scroll.topAnchor.constraint(equalTo: newRoleButton.bottomAnchor, constant: 10),
+            defaultRoleButton.topAnchor.constraint(equalTo: newRoleButton.bottomAnchor, constant: 6),
+            defaultRoleButton.leadingAnchor.constraint(equalTo: parent.leadingAnchor, constant: 8),
+            defaultRoleButton.trailingAnchor.constraint(equalTo: parent.trailingAnchor, constant: -8),
+            scroll.topAnchor.constraint(equalTo: defaultRoleButton.bottomAnchor, constant: 10),
             scroll.leadingAnchor.constraint(equalTo: parent.leadingAnchor, constant: 8),
             scroll.trailingAnchor.constraint(equalTo: parent.trailingAnchor, constant: -8),
             scroll.bottomAnchor.constraint(equalTo: btnStack.topAnchor, constant: -10),
@@ -1331,6 +1360,8 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         saveDraftButton.keyEquivalentModifierMask = [.command]
         saveDraftButton.target = self
         saveDraftButton.action = #selector(handleSaveDraft)
+        useAsDefaultButton.target = self
+        useAsDefaultButton.action = #selector(handleUseAsDefault)
         activateButton.target = self
         activateButton.action = #selector(handleActivate)
         rollbackButton.target = self
@@ -1338,6 +1369,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
 
         let actionRow = NSStackView(views: [
             saveDraftButton,
+            useAsDefaultButton,
             activateButton
         ])
         actionRow.orientation = .horizontal
@@ -2320,6 +2352,41 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
                 }
             }
         }
+    }
+
+    @objc private func handleAddDefaultRole() {
+        guard !localUnsavedChanges else {
+            statusMessageLabel.stringValue = "请先保存当前角色，再添加默认角色。"
+            return
+        }
+        guard let url = Bundle.main.url(forResource: "brain-default-role", withExtension: "json") else {
+            statusMessageLabel.stringValue = "默认角色模板缺失，请重新安装完整应用。"
+            return
+        }
+        do {
+            let role = try BrainDefaultRoleTemplate.load(from: url).makeRole()
+            currentDraftRole = role
+            populateRoleForm(role, entry: BrainRoleEntry(roleId: role.roleId, draftRevisionId: role.revisionId, name: role.name))
+            localUnsavedChanges = true
+            sectionSegment.selectedSegment = 0
+            switchTab(index: 0)
+            statusMessageLabel.stringValue = "默认客服配置已填入，可自由修改。保存后点击「设为默认角色…」。"
+        } catch {
+            statusMessageLabel.stringValue = "读取默认角色模板失败：\(error.localizedDescription)"
+        }
+    }
+
+    @objc private func handleUseAsDefault() {
+        guard let role = currentDraftRole, !localUnsavedChanges,
+              listPayload?.roles.contains(where: { $0.roleId == role.roleId }) == true else {
+            statusMessageLabel.stringValue = "请先保存角色草稿，再设为默认角色。"
+            return
+        }
+        selectDefaultRoleDraft(roleId: role.roleId)
+        sectionSegment.selectedSegment = 3
+        switchTab(index: 3)
+        bindingsStatusLabel.stringValue = "已选择「\(role.name)」为默认角色。请保存绑定草稿，再启用配置。"
+        statusMessageLabel.stringValue = "默认角色用于白名单内未指定专属角色的会话；专属角色保持优先。"
     }
 
     @objc private func handleNewRole() {

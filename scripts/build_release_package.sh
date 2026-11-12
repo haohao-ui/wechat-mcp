@@ -79,6 +79,8 @@ done
 cp target/release/wechat-cs-host "$OUT_DIR/Apps/微信客服助手.app/Contents/MacOS/wechat-cs-host"
 chmod 0755 "$OUT_DIR/Apps/微信客服助手.app/Contents/MacOS/wechat-cs-host"
 
+cp native/bootstrap/brain-default-role.json "$OUT_DIR/Apps/微信客服助手.app/Contents/Resources/brain-default-role.json"
+
 cp native/bootstrap/Info.plist "$OUT_DIR/Apps/微信客服助手.app/Contents/Info.plist"
 chmod 0644 "$OUT_DIR/Apps/微信客服助手.app/Contents/Info.plist"
 
