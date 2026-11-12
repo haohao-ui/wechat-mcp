@@ -66,3 +66,19 @@ The host LaunchAgent was re-enabled and the new host bootstrapped. Core was init
 The ScreenCaptureKit streaming operation explicitly requires macOS 14; this macOS 12.7.6 target cannot pass that capability, even though diagnostics and compilation now work. Existing worker capture capabilities require separate live acceptance and are not proven by the runtime self-test.
 
 The target screen-sharing session was observed as locked. The user was asked to unlock the dedicated machine and log into WeChat. UI, actual capture/OCR, configured-brain flows and named test-contact messaging remain pending. Production update apply/rollback/recover and real drain remain incomplete; this manual controlled installation does not validate those features or the seven-day operation requirement.
+
+## Login and read-only UI checks
+
+After the user confirmed login, native diagnostics observed WeChat 4.1.15 running with an on-screen window, Accessibility and Screen Recording authorization true. Core health changed to paused/admin_pause. The screen-sharing title still said locked, but the actual captured desktop was unlocked; the title was stale and is not acceptance evidence.
+
+The real update page was visually inspected: x86_64 runtime, unknown installed release, no configured update source/publisher root, and disabled download/install/defer controls were displayed. No role draft was saved or activated by the acceptance operator.
+
+A live defect was found: brain-list returned ready with zero binding candidates, although the read-only history query counted 45 contacts across two accounts. No contacts belonged to the configured device alias. BrainAccess already resolves the recorded logged-in account, but brain control's account context and candidate enumeration still used the device alias.
+
+The fix reuses effective_account_id for brain control and returns the server-selected account_id in brain-list; the UI displays that authoritative value (or unknown for older responses). Existing device-alias roles are not migrated across account boundaries. The existing projection regression was extended to switch to a second logged-in account with a same-name contact and assert its authorized candidate and no leakage of the prior account's roles.
+
+Validation: the new switch assertion failed first (exit 101, zero candidates instead of one); after the fix the projection test passed, 145 brain-related Rust tests passed, and the Swift brain UI harness passed with additional authoritative-account/legacy-unknown parsing assertions. The revised core and host are staged for device testing, not yet installed: a restart could discard an unsaved role draft, so confirmation was requested.
+
+During read-only acceptance the live configuration changed in two allowlist recipient values (entry count remains three, state root unchanged). No configuration-save command was issued by the operator. The writer is not yet established; the change is preserved and the user was asked whether they are editing concurrently. Do not overwrite it with the pre-install backup.
+
+Named test-contact scope and permission to restart after saving drafts are pending. No send operation or automatic-reply resume has been performed.

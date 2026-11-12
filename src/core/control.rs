@@ -2773,6 +2773,12 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
         }
     };
 
+    // Match the scheduler/contact APIs: configuration may name the device,
+    // while the core's private state records the currently logged-in account.
+    let mut cfg = cfg;
+    cfg.account_id =
+        crate::core::wechat_account::effective_account_id(&cfg.state_dir, &cfg.account_id);
+
     let req_val: Value = if let Some(s) = request_json {
         match serde_json::from_str(&s) {
             Ok(v) => v,
@@ -2842,6 +2848,7 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
                 compute_allowlist_contacts_projection(&cfg, &db_path);
 
             let data = json!({
+                "account_id": ctx.account_id(),
                 "generation": generation,
                 "execution_mode": account_entry.as_ref().map(|a| a.execution_mode).unwrap_or(ExecutionMode::Legacy),
                 "roles": roles,
@@ -7592,6 +7599,38 @@ mod tests {
         assert_eq!(list[0]["contact_id"], "c_zhangsan");
         assert_eq!(list[0]["display_name"], "张三真实名");
         assert_eq!(list[0]["chat_kind"], "private");
+
+        // The configured account is a device alias. After a login switch, both
+        // authorization and enumeration must use the recorded WeChat account.
+        crate::core::wechat_account::record_current_account(&state_dir, "acc_other", 101.0)
+            .unwrap();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = execute_control_full(
+            &[
+                "brain-list".into(),
+                "--config".into(),
+                cfg_path.to_str().unwrap().into(),
+            ],
+            &mut stdout,
+            &mut stderr,
+            None,
+            None,
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
+        let switched: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(switched["data"]["account_id"], "acc_other");
+        assert!(
+            switched["data"]["roles"].as_array().unwrap().is_empty(),
+            "roles from the configured alias must not cross the login boundary"
+        );
+        let contacts = switched["data"]["allowlist_contacts"].as_array().unwrap();
+        assert_eq!(
+            contacts.len(),
+            1,
+            "logged-in account must have its authorized candidate"
+        );
+        assert_eq!(contacts[0]["contact_id"], "c_other");
     }
 
     #[test]

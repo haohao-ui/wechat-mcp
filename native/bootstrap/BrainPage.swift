@@ -466,6 +466,7 @@ public struct BrainModelSummary: Codable, Equatable {
 }
 
 public struct BrainListPayload: Codable, Equatable {
+    public var accountId: String?
     public var generation: UInt64
     public var executionMode: String
     public var roles: [BrainRoleEntry]
@@ -477,6 +478,7 @@ public struct BrainListPayload: Codable, Equatable {
     public var allowlistContactsError: String?
 
     enum CodingKeys: String, CodingKey {
+        case accountId = "account_id"
         case generation
         case executionMode = "execution_mode"
         case roles
@@ -497,8 +499,10 @@ public struct BrainListPayload: Codable, Equatable {
         modelSummary: BrainModelSummary? = nil,
         allowlistContacts: [BrainAllowlistContact] = [],
         allowlistContactsStatus: String = "ready",
-        allowlistContactsError: String? = nil
+        allowlistContactsError: String? = nil,
+        accountId: String? = nil
     ) {
+        self.accountId = accountId
         self.generation = generation
         self.executionMode = executionMode
         self.roles = roles
@@ -512,6 +516,7 @@ public struct BrainListPayload: Codable, Equatable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.accountId = try container.decodeIfPresent(String.self, forKey: .accountId)
         self.generation = try container.decode(UInt64.self, forKey: .generation)
         self.executionMode = try container.decode(String.self, forKey: .executionMode)
         self.roles = try container.decode([BrainRoleEntry].self, forKey: .roles)
@@ -1825,7 +1830,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     }
 
     private func updateUIWithList(_ payload: BrainListPayload) {
-        accountLabel.stringValue = "当前账号: \(context.currentRawConfig["account_id"] as? String ?? "-")"
+        accountLabel.stringValue = "当前账号: \(payload.accountId ?? "未知")"
         if let summary = payload.modelSummary {
             modeLabel.stringValue = "模式: \(summary.mode) · 模型: 已配置"
         }
