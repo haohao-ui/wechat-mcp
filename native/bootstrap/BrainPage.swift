@@ -849,6 +849,18 @@ public struct BrainPageLogic {
         return .success(copy)
     }
 
+    public static func activationBindings(role: BrainRoleRevision, bindings: BrainBindingSet) -> BrainBindingSet {
+        var result = bindings
+        let referenced = result.defaultRef?.roleId == role.roleId || result.overrides.contains { $0.roleId == role.roleId }
+        if !referenced || result.defaultRef?.roleId == role.roleId {
+            result.defaultRef = BrainRoleRef(roleId: role.roleId, revisionId: role.revisionId)
+        }
+        for index in result.overrides.indices where result.overrides[index].roleId == role.roleId {
+            result.overrides[index].revisionId = role.revisionId
+        }
+        return result
+    }
+
     public static func deleteOverride(from bindings: BrainBindingSet, contactId: String) -> BrainBindingSet {
         var copy = bindings
         copy.overrides.removeAll(where: { $0.contactId == contactId })
@@ -897,7 +909,19 @@ public final class BrainClient {
             throw NSError(domain: "BrainClient", code: Int(run.status), userInfo: [NSLocalizedDescriptionKey: errStr])
         }
         let outStr = String(data: run.output, encoding: .utf8) ?? "{}"
-        return try BrainPageLogic.parseBrainList(jsonString: outStr)
+        var payload = try BrainPageLogic.parseBrainList(jsonString: outStr)
+        for index in payload.roles.indices {
+            let entry = payload.roles[index]
+            if entry.archived { continue }
+            let role = try getRole(roleId: entry.roleId, revisionId: entry.draftRevisionId)
+            payload.roles[index].name = role.name
+            var revisions: [String] = []
+            if let ref = payload.active?.defaultRef, ref.roleId == entry.roleId { revisions.append(ref.revisionId) }
+            for ref in payload.active?.overrides ?? [] where ref.roleId == entry.roleId { revisions.append(ref.revisionId) }
+            payload.roles[index].activeBindingCount = revisions.count
+            payload.roles[index].activeRevisionId = revisions.contains(entry.draftRevisionId) ? entry.draftRevisionId : revisions.first
+        }
+        return payload
     }
 
     public func getRole(roleId: String, revisionId: String? = nil) throws -> BrainRoleRevision {
@@ -1090,6 +1114,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     private var roleLoadToken = UUID()
     private var focusRoleAfterLoad: String?
     private var hasStoredRoles = false
+    private var activationInFlight = false
     private var currentDraftRole: BrainRoleRevision?
     private var localUnsavedChanges: Bool = false
 
@@ -2538,6 +2563,12 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         t.unreadable["too_large"] = ul.isEmpty ? nil : ul
         draft.templates = t
 
+        if let existing = payload.roles.first(where: { $0.roleId == draft.roleId }) {
+            draft.parentRevisionId = existing.draftRevisionId
+            draft.revisionId = "rev_(UUID().uuidString.lowercased())"
+            draft.createdAt = UInt64(Date().timeIntervalSince1970)
+            draft.contentSha256 = ""
+        }
         statusMessageLabel.stringValue = "正在保存草稿..."
         let gen = payload.generation
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -2560,34 +2591,55 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     }
 
     @objc private func handleActivate() {
-        guard let payload = listPayload, currentDraftRole != nil else {
-            statusMessageLabel.stringValue = "请先新建并保存角色，再设置适用会话。"
-            return
-        }
-        guard !localUnsavedChanges, !hasUnsavedBindingsChanges else {
+        guard !activationInFlight, let payload = listPayload, let role = currentDraftRole else { return }
+        guard !localUnsavedChanges, !hasUnsavedBindingsChanges,
+              payload.roles.contains(where: { $0.roleId == role.roleId && $0.draftRevisionId == role.revisionId }) else {
             statusMessageLabel.stringValue = "尚有未保存的修改，请先保存角色草稿及会话绑定，再启用。"
             return
         }
+        let savedBindings = payload.draft ?? BrainBindingSet(defaultRef: nil, overrides: [])
+        let bindings = BrainPageLogic.activationBindings(role: role, bindings: savedBindings)
+        let wasReferenced = savedBindings.defaultRef?.roleId == role.roleId || savedBindings.overrides.contains { $0.roleId == role.roleId }
         let alert = NSAlert()
-        alert.messageText = "确认启用大脑配置"
-        alert.informativeText = "即将启用已保存的会话绑定配置（含默认角色和专属角色）。请先在「适用会话」确认范围。\n仅影响新到达的对话轮次，在途轮次不受影响。"
+        alert.messageText = "启用角色「\(role.name)」？"
+        alert.informativeText = wasReferenced
+            ? "将更新该角色已有的默认或专属绑定到当前已保存版本，并启用整份会话配置。其他角色绑定保持原样。仅影响新轮次。"
+            : "将把该角色设为账号默认角色，并启用整份会话配置。白名单内没有专属角色的会话将使用它；已有专属角色保持不变。仅影响新轮次。"
         alert.addButton(withTitle: "确认启用")
         alert.addButton(withTitle: "取消")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        statusMessageLabel.stringValue = "正在提交激活请求..."
-        let gen = payload.generation
+        activationInFlight = true
+        activateButton.isEnabled = false
+        statusMessageLabel.stringValue = "正在保存适用范围并启用角色..."
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             do {
-                _ = try self.client.activate(expectedGeneration: gen)
+                var generation = payload.generation
+                if bindings != savedBindings {
+                    generation = try self.client.saveBindings(draft: bindings, expectedGeneration: generation)
+                }
+                _ = try self.client.activate(expectedGeneration: generation)
+                var verified = try self.client.fetchList()
+                guard verified.active == bindings else {
+                    throw NSError(domain: "BrainClient", code: 3, userInfo: [NSLocalizedDescriptionKey: "启用结果与预期范围不一致，请重新读取配置确认。"])
+                }
+                let hasStoredRoles = !verified.roles.isEmpty
+                verified.roles.removeAll { $0.archived }
                 DispatchQueue.main.async {
-                    self.statusMessageLabel.stringValue = "新配置已成功激活生效"
-                    self.reloadBrainData()
+                    self.activationInFlight = false
+                    self.activateButton.isEnabled = true
+                    self.hasStoredRoles = hasStoredRoles
+                    self.preferredRoleId = role.roleId
+                    self.listPayload = verified
+                    self.updateUIWithList(verified)
+                    self.statusMessageLabel.stringValue = "角色「\(role.name)」已启用（\(role.revisionId)），适用范围已核对。"
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.statusMessageLabel.stringValue = "激活失败: \(error.localizedDescription)"
+                    self.activationInFlight = false
+                    self.activateButton.isEnabled = true
+                    self.statusMessageLabel.stringValue = "启用未确认：\(error.localizedDescription)。请重新读取配置核对；已保存的绑定草稿会保留。"
+                    self.reloadBrainData()
                 }
             }
         }
@@ -2697,7 +2749,8 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
 
         let isLocal = !(listPayload?.roles.contains(where: { $0.roleId == entry.roleId }) ?? false)
         let isDefault = listPayload?.draft?.defaultRef?.roleId == entry.roleId || listPayload?.active?.defaultRef?.roleId == entry.roleId
-        let statusText = isLocal ? "未保存草稿" : isDefault ? "默认角色" : entry.hasDraftChanges ? "草稿: \(entry.draftRevisionId) ●" : "运行中: \(entry.activeRevisionId ?? "-")"
+        let state = entry.activeRevisionId == nil ? "已保存 · 未启用" : entry.hasDraftChanges ? "有新草稿 · 运行: \(entry.activeRevisionId!)" : "已启用: \(entry.activeRevisionId!)"
+        let statusText = isLocal ? "未保存草稿" : (isDefault ? "默认 · " : "") + state
         let statusLbl = NSTextField(labelWithString: statusText)
         statusLbl.font = NSFont.systemFont(ofSize: 10)
         statusLbl.textColor = entry.hasDraftChanges ? .systemOrange : .secondaryLabelColor

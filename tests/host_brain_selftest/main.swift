@@ -865,6 +865,22 @@ func runTests() -> Int32 {
             // 13.8 激活与回退
             let genAfterAct = try realClient.activate(expectedGeneration: genAfterBind)
             check("real_control_activate_gen", genAfterAct > genAfterBind)
+            let activePayload = try realClient.fetchList()
+            let activeRole = activePayload.roles.first { $0.roleId == role.roleId }
+            check("real_role_name_is_loaded", activeRole?.name == role.name)
+            check("real_enabled_role_not_shown_as_draft", activeRole?.activeRevisionId == "rev_c2" && activeRole?.hasDraftChanges == false)
+            check("real_role_active_scope_count", activeRole?.activeBindingCount == 2)
+            let emptyActivation = BrainPageLogic.activationBindings(role: role, bindings: BrainBindingSet(defaultRef: nil, overrides: []))
+            check("activate_selected_role_cannot_leave_empty_scope", emptyActivation.defaultRef?.roleId == role.roleId && emptyActivation.defaultRef?.revisionId == role.revisionId)
+            var newerRole = role
+            newerRole.revisionId = "rev_new"
+            let updatedActivation = BrainPageLogic.activationBindings(role: newerRole, bindings: realBindings)
+            check("activation_advances_bound_role_revision", updatedActivation.defaultRef?.revisionId == "rev_new" && updatedActivation.overrides.first?.revisionId == "rev_new")
+            var dedicatedOnly = realBindings
+            dedicatedOnly.defaultRef = BrainRoleRef(roleId: "another_role", revisionId: "another_rev")
+            let dedicatedActivation = BrainPageLogic.activationBindings(role: newerRole, bindings: dedicatedOnly)
+            check("activation_preserves_other_default", dedicatedActivation.defaultRef == dedicatedOnly.defaultRef)
+
             
             // 产生第二个激活历史世代以验证合法回退
             let genAfterBind2 = try realClient.saveBindings(draft: realBindings, expectedGeneration: genAfterAct)
