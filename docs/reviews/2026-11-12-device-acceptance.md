@@ -84,3 +84,13 @@ During read-only acceptance the live configuration changed in two allowlist reci
 Named test-contact scope and permission to restart after saving drafts are pending. No send operation or automatic-reply resume has been performed.
 
 The `38de5a5` Intel core and updated host compiled successfully. Executing the staged core's read-only brain-list on the dedicated machine returned account_id different from the configured device alias, ready status and **3 authorized binding candidates** (previously 0). This verifies the live lookup fix without replacing the running host/core or activating roles. Installation of this follow-up remains pending protection of the user's unsaved draft.
+
+## Installed account fix and UI refinement — November 12, 13:19
+
+The user authorized restarting the assistant. The account lookup fix was installed earlier; the follow-up host UI at commit `784e3b8` is now installed as `784e3b8-device-20261112`, compiled on the Intel macOS 12.7.6 machine with Swift 5.7.2 and signed with the existing signing identity. Core binary remains the account-fixed build. Current config was preserved; the old app and config are backed up under `$TARGET_HOME/.wechat-rpa/acceptance/784e3b8-ux`.
+
+Changes: new-role entry above the list; clearer task tabs and first-use sequence; native primary Save with Command-S; rollback moved into Versions; corrected activation scope; unsaved edits block preview and activation; selected newly saved role is retained; persona text view sizing fixed; removed unsupported model-configured claim.
+
+Validation: Swift brain UI/real-control harness passed **107 checks, zero failures**, including new unsaved-preview and unsaved-activation regressions. Target-machine optimized host compilation and strict app signature verification passed. A direct screenshot of the target desktop confirmed the new header, top new-role button, workflow instructions, complete tab bar and blue Save button without clipping at the current window size. Evidence is `live-ui.png` in the private device acceptance directory. The screenshot was obtained after foregrounding and positioning the actual app; screen-sharing window titles remained stale.
+
+Core health after restart: PID 61980, state paused, reason admin_pause. No roles/bindings were activated and no acceptance messages were sent. A subsequent AX attempt to press New Role failed with a System Events specifier error; it is not counted as a successful live draft interaction. Unsaved-action coverage remains automated evidence. Full messaging acceptance still requires a named test conversation; updater rollback and the wider production acceptance remain outstanding.
