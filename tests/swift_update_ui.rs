@@ -117,6 +117,7 @@ fn test_swift_update_ui_selftest() {
 
     // 运行测试可执行文件（传入真实 Rust control 配置环境变量）
     let run_output = Command::new(&bin_path)
+        .env("CFFIXED_USER_HOME", &temp_dir)
         .env("REAL_UPDATE_CONFIG", &cfg_path)
         .env("WECHAT_MCP_BIN", &wechat_mcp_bin)
         .output()

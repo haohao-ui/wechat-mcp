@@ -17,6 +17,19 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
 }
 
+/// Foundation resolves `FileManager.homeDirectoryForCurrentUser` from
+/// `CFFIXED_USER_HOME`, not `HOME`. Point every spawned helper at a temporary
+/// home so config staging never touches the developer's `~/.wechat-rpa`.
+fn swift_test_home() -> &'static Path {
+    static HOME: OnceLock<PathBuf> = OnceLock::new();
+    HOME.get_or_init(|| {
+        let dir =
+            std::env::temp_dir().join(format!("wechat-mcp-swift-home-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create swift test home");
+        dir
+    })
+}
+
 fn has_swiftc() -> bool {
     if !cfg!(target_os = "macos") {
         return false;
@@ -119,6 +132,7 @@ fn run_host_cmd(command: &str, payload: &Value) -> Result<Value, String> {
     let bin = host_selftest_bin().expect("host_selftest binary not available");
     let payload_str = serde_json::to_string(payload).unwrap();
     let output = Command::new(bin)
+        .env("CFFIXED_USER_HOME", swift_test_home())
         .arg(command)
         .arg(&payload_str)
         .output()
@@ -2119,6 +2133,7 @@ fn run_task5_cmd(command: &str, payload: &Value) -> Result<Value, String> {
         .ok_or_else(|| "host_task5_selftest binary not available".to_string())?;
     let payload_str = serde_json::to_string(payload).unwrap();
     let output = Command::new(bin)
+        .env("CFFIXED_USER_HOME", swift_test_home())
         .arg(command)
         .arg(&payload_str)
         .output()
@@ -2459,6 +2474,7 @@ fn run_task6_cmd(command: &str, payload: &Value) -> Result<Value, String> {
         .ok_or_else(|| "host_task6_selftest binary not available".to_string())?;
     let payload_str = serde_json::to_string(payload).unwrap();
     let output = Command::new(bin)
+        .env("CFFIXED_USER_HOME", swift_test_home())
         .arg(command)
         .arg(&payload_str)
         .output()
@@ -3437,6 +3453,7 @@ print(main())
 
     let run_bin = || -> String {
         let out = Command::new(&bin_path)
+            .env("CFFIXED_USER_HOME", swift_test_home())
             .arg(cfg_file.to_str().unwrap())
             .output()
             .expect("run cfg_reload_bin");
