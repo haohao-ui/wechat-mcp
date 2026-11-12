@@ -1450,6 +1450,9 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         personaField.isVerticallyResizable = true
         personaField.isHorizontallyResizable = false
         personaField.autoresizingMask = [.width]
+        personaField.minSize = NSSize(width: 0, height: 120)
+        personaField.maxSize = NSSize(width: 460, height: CGFloat.greatestFiniteMagnitude)
+        personaField.textContainer?.containerSize = NSSize(width: 444, height: CGFloat.greatestFiniteMagnitude)
         personaField.textContainer?.widthTracksTextView = true
         personaField.textContainerInset = NSSize(width: 8, height: 8)
         personaScroll.documentView = personaField
