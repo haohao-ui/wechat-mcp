@@ -178,6 +178,7 @@ VALUES (
     let wechat_mcp_bin = root.join("target").join("debug").join("wechat-mcp");
 
     let run_output = Command::new(&bin_path)
+        .env("CFFIXED_USER_HOME", &temp_dir)
         .env("REAL_CONTROL_CONFIG", &cfg_path)
         .env("WECHAT_MCP_BIN", &wechat_mcp_bin)
         .env("REAL_CONTROL_TEST_TURN_ID", "turn_contract_real")

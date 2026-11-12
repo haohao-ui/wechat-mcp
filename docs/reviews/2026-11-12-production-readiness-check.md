@@ -23,13 +23,13 @@
 | 全量测试 | `cargo test --locked --no-fail-fast` | PASS（2245 passed / 0 failed / 3 ignored，隔离环境） |
 | 原生自测 | `wechat_window --self-test`、`wechat_overlay --self-test`、`wechat_runtime --self-test` | PASS |
 
-测试环境说明：裸跑沙箱曾出现 15 个失败，均为环境问题而非业务断言：
+测试环境说明：修复前裸跑沙箱曾出现 15 个失败，均为环境问题而非业务断言：
 
 - 4 个 updater CLI 用例找不到 `target/debug/wechat-updater`（自定义 `CARGO_TARGET_DIR` 导致回退路径失效）；
 - 2 个 UI 联测用例找不到 `target/debug/wechat-mcp`（同一原因）；
 - 9 个 `swift_host` 配置用例写真实用户目录下的 `~/.wechat-rpa/tmp`，被沙箱拒绝。
 
-使用默认 `CARGO_TARGET_DIR` 并设置 `CFFIXED_USER_HOME` 指向临时目录后，全部用例通过。这说明测试对执行环境不封闭，但产品断言本身没有失败。
+本分支已修复 9 个 `swift_host` 用例的用户目录依赖：测试 harness 为每个 Swift 子进程设置 `CFFIXED_USER_HOME` 到临时目录。修复后不再需要外部设置该变量，全量测试在临时 `HOME` 下仍为 2245 通过、0 失败、3 ignored。4 个 updater 与 2 个 UI 用例的路径失败只在自定义 `CARGO_TARGET_DIR` 时出现，CI 使用默认 target 不受影响。
 
 main 上的 `core::open_api::compat_tests::ops_tools_list_unchanged` 已通过（fixture 已更新）；旧分支仍是失败状态。
 
@@ -88,9 +88,9 @@ error: unsupported: real update <action> is disabled in this phase (fixture adap
 - 错误主要是自然语言文本，缺少稳定的错误码、可重试标记和副作用标记；
 - gateway / mcp 层几乎没有结构化 `tracing`，故障定位依赖状态文件。
 
-### P1-4 测试对用户目录不封闭
+### P1-4 测试对用户目录不封闭（本分支已修复）
 
-`native/bootstrap/ConfigForm.swift` 的 `getSecureTempDirectory()` 使用 `FileManager.homeDirectoryForCurrentUser`，不读取 `HOME`；测试需要额外设置 `CFFIXED_USER_HOME` 才能通过。建议支持注入 state/temp 目录，避免测试触碰真实用户目录。
+`native/bootstrap/ConfigForm.swift` 的 `getSecureTempDirectory()` 使用 `FileManager.homeDirectoryForCurrentUser`，不读取 `HOME`。本分支在 `tests/swift_host.rs`、`swift_brain_ui.rs`、`swift_update_ui.rs` 中为 Swift 子进程设置 `CFFIXED_USER_HOME` 临时目录，测试不再触碰真实 `~/.wechat-rpa`。仍建议生产代码支持显式注入 state/temp 目录，减少对 Foundation 环境变量的隐式依赖。
 
 ### P1-5 Supervisor 崩溃退避上限
 
@@ -118,7 +118,7 @@ error: unsupported: real update <action> is disabled in this phase (fixture adap
 
 1. 合入本分支的格式化修复，恢复 CI 格式门禁。
 2. 明确生产基线，逐项评审并合并当前工作区的 13 个提交；或者明确排除并记录理由。
-3. 修复测试隔离：测试用临时 state/temp 目录，Swift 支持环境变量注入。
+3. 测试 home 隔离已修复；可选补 state/temp 注入与自定义 `CARGO_TARGET_DIR` 兼容，进一步减少环境假设。
 4. 为桌面读写、发送、文章抓取补操作级超时；为 MCP 任务补 panic 隔离。
 5. 更新能力二选一：完成真实更新核心与签名验证，或明确首版不支持并在 UI/文档中保持一致。
 6. 发布链路补签名/公证，安装器在验签通过前不要无条件去隔离。
@@ -133,9 +133,8 @@ bash scripts/test-gates.sh
 bash scripts/check_sensitive.sh
 shellcheck -S warning scripts/*.sh scripts/hooks/*
 
-# 构建与测试（隔离用户目录）
+# 构建与测试（隔离用户目录；Swift 子进程由测试 harness 设置 CFFIXED_USER_HOME）
 export HOME="$(mktemp -d)"
-export CFFIXED_USER_HOME="$HOME"
 cargo build --release --locked
 cargo test --locked --no-fail-fast
 
