@@ -88,11 +88,11 @@ error: unsupported: real update <action> is disabled in this phase (fixture adap
 
 新增单元测试 `panicking_task_response_keeps_request_id`，覆盖字符串/数字请求 id 与不可解析 key。限制：没有进程级“注入真实 panic”的端到端测试；panic 可能留下已中毒的锁或未释放的桌面租约，隔离只能避免整个服务退出，不能恢复被破坏的进程内状态。生产上仍需配合超时与重启策略处理中毒锁/租约。
 
-### P1-3 对外契约与可观测性不足
+### P1-3 对外契约与可观测性不足（部分修复）
 
 - 工具列表仍为 0 个 `outputSchema`；
 - 错误主要是自然语言文本，缺少稳定的错误码、可重试标记和副作用标记；
-- gateway / mcp 层几乎没有结构化 `tracing`，故障定位依赖状态文件。
+- 网关 `Gateway::call` 已记录 `tool`、`elapsed_ms` 与成败日志，桌面超时也会记录 `desktop_operation_timeout`；但 mcp 层仍缺结构化日志，工具契约仍不完整。
 
 ### P1-4 测试对用户目录不封闭（本分支已修复）
 

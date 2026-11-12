@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -70,8 +71,12 @@ impl Gateway {
     }
 
     pub async fn call(&self, name: &str, args: Value) -> Value {
-        match self.execute(name, args).await {
+        let started = Instant::now();
+        let outcome = self.execute(name, args).await;
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        match outcome {
             Ok(mut data) => {
+                tracing::info!(tool = name, elapsed_ms, "gateway_call_ok");
                 let screenshot = if crate::interaction::is_tool(name) {
                     data.as_object_mut()
                         .and_then(|obj| obj.remove("screenshot_base64"))
@@ -89,7 +94,10 @@ impl Gateway {
                 }
                 result
             }
-            Err(error) => make_tool_result(&format!("{error:#}"), true),
+            Err(error) => {
+                tracing::warn!(tool = name, elapsed_ms, "gateway_call_failed");
+                make_tool_result(&format!("{error:#}"), true)
+            }
         }
     }
 

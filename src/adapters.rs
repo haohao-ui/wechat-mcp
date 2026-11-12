@@ -72,9 +72,17 @@ async fn bounded<T>(
     message: String,
     future: impl Future<Output = Result<T>>,
 ) -> Result<T> {
-    match tokio::time::timeout(budget, future).await {
-        Ok(result) => result,
-        Err(_) => bail!("{message}"),
+    let started = std::time::Instant::now();
+    if let Ok(result) = tokio::time::timeout(budget, future).await {
+        result
+    } else {
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        tracing::warn!(
+            elapsed_ms,
+            budget_secs = budget.as_secs(),
+            "desktop_operation_timeout"
+        );
+        bail!("{message}")
     }
 }
 
