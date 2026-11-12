@@ -1,11 +1,12 @@
 use std::path::PathBuf;
 use wechat_mcp::core::config;
+use wechat_mcp::updater::executor;
 use wechat_mcp::updater::journal::{self, TransactionStage, UpdateJournal};
 use wechat_mcp::updater::manifest;
 
 fn print_usage() {
     eprintln!(
-        "Usage: wechat-updater <status|check|apply|rollback|recover> [--config <path>] [--manifest <path>]"
+        "Usage: wechat-updater <status|check|apply|rollback|recover> [--config <path>] [--manifest <path>] [--trusted-keys <path>]"
     );
 }
 
@@ -95,6 +96,7 @@ fn main() {
         "check" => {
             let mut config_path: Option<PathBuf> = None;
             let mut manifest_path: Option<PathBuf> = None;
+            let mut trusted_keys_path: Option<PathBuf> = None;
             let mut i = 2;
             while i < args.len() {
                 if args[i] == "--config" && i + 1 < args.len() {
@@ -102,6 +104,9 @@ fn main() {
                     i += 2;
                 } else if args[i] == "--manifest" && i + 1 < args.len() {
                     manifest_path = Some(PathBuf::from(&args[i + 1]));
+                    i += 2;
+                } else if args[i] == "--trusted-keys" && i + 1 < args.len() {
+                    trusted_keys_path = Some(PathBuf::from(&args[i + 1]));
                     i += 2;
                 } else {
                     eprintln!("error: unrecognized argument '{}'", args[i]);
@@ -112,7 +117,7 @@ fn main() {
                 eprintln!("error: check requires --config <path> and --manifest <path>");
                 std::process::exit(2);
             };
-            let _cfg = match config::BotConfig::load(&cfg_p) {
+            let cfg = match config::BotConfig::load(&cfg_p) {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!(
@@ -137,11 +142,70 @@ fn main() {
                 }
             };
 
-            // 生产环境下无可信根公钥配置必须 fail closed；测试公钥仅限 fixture 适配器注入，生产 CLI 严格拒绝无根或覆盖根
-            eprintln!(
-                "error: trust_root_unconfigured: production public key root is not configured; updates cannot be verified without trusted keys"
-            );
-            std::process::exit(1);
+            // The app still has no built-in root; an explicit offline key file is
+            // the only way to verify here. Without it, remain fail-closed.
+            let Some(trusted_keys) = trusted_keys_path else {
+                eprintln!(
+                    "error: trust_root_unconfigured: production public key root is not configured; provide --trusted-keys for offline verification"
+                );
+                std::process::exit(1);
+            };
+            let store = match manifest::load_trusted_keys(&trusted_keys) {
+                Ok(store) => store,
+                Err(e) => {
+                    eprintln!("error: trusted_keys_invalid: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let highest_sequence = match journal::load_highest_accepted_sequence(&cfg.state_dir) {
+                Ok(sequence) => sequence,
+                Err(e) => {
+                    eprintln!("error: corrupt_sequence_file: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let host_os = match std::process::Command::new("sw_vers")
+                .arg("-productVersion")
+                .output()
+            {
+                Ok(output) if output.status.success() => {
+                    String::from_utf8_lossy(&output.stdout).trim().to_string()
+                }
+                _ => {
+                    eprintln!("error: host_os_version_unavailable");
+                    std::process::exit(1);
+                }
+            };
+            let verified = match executor::VerifiedManifestEnvelope::verify_and_construct(
+                &manifest_bytes,
+                &store,
+                std::env::consts::ARCH,
+                &host_os,
+                highest_sequence,
+            ) {
+                Ok(verified) => verified,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let digest = match executor::calculate_manifest_digest(verified.manifest()) {
+                Ok(digest) => digest,
+                Err(e) => {
+                    eprintln!("error: manifest_digest_failed: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let out = serde_json::json!({
+                "status": "verified",
+                "release_id": verified.manifest().release_id,
+                "sequence": verified.manifest().sequence,
+                "manifest_sha256": digest,
+                "host_arch": std::env::consts::ARCH,
+                "host_os_version": host_os,
+            });
+            println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+            std::process::exit(0);
         }
         "apply" | "rollback" | "recover" => {
             // 检查是否有未知参数，若有未知参数报错退出码 2

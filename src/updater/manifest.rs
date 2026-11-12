@@ -1,6 +1,7 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 
 pub const MANIFEST_DOMAIN_PREFIX: &[u8] = b"WECHAT_MCP_UPDATE_MANIFEST_V1\n";
 
@@ -140,6 +141,94 @@ impl TrustedKeyStore {
 
         Ok(())
     }
+}
+
+/// Trusted release key file used by the CLI verification path.
+///
+/// The production app is expected to carry its own built-in root. This file
+/// exists so release engineering can verify a signed envelope offline without
+/// weakening the default fail-closed behavior.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustedKeysFile {
+    pub schema: u32,
+    pub keys: Vec<TrustedKeyEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustedKeyEntry {
+    pub key_id: String,
+    pub public_key_hex: String,
+}
+
+/// Loads a trusted-key file with the same narrow file checks used for secrets:
+/// regular file, current owner, owner-only permissions, bounded size, no
+/// duplicate JSON keys or key IDs, and 32-byte Ed25519 public keys.
+pub fn load_trusted_keys(path: &Path) -> Result<TrustedKeyStore> {
+    let meta = std::fs::symlink_metadata(path)
+        .with_context(|| format!("failed to stat trusted keys '{}'", path.display()))?;
+    if meta.file_type().is_symlink() {
+        bail!("trusted_keys_symlink_rejected");
+    }
+    if !meta.file_type().is_file() {
+        bail!("trusted_keys_not_regular_file");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.mode() & 0o077 != 0 {
+            bail!("trusted_keys_permissions_too_open: expected 0600 or stricter");
+        }
+        if meta.uid() != unsafe { libc::getuid() } {
+            bail!("trusted_keys_owner_mismatch");
+        }
+    }
+    if meta.len() > 64 * 1024 {
+        bail!("trusted_keys_file_too_large");
+    }
+
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("failed to read trusted keys '{}'", path.display()))?;
+    let text = std::str::from_utf8(&bytes).context("trusted_keys_invalid_utf8")?;
+    ensure_no_duplicate_json_keys(text)?;
+    let file: TrustedKeysFile = serde_json::from_slice(&bytes)?;
+    if file.schema != 1 {
+        bail!("unsupported_trusted_keys_schema: {}", file.schema);
+    }
+    if file.keys.is_empty() {
+        bail!("trusted_keys_empty");
+    }
+
+    let mut store = TrustedKeyStore::new();
+    for entry in file.keys {
+        if entry.key_id.trim().is_empty() {
+            bail!("trusted_keys_empty_key_id");
+        }
+        let public_key = decode_ed25519_public_key_hex(&entry.public_key_hex)?;
+        if store
+            .keys
+            .insert(entry.key_id.clone(), public_key)
+            .is_some()
+        {
+            bail!("trusted_keys_duplicate_key_id: {}", entry.key_id);
+        }
+    }
+    Ok(store)
+}
+
+fn decode_ed25519_public_key_hex(text: &str) -> Result<Vec<u8>> {
+    let text = text.trim();
+    if text.len() != 64 || !text.chars().all(|c| c.is_ascii_hexdigit()) {
+        bail!("trusted_keys_invalid_public_key_hex: expected 64 hex characters");
+    }
+    let mut bytes = Vec::with_capacity(32);
+    for index in (0..64).step_by(2) {
+        let byte = u8::from_str_radix(&text[index..index + 2], 16)
+            .context("trusted_keys_invalid_public_key_hex")?;
+        bytes.push(byte);
+    }
+    Ok(bytes)
 }
 
 /// 为测试或受控构建提供规范的 Ed25519 签名生成（RFC 8785 规范化 + 域分离）

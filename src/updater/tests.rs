@@ -38,6 +38,15 @@ fn updater_bin() -> PathBuf {
     debug_dir.join("wechat-updater")
 }
 
+fn release_signer_bin() -> PathBuf {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_wechat-release-signer") {
+        return PathBuf::from(path);
+    }
+    let exe = std::env::current_exe().expect("current test executable");
+    let debug_dir = exe.parent().and_then(Path::parent).expect("target/debug");
+    debug_dir.join("wechat-release-signer")
+}
+
 fn generate_test_ed25519_key() -> (ring::signature::Ed25519KeyPair, Vec<u8>) {
     let rng = ring::rand::SystemRandom::new();
     let pkcs8_doc = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
@@ -2572,4 +2581,206 @@ fn walk_dir_recursive(dir: &Path) -> Vec<PathBuf> {
         }
     }
     files
+}
+
+#[test]
+fn test_trusted_keys_file_validation() {
+    let temp = TempTestDir::new("trusted_keys");
+    let (_, pub_bytes) = generate_test_ed25519_key();
+    let keys_file = temp.0.join("trusted-keys.json");
+    let write_keys = |keys: serde_json::Value, mode: u32| {
+        fs::write(&keys_file, serde_json::to_vec(&keys).unwrap()).unwrap();
+        fs::set_permissions(&keys_file, fs::Permissions::from_mode(mode)).unwrap();
+    };
+
+    let valid = serde_json::json!({
+        "schema": 1,
+        "keys": [{"key_id": "release-v1", "public_key_hex": hex_encode(&pub_bytes)}]
+    });
+    write_keys(valid.clone(), 0o600);
+    let store = load_trusted_keys(&keys_file).unwrap();
+    assert_eq!(
+        store.keys.get("release-v1").map(Vec::as_slice),
+        Some(pub_bytes.as_slice())
+    );
+
+    write_keys(valid.clone(), 0o644);
+    let err = load_trusted_keys(&keys_file).unwrap_err().to_string();
+    assert!(err.contains("trusted_keys_permissions_too_open"), "{err}");
+
+    write_keys(
+        serde_json::json!({
+            "schema": 1,
+            "keys": [{"key_id": "release-v1", "public_key_hex": "00"}]
+        }),
+        0o600,
+    );
+    let err = load_trusted_keys(&keys_file).unwrap_err().to_string();
+    assert!(err.contains("invalid_public_key_hex"), "{err}");
+
+    let duplicate = serde_json::json!({
+        "schema": 1,
+        "keys": [
+            {"key_id": "release-v1", "public_key_hex": hex_encode(&pub_bytes)},
+            {"key_id": "release-v1", "public_key_hex": hex_encode(&pub_bytes)}
+        ]
+    });
+    write_keys(duplicate, 0o600);
+    let err = load_trusted_keys(&keys_file).unwrap_err().to_string();
+    assert!(err.contains("duplicate_key_id"), "{err}");
+
+    write_keys(
+        serde_json::json!({
+            "schema": 1,
+            "keys": [{"key_id": "release-v1", "public_key_hex": hex_encode(&pub_bytes), "extra": 1}]
+        }),
+        0o600,
+    );
+    assert!(load_trusted_keys(&keys_file).is_err());
+
+    write_keys(serde_json::json!({"schema": 2, "keys": []}), 0o600);
+    assert!(load_trusted_keys(&keys_file).is_err());
+}
+
+#[test]
+fn test_cli_check_verifies_signed_manifest_with_trusted_keys() {
+    let temp = TempTestDir::new("cli_verify");
+    let state_dir = temp.0.join("state");
+    fs::create_dir_all(&state_dir).unwrap();
+    let cfg_file = temp.0.join("config.json");
+    write_valid_bot_config(&cfg_file, &state_dir);
+
+    let (key_pair, pub_key_bytes) = generate_test_ed25519_key();
+    let manifest = sample_manifest(2000, std::env::consts::ARCH);
+    let signature = sign_manifest(&key_pair, &manifest);
+    let envelope = SignedEnvelope {
+        envelope_schema: 1,
+        key_id: "release-v1".into(),
+        signature_algorithm: "ed25519".into(),
+        signature,
+        manifest,
+    };
+    let manifest_file = temp.0.join("manifest.json");
+    fs::write(&manifest_file, serde_json::to_vec(&envelope).unwrap()).unwrap();
+
+    let keys_file = temp.0.join("trusted-keys.json");
+    let keys = serde_json::json!({
+        "schema": 1,
+        "keys": [{"key_id": "release-v1", "public_key_hex": hex_encode(&pub_key_bytes)}]
+    });
+    fs::write(&keys_file, serde_json::to_vec(&keys).unwrap()).unwrap();
+    fs::set_permissions(&keys_file, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let exe = updater_bin();
+    let output = std::process::Command::new(&exe)
+        .args([
+            "check",
+            "--config",
+            cfg_file.to_str().unwrap(),
+            "--manifest",
+            manifest_file.to_str().unwrap(),
+            "--trusted-keys",
+            keys_file.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"status\": \"verified\""), "{stdout}");
+    assert!(stdout.contains("0.2.0-2000"), "{stdout}");
+
+    // A different key must fail closed even when the key id matches.
+    let (_, other_pub) = generate_test_ed25519_key();
+    let wrong_keys = serde_json::json!({
+        "schema": 1,
+        "keys": [{"key_id": "release-v1", "public_key_hex": hex_encode(&other_pub)}]
+    });
+    fs::write(&keys_file, serde_json::to_vec(&wrong_keys).unwrap()).unwrap();
+    fs::set_permissions(&keys_file, fs::Permissions::from_mode(0o600)).unwrap();
+    let output = std::process::Command::new(&exe)
+        .args([
+            "check",
+            "--config",
+            cfg_file.to_str().unwrap(),
+            "--manifest",
+            manifest_file.to_str().unwrap(),
+            "--trusted-keys",
+            keys_file.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("signature_verification_failed"), "{stderr}");
+}
+
+#[test]
+fn test_release_signer_produces_verifiable_envelope() {
+    use ring::signature::KeyPair;
+    let temp = TempTestDir::new("release_signer");
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+    let key_pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+    let public_hex = hex_encode(key_pair.public_key().as_ref());
+
+    let key_file = temp.0.join("release-key.pk8");
+    fs::write(&key_file, pkcs8.as_ref()).unwrap();
+    fs::set_permissions(&key_file, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let manifest = sample_manifest(3000, std::env::consts::ARCH);
+    let manifest_file = temp.0.join("unsigned-manifest.json");
+    fs::write(&manifest_file, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let envelope_file = temp.0.join("signed-envelope.json");
+    let public_file = temp.0.join("release-key.hex");
+
+    let output = std::process::Command::new(release_signer_bin())
+        .args([
+            "--manifest",
+            manifest_file.to_str().unwrap(),
+            "--key-file",
+            key_file.to_str().unwrap(),
+            "--key-id",
+            "release-v1",
+            "--out",
+            envelope_file.to_str().unwrap(),
+            "--public-key-out",
+            public_file.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_to_string(&public_file).unwrap(), public_hex);
+
+    let envelope_bytes = fs::read(&envelope_file).unwrap();
+    let envelope = parse_signed_envelope(&envelope_bytes).unwrap();
+    let store = TrustedKeyStore::new().with_key("release-v1", key_pair.public_key().as_ref());
+    store.verify_envelope(&envelope).unwrap();
+
+    // A key readable by group/other must be rejected before signing.
+    fs::set_permissions(&key_file, fs::Permissions::from_mode(0o644)).unwrap();
+    let rejected = std::process::Command::new(release_signer_bin())
+        .args([
+            "--manifest",
+            manifest_file.to_str().unwrap(),
+            "--key-file",
+            key_file.to_str().unwrap(),
+            "--key-id",
+            "release-v1",
+            "--out",
+            envelope_file.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_ne!(rejected.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("signing_key_permissions_too_open"));
 }
