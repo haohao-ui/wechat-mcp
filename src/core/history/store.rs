@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OptionalExtension, params};
-use serde_json::{Value, json};
+use anyhow::{bail, Context, Result};
+use rusqlite::{params, Connection, OptionalExtension};
+use serde_json::{json, Value};
 
 use super::names::{candidate_names, name_key};
 use crate::core::model::Bubble;
@@ -283,6 +283,30 @@ CREATE TABLE brain_turns (
   PRIMARY KEY(account_id, turn_id)
 );
 CREATE INDEX brain_turns_contact_time ON brain_turns(account_id, contact_id, created_at);
+"#,
+    ),
+    // Older installations recorded version 5 before brain provenance existed.
+    // Add an idempotent upgrade without rewriting an applied migration.
+    (
+        6,
+        r#"
+CREATE TABLE IF NOT EXISTS brain_turns (
+  account_id TEXT NOT NULL,
+  turn_id TEXT NOT NULL,
+  contact_id TEXT NOT NULL REFERENCES contacts(contact_id),
+  snapshot_id TEXT NOT NULL,
+  snapshot_json TEXT NOT NULL,
+  input_message_ids TEXT NOT NULL,
+  observation_json TEXT NOT NULL,
+  decision_json TEXT,
+  model_json TEXT NOT NULL DEFAULT '{}',
+  send_key TEXT,
+  execution_json TEXT NOT NULL DEFAULT '{}',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(account_id, turn_id)
+);
+CREATE INDEX IF NOT EXISTS brain_turns_contact_time ON brain_turns(account_id, contact_id, created_at);
 "#,
     ),
 ];
@@ -2359,11 +2383,10 @@ mod tests {
         f.store.connection().lock().unwrap().execute_batch(
             "CREATE TRIGGER reject_second BEFORE INSERT ON messages WHEN NEW.text='second' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;"
         ).unwrap();
-        assert!(
-            f.store
-                .record_frame(&f.c, &frame, None, None, false)
-                .is_err()
-        );
+        assert!(f
+            .store
+            .record_frame(&f.c, &frame, None, None, false)
+            .is_err());
         assert_eq!(texts(&f), Vec::<String>::new());
         let cursors: i64 = f
             .store
@@ -2386,12 +2409,11 @@ mod tests {
                 .len(),
             2
         );
-        assert!(
-            f.store
-                .record_frame(&f.c, &frame, None, None, false)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(f
+            .store
+            .record_frame(&f.c, &frame, None, None, false)
+            .unwrap()
+            .is_empty());
         assert_eq!(texts(&f), vec!["first", "second"]);
     }
 
@@ -2401,20 +2423,19 @@ mod tests {
         f.store.connection().lock().unwrap().execute_batch(
             "CREATE TRIGGER reject_reply BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'injected failure'); END;"
         ).unwrap();
-        assert!(
-            f.store
-                .record_bot_reply(
-                    &f.c,
-                    "atomic",
-                    "reply",
-                    "triggered",
-                    &json!({}),
-                    &[],
-                    None,
-                    None
-                )
-                .is_err()
-        );
+        assert!(f
+            .store
+            .record_bot_reply(
+                &f.c,
+                "atomic",
+                "reply",
+                "triggered",
+                &json!({}),
+                &[],
+                None,
+                None
+            )
+            .is_err());
         assert!(f.store.send("atomic").unwrap().is_none());
         assert!(texts(&f).is_empty());
         f.store
@@ -4949,15 +4970,14 @@ mod tests {
                 )
                 .unwrap();
         }
-        assert!(
-            f.store
-                .ensure_contact(
-                    "acct",
-                    &json!({"recipient":"重名测试","kind":"private"}),
-                    false
-                )
-                .is_err()
-        );
+        assert!(f
+            .store
+            .ensure_contact(
+                "acct",
+                &json!({"recipient":"重名测试","kind":"private"}),
+                false
+            )
+            .is_err());
         assert_eq!(f.store.list_profiles("acct", None).unwrap().len(), 2);
     }
 
@@ -5191,6 +5211,25 @@ mod tests {
     }
 
     #[test]
+    fn test_legacy_version_five_without_brain_table_is_upgraded() {
+        let f = setup_fixture();
+        {
+            let conn = f.store.conn.lock().unwrap();
+            conn.execute_batch(
+                "DROP TABLE brain_turns; DELETE FROM schema_migrations WHERE version > 5;",
+            )
+            .unwrap();
+        }
+        f.store.migrate().unwrap();
+        f.store.migrate().unwrap();
+        let conn = f.store.conn.lock().unwrap();
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='brain_turns')", [], |r| r.get(0)
+        ).unwrap();
+        assert!(exists, "legacy version 5 must gain role snapshot storage");
+    }
+
+    #[test]
     fn test_brain_turns_provenance_lifecycle() {
         let f = setup_fixture();
         f.store.migrate().unwrap();
@@ -5215,13 +5254,12 @@ mod tests {
             .unwrap();
 
         // 2. 重复记录相同 snapshot_id 保持幂等
-        assert!(
-            f.store
-                .record_brain_turn_snapshot(
-                    "acct_a", "turn_101", &cid, "snap_111", &snap, &input_ids, &obs,
-                )
-                .is_ok()
-        );
+        assert!(f
+            .store
+            .record_brain_turn_snapshot(
+                "acct_a", "turn_101", &cid, "snap_111", &snap, &input_ids, &obs,
+            )
+            .is_ok());
 
         // 3. 重复记录不同 snapshot_id 报 integrity_mismatch
         let err = f
@@ -5263,11 +5301,10 @@ mod tests {
         assert_eq!(detail["execution"]["delivery"], "unknown");
 
         // 7. 跨账号查询返回 None
-        assert!(
-            f.store
-                .get_brain_turn_detail("acct_b", "turn_101")
-                .unwrap()
-                .is_none()
-        );
+        assert!(f
+            .store
+            .get_brain_turn_detail("acct_b", "turn_101")
+            .unwrap()
+            .is_none());
     }
 }

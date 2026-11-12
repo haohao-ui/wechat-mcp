@@ -34,27 +34,27 @@ fn format_fp_json(fp: &crate::core::policy::Fingerprint) -> String {
 use crate::brain::{
     Brain, BrainReply, ContactInfo, ContextItem, FailedAttachment, MediaRef, Turn as BrainTurn,
 };
-use crate::core::config::{BotConfig, candidate_names, clean_title};
-use crate::core::delivery::{EchoOutcome, ToolClient, is_not_sent};
-use crate::core::history::store::{HistoryStore, similar};
+use crate::core::config::{candidate_names, clean_title, BotConfig};
+use crate::core::delivery::{is_not_sent, EchoOutcome, ToolClient};
+use crate::core::history::store::{similar, HistoryStore};
 use crate::core::model::{Bubble, Frame};
 use crate::core::policy::{
-    ContinuityError, Fingerprint, Policy, echo_matches, fingerprint, merge_pages, new_bubbles,
-    reconcile, relocate, separator_tail, strip_member_count, validate_reply,
+    echo_matches, fingerprint, merge_pages, new_bubbles, reconcile, relocate, separator_tail,
+    strip_member_count, validate_reply, ContinuityError, Fingerprint, Policy,
 };
 use crate::core::state::{read_json, write_private};
 use crate::core::worker_client::action_interrupted;
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub const MODEL_RETRIES: usize = 2;
@@ -1656,9 +1656,17 @@ impl BotService {
             }
         }
         let mut fixed_role: Option<crate::core::brain_profiles::RoleRevision> = None;
-        let bindings_path = self.config.state_dir.join("brain-bindings.json");
+        // Session state is local, but the shared history identifies the account
+        // root that owns role bindings. Never fall back to legacy just because
+        // a coordinator child has no private copy of the profile store.
+        let profile_root = self
+            .history
+            .as_ref()
+            .and_then(|history| history.root_dir().parent())
+            .unwrap_or(self.config.state_dir.as_path());
+        let bindings_path = profile_root.join("brain-bindings.json");
         let (mode, store_ctx) = if bindings_path.exists() {
-            let store = match crate::core::brain_profiles::Store::open(&self.config.state_dir) {
+            let store = match crate::core::brain_profiles::Store::open(profile_root) {
                 Ok(s) => s,
                 Err(e) => {
                     if let Some(map) = record.as_object_mut() {
@@ -2351,8 +2359,8 @@ mod tests {
     use crate::core::config::AllowlistEntry;
     use std::collections::HashMap;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
+    use std::sync::Mutex;
 
     struct TestDir(PathBuf);
     impl TestDir {
@@ -3018,12 +3026,10 @@ mod tests {
 
         let health: Value = read_json(svc.root.join("health.json")).unwrap();
         assert_eq!(health["state"], "watching");
-        assert!(
-            health["reason"]
-                .as_str()
-                .unwrap()
-                .contains("last reply not sent")
-        );
+        assert!(health["reason"]
+            .as_str()
+            .unwrap()
+            .contains("last reply not sent"));
     }
 
     #[tokio::test]
@@ -8341,7 +8347,7 @@ mod tests {
     #[tokio::test]
     async fn test_brain_snapshot_provenance_and_failure_injection() {
         let td = TestDir::new();
-        let cfg = fixture_config(td.path());
+        let mut cfg = fixture_config(td.path());
         let state_dir = cfg.state_dir.clone();
         fs::create_dir_all(&state_dir).unwrap();
         fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
@@ -8395,6 +8401,9 @@ mod tests {
         };
         store.write(&ctx, &write_act, &access, 102).unwrap();
 
+        // Coordinator sessions keep their cursor/journal in a child directory,
+        // while role bindings and history remain in the shared account root.
+        cfg.state_dir = state_dir.join("sessions").join(&cid);
         let mut svc = BotService::new(
             cfg,
             None,
