@@ -4,6 +4,7 @@ import CoreMedia
 import CoreImage
 import CryptoKit
 
+@available(macOS 12.3, *)
 final class WindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private let lock = NSLock()
     private let queue = DispatchQueue(label: "wechat.capture", qos: .userInitiated)
@@ -72,7 +73,9 @@ final class WindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             config.minimumFrameInterval = CMTime(value: 1, timescale: 5)
             config.queueDepth = 3
             config.showsCursor = false
+            #if compiler(>=5.9)
             config.ignoreShadowsSingleWindow = true
+            #endif
             config.capturesAudio = false
             let next = SCStream(filter: SCContentFilter(desktopIndependentWindow: target), configuration: config, delegate: self)
             try next.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)

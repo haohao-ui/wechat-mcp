@@ -3,6 +3,10 @@ import Foundation
 @main
 struct WechatRuntime {
     static func main() async {
+        guard #available(macOS 12.3, *) else {
+            fputs("wechat_runtime requires macOS 12.3 or newer\n", stderr)
+            exit(1)
+        }
         let capture = WindowCapture()
         let recognizer = TextRecognizer()
         do {
