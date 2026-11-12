@@ -19,6 +19,17 @@ fn has_swiftc() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+/// Locates the core binary without assuming the default `target/debug`
+/// location, so `CARGO_TARGET_DIR` overrides keep this integration test runnable.
+fn mcp_bin_path() -> PathBuf {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_wechat-mcp") {
+        return PathBuf::from(path);
+    }
+    let exe = std::env::current_exe().expect("current test executable");
+    let debug_dir = exe.parent().and_then(Path::parent).expect("target/debug");
+    debug_dir.join("wechat-mcp")
+}
+
 #[test]
 fn test_swift_update_ui_selftest() {
     if !has_swiftc() {
@@ -113,7 +124,7 @@ fn test_swift_update_ui_selftest() {
     std::fs::set_permissions(&cfg_path, std::fs::Permissions::from_mode(0o600))
         .expect("chmod config.json");
 
-    let wechat_mcp_bin = root.join("target").join("debug").join("wechat-mcp");
+    let wechat_mcp_bin = mcp_bin_path();
 
     // 运行测试可执行文件（传入真实 Rust control 配置环境变量）
     let run_output = Command::new(&bin_path)
