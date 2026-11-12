@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
@@ -30,6 +30,52 @@ pub enum Operation {
         recipient: Option<String>,
         timeout_seconds: u64,
     },
+}
+
+impl Operation {
+    /// Desktop locks are process-wide. A hung OCR/AppleScript/helper call must
+    /// not hold that lock forever, otherwise every later request queues behind it.
+    fn timeout_budget(&self) -> Duration {
+        match self {
+            Self::Focus => Duration::from_secs(60),
+            Self::ListConversations | Self::ReadMessages { .. } => Duration::from_secs(120),
+            Self::SendMessage { .. } | Self::SendFile { .. } => Duration::from_secs(180),
+            Self::WaitForMessage {
+                timeout_seconds, ..
+            } => Duration::from_secs(timeout_seconds.saturating_add(60)),
+        }
+    }
+
+    fn timeout_message(&self, budget: Duration) -> String {
+        let seconds = budget.as_secs();
+        match self {
+            Self::SendMessage { .. } | Self::SendFile { .. } => format!(
+                "桌面发送操作超时（{seconds} 秒），结果未知；桌面锁已释放，不要盲目重发，请先核对发送状态与微信界面"
+            ),
+            Self::WaitForMessage { .. } => format!(
+                "等待消息超时（{seconds} 秒），桌面锁已释放；请检查微信是否被弹窗或权限对话框阻塞"
+            ),
+            Self::Focus => format!(
+                "聚焦微信超时（{seconds} 秒），桌面锁已释放；请检查辅助功能/自动化权限或系统弹窗"
+            ),
+            Self::ListConversations | Self::ReadMessages { .. } => format!(
+                "读取微信界面超时（{seconds} 秒），桌面锁已释放；请检查微信是否被弹窗或权限对话框阻塞"
+            ),
+        }
+    }
+}
+
+/// Runs one desktop operation under a hard deadline. Dropping the future also
+/// drops the desktop lease and any `kill_on_drop` helper child it owns.
+async fn bounded<T>(
+    budget: Duration,
+    message: String,
+    future: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    match tokio::time::timeout(budget, future).await {
+        Ok(result) => result,
+        Err(_) => bail!("{message}"),
+    }
 }
 
 pub trait MessageAdapter: Send + Sync {
@@ -78,7 +124,10 @@ impl MessageAdapter for WechatDesktop {
         Box::pin(async move {
             // UI focus, clipboard and screenshot files are shared across all requests.
             let _lease = self.desktop.acquire().await?;
-            let data = match operation {
+            let budget = operation.timeout_budget();
+            let message = operation.timeout_message(budget);
+            let data = bounded(budget, message, async move {
+                let data = match operation {
                 Operation::Focus => {
                     let (x, y, width, height) = wechat::focus_wechat().await?;
                     json!({"status":"executed", "window":{"x":x,"y":y,"width":width,"height":height}})
@@ -132,10 +181,79 @@ impl MessageAdapter for WechatDesktop {
                     json!({"recipient":recipient,"status":if observation.is_some() {"change_observed"} else {"timeout"},
                         "observation":observation,"source":"desktop_ocr","incoming_verified":false})
                 }
-            };
+                };
+                Ok::<Value, anyhow::Error>(data)
+            })
+            .await?;
             Ok(
                 json!({"account":self.account.key,"identity_verified":self.account.identity_verified,"data":data}),
             )
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn desktop_operation_timeouts_are_bounded() {
+        assert_eq!(Operation::Focus.timeout_budget(), Duration::from_secs(60));
+        assert_eq!(
+            Operation::ListConversations.timeout_budget(),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            Operation::ReadMessages { recipient: None }.timeout_budget(),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            Operation::WaitForMessage {
+                recipient: None,
+                timeout_seconds: 300,
+            }
+            .timeout_budget(),
+            Duration::from_secs(360)
+        );
+        let send = Operation::SendMessage {
+            recipient: "someone".into(),
+            message: "hello".into(),
+        };
+        assert_eq!(send.timeout_budget(), Duration::from_secs(180));
+        assert!(
+            send.timeout_message(Duration::from_secs(180))
+                .contains("不要盲目重发")
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_timeout_drops_future_and_keeps_message() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let flag = DropFlag(dropped.clone());
+        let result = bounded(
+            Duration::from_millis(10),
+            "读取微信界面超时".to_string(),
+            async move {
+                let _flag = flag;
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Ok::<(), anyhow::Error>(())
+            },
+        )
+        .await;
+        let error = result.expect_err("future must be cancelled");
+        assert!(error.to_string().contains("读取微信界面超时"));
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "dropping the timed-out future must drop its resources"
+        );
     }
 }
