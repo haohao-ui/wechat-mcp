@@ -1087,6 +1087,9 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     private var listPayload: BrainListPayload?
     private var selectedRoleIndex: Int = -1
     private var preferredRoleId: String?
+    private var roleLoadToken = UUID()
+    private var focusRoleAfterLoad: String?
+    private var hasStoredRoles = false
     private var currentDraftRole: BrainRoleRevision?
     private var localUnsavedChanges: Bool = false
 
@@ -1106,7 +1109,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     private let newRoleButton = NSButton(title: "新增角色", target: nil, action: nil)
     private let useAsDefaultButton = NSButton(title: "设为默认角色…", target: nil, action: nil)
     private let copyRoleButton = NSButton(title: "复制角色", target: nil, action: nil)
-    private let archiveRoleButton = NSButton(title: "归档角色", target: nil, action: nil)
+    private let archiveRoleButton = NSButton(title: "删除角色", target: nil, action: nil)
 
     // UI - Tab Segment
     private let sectionSegment = NSSegmentedControl(labels: ["角色设定", "知识", "异常回复", "适用会话", "版本", "预览"], trackingMode: .selectOne, target: nil, action: nil)
@@ -1252,6 +1255,9 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         roleTable.headerView = nil
         roleTable.dataSource = self
         roleTable.delegate = self
+        roleTable.target = self
+        roleTable.doubleAction = #selector(handleEditRole)
+        roleTable.toolTip = "双击角色名编辑"
         roleTable.rowHeight = 44
         scroll.documentView = roleTable
 
@@ -1844,8 +1850,11 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             do {
-                let payload = try self.client.fetchList()
+                var payload = try self.client.fetchList()
+                let hasStoredRoles = !payload.roles.isEmpty
+                payload.roles.removeAll { $0.archived }
                 DispatchQueue.main.async {
+                    self.hasStoredRoles = hasStoredRoles
                     self.listPayload = payload
                     self.updateUIWithList(payload)
                 }
@@ -1875,7 +1884,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             roleTable.selectRowIndexes(IndexSet(integer: selectedRoleIndex), byExtendingSelection: false)
             loadSelectedRole()
         } else {
-            if currentDraftRole == nil { handleAddDefaultRole() }
+            if currentDraftRole == nil && !hasStoredRoles { handleAddDefaultRole() }
             refreshDraftRoleRow()
         }
     }
@@ -2211,12 +2220,28 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     }
 
     private func refreshDraftRoleRow() {
+        roleLoadToken = UUID()
         roleTable.reloadData()
         guard let role = currentDraftRole,
               let index = displayedRoles.firstIndex(where: { $0.roleId == role.roleId }) else { return }
         selectedRoleIndex = index
         roleTable.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
-        archiveRoleButton.isEnabled = listPayload?.roles.contains(where: { $0.roleId == role.roleId }) == true
+        archiveRoleButton.isEnabled = true
+    }
+
+    @objc private func handleEditRole() {
+        let row = roleTable.clickedRow >= 0 ? roleTable.clickedRow : roleTable.selectedRow
+        guard row >= 0, row < displayedRoles.count else { return }
+        selectedRoleIndex = row
+        let entry = displayedRoles[row]
+        sectionSegment.selectedSegment = 0
+        switchTab(index: 0)
+        if currentDraftRole?.roleId == entry.roleId {
+            view.window?.makeFirstResponder(roleNameField)
+        } else {
+            focusRoleAfterLoad = entry.roleId
+            loadSelectedRole()
+        }
     }
 
     private func loadSelectedRole() {
@@ -2229,16 +2254,24 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             return
         }
         let entry = payload.roles[selectedRoleIndex]
+        let loadToken = UUID()
+        roleLoadToken = loadToken
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             do {
                 let role = try self.client.getRole(roleId: entry.roleId, revisionId: entry.draftRevisionId)
                 DispatchQueue.main.async {
+                    guard self.roleLoadToken == loadToken else { return }
                     self.currentDraftRole = role
                     self.populateRoleForm(role, entry: entry)
+                    if self.focusRoleAfterLoad == role.roleId {
+                        self.focusRoleAfterLoad = nil
+                        self.view.window?.makeFirstResponder(self.roleNameField)
+                    }
                 }
             } catch {
                 DispatchQueue.main.async {
+                    guard self.roleLoadToken == loadToken else { return }
                     self.loadErrorLabel.stringValue = "读取角色草稿失败: \(error.localizedDescription)"
                 }
             }
@@ -2427,31 +2460,63 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     }
 
     @objc private func handleArchiveRole() {
-        guard let payload = listPayload, selectedRoleIndex >= 0 && selectedRoleIndex < payload.roles.count else { return }
-        let entry = payload.roles[selectedRoleIndex]
-        guard BrainPageLogic.canArchiveRole(entry) else {
-            let alert = NSAlert()
-            alert.messageText = "无法归档该角色"
-            alert.informativeText = "该角色当前正被运行配置或特定联系人绑定引用中，请先解除绑定再执行归档。"
-            alert.runModal()
+        guard let payload = listPayload, selectedRoleIndex >= 0,
+              selectedRoleIndex < displayedRoles.count else { return }
+        let entry = displayedRoles[selectedRoleIndex]
+        let isSaved = payload.roles.contains { $0.roleId == entry.roleId }
+        let inUse = [payload.active, payload.draft, Optional(currentDraftBindings)].compactMap { $0 }.contains {
+            $0.defaultRef?.roleId == entry.roleId || $0.overrides.contains { $0.roleId == entry.roleId }
+        }
+        guard !inUse else {
+            statusMessageLabel.stringValue = "无法删除：该角色仍被会话配置引用，请先解除默认或专属角色绑定。"
             return
         }
-
-        let gen = payload.generation
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "删除角色「\(entry.name)」？"
+        alert.informativeText = isSaved
+            ? "删除后将从角色列表移除，历史对话和版本记录会保留。"
+            : "该角色尚未保存，删除后将丢弃这份草稿。"
+        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: "删除角色")
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+        if !isSaved {
+            clearDeletedRole()
+            statusMessageLabel.stringValue = "未保存角色已删除"
+            return
+        }
+        archiveRoleButton.isEnabled = false
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             do {
-                _ = try self.client.archiveRole(roleId: entry.roleId, expectedGeneration: gen)
+                _ = try self.client.archiveRole(roleId: entry.roleId, expectedGeneration: payload.generation)
                 DispatchQueue.main.async {
-                    self.statusMessageLabel.stringValue = "角色已归档"
+                    self.clearDeletedRole()
+                    self.statusMessageLabel.stringValue = "角色已删除"
                     self.reloadBrainData()
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.statusMessageLabel.stringValue = "归档失败: \(error.localizedDescription)"
+                    self.archiveRoleButton.isEnabled = true
+                    self.statusMessageLabel.stringValue = "删除失败：\(error.localizedDescription)"
                 }
             }
         }
+    }
+
+    private func clearDeletedRole() {
+        roleLoadToken = UUID()
+        currentDraftRole = nil
+        selectedRoleIndex = -1
+        localUnsavedChanges = false
+        for field in [roleNameField, toneField, goalsField, rulesField, greetingField, insufficientInfoField, unreadableTypeField, unreadableLargeField] {
+            field.stringValue = ""
+        }
+        personaField.string = ""
+        revisionStatusLabel.stringValue = "请选择角色，或点击「新增角色」"
+        archiveRoleButton.isEnabled = false
+        roleTable.deselectAll(nil)
+        roleTable.reloadData()
     }
 
     @objc private func handleSaveDraft() {
