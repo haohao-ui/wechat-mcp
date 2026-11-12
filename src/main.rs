@@ -29,7 +29,7 @@ use mcp::{JsonRpcRequest, JsonRpcResponse};
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    task::{AbortHandle, JoinSet},
+    task::{AbortHandle, Id, JoinSet},
 };
 use tracing::info;
 
@@ -205,21 +205,44 @@ async fn async_main() -> Result<()> {
     let mut reader = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();
     let mut tasks = JoinSet::new();
+    let mut task_keys: HashMap<Id, String> = HashMap::new();
     let mut pending: HashMap<String, Option<AbortHandle>> = HashMap::new();
     let mut input_open = true;
     let mut structured_content = false;
 
     while input_open || !tasks.is_empty() {
         tokio::select! {
-            completed = tasks.join_next(), if !tasks.is_empty() => {
+            completed = tasks.join_next_with_id(), if !tasks.is_empty() => {
                 match completed {
-                    Some(Ok((key, response))) => {
+                    Some(Ok((task_id, (key, response)))) => {
+                        task_keys.remove(&task_id);
                         if pending.remove(&key).is_some() {
                             send_response(&mut stdout, &response).await?;
                         }
                     }
-                    Some(Err(error)) if error.is_cancelled() => {}
-                    Some(Err(error)) => return Err(error.into()),
+                    Some(Err(error)) if error.is_cancelled() => {
+                        task_keys.remove(&error.id());
+                    }
+                    Some(Err(error)) => {
+                        let key = task_keys.remove(&error.id());
+                        if error.is_panic() {
+                            tracing::error!("isolated panicking MCP request task: {error}");
+                            if let Some(key) = key {
+                                let was_pending = pending.remove(&key).is_some();
+                                if was_pending {
+                                    if let Some(response) = task_panic_response(&key) {
+                                        send_response(&mut stdout, &response).await?;
+                                    } else {
+                                        tracing::error!(
+                                            "panicking task had an unparseable request id: {key:?}"
+                                        );
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        return Err(error.into());
+                    }
                     None => {}
                 }
             }
@@ -286,6 +309,7 @@ async fn async_main() -> Result<()> {
                     let response = handle_request(request, &gateway, structured_content).await;
                     (response_key, response)
                 });
+                task_keys.insert(abort.id(), key.clone());
                 pending.insert(key, can_cancel.then_some(abort));
             }
         }
@@ -359,6 +383,11 @@ fn is_cancellable(request: &JsonRpcRequest) -> bool {
             name,
             "wait_for_message" | "wait_for_new_message" | "get_messages" | "read_chat_messages"
         )
+}
+
+fn task_panic_response(key: &str) -> Option<JsonRpcResponse> {
+    let id = serde_json::from_str(key).ok()?;
+    Some(JsonRpcResponse::error(Some(id), -32603, "Internal error"))
 }
 
 async fn send_response<W: AsyncWriteExt + Unpin>(
@@ -488,6 +517,21 @@ mod tests {
 
         // None
         assert_eq!(negotiate_protocol_version(None), ("2024-11-05", false));
+    }
+
+    #[test]
+    fn panicking_task_response_keeps_request_id() {
+        let response = task_panic_response("\"req-1\"").expect("string id parses");
+        assert_eq!(response.id, Some(json!("req-1")));
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code),
+            Some(-32603)
+        );
+
+        let numeric = task_panic_response("42").expect("numeric id parses");
+        assert_eq!(numeric.id, Some(json!(42)));
+
+        assert!(task_panic_response("not-json").is_none());
     }
 
     #[test]

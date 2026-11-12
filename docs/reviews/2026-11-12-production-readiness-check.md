@@ -4,7 +4,7 @@
 - 检查基线：`main` / `3e9c0bf`（临时 worktree `prod-check-main`）
 - 当前用户工作区：`feat/wechat-bot-history` / `b7e3afb`，落后 main 105 个提交，另有 13 个提交未合入 main
 - 检查方式：只读检查 + 隔离环境构建/测试；未部署、未发送微信消息、未调用付费模型、未连接专用机
-- 结论：**未通过生产就绪检查（partial）**。功能测试、构建与本地门禁基本可用；格式门禁已在本分支修复。主要阻断项是更新器真实写操作仍未实现、发布/安装签名链路不完整、真机验收仍为 partial，以及运行时的超时与 panic 隔离缺口。
+- 结论：**未通过生产就绪检查（partial）**。功能测试、构建与本地门禁基本可用；格式门禁与任务 panic 隔离已在本分支修复。主要阻断项是更新器真实写操作仍未实现、发布/安装签名链路不完整、真机验收仍为 partial，以及桌面操作缺少超时。
 
 > 本报告是工程与验收证据检查，不是正式生产验收结论，也不代表整个项目验收通过。
 
@@ -20,7 +20,7 @@
 | 格式（本分支） | `cargo fmt --all -- --check` | PASS（本分支已提交格式化修复） |
 | Clippy（CI 口径） | `cargo clippy --all-targets --locked` | PASS（退出码 0，但约 1850 条 warning） |
 | Clippy（严格口径） | `cargo clippy --all-targets --locked -- -D warnings` | FAIL（退出码 101，约 2000 个 error） |
-| 全量测试 | `cargo test --locked --no-fail-fast` | PASS（2245 passed / 0 failed / 3 ignored，隔离环境） |
+| 全量测试 | `cargo test --locked --no-fail-fast` | PASS（2246 passed / 0 failed / 3 ignored，隔离环境） |
 | 原生自测 | `wechat_window --self-test`、`wechat_overlay --self-test`、`wechat_runtime --self-test` | PASS |
 
 测试环境说明：修复前裸跑沙箱曾出现 15 个失败，均为环境问题而非业务断言：
@@ -29,7 +29,7 @@
 - 2 个 UI 联测用例找不到 `target/debug/wechat-mcp`（同一原因）；
 - 9 个 `swift_host` 配置用例写真实用户目录下的 `~/.wechat-rpa/tmp`，被沙箱拒绝。
 
-本分支已修复 9 个 `swift_host` 用例的用户目录依赖：测试 harness 为每个 Swift 子进程设置 `CFFIXED_USER_HOME` 到临时目录。修复后不再需要外部设置该变量，全量测试在临时 `HOME` 下仍为 2245 通过、0 失败、3 ignored。4 个 updater 与 2 个 UI 用例的路径失败只在自定义 `CARGO_TARGET_DIR` 时出现，CI 使用默认 target 不受影响。
+本分支已修复 9 个 `swift_host` 用例的用户目录依赖：测试 harness 为每个 Swift 子进程设置 `CFFIXED_USER_HOME` 到临时目录。修复后不再需要外部设置该变量，全量测试在临时 `HOME` 下仍为 2246 通过、0 失败、3 ignored。4 个 updater 与 2 个 UI 用例的路径失败只在自定义 `CARGO_TARGET_DIR` 时出现，CI 使用默认 target 不受影响。
 
 main 上的 `core::open_api::compat_tests::ops_tools_list_unchanged` 已通过（fixture 已更新）；旧分支仍是失败状态。
 
@@ -78,9 +78,11 @@ error: unsupported: real update <action> is disabled in this phase (fixture adap
 
 `src/adapters.rs` 在取得桌面租约后整段执行，没有超时；`src/wechat.rs` 的 `osascript` 使用 `wait_with_output()` 无限等待。任一辅助进程或系统弹窗挂起，都可能长期占用进程内互斥锁与跨进程 `desktop.lock`，导致后续请求排队或返回“桌面被占用”。
 
-### P1-2 任务 panic 会退出整个 MCP 进程
+### P1-2 任务 panic 会退出整个 MCP 进程（本分支已修复）
 
-`src/main.rs` 对 `JoinSet` 的非取消错误直接向上返回，进程退出；单个工具任务的 panic 可能带走所有在途会话。建议对 `is_panic()` 记录并返回 JSON-RPC internal error，而不是结束进程。
+原实现把 `JoinSet` 的非取消错误直接向上返回，单个工具任务 panic 会结束整个服务。本分支改用 `join_next_with_id()` 并维护 task id → 请求 id 映射：panic 时记录日志、返回 JSON-RPC `-32603 Internal error`，进程继续服务；非 panic 的 `JoinError` 仍按原路径退出。
+
+新增单元测试 `panicking_task_response_keeps_request_id`，覆盖字符串/数字请求 id 与不可解析 key。限制：没有进程级“注入真实 panic”的端到端测试；panic 可能留下已中毒的锁或未释放的桌面租约，隔离只能避免整个服务退出，不能恢复被破坏的进程内状态。生产上仍需补齐操作级超时与重启策略。
 
 ### P1-3 对外契约与可观测性不足
 
@@ -102,7 +104,7 @@ error: unsupported: real update <action> is disabled in this phase (fixture adap
 - 备份已包含 `media/`、`brain-profiles/`、`brain-bindings.json`、SHA-256 与恢复路径，`--out` 覆盖保护已存在；
 - 敏感信息扫描、密钥文件 0600、OpenAPI 拒绝 `0.0.0.0`、Socket 权限等安全边界仍在；
 - 大脑角色存储、绑定、界面与更新只读页面已进入 main；
-- 全量测试在隔离环境下 2245 通过、0 失败；
+- 全量测试在隔离环境下 2246 通过、0 失败；
 - 原始工具编译与 self-test 通过。
 
 ## 5. 未验证 / Unknown
@@ -119,7 +121,7 @@ error: unsupported: real update <action> is disabled in this phase (fixture adap
 1. 合入本分支的格式化修复，恢复 CI 格式门禁。
 2. 明确生产基线，逐项评审并合并当前工作区的 13 个提交；或者明确排除并记录理由。
 3. 测试 home 隔离已修复；可选补 state/temp 注入与自定义 `CARGO_TARGET_DIR` 兼容，进一步减少环境假设。
-4. 为桌面读写、发送、文章抓取补操作级超时；为 MCP 任务补 panic 隔离。
+4. 为桌面读写、发送、文章抓取补操作级超时；任务 panic 隔离已补，但需配合超时与重启策略处理中毒锁/租约。
 5. 更新能力二选一：完成真实更新核心与签名验证，或明确首版不支持并在 UI/文档中保持一致。
 6. 发布链路补签名/公证，安装器在验签通过前不要无条件去隔离。
 7. 在最新 main 上重跑 Q1，并完成真机 M1–M9 与 7 天试运行。
