@@ -29,7 +29,7 @@
 - 2 个 UI 联测用例找不到 `target/debug/wechat-mcp`（同一原因）；
 - 9 个 `swift_host` 配置用例写真实用户目录下的 `~/.wechat-rpa/tmp`，被沙箱拒绝。
 
-本分支已修复 9 个 `swift_host` 用例的用户目录依赖：测试 harness 为每个 Swift 子进程设置 `CFFIXED_USER_HOME` 到临时目录。修复后不再需要外部设置该变量，全量测试在临时 `HOME` 下仍为 2246 通过、0 失败、3 ignored。4 个 updater 与 2 个 UI 用例的路径失败只在自定义 `CARGO_TARGET_DIR` 时出现，CI 使用默认 target 不受影响。
+本分支已修复 9 个 `swift_host` 用例的用户目录依赖：测试 harness 为每个 Swift 子进程设置 `CFFIXED_USER_HOME` 到临时目录。修复后不再需要外部设置该变量，全量测试在临时 `HOME` 下仍为 2246 通过、0 失败、3 ignored。updater 与 UI 用例也已改为从 `current_exe` 定位 `target/debug`，在自定义 `CARGO_TARGET_DIR` 下同样可运行（需先构建对应二进制）。
 
 main 上的 `core::open_api::compat_tests::ops_tools_list_unchanged` 已通过（fixture 已更新）；旧分支仍是失败状态。
 
@@ -92,7 +92,7 @@ error: unsupported: real update <action> is disabled in this phase (fixture adap
 
 ### P1-4 测试对用户目录不封闭（本分支已修复）
 
-`native/bootstrap/ConfigForm.swift` 的 `getSecureTempDirectory()` 使用 `FileManager.homeDirectoryForCurrentUser`，不读取 `HOME`。本分支在 `tests/swift_host.rs`、`swift_brain_ui.rs`、`swift_update_ui.rs` 中为 Swift 子进程设置 `CFFIXED_USER_HOME` 临时目录，测试不再触碰真实 `~/.wechat-rpa`。仍建议生产代码支持显式注入 state/temp 目录，减少对 Foundation 环境变量的隐式依赖。
+`native/bootstrap/ConfigForm.swift` 的 `getSecureTempDirectory()` 使用 `FileManager.homeDirectoryForCurrentUser`，不读取 `HOME`。本分支在 `tests/swift_host.rs`、`swift_brain_ui.rs`、`swift_update_ui.rs` 中为 Swift 子进程设置 `CFFIXED_USER_HOME` 临时目录，测试不再触碰真实 `~/.wechat-rpa`。updater/UI 测试也不再假设固定的 `target/debug` 路径。仍建议生产代码支持显式注入 state/temp 目录，减少对 Foundation 环境变量的隐式依赖。
 
 ### P1-5 Supervisor 崩溃退避上限
 

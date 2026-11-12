@@ -18,6 +18,17 @@ fn has_swiftc() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+/// Locates the core binary without assuming the default `target/debug`
+/// location, so `CARGO_TARGET_DIR` overrides keep this integration test runnable.
+fn mcp_bin_path() -> PathBuf {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_wechat-mcp") {
+        return PathBuf::from(path);
+    }
+    let exe = std::env::current_exe().expect("current test executable");
+    let debug_dir = exe.parent().and_then(Path::parent).expect("target/debug");
+    debug_dir.join("wechat-mcp")
+}
+
 #[test]
 #[allow(clippy::too_many_lines)]
 fn test_swift_brain_ui_selftest() {
@@ -175,7 +186,7 @@ VALUES (
         .expect("initialize history.sqlite3");
     assert!(sqlite_status.success(), "sqlite3 init failed");
 
-    let wechat_mcp_bin = root.join("target").join("debug").join("wechat-mcp");
+    let wechat_mcp_bin = mcp_bin_path();
 
     let run_output = Command::new(&bin_path)
         .env("CFFIXED_USER_HOME", &temp_dir)

@@ -27,6 +27,17 @@ impl Drop for TempTestDir {
     }
 }
 
+/// Locates the sibling binary without assuming the default `target/debug`
+/// location, so `CARGO_TARGET_DIR` overrides keep the CLI tests runnable.
+fn updater_bin() -> PathBuf {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_wechat-updater") {
+        return PathBuf::from(path);
+    }
+    let exe = std::env::current_exe().expect("current test executable");
+    let debug_dir = exe.parent().and_then(Path::parent).expect("target/debug");
+    debug_dir.join("wechat-updater")
+}
+
 fn generate_test_ed25519_key() -> (ring::signature::Ed25519KeyPair, Vec<u8>) {
     let rng = ring::rand::SystemRandom::new();
     let pkcs8_doc = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
@@ -1039,11 +1050,7 @@ fn test_cli_rejects_test_pubkey_and_mutations_without_side_effects() {
     };
     fs::write(&manifest_file, serde_json::to_vec(&envelope).unwrap()).unwrap();
 
-    let exe = std::env::var("CARGO_BIN_EXE_wechat-updater")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/wechat-updater")
-        });
+    let exe = updater_bin();
 
     // 1. 验证拒绝 --test-pubkey-hex 选项（退出码 2，unrecognized argument）
     let output_flag = std::process::Command::new(&exe)
@@ -1105,11 +1112,7 @@ fn test_cli_rejects_test_pubkey_and_mutations_without_side_effects() {
 #[test]
 fn test_cli_rejects_invalid_or_missing_config_without_side_effects() {
     let temp = TempTestDir::new("cli_invalid_config");
-    let exe = std::env::var("CARGO_BIN_EXE_wechat-updater")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/wechat-updater")
-        });
+    let exe = updater_bin();
 
     let entries_before: Vec<_> = fs::read_dir(&temp.0).unwrap().collect();
 
