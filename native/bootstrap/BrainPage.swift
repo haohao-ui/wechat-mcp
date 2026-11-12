@@ -1104,7 +1104,6 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
 
     // UI - Role Management Buttons
     private let newRoleButton = NSButton(title: "新增角色", target: nil, action: nil)
-    private let defaultRoleButton = NSButton(title: "添加默认角色", target: nil, action: nil)
     private let useAsDefaultButton = NSButton(title: "设为默认角色…", target: nil, action: nil)
     private let copyRoleButton = NSButton(title: "复制角色", target: nil, action: nil)
     private let archiveRoleButton = NSButton(title: "归档角色", target: nil, action: nil)
@@ -1256,11 +1255,6 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         roleTable.rowHeight = 44
         scroll.documentView = roleTable
 
-        let btnStack = NSStackView()
-        btnStack.orientation = .vertical
-        btnStack.spacing = 6
-        btnStack.translatesAutoresizingMaskIntoConstraints = false
-
         newRoleButton.target = self
         newRoleButton.action = #selector(handleNewRole)
         copyRoleButton.target = self
@@ -1268,18 +1262,8 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         archiveRoleButton.target = self
         archiveRoleButton.action = #selector(handleArchiveRole)
 
-        defaultRoleButton.target = self
-        defaultRoleButton.action = #selector(handleAddDefaultRole)
-        parent.addSubview(defaultRoleButton)
-        defaultRoleButton.translatesAutoresizingMaskIntoConstraints = false
-        parent.addSubview(newRoleButton)
-        newRoleButton.translatesAutoresizingMaskIntoConstraints = false
-        btnStack.addArrangedSubview(copyRoleButton)
-        btnStack.addArrangedSubview(archiveRoleButton)
-
         parent.addSubview(titleLabel)
         parent.addSubview(scroll)
-        parent.addSubview(btnStack)
 
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -1287,20 +1271,10 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             titleLabel.leadingAnchor.constraint(equalTo: parent.leadingAnchor, constant: 12),
             titleLabel.trailingAnchor.constraint(equalTo: parent.trailingAnchor, constant: -12),
 
-            newRoleButton.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 10),
-            newRoleButton.leadingAnchor.constraint(equalTo: parent.leadingAnchor, constant: 8),
-            newRoleButton.trailingAnchor.constraint(equalTo: parent.trailingAnchor, constant: -8),
-            defaultRoleButton.topAnchor.constraint(equalTo: newRoleButton.bottomAnchor, constant: 6),
-            defaultRoleButton.leadingAnchor.constraint(equalTo: parent.leadingAnchor, constant: 8),
-            defaultRoleButton.trailingAnchor.constraint(equalTo: parent.trailingAnchor, constant: -8),
-            scroll.topAnchor.constraint(equalTo: defaultRoleButton.bottomAnchor, constant: 10),
+            scroll.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 12),
             scroll.leadingAnchor.constraint(equalTo: parent.leadingAnchor, constant: 8),
             scroll.trailingAnchor.constraint(equalTo: parent.trailingAnchor, constant: -8),
-            scroll.bottomAnchor.constraint(equalTo: btnStack.topAnchor, constant: -10),
-
-            btnStack.leadingAnchor.constraint(equalTo: parent.leadingAnchor, constant: 8),
-            btnStack.trailingAnchor.constraint(equalTo: parent.trailingAnchor, constant: -8),
-            btnStack.bottomAnchor.constraint(equalTo: parent.bottomAnchor, constant: -14)
+            scroll.bottomAnchor.constraint(equalTo: parent.bottomAnchor, constant: -12)
         ])
     }
 
@@ -1321,7 +1295,9 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         topRow.orientation = .horizontal
         topRow.spacing = 10
         headerStack.addArrangedSubview(topRow)
-        headerStack.addArrangedSubview(modeLabel)
+        let roleToolbar = NSStackView(views: [modeLabel, newRoleButton, copyRoleButton, archiveRoleButton])
+        roleToolbar.spacing = 8
+        headerStack.addArrangedSubview(roleToolbar)
 
         statusMessageLabel.font = NSFont.systemFont(ofSize: 11)
         loadErrorLabel.font = NSFont.systemFont(ofSize: 11)
@@ -1899,7 +1875,8 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             roleTable.selectRowIndexes(IndexSet(integer: selectedRoleIndex), byExtendingSelection: false)
             loadSelectedRole()
         } else {
-            statusMessageLabel.stringValue = "先点左侧「新增角色」→ 保存草稿 → 在「适用会话」设置范围 → 启用配置"
+            if currentDraftRole == nil { handleAddDefaultRole() }
+            refreshDraftRoleRow()
         }
     }
 
@@ -2225,7 +2202,29 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         }
     }
 
+    private var displayedRoles: [BrainRoleEntry] {
+        var roles = listPayload?.roles ?? []
+        if let role = currentDraftRole, !roles.contains(where: { $0.roleId == role.roleId }) {
+            roles.append(BrainRoleEntry(roleId: role.roleId, draftRevisionId: role.revisionId, name: role.name))
+        }
+        return roles
+    }
+
+    private func refreshDraftRoleRow() {
+        roleTable.reloadData()
+        guard let role = currentDraftRole,
+              let index = displayedRoles.firstIndex(where: { $0.roleId == role.roleId }) else { return }
+        selectedRoleIndex = index
+        roleTable.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        archiveRoleButton.isEnabled = listPayload?.roles.contains(where: { $0.roleId == role.roleId }) == true
+    }
+
     private func loadSelectedRole() {
+        if selectedRoleIndex == (listPayload?.roles.count ?? 0), let role = currentDraftRole {
+            populateRoleForm(role, entry: BrainRoleEntry(roleId: role.roleId, draftRevisionId: role.revisionId, name: role.name))
+            localUnsavedChanges = true
+            return
+        }
         guard let payload = listPayload, selectedRoleIndex >= 0 && selectedRoleIndex < payload.roles.count else {
             return
         }
@@ -2373,7 +2372,8 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             localUnsavedChanges = true
             sectionSegment.selectedSegment = 0
             switchTab(index: 0)
-            statusMessageLabel.stringValue = "默认客服配置已填入，可自由修改。保存后点击「设为默认角色…」。"
+            refreshDraftRoleRow()
+            statusMessageLabel.stringValue = "默认角色草稿已准备好，可直接编辑并保存。"
         } catch {
             statusMessageLabel.stringValue = "读取默认角色模板失败：\(error.localizedDescription)"
         }
@@ -2393,6 +2393,10 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     }
 
     @objc private func handleNewRole() {
+        guard !localUnsavedChanges else {
+            statusMessageLabel.stringValue = "请先保存当前角色，再新建角色。"
+            return
+        }
         let newRole = BrainRoleRevision(
             roleId: "role_\(UUID().uuidString.prefix(8))",
             revisionId: "rev_1",
@@ -2407,6 +2411,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         localUnsavedChanges = true
         sectionSegment.selectedSegment = 0
         switchTab(index: 0)
+        refreshDraftRoleRow()
         view.window?.makeFirstResponder(roleNameField)
         statusMessageLabel.stringValue = "尚未保存：填写角色设定后按 ⌘S 保存，再设置适用会话"
     }
@@ -2417,6 +2422,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         currentDraftRole = copy
         populateRoleForm(copy, entry: BrainRoleEntry(roleId: copy.roleId, draftRevisionId: copy.revisionId, name: copy.name))
         localUnsavedChanges = true
+        refreshDraftRoleRow()
         statusMessageLabel.stringValue = "已复制角色，编辑后点击「保存草稿」"
     }
 
@@ -2584,7 +2590,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         if tableView == overridesTableView {
             return currentDraftBindings.overrides.count
         }
-        return listPayload?.roles.count ?? 0
+        return displayedRoles.count
     }
 
     public func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -2613,7 +2619,8 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             return tf
         }
 
-        guard let roles = listPayload?.roles, row < roles.count else { return nil }
+        let roles = displayedRoles
+        guard row >= 0, row < roles.count else { return nil }
         let entry = roles[row]
         let cell = NSStackView()
         cell.orientation = .vertical
@@ -2623,7 +2630,9 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         let nameLbl = NSTextField(labelWithString: entry.name)
         nameLbl.font = NSFont.systemFont(ofSize: 12, weight: .bold)
 
-        let statusText = entry.hasDraftChanges ? "草稿: \(entry.draftRevisionId) ●" : "运行中: \(entry.activeRevisionId ?? "-")"
+        let isLocal = !(listPayload?.roles.contains(where: { $0.roleId == entry.roleId }) ?? false)
+        let isDefault = listPayload?.draft?.defaultRef?.roleId == entry.roleId || listPayload?.active?.defaultRef?.roleId == entry.roleId
+        let statusText = isLocal ? "未保存草稿" : isDefault ? "默认角色" : entry.hasDraftChanges ? "草稿: \(entry.draftRevisionId) ●" : "运行中: \(entry.activeRevisionId ?? "-")"
         let statusLbl = NSTextField(labelWithString: statusText)
         statusLbl.font = NSFont.systemFont(ofSize: 10)
         statusLbl.textColor = entry.hasDraftChanges ? .systemOrange : .secondaryLabelColor

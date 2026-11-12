@@ -731,6 +731,21 @@ func runTests() -> Int32 {
         check("unsaved_role_preview_blocked", descendants(brainController.view).compactMap { ($0 as? NSTextView)?.string }.contains { $0.contains("请先保存角色草稿") })
         _ = brainController.perform(NSSelectorFromString("handleActivate"))
         check("unsaved_role_activation_blocked", descendants(brainController.view).compactMap { ($0 as? NSTextField)?.stringValue }.contains { $0.contains("尚有未保存的修改") })
+        let roleTables = descendants(brainController.view).compactMap { $0 as? NSTableView }.filter { $0.tableColumns.count == 1 }
+        if let roleTable = roleTables.first, let sidebar = roleTable.enclosingScrollView?.superview {
+            let roleButtons = descendants(sidebar).compactMap { $0 as? NSButton }
+            check("role_sidebar_contains_entities_only", roleButtons.isEmpty)
+            check("new_draft_is_list_item", roleTable.numberOfRows == mockPayload.roles.count + 1)
+            let emptyPayload = BrainListPayload(generation: 0, executionMode: "managed", roles: [])
+            let defaultRole = try! BrainDefaultRoleTemplate.load(from: templateURL).makeRole()
+            brainController.applyFixtureState(payload: emptyPayload, role: defaultRole)
+            check("empty_account_displays_default_role_row", roleTable.numberOfRows == 1)
+            let rowView = brainController.tableView(roleTable, viewFor: roleTable.tableColumns[0], row: 0)!
+            check("default_role_row_names_entity", descendants(rowView).compactMap { ($0 as? NSTextField)?.stringValue }.contains("默认客服助手"))
+        } else {
+            check("role_sidebar_found", false)
+        }
+
 
     }
 
