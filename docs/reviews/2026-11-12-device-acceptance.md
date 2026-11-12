@@ -82,3 +82,5 @@ Validation: the new switch assertion failed first (exit 101, zero candidates ins
 During read-only acceptance the live configuration changed in two allowlist recipient values (entry count remains three, state root unchanged). No configuration-save command was issued by the operator. The writer is not yet established; the change is preserved and the user was asked whether they are editing concurrently. Do not overwrite it with the pre-install backup.
 
 Named test-contact scope and permission to restart after saving drafts are pending. No send operation or automatic-reply resume has been performed.
+
+The `38de5a5` Intel core and updated host compiled successfully. Executing the staged core's read-only brain-list on the dedicated machine returned account_id different from the configured device alias, ready status and **3 authorized binding candidates** (previously 0). This verifies the live lookup fix without replacing the running host/core or activating roles. Installation of this follow-up remains pending protection of the user's unsaved draft.
