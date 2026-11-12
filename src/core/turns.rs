@@ -34,27 +34,27 @@ fn format_fp_json(fp: &crate::core::policy::Fingerprint) -> String {
 use crate::brain::{
     Brain, BrainReply, ContactInfo, ContextItem, FailedAttachment, MediaRef, Turn as BrainTurn,
 };
-use crate::core::config::{candidate_names, clean_title, BotConfig};
-use crate::core::delivery::{is_not_sent, EchoOutcome, ToolClient};
-use crate::core::history::store::{similar, HistoryStore};
+use crate::core::config::{BotConfig, candidate_names, clean_title};
+use crate::core::delivery::{EchoOutcome, ToolClient, is_not_sent};
+use crate::core::history::store::{HistoryStore, similar};
 use crate::core::model::{Bubble, Frame};
 use crate::core::policy::{
-    echo_matches, fingerprint, merge_pages, new_bubbles, reconcile, relocate, separator_tail,
-    strip_member_count, validate_reply, ContinuityError, Fingerprint, Policy,
+    ContinuityError, Fingerprint, Policy, echo_matches, fingerprint, merge_pages, new_bubbles,
+    reconcile, relocate, separator_tail, strip_member_count, validate_reply,
 };
 use crate::core::state::{read_json, write_private};
 use crate::core::worker_client::action_interrupted;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 pub const MODEL_RETRIES: usize = 2;
@@ -2359,8 +2359,8 @@ mod tests {
     use crate::core::config::AllowlistEntry;
     use std::collections::HashMap;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
 
     struct TestDir(PathBuf);
     impl TestDir {
@@ -3026,10 +3026,12 @@ mod tests {
 
         let health: Value = read_json(svc.root.join("health.json")).unwrap();
         assert_eq!(health["state"], "watching");
-        assert!(health["reason"]
-            .as_str()
-            .unwrap()
-            .contains("last reply not sent"));
+        assert!(
+            health["reason"]
+                .as_str()
+                .unwrap()
+                .contains("last reply not sent")
+        );
     }
 
     #[tokio::test]
