@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, bail};
+use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::{Value, json};
 
 use super::names::{candidate_names, name_key};
 use crate::core::model::Bubble;
@@ -2383,10 +2383,11 @@ mod tests {
         f.store.connection().lock().unwrap().execute_batch(
             "CREATE TRIGGER reject_second BEFORE INSERT ON messages WHEN NEW.text='second' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;"
         ).unwrap();
-        assert!(f
-            .store
-            .record_frame(&f.c, &frame, None, None, false)
-            .is_err());
+        assert!(
+            f.store
+                .record_frame(&f.c, &frame, None, None, false)
+                .is_err()
+        );
         assert_eq!(texts(&f), Vec::<String>::new());
         let cursors: i64 = f
             .store
@@ -2409,11 +2410,12 @@ mod tests {
                 .len(),
             2
         );
-        assert!(f
-            .store
-            .record_frame(&f.c, &frame, None, None, false)
-            .unwrap()
-            .is_empty());
+        assert!(
+            f.store
+                .record_frame(&f.c, &frame, None, None, false)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(texts(&f), vec!["first", "second"]);
     }
 
@@ -2423,19 +2425,20 @@ mod tests {
         f.store.connection().lock().unwrap().execute_batch(
             "CREATE TRIGGER reject_reply BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'injected failure'); END;"
         ).unwrap();
-        assert!(f
-            .store
-            .record_bot_reply(
-                &f.c,
-                "atomic",
-                "reply",
-                "triggered",
-                &json!({}),
-                &[],
-                None,
-                None
-            )
-            .is_err());
+        assert!(
+            f.store
+                .record_bot_reply(
+                    &f.c,
+                    "atomic",
+                    "reply",
+                    "triggered",
+                    &json!({}),
+                    &[],
+                    None,
+                    None
+                )
+                .is_err()
+        );
         assert!(f.store.send("atomic").unwrap().is_none());
         assert!(texts(&f).is_empty());
         f.store
@@ -4970,14 +4973,15 @@ mod tests {
                 )
                 .unwrap();
         }
-        assert!(f
-            .store
-            .ensure_contact(
-                "acct",
-                &json!({"recipient":"重名测试","kind":"private"}),
-                false
-            )
-            .is_err());
+        assert!(
+            f.store
+                .ensure_contact(
+                    "acct",
+                    &json!({"recipient":"重名测试","kind":"private"}),
+                    false
+                )
+                .is_err()
+        );
         assert_eq!(f.store.list_profiles("acct", None).unwrap().len(), 2);
     }
 
@@ -5254,12 +5258,13 @@ mod tests {
             .unwrap();
 
         // 2. 重复记录相同 snapshot_id 保持幂等
-        assert!(f
-            .store
-            .record_brain_turn_snapshot(
-                "acct_a", "turn_101", &cid, "snap_111", &snap, &input_ids, &obs,
-            )
-            .is_ok());
+        assert!(
+            f.store
+                .record_brain_turn_snapshot(
+                    "acct_a", "turn_101", &cid, "snap_111", &snap, &input_ids, &obs,
+                )
+                .is_ok()
+        );
 
         // 3. 重复记录不同 snapshot_id 报 integrity_mismatch
         let err = f
@@ -5301,10 +5306,11 @@ mod tests {
         assert_eq!(detail["execution"]["delivery"], "unknown");
 
         // 7. 跨账号查询返回 None
-        assert!(f
-            .store
-            .get_brain_turn_detail("acct_b", "turn_101")
-            .unwrap()
-            .is_none());
+        assert!(
+            f.store
+                .get_brain_turn_detail("acct_b", "turn_101")
+                .unwrap()
+                .is_none()
+        );
     }
 }
