@@ -703,6 +703,18 @@ func runTests() -> Int32 {
         let sessOK = renderOpaquePNG(view: sessController.view, size: NSSize(width: 740, height: 760), outputURL: sessURL)
         check("sessions_page_png_written", sessOK && FileManager.default.fileExists(atPath: sessURL.path))
         check("sessions_page_png_size_valid", ((try? Data(contentsOf: sessURL))?.count ?? 0) > 10240)
+
+        // Unsaved-role actions must not invoke preview or activation against an older revision.
+        _ = brainController.perform(NSSelectorFromString("handleNewRole"))
+        _ = brainController.perform(NSSelectorFromString("handleRunPreview"))
+        brainController.selectTab(index: 5)
+        func descendants(_ view: NSView) -> [NSView] {
+            return [view] + view.subviews.flatMap { descendants($0) }
+        }
+        check("unsaved_role_preview_blocked", descendants(brainController.view).compactMap { ($0 as? NSTextView)?.string }.contains { $0.contains("请先保存角色草稿") })
+        _ = brainController.perform(NSSelectorFromString("handleActivate"))
+        check("unsaved_role_activation_blocked", descendants(brainController.view).compactMap { ($0 as? NSTextField)?.stringValue }.contains { $0.contains("尚有未保存的修改") })
+
     }
 
     // 13. Real Rust control + Swift client contract integration
