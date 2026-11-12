@@ -509,16 +509,9 @@ public final class CoreSupervisor {
         if jrErr != nil {
             return true
         }
-        if let jrBytes = jrData {
-            guard let jObj = (try? JSONSerialization.jsonObject(with: jrBytes, options: [])) as? [String: Any],
-                  let schemaNum = jObj["journal_schema"] as? NSNumber,
-                  CFGetTypeID(schemaNum) != CFBooleanGetTypeID(),
-                  schemaNum.intValue == 1,
-                  let stage = jObj["stage"] as? String,
-                  stage == "Committed" else {
-                return true
-            }
-        }
+        // A legacy journal has no trusted install-root mapping here. A stage
+        // label alone cannot establish that its record and current link agree.
+        if jrData != nil { return true }
 
         return false
     }
