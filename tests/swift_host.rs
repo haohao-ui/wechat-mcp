@@ -3089,14 +3089,17 @@ func checkMode() -> String {
     let currentURL = URL(fileURLWithPath: currentPath)
     let maintURL = stateURL.appendingPathComponent("core.maintenance")
     let journalURL = stateURL.appendingPathComponent("update-journal.json")
+    let configURL = stateURL.appendingPathComponent("isolated_config.json")
 
     let supervisor = CoreSupervisor(
         coreEnabledURL: stateURL.appendingPathComponent("core.enabled"),
         maintenanceURL: maintURL,
+        configURL: configURL,
         journalURL: journalURL,
         releasesDirURL: releasesURL,
         currentLinkURL: currentURL,
-        legacyStateDirURL: legacyURL
+        legacyStateDirURL: legacyURL,
+        allowMissingConfigForTesting: true
     )
 
     let status = supervisor.maintenanceStatus
@@ -3138,12 +3141,17 @@ print(checkMode())
         String::from_utf8_lossy(&comp_res.stderr)
     );
 
+    let empty_legacy = temp.path.join("empty_legacy");
+    fs::create_dir_all(&empty_legacy).unwrap();
+    fs::set_permissions(&empty_legacy, fs::Permissions::from_mode(0o700)).unwrap();
+
     let run_guard = |expected: &str| -> String {
         let output = Command::new(&swift_test_bin)
             .arg(state_dir.to_str().unwrap())
             .arg(releases_dir.to_str().unwrap())
             .arg(current_link.to_str().unwrap())
             .arg(expected)
+            .arg(empty_legacy.to_str().unwrap())
             .output()
             .expect("failed to run dual_guard_bin");
         assert!(
@@ -3426,8 +3434,8 @@ print(main())
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     };
 
-    // 1. 配置文件尚不存在 -> 默认允许 INACTIVE
-    assert_eq!(run_bin(), "INACTIVE");
+    // 1. 配置文件尚不存在 -> 生产必须 Fail-Closed 判定 RECOVERY_REQUIRED
+    assert_eq!(run_bin(), "RECOVERY_REQUIRED");
 
     // 2. 写入非法相对路径 state_dir -> 严格判定 RECOVERY_REQUIRED
     let bad_cfg1 = serde_json::json!({
@@ -3438,7 +3446,24 @@ print(main())
     fs::set_permissions(&cfg_file, fs::Permissions::from_mode(0o600)).unwrap();
     assert_eq!(run_bin(), "RECOVERY_REQUIRED");
 
-    // 3. 写入非法相对路径 install_root -> 严格判定 RECOVERY_REQUIRED
+    // 3. 写入非法类型 install_root (数字/布尔/null/数组) -> 必须严格判定 RECOVERY_REQUIRED，严禁静默吞掉
+    let bad_types = vec![
+        serde_json::json!(12345),
+        serde_json::json!(true),
+        serde_json::json!(null),
+        serde_json::json!(["/some/path"]),
+    ];
+    for bt in bad_types {
+        let bad_cfg_type = serde_json::json!({
+            "schema_version": 1,
+            "state_dir": state_dir.to_str().unwrap(),
+            "install_root": bt
+        });
+        fs::write(&cfg_file, serde_json::to_vec_pretty(&bad_cfg_type).unwrap()).unwrap();
+        assert_eq!(run_bin(), "RECOVERY_REQUIRED");
+    }
+
+    // 4. 写入非法相对路径 install_root -> 严格判定 RECOVERY_REQUIRED
     let bad_cfg2 = serde_json::json!({
         "schema_version": 1,
         "state_dir": state_dir.to_str().unwrap(),
@@ -3447,7 +3472,7 @@ print(main())
     fs::write(&cfg_file, serde_json::to_vec_pretty(&bad_cfg2).unwrap()).unwrap();
     assert_eq!(run_bin(), "RECOVERY_REQUIRED");
 
-    // 4. 修复为合法绝对路径 state_dir 与 install_root -> 成功解析并判定 INACTIVE
+    // 5. 修复为合法绝对路径 state_dir 与 install_root -> 成功解析并判定 INACTIVE
     let install_dir = temp.path.join("dyn_install");
     fs::create_dir_all(&install_dir).unwrap();
     let good_cfg = serde_json::json!({
@@ -3457,4 +3482,35 @@ print(main())
     });
     fs::write(&cfg_file, serde_json::to_vec_pretty(&good_cfg).unwrap()).unwrap();
     assert_eq!(run_bin(), "INACTIVE");
+
+    // 6. 原配置 Some(root) 改 None 后必须显式重置为未配置状态，不能残留旧 releases/current
+    let no_root_cfg = serde_json::json!({
+        "schema_version": 1,
+        "state_dir": state_dir.to_str().unwrap()
+    });
+    fs::write(&cfg_file, serde_json::to_vec_pretty(&no_root_cfg).unwrap()).unwrap();
+
+    // 在 state_dir 写入 Committed 的 journal
+    let journal_path = state_dir.join("update-journal.json");
+    let valid_sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let journal_committed = serde_json::json!({
+        "journal_schema": 1,
+        "transaction_id": "tx-00000000-0000-4000-8000-000000000001",
+        "stage": "Committed",
+        "source_release_id": "1.0.0",
+        "target_release_id": "1.0.1",
+        "target_sequence": 2,
+        "manifest_digest": valid_sha,
+        "timestamp": 1000,
+        "maintenance_marker_confirmed": true
+    });
+    fs::write(
+        &journal_path,
+        serde_json::to_vec_pretty(&journal_committed).unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    // 因为 install_root 已被移除，处于未配置状态，Committed 终态全要素检查必须严格拒绝（RECOVERY_REQUIRED）！
+    assert_eq!(run_bin(), "RECOVERY_REQUIRED");
 }

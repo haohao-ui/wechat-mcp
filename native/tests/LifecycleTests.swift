@@ -23,7 +23,7 @@ struct LifecycleTests {
             let enabled = dir.appendingPathComponent("enabled")
             let marker = dir.appendingPathComponent("core.maintenance")
             func makeSupervisor() -> CoreSupervisor {
-                CoreSupervisor(coreEnabledURL: enabled, binaryURL: URL(fileURLWithPath: "/usr/bin/true"), configURL: dir.appendingPathComponent("config"), logURL: dir.appendingPathComponent("log"), gracePeriod: 0.05, pythonLoadedChecker: { false })
+                CoreSupervisor(coreEnabledURL: enabled, binaryURL: URL(fileURLWithPath: "/usr/bin/true"), configURL: dir.appendingPathComponent("config"), logURL: dir.appendingPathComponent("log"), allowMissingConfigForTesting: true, gracePeriod: 0.05, pythonLoadedChecker: { false })
             }
             let subject = makeSupervisor()
             let id = UUID().uuidString
@@ -108,7 +108,7 @@ struct LifecycleTests {
         }
         expect(policy.recordExit(at: now) == .giveUp, "real-crash threshold unchanged")
         // All supervisor paths explicit; no real core, launchctl, GUI, DB or HostLogger.
-        let supervisor = CoreSupervisor(coreEnabledURL: root.appendingPathComponent("enabled"), binaryURL: URL(fileURLWithPath: "/bin/sh"), configURL: root.appendingPathComponent("config"), logURL: root.appendingPathComponent("core.log"), gracePeriod: 0.1, pythonLoadedChecker: { false })
+        let supervisor = CoreSupervisor(coreEnabledURL: root.appendingPathComponent("enabled"), binaryURL: URL(fileURLWithPath: "/bin/sh"), configURL: root.appendingPathComponent("config"), logURL: root.appendingPathComponent("core.log"), allowMissingConfigForTesting: true, gracePeriod: 0.1, pythonLoadedChecker: { false })
         func start(_ script: String) throws {
             try supervisor.startProcess(binaryPath: "/bin/sh", arguments: ["-c", script])
         }
@@ -177,7 +177,7 @@ struct LifecycleTests {
         rejected("finish without held child rejected") { try supervisor.finishMaintenance(transactionID: id) }
         supervisor.reset()
         expect(supervisor.maintenanceStatus == .active(transactionID: id), "reset retains maintenance")
-        let rebuilt = CoreSupervisor(coreEnabledURL: supervisor.coreEnabledURL, binaryURL: URL(fileURLWithPath: "/usr/bin/true"), configURL: supervisor.configURL, logURL: supervisor.logURL, pythonLoadedChecker: { false })
+        let rebuilt = CoreSupervisor(coreEnabledURL: supervisor.coreEnabledURL, binaryURL: URL(fileURLWithPath: "/usr/bin/true"), configURL: supervisor.configURL, logURL: supervisor.logURL, allowMissingConfigForTesting: true, pythonLoadedChecker: { false })
         expect(rebuilt.checkAndReconcile() == .keep, "new supervisor retains interruption suppression")
         try Data("corrupt".utf8).write(to: marker)
         expect(supervisor.maintenanceStatus == .recoveryRequired, "corrupt marker fails closed")
@@ -190,7 +190,7 @@ struct LifecycleTests {
         expect(supervisor.maintenanceStatus == .recoveryRequired, "symlink marker fails closed")
         rejected("begin cannot replace symlink") { try supervisor.beginMaintenance(transactionID: id) }
         try FileManager.default.removeItem(at: marker)
-        let missingParent = CoreSupervisor(coreEnabledURL: root.appendingPathComponent("missing/enabled"), binaryURL: URL(fileURLWithPath: "/usr/bin/true"), configURL: supervisor.configURL, logURL: supervisor.logURL, pythonLoadedChecker: { false })
+        let missingParent = CoreSupervisor(coreEnabledURL: root.appendingPathComponent("missing/enabled"), binaryURL: URL(fileURLWithPath: "/usr/bin/true"), configURL: supervisor.configURL, logURL: supervisor.logURL, allowMissingConfigForTesting: true, pythonLoadedChecker: { false })
         do {
             try missingParent.beginMaintenance(transactionID: id)
             expect(false, "missing directory must fail")
@@ -207,7 +207,7 @@ struct LifecycleTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
         let alias = root.appendingPathComponent("alias")
         try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: root)
-        let linkedParent = CoreSupervisor(coreEnabledURL: alias.appendingPathComponent("enabled"), binaryURL: URL(fileURLWithPath: "/usr/bin/true"), configURL: supervisor.configURL, logURL: supervisor.logURL, pythonLoadedChecker: { false })
+        let linkedParent = CoreSupervisor(coreEnabledURL: alias.appendingPathComponent("enabled"), binaryURL: URL(fileURLWithPath: "/usr/bin/true"), configURL: supervisor.configURL, logURL: supervisor.logURL, allowMissingConfigForTesting: true, pythonLoadedChecker: { false })
         rejected("symlink parent cannot publish maintenance marker") { try linkedParent.beginMaintenance(transactionID: id) }
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path)
         rejected("uncontrolled directory rejected") { try supervisor.beginMaintenance(transactionID: id) }
@@ -278,7 +278,7 @@ struct LifecycleTests {
         let checked = DispatchSemaphore(value: 0)
         let resume = DispatchSemaphore(value: 0)
         let raceLog = raceRoot.appendingPathComponent("log")
-        let race = CoreSupervisor(coreEnabledURL: raceRoot.appendingPathComponent("enabled"), binaryURL: URL(fileURLWithPath: "/usr/bin/true"), configURL: raceRoot.appendingPathComponent("config"), logURL: raceLog, pythonLoadedChecker: {
+        let race = CoreSupervisor(coreEnabledURL: raceRoot.appendingPathComponent("enabled"), binaryURL: URL(fileURLWithPath: "/usr/bin/true"), configURL: raceRoot.appendingPathComponent("config"), logURL: raceLog, allowMissingConfigForTesting: true, pythonLoadedChecker: {
             checked.signal()
             _ = resume.wait(timeout: .now() + 4)
             return false
