@@ -328,6 +328,7 @@ func run() -> Int32 {
                 binaryURL: URL(fileURLWithPath: binPath),
                 configURL: URL(fileURLWithPath: "/tmp/fake.json"),
                 logURL: URL(fileURLWithPath: logPath),
+                allowMissingConfigForTesting: true,
                 gracePeriod: graceSec,
                 pythonLoadedChecker: { false }
             )
@@ -384,6 +385,7 @@ func run() -> Int32 {
                     binaryURL: URL(fileURLWithPath: binPath),
                     configURL: URL(fileURLWithPath: "/tmp/fake.json"),
                     logURL: URL(fileURLWithPath: logPath),
+                    allowMissingConfigForTesting: true,
                     gracePeriod: graceSec,
                     pythonLoadedChecker: { false }
                 )

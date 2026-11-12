@@ -147,3 +147,107 @@ fn test_legacy_state_maintenance_detected_without_deletion() {
         "legacy maintenance marker must be preserved without deletion"
     );
 }
+
+#[test]
+fn test_bot_config_install_root_invalid_types_rejected() {
+    let dir = TempDir::new("cfg_types_test");
+    let (cfg_base, _) = write_config_json(&dir.path, None);
+    let base_content = fs::read_to_string(&cfg_base).unwrap();
+
+    let invalid_values = vec![
+        serde_json::json!(12345),
+        serde_json::json!(true),
+        serde_json::json!(false),
+        serde_json::json!(null),
+        serde_json::json!(["/absolute/path"]),
+        serde_json::json!({"path": "/absolute/path"}),
+    ];
+
+    for (idx, bad_val) in invalid_values.into_iter().enumerate() {
+        let mut map: serde_json::Value = serde_json::from_str(&base_content).unwrap();
+        map["install_root"] = bad_val;
+        let bad_cfg_path = dir.path.join(format!("bad_cfg_{}.json", idx));
+        fs::write(&bad_cfg_path, serde_json::to_vec_pretty(&map).unwrap()).unwrap();
+
+        let res = BotConfig::load(&bad_cfg_path);
+        assert!(
+            res.is_err(),
+            "invalid install_root type must be rejected: {:?}",
+            map["install_root"]
+        );
+    }
+}
+
+#[test]
+fn test_legacy_state_corrupt_json_and_incomplete_journal_detected() {
+    let dir = TempDir::new("legacy_corrupt_test");
+    let legacy_dir = dir.path.join("legacy");
+    fs::create_dir_all(&legacy_dir).unwrap();
+
+    // 1. core.maintenance.json 损坏 (格式非 JSON) 必须判定为需阻断，绝不能被吞掉
+    let json_maint = legacy_dir.join("core.maintenance.json");
+    fs::write(&json_maint, b"not_valid_json_content").unwrap();
+    fs::set_permissions(&json_maint, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(
+        journal::detect_legacy_maintenance_marker(&legacy_dir),
+        "corrupt legacy core.maintenance.json must be detected as requiring maintenance block"
+    );
+    assert!(json_maint.exists(), "corrupt json must not be deleted");
+    fs::remove_file(&json_maint).unwrap();
+
+    // 2. legacy 目录存在未完成事务的 update-journal.json (Draining) 必须被探测并阻断
+    let journal_path = legacy_dir.join("update-journal.json");
+    let journal_draining = serde_json::json!({
+        "journal_schema": 1,
+        "transaction_id": "00000000-0000-4000-8000-000000000001",
+        "stage": "Draining",
+        "source_release_id": "1.0.0",
+        "target_release_id": "1.0.1",
+        "target_sequence": 2,
+        "timestamp": 1000
+    });
+    fs::write(
+        &journal_path,
+        serde_json::to_vec_pretty(&journal_draining).unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(
+        journal::detect_legacy_maintenance_marker(&legacy_dir),
+        "legacy incomplete update-journal.json must be detected"
+    );
+    assert!(journal_path.exists(), "legacy journal must not be deleted");
+}
+
+#[test]
+fn test_install_root_symlink_rejected() {
+    let dir = TempDir::new("ir_symlink_test");
+    let real_install = dir.path.join("real_install");
+    fs::create_dir_all(&real_install).unwrap();
+    let releases_dir = real_install.join("releases");
+    let release_1 = releases_dir.join("1.0.0");
+    fs::create_dir_all(&release_1).unwrap();
+    let current_link = real_install.join("current");
+    std::os::unix::fs::symlink(&release_1, &current_link).unwrap();
+
+    // 创建指向 real_install 的符号链接 install_symlink
+    let install_symlink = dir.path.join("install_symlink");
+    std::os::unix::fs::symlink(&real_install, &install_symlink).unwrap();
+
+    // 当 install_root 自身是符号链接时，必须被严格拒绝
+    let verify_res = journal::verify_current_link_target_with_root(
+        &install_symlink.join("current"),
+        &install_symlink.join("releases"),
+        "1.0.0",
+        Some(&install_symlink),
+    );
+    assert!(
+        verify_res.is_err(),
+        "install_root as symlink must be strictly rejected"
+    );
+    let err_str = verify_res.err().unwrap().to_string();
+    assert!(
+        err_str.contains("install_root_must_not_be_symlink") || err_str.contains("symlink"),
+        "unexpected error: {err_str}"
+    );
+}

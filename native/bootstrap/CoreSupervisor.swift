@@ -220,7 +220,9 @@ public final class CoreSupervisor {
     private var customJournalURL = false
     private var customReleasesDirURL = false
     private var customCurrentLinkURL = false
+    private(set) var hasConfiguredInstallRoot = false
     public var legacyStateDirURL: URL?
+    private var allowMissingConfigForTesting = false
     private var runningStateDir: String?
     private var runningInstallRoot: String?
     // Process identity retained after stop; a nil cache or a new PID is not exit proof.
@@ -260,6 +262,7 @@ public final class CoreSupervisor {
         releasesDirURL: URL? = nil,
         currentLinkURL: URL? = nil,
         legacyStateDirURL: URL? = nil,
+        allowMissingConfigForTesting: Bool = false,
         gracePeriod: TimeInterval = 240.0,
         pythonLoadedChecker: @escaping () -> Bool = checkPythonLaunchdLoaded
     ) {
@@ -278,7 +281,9 @@ public final class CoreSupervisor {
         self.releasesDirURL = releasesDirURL ?? baseRpa.appendingPathComponent("releases")
         self.customCurrentLinkURL = (currentLinkURL != nil)
         self.currentLinkURL = currentLinkURL ?? baseRpa.appendingPathComponent("current")
-        self.legacyStateDirURL = legacyStateDirURL
+        self.hasConfiguredInstallRoot = (releasesDirURL != nil && currentLinkURL != nil)
+        self.legacyStateDirURL = legacyStateDirURL ?? baseRpa
+        self.allowMissingConfigForTesting = allowMissingConfigForTesting
         self.gracePeriod = gracePeriod
         self.pythonLoadedChecker = pythonLoadedChecker
     }
@@ -350,8 +355,20 @@ public final class CoreSupervisor {
             return false
         }
 
-        // c. 打开受控 releasesDir 固定 root fd（O_DIRECTORY | O_NOFOLLOW）
-        let rootFd = open(releasesDirURL.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        // c. 打开受控 install_root 与 releasesDir 固定 root fd（全链路 O_DIRECTORY | O_NOFOLLOW 防父目录符号链接逃逸）
+        let installRootURL = releasesDirURL.deletingLastPathComponent()
+        let irFd = open(installRootURL.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard irFd >= 0 else { return false }
+        defer { close(irFd) }
+
+        var irStat = stat()
+        guard fstat(irFd, &irStat) == 0,
+              (irStat.st_mode & S_IFMT) == S_IFDIR,
+              irStat.st_uid == geteuid() else {
+            return false
+        }
+
+        let rootFd = openat(irFd, "releases", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard rootFd >= 0 else { return false }
         defer { close(rootFd) }
 
@@ -402,32 +419,43 @@ public final class CoreSupervisor {
             return false
         }
         guard let data = cfgData else {
-            // 配置文件不存在 (ENOENT)，沿用已配置/默认路径
-            return true
+            // 生产缺失配置严格 Fail-Closed（仅测试显式允许时豁免）
+            if allowMissingConfigForTesting {
+                return true
+            }
+            return false
         }
 
         guard let json = (try? JSONSerialization.jsonObject(with: data, options: [])) as? [String: Any] else {
             return false
         }
 
-        guard let stateDirStr = json["state_dir"] as? String,
+        guard let stateDirVal = json["state_dir"],
+              let stateDirStr = stateDirVal as? String,
               !stateDirStr.isEmpty,
               stateDirStr.hasPrefix("/") else {
             return false
         }
 
-        let installRootStr = json["install_root"] as? String
-        if let ir = installRootStr {
-            guard !ir.isEmpty, ir.hasPrefix("/") else {
+        var newInstallRootStr: String? = nil
+        if json.keys.contains("install_root") {
+            let irVal = json["install_root"]!
+            guard !(irVal is NSNull),
+                  let irStr = irVal as? String,
+                  !irStr.isEmpty,
+                  irStr.hasPrefix("/") else {
                 return false
             }
+            newInstallRootStr = irStr
         }
 
         if let proc = process, proc.isRunning {
             if let runningSD = runningStateDir, runningSD != stateDirStr {
+                isConfigError = true
                 return false
             }
-            if let runningIR = runningInstallRoot, runningIR != (installRootStr ?? "") {
+            if let runningIR = runningInstallRoot, runningIR != (newInstallRootStr ?? "") {
+                isConfigError = true
                 return false
             }
         }
@@ -440,7 +468,8 @@ public final class CoreSupervisor {
             self.journalURL = stateDirURL.appendingPathComponent("update-journal.json")
         }
 
-        if let ir = installRootStr {
+        if let ir = newInstallRootStr {
+            self.hasConfiguredInstallRoot = true
             let irURL = URL(fileURLWithPath: ir)
             if !customReleasesDirURL {
                 self.releasesDirURL = irURL.appendingPathComponent("releases")
@@ -448,6 +477,8 @@ public final class CoreSupervisor {
             if !customCurrentLinkURL {
                 self.currentLinkURL = irURL.appendingPathComponent("current")
             }
+        } else {
+            self.hasConfiguredInstallRoot = false
         }
 
         return true
@@ -471,6 +502,22 @@ public final class CoreSupervisor {
         let (jData, jErr) = readLimitedPrivateFile(url: legacyJson, maxBytes: 4096)
         if jErr != nil || jData != nil {
             return true
+        }
+
+        let legacyJournal = legacyURL.appendingPathComponent("update-journal.json")
+        let (jrData, jrErr) = readLimitedPrivateFile(url: legacyJournal, maxBytes: 64 * 1024)
+        if jrErr != nil {
+            return true
+        }
+        if let jrBytes = jrData {
+            guard let jObj = (try? JSONSerialization.jsonObject(with: jrBytes, options: [])) as? [String: Any],
+                  let schemaNum = jObj["journal_schema"] as? NSNumber,
+                  CFGetTypeID(schemaNum) != CFBooleanGetTypeID(),
+                  schemaNum.intValue == 1,
+                  let stage = jObj["stage"] as? String,
+                  stage == "Committed" else {
+                return true
+            }
         }
 
         return false
@@ -535,6 +582,11 @@ public final class CoreSupervisor {
 
             case "Committed":
                 // 终态全要素二次只读核验：严禁仅凭 Committed 标签放行！
+                // 必须显式配置受控 install_root，未配置 install_root 严格拒绝放行
+                guard hasConfiguredInstallRoot else {
+                    return .recoveryRequired
+                }
+
                 // a. 读取并校验 current_release.json（严格 O_NOFOLLOW / 0600 / UID 匹配）
                 let recordURL = journalURL.deletingLastPathComponent().appendingPathComponent("current_release.json")
                 let (rData, rErr) = readLimitedPrivateFile(url: recordURL, maxBytes: 64 * 1024)
@@ -625,6 +677,7 @@ public final class CoreSupervisor {
     public func beginMaintenance(transactionID: String) throws {
         lock.lock()
         defer { lock.unlock() }
+        guard reloadConfigPathsLocked() else { throw CoreMaintenanceError.recoveryRequired }
         guard validTransaction(transactionID) else { throw CoreMaintenanceError.invalidTransaction }
         switch readMaintenanceLocked() {
         case .active(let owner):
@@ -662,6 +715,7 @@ public final class CoreSupervisor {
 
     private func requireMaintenanceOwner(_ id: String) throws {
         guard validTransaction(id) else { throw CoreMaintenanceError.invalidTransaction }
+        guard reloadConfigPathsLocked() else { throw CoreMaintenanceError.recoveryRequired }
         switch readMaintenanceLocked() {
         case .active(let owner) where owner == id: return
         case .recoveryRequired: throw CoreMaintenanceError.recoveryRequired
@@ -694,6 +748,7 @@ public final class CoreSupervisor {
         defer { stopLock.unlock() }
         lock.lock()
         defer { lock.unlock() }
+        guard reloadConfigPathsLocked() else { throw CoreMaintenanceError.recoveryRequired }
         try requireMaintenanceOwner(transactionID)
         guard maintenanceStoppedTransaction == transactionID,
               let held = maintenanceStoppedProcess, !held.isRunning,
@@ -851,15 +906,13 @@ public final class CoreSupervisor {
             self?.handleProcessTermination(pid: p.processIdentifier, exitCode: p.terminationStatus, reason: p.terminationReason)
         }
 
+        // 在 spawn 之前固定已锁内核验的快照
+        self.runningStateDir = maintenanceURL.deletingLastPathComponent().path
+        self.runningInstallRoot = hasConfiguredInstallRoot ? releasesDirURL.deletingLastPathComponent().path : ""
+
         try proc.run()
         self.process = proc
         self.restartingAt = nil
-        let (cfgData, _) = readLimitedPrivateFile(url: configURL, maxBytes: 512 * 1024)
-        if let d = cfgData,
-           let json = (try? JSONSerialization.jsonObject(with: d, options: [])) as? [String: Any] {
-            self.runningStateDir = json["state_dir"] as? String
-            self.runningInstallRoot = json["install_root"] as? String ?? ""
-        }
     }
 
     private func handleProcessTermination(pid: Int32, exitCode: Int32, reason: Process.TerminationReason) {

@@ -304,20 +304,34 @@ pub type AccountDetector = std::sync::Arc<dyn Fn() -> Option<String> + Send + Sy
 #[derive(Debug, Clone)]
 pub(crate) struct StartupGuardPaths {
     pub state_dir: PathBuf,
+    pub install_root: Option<PathBuf>,
     pub releases_dir: Option<PathBuf>,
     pub current_link: Option<PathBuf>,
+    pub legacy_dir: Option<PathBuf>,
 }
 
 impl StartupGuardPaths {
     pub(crate) fn from_config(config: &BotConfig) -> Self {
+        Self::from_config_with_legacy(config, None)
+    }
+
+    pub(crate) fn from_config_with_legacy(
+        config: &BotConfig,
+        legacy_override: Option<&Path>,
+    ) -> Self {
         let (releases_dir, current_link) = match &config.install_root {
             Some(root) => (Some(root.join("releases")), Some(root.join("current"))),
             None => (None, None),
         };
+        let legacy_dir = legacy_override
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".wechat-rpa")));
         Self {
             state_dir: config.state_dir.clone(),
+            install_root: config.install_root.clone(),
             releases_dir,
             current_link,
+            legacy_dir,
         }
     }
 
@@ -325,8 +339,10 @@ impl StartupGuardPaths {
     pub(crate) fn from_state_dir(state_dir: &Path) -> Self {
         Self {
             state_dir: state_dir.to_path_buf(),
+            install_root: None,
             releases_dir: None,
             current_link: None,
+            legacy_dir: None,
         }
     }
 
@@ -338,8 +354,21 @@ impl StartupGuardPaths {
     ) -> Self {
         Self {
             state_dir: state_dir.to_path_buf(),
+            install_root: releases_dir.parent().map(Path::to_path_buf),
             releases_dir: Some(releases_dir.to_path_buf()),
             current_link: Some(current_link.to_path_buf()),
+            legacy_dir: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_legacy_dir(state_dir: &Path, legacy_dir: &Path) -> Self {
+        Self {
+            state_dir: state_dir.to_path_buf(),
+            install_root: None,
+            releases_dir: None,
+            current_link: None,
+            legacy_dir: Some(legacy_dir.to_path_buf()),
         }
     }
 }
@@ -348,10 +377,12 @@ pub(crate) fn verify_serve_core_startup_guard_in_lock(
     paths: &StartupGuardPaths,
     core_lock: File,
 ) -> Result<File> {
-    let decision = crate::updater::journal::check_startup_guard_readonly(
+    let decision = crate::updater::journal::check_startup_guard_readonly_with_root(
         &paths.state_dir,
         paths.releases_dir.as_deref(),
         paths.current_link.as_deref(),
+        paths.install_root.as_deref(),
+        paths.legacy_dir.as_deref(),
     );
 
     match decision {
@@ -1555,6 +1586,62 @@ mod tests {
             lock_check.is_ok(),
             "core.lock must be released after normal shutdown"
         );
+    }
+
+    #[tokio::test]
+    async fn test_run_serve_core_blocked_when_legacy_dir_has_unsettled_maintenance() {
+        let dir = TempDir::new();
+        let (cfg_path, state_dir) = write_test_config(dir.path());
+        let serve_paths = ServePaths::isolated(dir.path());
+
+        // 构造独立的 legacy 目录，写入未完成维护标记
+        let legacy_dir = dir.path().join("legacy_rpa");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy_maint = legacy_dir.join("core.maintenance");
+        fs::write(&legacy_maint, b"12345678-1234-4234-8234-123456789abc").unwrap();
+        fs::set_permissions(&legacy_maint, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let guard_paths = StartupGuardPaths::with_legacy_dir(&state_dir, &legacy_dir);
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let res = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_serve_core_for_test(
+                &cfg_path,
+                Some(rx),
+                AccountSource::Config,
+                &serve_paths,
+                Some(guard_paths),
+                None,
+            ),
+        )
+        .await
+        .expect("test timed out");
+
+        assert!(
+            res.is_err(),
+            "serve-core must be blocked when legacy dir has unsettled maintenance"
+        );
+        let err_msg = res.err().unwrap().to_string();
+        assert!(
+            err_msg.contains("legacy_maintenance_marker_detected")
+                || err_msg.contains("startup_blocked_recovery_required"),
+            "unexpected error message: {}",
+            err_msg
+        );
+
+        // 零业务副作用验证
+        assert!(!serve_paths.core_sock.exists());
+        assert!(!state_dir.join("health.json").exists());
+        // 关键契约：严格只读，旧文件必须完好无损存在
+        assert!(
+            legacy_maint.exists(),
+            "legacy maintenance marker must NOT be deleted"
+        );
+
+        let lock_check = acquire_core_lock(&state_dir);
+        assert!(lock_check.is_ok(), "core.lock must be released");
+        let _ = tx.send(true);
     }
 
     #[tokio::test]

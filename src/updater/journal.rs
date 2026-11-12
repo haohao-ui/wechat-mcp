@@ -748,11 +748,20 @@ impl Drop for SafeFd {
     }
 }
 
-/// 精确核验 current 软链接的目标必须是受控 releases_dir 下指定的物理目录，拒绝任何外部逃逸或悬空
 pub fn verify_current_link_target(
     current_link: &Path,
     releases_dir: &Path,
     expected_release_id: &str,
+) -> Result<()> {
+    verify_current_link_target_with_root(current_link, releases_dir, expected_release_id, None)
+}
+
+/// 精确核验 current 软链接的目标必须是受控 releases_dir 下指定的物理目录，拒绝任何外部逃逸或悬空
+pub fn verify_current_link_target_with_root(
+    current_link: &Path,
+    releases_dir: &Path,
+    expected_release_id: &str,
+    install_root: Option<&Path>,
 ) -> Result<()> {
     // a. 校验 release_id 命名格式安全
     validate_release_id_safe(expected_release_id)?;
@@ -774,35 +783,103 @@ pub fn verify_current_link_target(
         bail!("current_link_must_be_symlink: '{}'", current_link.display());
     }
 
-    // c. 锚定受控 releases_dir：以 O_DIRECTORY | O_NOFOLLOW 打开固定 root fd
-    let c_releases = std::ffi::CString::new(
-        releases_dir
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("invalid_releases_dir_path"))?,
-    )?;
-    let root_fd = unsafe {
-        libc::open(
-            c_releases.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if root_fd < 0 {
-        let err = std::io::Error::last_os_error();
-        if err.kind() == std::io::ErrorKind::NotFound {
-            bail!("releases_dir_does_not_exist: '{}'", releases_dir.display());
+    let current_uid = unsafe { libc::geteuid() };
+
+    // c. 锚定受控 releases_dir：若提供 install_root，先校验 install_root 自身非 symlink 且归属当前 UID，
+    //    然后通过 openat 打开 releases，防止父目录符号链接逃逸！
+    let (root_fd, _ir_guard) = if let Some(ir) = install_root {
+        if !ir.is_absolute() {
+            bail!("install_root_must_be_absolute: '{}'", ir.display());
         }
-        if err.raw_os_error() == Some(libc::ELOOP) {
+        let c_ir = std::ffi::CString::new(
+            ir.to_str()
+                .ok_or_else(|| anyhow::anyhow!("invalid_install_root_path"))?,
+        )?;
+        let ir_fd = unsafe {
+            libc::open(
+                c_ir.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if ir_fd < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ELOOP) {
+                bail!("install_root_must_not_be_symlink: '{}'", ir.display());
+            }
+            bail!("cannot_open_install_root: '{}' ({})", ir.display(), err);
+        }
+        let ir_guard = SafeFd(ir_fd);
+
+        let mut ir_stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(ir_fd, &mut ir_stat) } != 0 {
+            bail!("cannot_fstat_install_root: '{}'", ir.display());
+        }
+        if (ir_stat.st_mode & libc::S_IFMT) != libc::S_IFDIR {
+            bail!("install_root_must_be_directory: '{}'", ir.display());
+        }
+        if ir_stat.st_uid != current_uid {
             bail!(
-                "releases_dir_must_not_be_symlink: '{}'",
-                releases_dir.display()
+                "install_root_uid_mismatch: '{}' (owner: {}, current: {})",
+                ir.display(),
+                ir_stat.st_uid,
+                current_uid
             );
         }
-        bail!(
-            "cannot_open_releases_dir: '{}' ({})",
-            releases_dir.display(),
-            err
-        );
-    }
+
+        let c_rel_name = std::ffi::CString::new("releases")?;
+        let r_fd = unsafe {
+            libc::openat(
+                ir_fd,
+                c_rel_name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if r_fd < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ELOOP) {
+                bail!(
+                    "releases_dir_must_not_be_symlink: '{}'",
+                    releases_dir.display()
+                );
+            }
+            bail!(
+                "cannot_open_releases_dir: '{}' ({})",
+                releases_dir.display(),
+                err
+            );
+        }
+        (r_fd, Some(ir_guard))
+    } else {
+        let c_releases = std::ffi::CString::new(
+            releases_dir
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("invalid_releases_dir_path"))?,
+        )?;
+        let r_fd = unsafe {
+            libc::open(
+                c_releases.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if r_fd < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::NotFound {
+                bail!("releases_dir_does_not_exist: '{}'", releases_dir.display());
+            }
+            if err.raw_os_error() == Some(libc::ELOOP) {
+                bail!(
+                    "releases_dir_must_not_be_symlink: '{}'",
+                    releases_dir.display()
+                );
+            }
+            bail!(
+                "cannot_open_releases_dir: '{}' ({})",
+                releases_dir.display(),
+                err
+            );
+        }
+        (r_fd, None)
+    };
     let _root_guard = SafeFd(root_fd);
 
     let mut root_stat: libc::stat = unsafe { std::mem::zeroed() };
@@ -1031,16 +1108,36 @@ pub enum StartupDualCheckDecision {
 pub fn detect_legacy_maintenance_marker(legacy_dir: &Path) -> bool {
     let maint_path = legacy_dir.join("core.maintenance");
     match read_limited_private_file(&maint_path, 128) {
-        Ok(Some(_)) => true,
-        Err(_) => true, // 权限/软链/无法安全打开均保守判定为需维护阻断
-        Ok(None) => {
-            let json_path = legacy_dir.join("core.maintenance.json");
-            match read_limited_private_file(&json_path, 4096) {
-                Ok(Some(_)) => true,
-                _ => false,
+        Ok(Some(_)) => return true,
+        Err(_) => return true, // 权限/软链/无法安全打开均保守判定为需维护阻断
+        Ok(None) => {}
+    }
+
+    let json_path = legacy_dir.join("core.maintenance.json");
+    match read_limited_private_file(&json_path, 4096) {
+        Ok(Some(_)) => return true,
+        Err(_) => return true, // 权限/软链/无法安全打开同样必须判定为需阻断，绝不能吞掉
+        Ok(None) => {}
+    }
+
+    let journal_path = legacy_dir.join("update-journal.json");
+    match read_limited_private_file(&journal_path, 64 * 1024) {
+        Ok(Some(bytes)) => {
+            // 如果存在旧 journal，必须校验其是否为已结束终态；损坏或未完成事务均必须阻断
+            match serde_json::from_slice::<UpdateJournal>(&bytes) {
+                Ok(j) => {
+                    if j.journal_schema != 1 || j.stage != TransactionStage::Committed {
+                        return true;
+                    }
+                }
+                Err(_) => return true,
             }
         }
+        Err(_) => return true,
+        Ok(None) => {}
     }
+
+    false
 }
 
 /// 纯只读启动双检查 Guard（零写入、零删除、零副作用、防 TOCTOU）
@@ -1049,6 +1146,26 @@ pub fn check_startup_guard_readonly(
     releases_dir: Option<&Path>,
     current_link: Option<&Path>,
 ) -> StartupDualCheckDecision {
+    check_startup_guard_readonly_with_root(state_dir, releases_dir, current_link, None, None)
+}
+
+/// 纯只读启动双检查 Guard（支持受控 install_root 与 legacy 状态根探测）
+pub fn check_startup_guard_readonly_with_root(
+    state_dir: &Path,
+    releases_dir: Option<&Path>,
+    current_link: Option<&Path>,
+    install_root: Option<&Path>,
+    legacy_dir: Option<&Path>,
+) -> StartupDualCheckDecision {
+    // 0. 探测旧 legacy 状态根（若已配置且与当前 state_dir 不同，发现未完成维护标记或损坏严格 Fail-Closed，绝不删除）
+    if let Some(leg) = legacy_dir {
+        if leg != state_dir && detect_legacy_maintenance_marker(leg) {
+            return StartupDualCheckDecision::RecoveryRequired {
+                reason: "legacy_maintenance_marker_detected".into(),
+            };
+        }
+    }
+
     // 1. 检查 core.maintenance（安全打开 + fstat 校验）
     let maint_path = state_dir.join("core.maintenance");
     let mut maint_uuid: Option<String> = None;
@@ -1227,10 +1344,11 @@ pub fn check_startup_guard_readonly(
                     }
 
                     // b. 核查 current 软链接物理目标（拒绝外部目录与悬空）
-                    if let Err(e) = verify_current_link_target(
+                    if let Err(e) = verify_current_link_target_with_root(
                         current_link,
                         releases_dir,
                         &journal.target_release_id,
+                        install_root,
                     ) {
                         return StartupDualCheckDecision::RecoveryRequired {
                             reason: format!("current_link_verification_failed: {}", e),
