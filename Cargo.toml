@@ -40,6 +40,10 @@ path = "src/bin/wechat-updater.rs"
 name = "wechat-test-signer"
 path = "src/bin/wechat-test-signer.rs"
 
+[[bin]]
+name = "wechat-release-signer"
+path = "src/bin/wechat-release-signer.rs"
+
 [lints.clippy]
 correctness = "deny"
 suspicious = "deny"

@@ -20,7 +20,7 @@
 | 格式（本分支） | `cargo fmt --all -- --check` | PASS（本分支已提交格式化修复） |
 | Clippy（CI 口径） | `cargo clippy --all-targets --locked` | PASS（退出码 0，但约 1850 条 warning） |
 | Clippy（严格口径） | `cargo clippy --all-targets --locked -- -D warnings` | FAIL（退出码 101，约 2000 个 error） |
-| 全量测试 | `cargo test --locked --no-fail-fast` | PASS（2250 passed / 0 failed / 3 ignored，隔离环境） |
+| 全量测试 | `cargo test --locked --no-fail-fast` | PASS（2256 passed / 0 failed / 3 ignored，隔离环境） |
 | 原生自测 | `wechat_window --self-test`、`wechat_overlay --self-test`、`wechat_runtime --self-test` | PASS |
 
 测试环境说明：修复前裸跑沙箱曾出现 15 个失败，均为环境问题而非业务断言：
@@ -29,7 +29,7 @@
 - 2 个 UI 联测用例找不到 `target/debug/wechat-mcp`（同一原因）；
 - 9 个 `swift_host` 配置用例写真实用户目录下的 `~/.wechat-rpa/tmp`，被沙箱拒绝。
 
-本分支已修复 9 个 `swift_host` 用例的用户目录依赖：测试 harness 为每个 Swift 子进程设置 `CFFIXED_USER_HOME` 到临时目录。修复后不再需要外部设置该变量，全量测试在临时 `HOME` 下仍为 2250 通过、0 失败、3 ignored。updater 与 UI 用例也已改为从 `current_exe` 定位 `target/debug`，在自定义 `CARGO_TARGET_DIR` 下同样可运行（需先构建对应二进制）。
+本分支已修复 9 个 `swift_host` 用例的用户目录依赖：测试 harness 为每个 Swift 子进程设置 `CFFIXED_USER_HOME` 到临时目录。修复后不再需要外部设置该变量，全量测试在临时 `HOME` 下仍为 2256 通过、0 失败、3 ignored。updater 与 UI 用例也已改为从 `current_exe` 定位 `target/debug`，在自定义 `CARGO_TARGET_DIR` 下同样可运行（需先构建对应二进制）。
 
 main 上的 `core::open_api::compat_tests::ops_tools_list_unchanged` 已通过（fixture 已更新）；旧分支仍是失败状态。
 
@@ -43,7 +43,13 @@ main 上的 `core::open_api::compat_tests::ops_tools_list_unchanged` 已通过�
 error: unsupported: real update <action> is disabled in this phase (fixture adapters only)
 ```
 
-更新检查与只读状态页可用，但真实下载、安装、切换、回退、崩溃恢复没有生产实现。`src/updater/rollback.rs` 也明确拒绝自动数据库回滚（`unsupported_db_rollback`）。因此“应用版本更新”这一生产目标尚未达成。
+本分支已补齐离线签名/验签链路：
+
+- `wechat-release-signer` 从 0600 的 PKCS#8 私钥签名发布清单；
+- `wechat-updater check --trusted-keys <file>` 可校验 Ed25519 签名、架构/OS/防降级，并输出 manifest 摘要；
+- 可信 key 文件要求 owner-only 权限、当前用户所有、无软链、无重复 key、32 字节公钥。
+
+仍缺：应用内置信任根、下载、安装、排空、切换、回滚、崩溃恢复；`src/updater/rollback.rs` 仍明确拒绝自动数据库回滚（`unsupported_db_rollback`）。因此“应用版本更新”的生产目标尚未达成。
 
 ### P0-2 发布与安装的签名链路不完整
 
@@ -109,7 +115,8 @@ error: unsupported: real update <action> is disabled in this phase (fixture adap
 - 敏感信息扫描、密钥文件 0600、OpenAPI 拒绝 `0.0.0.0`、Socket 权限等安全边界仍在；
 - 大脑角色存储、绑定、界面与更新只读页面已进入 main；
 - 桌面操作已有硬超时，超时会释放桌面锁并触发 helper 的 `kill_on_drop` 清理；
-- 全量测试在隔离环境下 2250 通过、0 失败；
+- 发布清单可用 `wechat-release-signer` 离线签名，`wechat-updater check --trusted-keys` 可离线验签；
+- 全量测试在隔离环境下 2256 通过、0 失败；
 - 原始工具编译与 self-test 通过。
 
 ## 5. 未验证 / Unknown
