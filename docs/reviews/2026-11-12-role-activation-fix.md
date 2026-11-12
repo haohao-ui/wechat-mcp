@@ -1,0 +1,11 @@
+# Selected-role activation and truthful state
+
+Commit `bfb2fb4` fixes the screenshot's contradictory success banner and draft state. Live read-only brain-list before installation showed generation 5 with the saved role `role_6E2E9A8C`, but both active and draft bindings were empty. Earlier activation succeeded at activating that empty binding set; it had not enabled the selected role.
+
+The native client now loads authoritative role names and derives role running revision/binding count from active bindings. The list distinguishes unsaved, saved/not-enabled, enabled, and newer draft with an older running revision. No public interface or persistent schema was changed.
+
+Activate now confirms the selected role and its scope. Existing bindings for that role advance to the selected saved revision; if the role has no scope, confirmation explicitly says it will become account default while preserving dedicated overrides. The client saves changed bindings, activates with the returned generation, then reads back and compares the active set before reporting success. Concurrent edits or unverifiable results do not produce a success banner. Existing-role saves now create a fresh revision and reference the previous revision as parent, avoiding repeated edits to immutable rev_1.
+
+Validation: Swift brain/real Rust control harness **126 passed, zero failed**. New regressions verify actual loaded name, active revision and binding count after real activation; enabled roles no longer classified as drafts; empty-scope preparation includes selected role; revision advancement; and preservation of a different default when enabling an already dedicated role. Intel target Swift 5.7.2 host compilation and strict signature verification passed.
+
+Installed and restarted `bfb2fb4-device-20261112`. Live screenshot shows the real name 新助手 and 已保存 · 未启用, consistent with its unchanged empty active bindings. Evidence is `$TARGET_HOME/.wechat-rpa/acceptance/bfb2fb4-role-activation/live-role-state.png`. Core PID 96703 remains paused/admin_pause. The user's business role was not activated/rebound by the operator; its new scope still requires the explicit in-app confirmation. No customer messages were sent. Real activation regressions ran only against isolated test data.
