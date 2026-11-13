@@ -91,7 +91,7 @@ public final class LogsPageController: NSViewController {
         logLevelPopup.action = #selector(handleFilterChanged)
 
         searchField.placeholderString = "搜索日志..."
-        searchField.widthAnchor.constraint(equalToConstant: 180).isActive = true
+        searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
         searchField.target = self
         searchField.action = #selector(handleFilterChanged)
 
@@ -117,7 +117,7 @@ public final class LogsPageController: NSViewController {
         scrollView.autohidesScrollers = true
 
         textView.isEditable = false
-        textView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        textView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         textView.autoresizingMask = [.width]
         scrollView.documentView = textView
         mainStack.addArrangedSubview(scrollView)
@@ -128,7 +128,7 @@ public final class LogsPageController: NSViewController {
             mainStack.topAnchor.constraint(equalTo: view.topAnchor, constant: 16),
             mainStack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16),
             scrollView.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
-            scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 500)
+            scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 200)
         ])
     }
 

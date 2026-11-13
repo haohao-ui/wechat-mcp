@@ -513,6 +513,9 @@ public final class UpdatePageController: NSViewController {
 
     // UI - 恢复卡片 (当出现 recovery_required 时高亮)
     private let recoveryBox = NSBox()
+    private let technicalDetails = NSStackView()
+    private let transactionDetails = NSStackView()
+    private let detailsButton = NSButton(checkboxWithTitle: "显示技术详情", target: nil, action: nil)
     private let recoveryDetailsLabel = NSTextField(wrappingLabelWithString: "")
 
     // UI - 整个内容 Stack
@@ -539,325 +542,154 @@ public final class UpdatePageController: NSViewController {
     }
 
     private func setupUI() {
-        let scrollView = NSScrollView()
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = false
-        scrollView.autohidesScrollers = true
-
+        let scroll = NSScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+        let document = FlippedView()
+        document.translatesAutoresizingMaskIntoConstraints = false
         contentStack.orientation = .vertical
         contentStack.alignment = .leading
-        contentStack.spacing = 14
+        contentStack.spacing = 20
         contentStack.translatesAutoresizingMaskIntoConstraints = false
-
-        // 1. 标题与只读标识
-        let headerLabel = NSTextField(labelWithString: "应用版本更新")
-        headerLabel.font = NSFont.systemFont(ofSize: 20, weight: .bold)
-
-        let headerRow = NSStackView()
-        headerRow.orientation = .horizontal
-        headerRow.alignment = .centerY
-        headerRow.spacing = 10
-        headerRow.addArrangedSubview(headerLabel)
-        let headerSpacer = NSView()
-        headerSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        headerRow.addArrangedSubview(headerSpacer)
-
-        readOnlyBadge.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
-        readOnlyBadge.alignment = .center
-        readOnlyBadge.textColor = .white
-        readOnlyBadge.wantsLayer = true
-        readOnlyBadge.layer?.backgroundColor = NSColor.systemOrange.cgColor
-        readOnlyBadge.layer?.cornerRadius = 8
-        readOnlyBadge.layer?.masksToBounds = true
-        readOnlyBadge.setAccessibilityLabel("当前为只读阶段")
-        readOnlyBadge.widthAnchor.constraint(equalToConstant: 46).isActive = true
-        readOnlyBadge.heightAnchor.constraint(equalToConstant: 20).isActive = true
-        headerRow.addArrangedSubview(readOnlyBadge)
-        contentStack.addArrangedSubview(headerRow)
-
-        let subtitleLabel = NSTextField(wrappingLabelWithString: "查看当前版本、候选版本与更新事务。本阶段不会下载、安装或重启。")
-        subtitleLabel.font = NSFont.systemFont(ofSize: 12)
-        subtitleLabel.textColor = .secondaryLabelColor
-        contentStack.addArrangedSubview(subtitleLabel)
-
-        // 1b. 只读说明条（始终可见，避免用户误以为写入按钮坏了）
-        let readOnlyBanner = NSBox()
-        readOnlyBanner.boxType = .custom
-        readOnlyBanner.fillColor = NSColor.systemOrange.withAlphaComponent(0.10)
-        readOnlyBanner.borderColor = NSColor.systemOrange.withAlphaComponent(0.25)
-        readOnlyBanner.titlePosition = .noTitle
-        readOnlyBanner.translatesAutoresizingMaskIntoConstraints = false
-
-        let lockImage = NSImageView(image: NSImage(systemSymbolName: "lock.shield", accessibilityDescription: nil) ?? NSImage())
-        lockImage.contentTintColor = .systemOrange
-        lockImage.translatesAutoresizingMaskIntoConstraints = false
-        lockImage.widthAnchor.constraint(equalToConstant: 18).isActive = true
-        lockImage.heightAnchor.constraint(equalToConstant: 18).isActive = true
-
-        let bannerText = NSStackView()
-        bannerText.orientation = .vertical
-        bannerText.alignment = .leading
-        bannerText.spacing = 2
-        let bannerTitle = NSTextField(labelWithString: "当前为只读阶段")
-        bannerTitle.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-        let bannerDetail = NSTextField(wrappingLabelWithString: "下载、安装、延期与恢复写入均未启用；所有状态来自真实读模型，界面不模拟成功。")
-        bannerDetail.font = NSFont.systemFont(ofSize: 11)
-        bannerDetail.textColor = .secondaryLabelColor
-        bannerText.addArrangedSubview(bannerTitle)
-        bannerText.addArrangedSubview(bannerDetail)
-
-        let bannerRow = NSStackView(views: [lockImage, bannerText])
-        bannerRow.orientation = .horizontal
-        bannerRow.alignment = .top
-        bannerRow.spacing = 10
-        readOnlyBanner.setContent(bannerRow)
-        contentStack.addArrangedSubview(readOnlyBanner)
-
-        // 2. 当前版本卡片
-        let currentBox = createSectionBox(title: "当前运行环境 (真实读模型)")
-        let currentGrid = NSGridView(views: [
-            [NSTextField(labelWithString: "当前整套版本:"), currentReleaseLabel],
-            [NSTextField(labelWithString: "核心编译版本:"), coreVersionLabel],
-            [NSTextField(labelWithString: "整套安装序列:"), currentSeqLabel],
-            [NSTextField(labelWithString: "防降级高水位:"), guardSeqLabel],
-            [NSTextField(labelWithString: "发布状态与来源:"), releaseTrustLabel],
-            [NSTextField(labelWithString: "宿主运行架构:"), architectureLabel],
-            [NSTextField(labelWithString: "组件一致性:"), consistencyBadge],
-            [NSTextField(labelWithString: "维护抑制状态:"), supervisorStatusLabel]
-        ])
-        currentGrid.rowSpacing = 6
-        currentGrid.columnSpacing = 12
-        currentReleaseLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 440).isActive = true
-        coreVersionLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 440).isActive = true
-        currentSeqLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 440).isActive = true
-        guardSeqLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 440).isActive = true
-        releaseTrustLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 440).isActive = true
-        architectureLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 440).isActive = true
-        consistencyBadge.widthAnchor.constraint(lessThanOrEqualToConstant: 440).isActive = true
-        supervisorStatusLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 440).isActive = true
-        currentBox.setContent(currentGrid)
-        contentStack.addArrangedSubview(currentBox)
-
-        // 3. 候选版本卡片
-        let candidateBox = createSectionBox(title: "候选版本与发布说明")
-        let candStack = NSStackView()
-        candStack.orientation = .vertical
-        candStack.alignment = .leading
-        candStack.spacing = 8
-
-        candStack.addArrangedSubview(candidateStatusLabel)
-        candidateStatusLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        candidateStatusLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 580).isActive = true
-
-        candidateEmptyLabel.font = NSFont.systemFont(ofSize: 11)
-        candidateEmptyLabel.textColor = .secondaryLabelColor
-        candidateEmptyLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 580).isActive = true
-        candStack.addArrangedSubview(candidateEmptyLabel)
-
-        let candGrid = NSGridView(views: [
-            [NSTextField(labelWithString: "目标版本:"), candidateVersionLabel],
-            [NSTextField(labelWithString: "发布时间:"), candidatePublishedLabel],
-            [NSTextField(labelWithString: "更新包大小:"), candidateSizeLabel],
-            [NSTextField(labelWithString: "发布者验证:"), publisherVerificationBadge],
-            [NSTextField(labelWithString: "本机重签名:"), localSigningLabel],
-            [NSTextField(labelWithString: "兼容性说明:"), compatibilityLabel]
-        ])
-        candGrid.rowSpacing = 6
-        candGrid.columnSpacing = 12
-        candidateVersionLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
-        candidatePublishedLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
-        candidateSizeLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
-        publisherVerificationBadge.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
-        localSigningLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
-        compatibilityLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
-
-        candidateDetailsContainer.orientation = .vertical
-        candidateDetailsContainer.alignment = .leading
-        candidateDetailsContainer.spacing = 8
-        candidateDetailsContainer.addArrangedSubview(candGrid)
-
-        let notesTitle = NSTextField(labelWithString: "版本发布说明:")
-        notesTitle.font = NSFont.systemFont(ofSize: 12, weight: .bold)
-        candidateDetailsContainer.addArrangedSubview(notesTitle)
-
-        let notesScroll = NSScrollView()
-        notesScroll.translatesAutoresizingMaskIntoConstraints = false
-        notesScroll.heightAnchor.constraint(equalToConstant: 90).isActive = true
-        notesScroll.hasVerticalScroller = true
-        notesScroll.borderType = .bezelBorder
-
-        releaseNotesView.isEditable = false
-        releaseNotesView.font = NSFont.systemFont(ofSize: 11)
-        releaseNotesView.string = "（暂无发布说明）"
-        notesScroll.documentView = releaseNotesView
-        candidateDetailsContainer.addArrangedSubview(notesScroll)
-        candStack.addArrangedSubview(candidateDetailsContainer)
-        candidateDetailsContainer.isHidden = true
-
-        candidateBox.setContent(candStack)
-        contentStack.addArrangedSubview(candidateBox)
-
-        // 4. 更新流程与进度流水线
-        let pipelineBox = createSectionBox(title: "更新阶段与进度")
-        let pipeStack = NSStackView()
-        pipeStack.orientation = .vertical
-        pipeStack.alignment = .leading
-        pipeStack.spacing = 8
-
-        pipelineStepsLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
-        pipelineStepsLabel.textColor = .secondaryLabelColor
-        pipeStack.addArrangedSubview(pipelineStepsLabel)
-
-        let stageRow = NSStackView()
-        stageRow.orientation = .horizontal
-        stageRow.spacing = 10
-        let stagePrefix = NSTextField(labelWithString: "当前执行阶段:")
-        stagePrefix.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        currentStageLabel.font = NSFont.systemFont(ofSize: 12, weight: .bold)
-        currentStageLabel.textColor = .systemBlue
-        stageRow.addArrangedSubview(stagePrefix)
-        stageRow.addArrangedSubview(currentStageLabel)
-        pipeStack.addArrangedSubview(stageRow)
-
-        progressBar.translatesAutoresizingMaskIntoConstraints = false
-        progressBar.isIndeterminate = false
-        progressBar.minValue = 0.0
-        progressBar.maxValue = 100.0
-        progressBar.doubleValue = 0.0
-        progressBar.widthAnchor.constraint(equalToConstant: 360).isActive = true
-        pipeStack.addArrangedSubview(progressBar)
-
-        progressDetailLabel.font = NSFont.systemFont(ofSize: 11)
-        progressDetailLabel.textColor = .secondaryLabelColor
-        pipeStack.addArrangedSubview(progressDetailLabel)
-
-        drainWarningLabel.font = NSFont.systemFont(ofSize: 12)
-        drainWarningLabel.textColor = .systemOrange
-        pipeStack.addArrangedSubview(drainWarningLabel)
-
-        permissionsNoteLabel.font = NSFont.systemFont(ofSize: 11)
-        permissionsNoteLabel.textColor = .secondaryLabelColor
-        pipeStack.addArrangedSubview(permissionsNoteLabel)
-
-        pipelineBox.setContent(pipeStack)
-        contentStack.addArrangedSubview(pipelineBox)
-
-        // 5. 失败恢复指引卡片
-        recoveryBox.title = "需要人工恢复"
-        recoveryBox.titleFont = NSFont.systemFont(ofSize: 13, weight: .bold)
-        recoveryBox.boxType = .custom
-        recoveryBox.fillColor = NSColor.systemRed.withAlphaComponent(0.08)
-        recoveryBox.borderColor = NSColor.systemRed.withAlphaComponent(0.30)
-        recoveryBox.titlePosition = .atTop
-        recoveryBox.translatesAutoresizingMaskIntoConstraints = false
-        recoveryDetailsLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        recoveryDetailsLabel.textColor = .labelColor
-        recoveryDetailsLabel.maximumNumberOfLines = 0
-        let recStack = NSStackView()
-        recStack.orientation = .vertical
-        recStack.alignment = .leading
-        recStack.spacing = 8
-        recStack.addArrangedSubview(recoveryDetailsLabel)
-        recoveryBox.setContent(recStack)
-        recoveryBox.isHidden = true
-        contentStack.addArrangedSubview(recoveryBox)
-
-        // 6. 操作按钮行 (严格只读，所有写操作永久禁用；分两行排布自适应宽度)
-        let actionBox = createSectionBox(title: "操作与维护 (只读受控)")
-        let actStack = NSStackView()
-        actStack.orientation = .vertical
-        actStack.alignment = .leading
-        actStack.spacing = 10
-
-        // 第1行：状态检查与刷新查询操作
-        let queryBtnRow = NSStackView()
-        queryBtnRow.orientation = .horizontal
-        queryBtnRow.spacing = 12
+        document.addSubview(contentStack)
+        scroll.documentView = document
+        view.addSubview(scroll)
 
         checkButton.target = self
         checkButton.action = #selector(handleCheckUpdate)
-        checkButton.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)
-        checkButton.imagePosition = .imageLeading
-        checkButton.setAccessibilityLabel("检查更新（只读查询）")
         refreshStatusButton.target = self
         refreshStatusButton.action = #selector(handleRefreshStatus)
-        refreshStatusButton.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
-        refreshStatusButton.imagePosition = .imageLeading
-        refreshStatusButton.setAccessibilityLabel("刷新更新状态（只读）")
+        let queries = NSStackView(views: [checkButton, refreshStatusButton])
+        queries.spacing = 12
+        contentStack.addArrangedSubview(queries)
 
-        queryBtnRow.addArrangedSubview(checkButton)
-        queryBtnRow.addArrangedSubview(refreshStatusButton)
-        actStack.addArrangedSubview(queryBtnRow)
+        let card = createSectionBox(title: "版本与更新")
+        let body = NSStackView()
+        body.orientation = .vertical
+        body.alignment = .leading
+        body.spacing = 16
+        currentReleaseLabel.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
+        body.addArrangedSubview(currentReleaseLabel)
+        candidateStatusLabel.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
+        body.addArrangedSubview(candidateStatusLabel)
+        candidateEmptyLabel.textColor = .secondaryLabelColor
+        body.addArrangedSubview(candidateEmptyLabel)
 
-        // 第2行：写操作受控入口 (本阶段永久禁用)
-        writeControlsNote.font = NSFont.systemFont(ofSize: 11)
-        writeControlsNote.textColor = .secondaryLabelColor
-        actStack.addArrangedSubview(writeControlsNote)
+        candidateDetailsContainer.orientation = .vertical
+        candidateDetailsContainer.alignment = .leading
+        candidateDetailsContainer.spacing = 10
+        let summary = NSGridView(views: [
+            [NSTextField(labelWithString: "目标版本:"), candidateVersionLabel],
+            [NSTextField(labelWithString: "发布时间"), candidatePublishedLabel],
+            [NSTextField(labelWithString: "适用环境"), compatibilityLabel]
+        ])
+        summary.rowSpacing = 8
+        summary.columnSpacing = 16
+        candidateDetailsContainer.addArrangedSubview(summary)
+        let notes = NSScrollView()
+        notes.translatesAutoresizingMaskIntoConstraints = false
+        notes.hasVerticalScroller = true
+        notes.drawsBackground = false
+        releaseNotesView.isEditable = false
+        releaseNotesView.font = NSFont.systemFont(ofSize: 13)
+        releaseNotesView.string = "（暂无发布说明）"
+        releaseNotesView.isVerticallyResizable = true
+        releaseNotesView.autoresizingMask = [.width]
+        releaseNotesView.textContainer?.widthTracksTextView = true
+        notes.documentView = releaseNotesView
+        candidateDetailsContainer.addArrangedSubview(notes)
+        notes.heightAnchor.constraint(equalToConstant: 110).isActive = true
+        notes.widthAnchor.constraint(equalTo: candidateDetailsContainer.widthAnchor).isActive = true
+        candidateDetailsContainer.isHidden = true
+        body.addArrangedSubview(candidateDetailsContainer)
 
-        let writeBtnRow = NSStackView()
-        writeBtnRow.orientation = .horizontal
-        writeBtnRow.spacing = 10
-
+        // Keep the existing read-only capability boundary; never simulate an update.
         downloadButton.target = self
-        downloadButton.action = #selector(handleDisabledWriteAction)
         installButton.target = self
-        installButton.action = #selector(handleDisabledWriteAction)
         deferButton.target = self
-        deferButton.action = #selector(handleDisabledWriteAction)
-
-        for (button, symbol, tip) in [
-            (downloadButton, "arrow.down.circle", "只读阶段不可用：不会下载更新包"),
-            (installButton, "shippingbox", "只读阶段不可用：不会安装或重启"),
-            (deferButton, "clock", "只读阶段不可用：不会修改更新计划")
-        ] {
+        for button in [downloadButton, installButton, deferButton] {
+            button.action = #selector(handleDisabledWriteAction)
             button.isEnabled = false
-            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
-            button.imagePosition = .imageLeading
-            button.toolTip = tip
-            button.setAccessibilityLabel("\(button.title)（当前只读阶段不可用）")
+            button.toolTip = "当前仅支持检查状态，此操作尚未启用"
         }
-
-        writeBtnRow.addArrangedSubview(downloadButton)
-        writeBtnRow.addArrangedSubview(installButton)
-        writeBtnRow.addArrangedSubview(deferButton)
-        actStack.addArrangedSubview(writeBtnRow)
-
+        let writes = NSStackView(views: [downloadButton])
+        writes.spacing = 12
+        body.addArrangedSubview(writes)
         actionFeedbackLabel.font = NSFont.systemFont(ofSize: 12)
         actionFeedbackLabel.textColor = .secondaryLabelColor
-        actStack.addArrangedSubview(actionFeedbackLabel)
+        body.addArrangedSubview(actionFeedbackLabel)
 
-        actionBox.setContent(actStack)
-        contentStack.addArrangedSubview(actionBox)
+        transactionDetails.orientation = .vertical
+        transactionDetails.alignment = .leading
+        transactionDetails.spacing = 8
+        transactionDetails.addArrangedSubview(currentStageLabel)
+        progressBar.minValue = 0
+        progressBar.maxValue = 100
+        progressBar.widthAnchor.constraint(equalToConstant: 280).isActive = true
+        transactionDetails.addArrangedSubview(progressBar)
+        transactionDetails.addArrangedSubview(progressDetailLabel)
+        transactionDetails.addArrangedSubview(drainWarningLabel)
+        transactionDetails.isHidden = true
+        body.addArrangedSubview(transactionDetails)
 
-        let document = FlippedView()
-        document.translatesAutoresizingMaskIntoConstraints = false
-        document.addSubview(contentStack)
-        scrollView.documentView = document
-        view.addSubview(scrollView)
+        recoveryBox.title = "需要人工恢复"
+        recoveryDetailsLabel.textColor = .systemRed
+        recoveryBox.setContent(recoveryDetailsLabel)
+        recoveryBox.isHidden = true
+        body.addArrangedSubview(recoveryBox)
 
-        NSLayoutConstraint.activate([
-            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            scrollView.topAnchor.constraint(equalTo: view.topAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-
-            document.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
-            document.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
-            document.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
-
-            contentStack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 20),
-            contentStack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -20),
-            contentStack.topAnchor.constraint(equalTo: document.topAnchor, constant: 16),
-            contentStack.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -16),
-
-            readOnlyBanner.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
-            currentBox.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
-            candidateBox.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
-            pipelineBox.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
-            recoveryBox.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
-            actionBox.widthAnchor.constraint(equalTo: contentStack.widthAnchor)
+        detailsButton.target = self
+        detailsButton.action = #selector(toggleTechnicalDetails)
+        body.addArrangedSubview(detailsButton)
+        technicalDetails.orientation = .vertical
+        technicalDetails.alignment = .leading
+        technicalDetails.spacing = 10
+        let grid = NSGridView(views: [
+            [NSTextField(labelWithString: "核心编译版本"), coreVersionLabel],
+            [NSTextField(labelWithString: "整套安装序列"), currentSeqLabel],
+            [NSTextField(labelWithString: "防降级高水位"), guardSeqLabel],
+            [NSTextField(labelWithString: "发布状态与来源"), releaseTrustLabel],
+            [NSTextField(labelWithString: "宿主运行架构"), architectureLabel],
+            [NSTextField(labelWithString: "组件一致性"), consistencyBadge],
+            [NSTextField(labelWithString: "维护抑制状态"), supervisorStatusLabel],
+            [NSTextField(labelWithString: "更新包大小"), candidateSizeLabel],
+            [NSTextField(labelWithString: "发布者验证"), publisherVerificationBadge],
+            [NSTextField(labelWithString: "本机重签名"), localSigningLabel]
         ])
+        grid.rowSpacing = 8
+        grid.columnSpacing = 16
+        technicalDetails.addArrangedSubview(grid)
+        let unavailableActions = NSStackView(views: [installButton, deferButton])
+        unavailableActions.spacing = 12
+        technicalDetails.addArrangedSubview(unavailableActions)
+        technicalDetails.addArrangedSubview(pipelineStepsLabel)
+        technicalDetails.addArrangedSubview(permissionsNoteLabel)
+        technicalDetails.addArrangedSubview(writeControlsNote)
+        technicalDetails.isHidden = true
+        body.addArrangedSubview(technicalDetails)
+        card.setContent(body, inset: 16)
+        contentStack.addArrangedSubview(card)
+        NSLayoutConstraint.activate([
+            scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: view.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            document.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            document.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            document.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            contentStack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 24),
+            contentStack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -24),
+            contentStack.topAnchor.constraint(equalTo: document.topAnchor, constant: 8),
+            contentStack.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -24),
+            card.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
+            candidateDetailsContainer.widthAnchor.constraint(equalTo: body.widthAnchor),
+            technicalDetails.widthAnchor.constraint(equalTo: body.widthAnchor)
+        ])
+    }
+
+    @objc private func toggleTechnicalDetails() {
+        technicalDetails.isHidden = detailsButton.state != .on
     }
 
     private func createSectionBox(title: String) -> NSBox {
@@ -911,7 +743,7 @@ public final class UpdatePageController: NSViewController {
                 consistencyBadge.stringValue = "整套组件版本一致"
                 consistencyBadge.textColor = .systemGreen
             } else {
-                consistencyBadge.stringValue = "⚠️ 组件版本不一致"
+                consistencyBadge.stringValue = "组件版本不一致"
                 consistencyBadge.textColor = .systemRed
             }
         } else {
@@ -1034,6 +866,9 @@ public final class UpdatePageController: NSViewController {
     }
 
     private func updateTransactionUI(_ transaction: UpdateTransactionInfo) {
+        transactionDetails.isHidden = transaction.status == .idle && !transaction.recoveryRequired
+        progressBar.isIndeterminate = transaction.status == .inProgress
+        if progressBar.isIndeterminate { progressBar.startAnimation(nil) } else { progressBar.stopAnimation(nil) }
         if transaction.recoveryRequired {
             currentStageLabel.stringValue = "故障需要恢复 (\(transaction.stage ?? "Unknown"))"
             currentStageLabel.textColor = .systemRed
@@ -1059,7 +894,7 @@ public final class UpdatePageController: NSViewController {
             currentStageLabel.stringValue = "状态: \(stageName) (外部事务)"
             currentStageLabel.textColor = .systemBlue
             if stageName == "Draining" {
-                drainWarningLabel.stringValue = "⚠️ 外部更新事务处于排空等待态；当前界面为只读，延期请由管理员命令行协调。"
+                drainWarningLabel.stringValue = "外部更新事务处于排空等待态；当前界面为只读，延期请由管理员命令行协调。"
             } else {
                 drainWarningLabel.stringValue = ""
             }

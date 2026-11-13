@@ -177,7 +177,7 @@ public final class SettingsPageController: NSViewController {
             [NSTextField(labelWithString: "API 密钥:"), keyStatusLabel]
         ])
         accGrid.translatesAutoresizingMaskIntoConstraints = false
-        accGrid.rowSpacing = 6
+        accGrid.rowSpacing = 10
         accGrid.columnSpacing = 12
         accountBox.setContent(accGrid)
         contentStack.addArrangedSubview(accountBox)
@@ -185,15 +185,15 @@ public final class SettingsPageController: NSViewController {
         // 3. 回复节奏与附件配置
         let paceBox = createSectionBox(title: "回复节奏与运行参数")
         let paceGrid = NSGridView(views: [
-            [NSTextField(labelWithString: "冷却时间 (cooldown_seconds):"), cooldownField, NSTextField(labelWithString: "0–300 秒 (默认 15)")],
-            [NSTextField(labelWithString: "每小时上限 (max_replies_per_hour):"), maxRepliesField, NSTextField(labelWithString: "1–100 条 (默认 20)")],
-            [NSTextField(labelWithString: "静默等待 (turn_quiet_seconds):"), quietSecField, NSTextField(labelWithString: "0–120 秒 (默认 10)")],
-            [NSTextField(labelWithString: "单轮最长 (turn_max_seconds):"), maxSecField, NSTextField(labelWithString: "10–600 秒 (默认 60)")],
-            [NSTextField(labelWithString: "上下文条数 (context_messages):"), contextMsgField, NSTextField(labelWithString: "0–100 条 (默认 5)")],
-            [NSTextField(labelWithString: "附件上限 (max_attachment_mb):"), maxAttachmentField, NSTextField(labelWithString: "1–200 MB (默认 50)")]
+            [NSTextField(labelWithString: "冷却时间:"), cooldownField, NSTextField(labelWithString: "0–300 秒 (默认 15)")],
+            [NSTextField(labelWithString: "每小时上限:"), maxRepliesField, NSTextField(labelWithString: "1–100 条 (默认 20)")],
+            [NSTextField(labelWithString: "静默等待:"), quietSecField, NSTextField(labelWithString: "0–120 秒 (默认 10)")],
+            [NSTextField(labelWithString: "单轮最长:"), maxSecField, NSTextField(labelWithString: "10–600 秒 (默认 60)")],
+            [NSTextField(labelWithString: "上下文条数:"), contextMsgField, NSTextField(labelWithString: "0–100 条 (默认 5)")],
+            [NSTextField(labelWithString: "附件上限:"), maxAttachmentField, NSTextField(labelWithString: "1–200 MB (默认 50)")]
         ])
         paceGrid.translatesAutoresizingMaskIntoConstraints = false
-        paceGrid.rowSpacing = 6
+        paceGrid.rowSpacing = 12
         paceGrid.columnSpacing = 12
 
         for f in [cooldownField, maxRepliesField, quietSecField, maxSecField, contextMsgField, maxAttachmentField] {
@@ -269,8 +269,8 @@ public final class SettingsPageController: NSViewController {
             document.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
             document.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
             document.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
-            contentStack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 20),
-            contentStack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -20),
+            contentStack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 24),
+            contentStack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -24),
             contentStack.topAnchor.constraint(equalTo: document.topAnchor, constant: 16),
             contentStack.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -16),
             permBox.widthAnchor.constraint(equalTo: contentStack.widthAnchor),

@@ -54,13 +54,14 @@ final class HostAppDelegate: NSObject, NSApplicationDelegate {
         termSource.resume()
         terminationSignal = termSource
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 860, height: 760),
+            contentRect: NSRect(x: 0, y: 0, width: 1180, height: 800),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "微信客服助手"
         window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 900, height: 640)
 
         let controller = StatusPanelController(worker: worker, coreSupervisor: coreSupervisor)
         self.panelController = controller
@@ -80,8 +81,9 @@ final class HostAppDelegate: NSObject, NSApplicationDelegate {
         shell.register(page: BrainPageController(context: controller), id: "brain", title: "大脑")
         shell.register(page: McpPageController(context: controller), id: "mcp", title: "MCP")
         shell.register(page: settingsPage, id: "settings", title: "设置")
-        shell.register(page: UpdatePageController(context: controller), id: "update", title: "应用更新")
         shell.register(page: LogsPageController(context: controller), id: "logs", title: "日志")
+
+        shell.register(page: UpdatePageController(context: controller), id: "update", title: "应用更新")
 
         window.contentViewController = shell
 

@@ -6,7 +6,7 @@ public final class OverviewPageController: NSViewController {
     private let context: StatusPanelController
 
     // Top metrics
-    private let totalRepliesLabel = NSTextField(labelWithString: "今日回复: -")
+    private let totalRepliesLabel = NSTextField(labelWithString: "今日回复: —")
     private let activeSessionsLabel = NSTextField(labelWithString: "监听会话: -")
     private let pendingHandoffLabel = NSTextField(labelWithString: "待人工: -")
 
@@ -45,7 +45,7 @@ public final class OverviewPageController: NSViewController {
         let mainStack = NSStackView()
         mainStack.orientation = .vertical
         mainStack.alignment = .leading
-        mainStack.spacing = 16
+        mainStack.spacing = 24
         mainStack.translatesAutoresizingMaskIntoConstraints = false
 
         // 1. Top Card: Metrics and Primary Actions
@@ -54,23 +54,28 @@ public final class OverviewPageController: NSViewController {
         topCard.titleFont = NSFont.systemFont(ofSize: 13, weight: .bold)
 
         let topStack = NSStackView()
-        topStack.orientation = .horizontal
-        topStack.alignment = .centerY
+        topStack.orientation = .vertical
+        topStack.alignment = .leading
         topStack.spacing = 16
-
-        for lbl in [totalRepliesLabel, activeSessionsLabel, pendingHandoffLabel] {
-            lbl.font = NSFont.systemFont(ofSize: 13, weight: .medium)
-            topStack.addArrangedSubview(lbl)
+        let metrics = NSStackView()
+        metrics.distribution = .fillEqually
+        metrics.spacing = 12
+        for label in [totalRepliesLabel, activeSessionsLabel, pendingHandoffLabel] {
+            label.font = NSFont.systemFont(ofSize: 16, weight: .semibold)
+            let card = NSBox()
+            card.titlePosition = .noTitle
+            card.setContent(label, inset: 16)
+            metrics.addArrangedSubview(card)
         }
-
         recheckButton.target = self
         recheckButton.action = #selector(handleRecheck)
         pauseResumeButton.target = self
         pauseResumeButton.action = #selector(handlePauseResume)
-
-        topStack.addArrangedSubview(recheckButton)
-        topStack.addArrangedSubview(pauseResumeButton)
-
+        let actions = NSStackView(views: [recheckButton, pauseResumeButton])
+        actions.spacing = 12
+        topStack.addArrangedSubview(metrics)
+        topStack.addArrangedSubview(actions)
+        metrics.widthAnchor.constraint(equalTo: topStack.widthAnchor).isActive = true
         topCard.setContent(topStack)
         mainStack.addArrangedSubview(topCard)
 
@@ -97,7 +102,7 @@ public final class OverviewPageController: NSViewController {
             document.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
             document.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
             document.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
-            mainStack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 20),
+            mainStack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 24),
             mainStack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -20),
             mainStack.topAnchor.constraint(equalTo: document.topAnchor, constant: 16),
             mainStack.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -16),
@@ -150,11 +155,10 @@ public final class OverviewPageController: NSViewController {
         let descText = item.fix != nil ? "\(item.reason) （建议: \(item.fix!)）" : item.reason
         let descLbl = NSTextField(wrappingLabelWithString: descText)
         descLbl.font = NSFont.systemFont(ofSize: 12)
-        descLbl.widthAnchor.constraint(lessThanOrEqualToConstant: 380).isActive = true
+        descLbl.textColor = .secondaryLabelColor
 
         rowStack.addArrangedSubview(dot)
         rowStack.addArrangedSubview(titleLbl)
-        rowStack.addArrangedSubview(descLbl)
 
         // 行内操作按钮
         if item.key == "desktop_service" {
@@ -173,7 +177,11 @@ public final class OverviewPageController: NSViewController {
             rowStack.addArrangedSubview(accBtn)
         }
 
-        return rowStack
+        let group = NSStackView(views: [rowStack, descLbl])
+        group.orientation = .vertical
+        group.alignment = .leading
+        group.spacing = 6
+        return group
     }
 
     private func itemTitle(key: String) -> String {
