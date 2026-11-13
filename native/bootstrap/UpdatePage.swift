@@ -490,6 +490,9 @@ public final class UpdatePageController: NSViewController {
     private let localSigningLabel = NSTextField(wrappingLabelWithString: "-")
     private let compatibilityLabel = NSTextField(wrappingLabelWithString: "-")
     private let releaseNotesView = NSTextView()
+    private let candidateEmptyLabel = NSTextField(wrappingLabelWithString: "尚未检查更新。点击「检查更新」读取授权清单状态；未配置更新源时不会联网或下载。")
+    private let candidateDetailsContainer = NSStackView()
+    private let readOnlyBadge = NSTextField(labelWithString: "只读")
 
     // UI - 流程流水线与进度
     private let pipelineStepsLabel = NSTextField(wrappingLabelWithString: "检查 → 下载 → 验证 → 本机签名 → 等待排空 → 备份 → 安装 → 自检")
@@ -502,9 +505,10 @@ public final class UpdatePageController: NSViewController {
     // UI - 操作按钮 (只读阶段全部禁用写操作，分行排布)
     private let checkButton = NSButton(title: "检查更新", target: nil, action: nil)
     private let refreshStatusButton = NSButton(title: "刷新状态", target: nil, action: nil)
-    private let downloadButton = NSButton(title: "下载更新 (未启用)", target: nil, action: nil)
-    private let installButton = NSButton(title: "安装并重启 (未启用)", target: nil, action: nil)
-    private let deferButton = NSButton(title: "延期更新 (未启用)", target: nil, action: nil)
+    private let downloadButton = NSButton(title: "下载更新", target: nil, action: nil)
+    private let installButton = NSButton(title: "安装并重启", target: nil, action: nil)
+    private let deferButton = NSButton(title: "延期更新", target: nil, action: nil)
+    private let writeControlsNote = NSTextField(wrappingLabelWithString: "受控写入（当前未启用）：下载、安装、延期由真实更新事务控制，界面不会模拟成功。")
     private let actionFeedbackLabel = NSTextField(wrappingLabelWithString: "当前处于只读状态查看阶段；真实下载、安装、排空延期与恢复写入均已安全禁用。")
 
     // UI - 恢复卡片 (当出现 recovery_required 时高亮)
@@ -543,18 +547,72 @@ public final class UpdatePageController: NSViewController {
 
         contentStack.orientation = .vertical
         contentStack.alignment = .leading
-        contentStack.spacing = 16
+        contentStack.spacing = 14
         contentStack.translatesAutoresizingMaskIntoConstraints = false
 
-        // 1. 标题
-        let headerLabel = NSTextField(labelWithString: "应用版本更新 (只读状态)")
-        headerLabel.font = NSFont.systemFont(ofSize: 18, weight: .bold)
-        contentStack.addArrangedSubview(headerLabel)
+        // 1. 标题与只读标识
+        let headerLabel = NSTextField(labelWithString: "应用版本更新")
+        headerLabel.font = NSFont.systemFont(ofSize: 20, weight: .bold)
 
-        let introLabel = NSTextField(wrappingLabelWithString: "管理微信客服助手整套原生组件与核心服务更新。当前处于 I6 限定审查阶段，界面严格以真实读模型为准，真实更新写入处于 unsupported 禁用状态。")
-        introLabel.font = NSFont.systemFont(ofSize: 12)
-        introLabel.textColor = .secondaryLabelColor
-        contentStack.addArrangedSubview(introLabel)
+        let headerRow = NSStackView()
+        headerRow.orientation = .horizontal
+        headerRow.alignment = .centerY
+        headerRow.spacing = 10
+        headerRow.addArrangedSubview(headerLabel)
+        let headerSpacer = NSView()
+        headerSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        headerRow.addArrangedSubview(headerSpacer)
+
+        readOnlyBadge.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        readOnlyBadge.alignment = .center
+        readOnlyBadge.textColor = .white
+        readOnlyBadge.wantsLayer = true
+        readOnlyBadge.layer?.backgroundColor = NSColor.systemOrange.cgColor
+        readOnlyBadge.layer?.cornerRadius = 8
+        readOnlyBadge.layer?.masksToBounds = true
+        readOnlyBadge.setAccessibilityLabel("当前为只读阶段")
+        readOnlyBadge.widthAnchor.constraint(equalToConstant: 46).isActive = true
+        readOnlyBadge.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        headerRow.addArrangedSubview(readOnlyBadge)
+        contentStack.addArrangedSubview(headerRow)
+
+        let subtitleLabel = NSTextField(wrappingLabelWithString: "查看当前版本、候选版本与更新事务。本阶段不会下载、安装或重启。")
+        subtitleLabel.font = NSFont.systemFont(ofSize: 12)
+        subtitleLabel.textColor = .secondaryLabelColor
+        contentStack.addArrangedSubview(subtitleLabel)
+
+        // 1b. 只读说明条（始终可见，避免用户误以为写入按钮坏了）
+        let readOnlyBanner = NSBox()
+        readOnlyBanner.boxType = .custom
+        readOnlyBanner.fillColor = NSColor.systemOrange.withAlphaComponent(0.10)
+        readOnlyBanner.borderColor = NSColor.systemOrange.withAlphaComponent(0.25)
+        readOnlyBanner.titlePosition = .noTitle
+        readOnlyBanner.translatesAutoresizingMaskIntoConstraints = false
+
+        let lockImage = NSImageView(image: NSImage(systemSymbolName: "lock.shield", accessibilityDescription: nil) ?? NSImage())
+        lockImage.contentTintColor = .systemOrange
+        lockImage.translatesAutoresizingMaskIntoConstraints = false
+        lockImage.widthAnchor.constraint(equalToConstant: 18).isActive = true
+        lockImage.heightAnchor.constraint(equalToConstant: 18).isActive = true
+
+        let bannerText = NSStackView()
+        bannerText.orientation = .vertical
+        bannerText.alignment = .leading
+        bannerText.spacing = 2
+        let bannerTitle = NSTextField(labelWithString: "当前为只读阶段")
+        bannerTitle.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        let bannerDetail = NSTextField(wrappingLabelWithString: "下载、安装、延期与恢复写入均未启用；所有状态来自真实读模型，界面不模拟成功。")
+        bannerDetail.font = NSFont.systemFont(ofSize: 11)
+        bannerDetail.textColor = .secondaryLabelColor
+        bannerText.addArrangedSubview(bannerTitle)
+        bannerText.addArrangedSubview(bannerDetail)
+
+        let bannerRow = NSStackView(views: [lockImage, bannerText])
+        bannerRow.orientation = .horizontal
+        bannerRow.alignment = .top
+        bannerRow.spacing = 10
+        readOnlyBanner.setContent(bannerRow)
+        contentStack.addArrangedSubview(readOnlyBanner)
 
         // 2. 当前版本卡片
         let currentBox = createSectionBox(title: "当前运行环境 (真实读模型)")
@@ -592,6 +650,11 @@ public final class UpdatePageController: NSViewController {
         candidateStatusLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         candidateStatusLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 580).isActive = true
 
+        candidateEmptyLabel.font = NSFont.systemFont(ofSize: 11)
+        candidateEmptyLabel.textColor = .secondaryLabelColor
+        candidateEmptyLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 580).isActive = true
+        candStack.addArrangedSubview(candidateEmptyLabel)
+
         let candGrid = NSGridView(views: [
             [NSTextField(labelWithString: "目标版本:"), candidateVersionLabel],
             [NSTextField(labelWithString: "发布时间:"), candidatePublishedLabel],
@@ -608,11 +671,15 @@ public final class UpdatePageController: NSViewController {
         publisherVerificationBadge.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
         localSigningLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
         compatibilityLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
-        candStack.addArrangedSubview(candGrid)
+
+        candidateDetailsContainer.orientation = .vertical
+        candidateDetailsContainer.alignment = .leading
+        candidateDetailsContainer.spacing = 8
+        candidateDetailsContainer.addArrangedSubview(candGrid)
 
         let notesTitle = NSTextField(labelWithString: "版本发布说明:")
         notesTitle.font = NSFont.systemFont(ofSize: 12, weight: .bold)
-        candStack.addArrangedSubview(notesTitle)
+        candidateDetailsContainer.addArrangedSubview(notesTitle)
 
         let notesScroll = NSScrollView()
         notesScroll.translatesAutoresizingMaskIntoConstraints = false
@@ -624,7 +691,9 @@ public final class UpdatePageController: NSViewController {
         releaseNotesView.font = NSFont.systemFont(ofSize: 11)
         releaseNotesView.string = "（暂无发布说明）"
         notesScroll.documentView = releaseNotesView
-        candStack.addArrangedSubview(notesScroll)
+        candidateDetailsContainer.addArrangedSubview(notesScroll)
+        candStack.addArrangedSubview(candidateDetailsContainer)
+        candidateDetailsContainer.isHidden = true
 
         candidateBox.setContent(candStack)
         contentStack.addArrangedSubview(candidateBox)
@@ -675,12 +744,16 @@ public final class UpdatePageController: NSViewController {
         contentStack.addArrangedSubview(pipelineBox)
 
         // 5. 失败恢复指引卡片
-        recoveryBox.title = "⚠️ 故障恢复指引 (只读状态)"
+        recoveryBox.title = "需要人工恢复"
         recoveryBox.titleFont = NSFont.systemFont(ofSize: 13, weight: .bold)
-        recoveryBox.boxType = .primary
+        recoveryBox.boxType = .custom
+        recoveryBox.fillColor = NSColor.systemRed.withAlphaComponent(0.08)
+        recoveryBox.borderColor = NSColor.systemRed.withAlphaComponent(0.30)
+        recoveryBox.titlePosition = .atTop
         recoveryBox.translatesAutoresizingMaskIntoConstraints = false
-        recoveryDetailsLabel.font = NSFont.systemFont(ofSize: 12)
-        recoveryDetailsLabel.textColor = .systemRed
+        recoveryDetailsLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        recoveryDetailsLabel.textColor = .labelColor
+        recoveryDetailsLabel.maximumNumberOfLines = 0
         let recStack = NSStackView()
         recStack.orientation = .vertical
         recStack.alignment = .leading
@@ -704,14 +777,24 @@ public final class UpdatePageController: NSViewController {
 
         checkButton.target = self
         checkButton.action = #selector(handleCheckUpdate)
+        checkButton.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)
+        checkButton.imagePosition = .imageLeading
+        checkButton.setAccessibilityLabel("检查更新（只读查询）")
         refreshStatusButton.target = self
         refreshStatusButton.action = #selector(handleRefreshStatus)
+        refreshStatusButton.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
+        refreshStatusButton.imagePosition = .imageLeading
+        refreshStatusButton.setAccessibilityLabel("刷新更新状态（只读）")
 
         queryBtnRow.addArrangedSubview(checkButton)
         queryBtnRow.addArrangedSubview(refreshStatusButton)
         actStack.addArrangedSubview(queryBtnRow)
 
         // 第2行：写操作受控入口 (本阶段永久禁用)
+        writeControlsNote.font = NSFont.systemFont(ofSize: 11)
+        writeControlsNote.textColor = .secondaryLabelColor
+        actStack.addArrangedSubview(writeControlsNote)
+
         let writeBtnRow = NSStackView()
         writeBtnRow.orientation = .horizontal
         writeBtnRow.spacing = 10
@@ -723,9 +806,17 @@ public final class UpdatePageController: NSViewController {
         deferButton.target = self
         deferButton.action = #selector(handleDisabledWriteAction)
 
-        downloadButton.isEnabled = false
-        installButton.isEnabled = false
-        deferButton.isEnabled = false
+        for (button, symbol, tip) in [
+            (downloadButton, "arrow.down.circle", "只读阶段不可用：不会下载更新包"),
+            (installButton, "shippingbox", "只读阶段不可用：不会安装或重启"),
+            (deferButton, "clock", "只读阶段不可用：不会修改更新计划")
+        ] {
+            button.isEnabled = false
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+            button.imagePosition = .imageLeading
+            button.toolTip = tip
+            button.setAccessibilityLabel("\(button.title)（当前只读阶段不可用）")
+        }
 
         writeBtnRow.addArrangedSubview(downloadButton)
         writeBtnRow.addArrangedSubview(installButton)
@@ -760,6 +851,7 @@ public final class UpdatePageController: NSViewController {
             contentStack.topAnchor.constraint(equalTo: document.topAnchor, constant: 16),
             contentStack.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -16),
 
+            readOnlyBanner.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
             currentBox.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
             candidateBox.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
             pipelineBox.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
@@ -773,6 +865,7 @@ public final class UpdatePageController: NSViewController {
         box.title = title
         box.titleFont = NSFont.systemFont(ofSize: 13, weight: .bold)
         box.boxType = .primary
+        box.contentViewMargins = NSSize(width: 12, height: 10)
         box.translatesAutoresizingMaskIntoConstraints = false
         return box
     }
@@ -842,6 +935,14 @@ public final class UpdatePageController: NSViewController {
     public func applyCheckResult(_ result: UpdateCheckResult) {
         self.currentCheckResult = result
 
+        let showsCandidateDetails = result.status != .unconfigured
+        candidateDetailsContainer.isHidden = !showsCandidateDetails
+        candidateEmptyLabel.isHidden = showsCandidateDetails
+        let friendlyReason = friendlyCheckReason(result.reason)
+        if case .unconfigured = result.status {
+            candidateEmptyLabel.stringValue = friendlyReason
+        }
+
         switch result.status {
         case .unconfigured:
             candidateStatusLabel.stringValue = "更新源尚未配置"
@@ -852,7 +953,7 @@ public final class UpdatePageController: NSViewController {
             publisherVerificationBadge.stringValue = "未配置公钥根"
             publisherVerificationBadge.textColor = .secondaryLabelColor
             localSigningLabel.stringValue = "未配置发布源，禁止重签"
-            compatibilityLabel.stringValue = result.reason ?? "生产环境下需配置授权更新清单；禁止任意未经验证的网络下载"
+            compatibilityLabel.stringValue = friendlyReason
             releaseNotesView.string = "系统未配置已批准的更新清单或分发源。为保障微信业务与专用机安全，禁止使用任意 URL 下载执行内容。"
 
         case .unverifiedTrustRoot:
@@ -920,6 +1021,16 @@ public final class UpdatePageController: NSViewController {
         downloadButton.isEnabled = false
         installButton.isEnabled = false
         deferButton.isEnabled = false
+    }
+
+    private func friendlyCheckReason(_ reason: String?) -> String {
+        guard let reason, !reason.isEmpty else {
+            return "尚未配置授权更新清单；当前不会联网、下载或安装。"
+        }
+        if reason == "distribution_source_not_configured" {
+            return "尚未配置授权更新源；当前仅展示本地状态，不会联网、下载或安装。"
+        }
+        return reason
     }
 
     private func updateTransactionUI(_ transaction: UpdateTransactionInfo) {

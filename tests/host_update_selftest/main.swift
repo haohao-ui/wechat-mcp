@@ -471,7 +471,28 @@ func runTests() -> Int32 {
             candidate: nil,
             verification: nil
         ))
-        
+
+        func collectViews(_ root: NSView) -> [NSView] {
+            [root] + root.subviews.flatMap { collectViews($0) }
+        }
+        func visibleText(_ root: NSView, _ text: String) -> Bool {
+            collectViews(root).contains { view in
+                guard let field = view as? NSTextField else { return false }
+                return field.stringValue == text && !field.isHiddenOrHasHiddenAncestor
+            }
+        }
+        let unconfiguredButtons = collectViews(updateVC.view).compactMap { $0 as? NSButton }
+        for title in ["下载更新", "安装并重启", "延期更新"] {
+            check(
+                "write_button_disabled_unconfigured_\(title)",
+                unconfiguredButtons.first(where: { $0.title == title })?.isEnabled == false
+            )
+        }
+        check(
+            "candidate_details_hidden_when_unconfigured",
+            !visibleText(updateVC.view, "目标版本:")
+        )
+
         // 隔离固定 1x Viewport 渲染器（解耦宿主显示器 Retina/非 Retina 分辨率依赖）
         func makeIsolatedViewportRep(size: NSSize) -> NSBitmapImageRep? {
             let rep = NSBitmapImageRep(
@@ -524,6 +545,33 @@ func runTests() -> Int32 {
             try? pngData680_1.write(to: URL(fileURLWithPath: outPath680_1))
             check("offscreen_unconfigured_680w_saved", FileManager.default.fileExists(atPath: outPath680_1))
         }
+
+        // 11.1b 可用候选状态：即使显示“可用”，只读阶段写按钮仍必须禁用
+        updateVC.applyCheckResult(UpdateCheckResult(
+            status: .available,
+            reason: nil,
+            candidate: UpdateCandidateDetail(
+                releaseId: "0.2.0-aarch64",
+                sequence: 2,
+                publishedAt: "2026-11-10T12:00:00Z",
+                sizeBytes: 10485760,
+                releaseNotes: "1. 增加大脑界面管理\n2. 优化会话追溯",
+                compatible: true,
+                requiresLocalSigning: true
+            ),
+            verification: UpdateVerificationInfo(publisherVerified: true, keyId: "release-v1")
+        ))
+        let availableButtons = collectViews(updateVC.view).compactMap { $0 as? NSButton }
+        for title in ["下载更新", "安装并重启", "延期更新"] {
+            check(
+                "write_button_disabled_available_\(title)",
+                availableButtons.first(where: { $0.title == title })?.isEnabled == false
+            )
+        }
+        check(
+            "candidate_details_visible_when_available",
+            visibleText(updateVC.view, "目标版本:")
+        )
 
         // 11.2 故障恢复状态渲染（720宽与680宽分别展开恢复卡、受控说明、事务 ID、两行禁用按钮）
         updateVC.applyStatusPayload(UpdateStatusPayload(
