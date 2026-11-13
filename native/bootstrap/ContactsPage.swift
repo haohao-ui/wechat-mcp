@@ -415,7 +415,7 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         contactsTable.intercellSpacing = NSSize(width: 6, height: contactsTable.intercellSpacing.height)
         contactsTable.dataSource = self
         contactsTable.delegate = self
-        contactsTable.rowHeight = 32
+        contactsTable.rowHeight = 38
         tableScroll.documentView = contactsTable
 
         // 右侧详情

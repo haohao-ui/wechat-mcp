@@ -268,9 +268,9 @@ public final class McpPageController: NSViewController {
 
         // 外部大脑参数
         let extParamsGrid = NSGridView(views: [
-            [NSTextField(labelWithString: "等待回复 (timeout_seconds):"), timeoutField, NSTextField(labelWithString: "1–3600 秒 (默认 120)")],
-            [NSTextField(labelWithString: "超时后动作 (timeout_action):"), timeoutActionPopup, NSTextField(labelWithString: "skip=跳过, handoff=转人工, builtin=改用内置")],
-            [NSTextField(labelWithString: "最长排队 (queue_minutes):"), queueMinutesField, NSTextField(labelWithString: "1–1440 分钟 (默认 30)")]
+            [NSTextField(labelWithString: "等待回复:"), timeoutField, NSTextField(labelWithString: "1–3600 秒 (默认 120)")],
+            [NSTextField(labelWithString: "超时后动作:"), timeoutActionPopup, NSTextField(labelWithString: "skip=跳过, handoff=转人工, builtin=改用内置")],
+            [NSTextField(labelWithString: "最长排队:"), queueMinutesField, NSTextField(labelWithString: "1–1440 分钟 (默认 30)")]
         ])
         extParamsGrid.rowSpacing = 6
         extParamsGrid.columnSpacing = 10

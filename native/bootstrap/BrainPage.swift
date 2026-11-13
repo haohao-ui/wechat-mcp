@@ -1262,7 +1262,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             splitView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             splitView.topAnchor.constraint(equalTo: view.topAnchor),
             splitView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            leftView.widthAnchor.constraint(equalToConstant: 180)
+            leftView.widthAnchor.constraint(equalToConstant: 168)
         ])
     }
 
@@ -1284,6 +1284,8 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         roleTable.doubleAction = #selector(handleEditRole)
         roleTable.toolTip = "双击角色名编辑"
         roleTable.rowHeight = 44
+        roleTable.style = .sourceList
+        roleTable.setAccessibilityLabel("角色列表")
         scroll.documentView = roleTable
 
         newRoleButton.target = self
@@ -1361,7 +1363,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         revisionStatusLabel.preferredMaxLayoutWidth = 500
 
         saveDraftButton.bezelStyle = .rounded
-        saveDraftButton.bezelColor = .controlAccentColor
+        saveDraftButton.bezelColor = .systemGreen
         saveDraftButton.contentTintColor = .white
         saveDraftButton.keyEquivalent = "s"
         saveDraftButton.keyEquivalentModifierMask = [.command]
@@ -1578,19 +1580,19 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         intro.preferredMaxLayoutWidth = 480
         stack.addArrangedSubview(intro)
 
-        let gRow = NSStackView(views: [NSTextField(labelWithString: "欢迎语 (greeting):"), greetingField])
+        let gRow = NSStackView(views: [NSTextField(labelWithString: "欢迎语:"), greetingField])
         greetingField.widthAnchor.constraint(equalToConstant: 320).isActive = true
         stack.addArrangedSubview(gRow)
 
-        let iRow = NSStackView(views: [NSTextField(labelWithString: "信息不足 (insufficient_info):"), insufficientInfoField])
+        let iRow = NSStackView(views: [NSTextField(labelWithString: "信息不足:"), insufficientInfoField])
         insufficientInfoField.widthAnchor.constraint(equalToConstant: 320).isActive = true
         stack.addArrangedSubview(iRow)
 
-        let u1Row = NSStackView(views: [NSTextField(labelWithString: "格式不支持 (unsupported_type):"), unreadableTypeField])
+        let u1Row = NSStackView(views: [NSTextField(labelWithString: "格式不支持:"), unreadableTypeField])
         unreadableTypeField.widthAnchor.constraint(equalToConstant: 320).isActive = true
         stack.addArrangedSubview(u1Row)
 
-        let u2Row = NSStackView(views: [NSTextField(labelWithString: "文件超限 (too_large):"), unreadableLargeField])
+        let u2Row = NSStackView(views: [NSTextField(labelWithString: "文件超限:"), unreadableLargeField])
         unreadableLargeField.widthAnchor.constraint(equalToConstant: 320).isActive = true
         stack.addArrangedSubview(u2Row)
 
@@ -1811,14 +1813,15 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         previewChatKindPopup.addItems(withTitles: ["私聊 (private)", "群聊 (group)"])
         let inputRow = NSStackView(views: [
             NSTextField(labelWithString: "模拟客户消息:"),
-            previewInputField,
-            previewChatKindPopup,
-            runPreviewButton
+            previewInputField
         ])
         previewInputField.widthAnchor.constraint(equalToConstant: 200).isActive = true
         runPreviewButton.target = self
         runPreviewButton.action = #selector(handleRunPreview)
         stack.addArrangedSubview(inputRow)
+        let previewActions = NSStackView(views: [previewChatKindPopup, runPreviewButton])
+        previewActions.spacing = 10
+        stack.addArrangedSubview(previewActions)
 
         stack.addArrangedSubview(NSTextField(labelWithString: "组装预览快照与决策:"))
         let resScroll = NSScrollView()
@@ -1851,12 +1854,28 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         case 5: targetView = previewView
         default: targetView = definitionView
         }
-        tabContainer.addSubview(targetView)
+        let scroll = NSScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.drawsBackground = false
+        let document = FlippedView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(targetView)
+        scroll.documentView = document
+        tabContainer.addSubview(scroll)
         NSLayoutConstraint.activate([
-            targetView.topAnchor.constraint(equalTo: tabContainer.topAnchor),
-            targetView.leadingAnchor.constraint(equalTo: tabContainer.leadingAnchor),
-            targetView.trailingAnchor.constraint(equalTo: tabContainer.trailingAnchor),
-            targetView.bottomAnchor.constraint(equalTo: tabContainer.bottomAnchor)
+            scroll.topAnchor.constraint(equalTo: tabContainer.topAnchor),
+            scroll.leadingAnchor.constraint(equalTo: tabContainer.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: tabContainer.trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: tabContainer.bottomAnchor),
+            document.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            document.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            document.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            targetView.topAnchor.constraint(equalTo: document.topAnchor),
+            targetView.leadingAnchor.constraint(equalTo: document.leadingAnchor),
+            targetView.trailingAnchor.constraint(equalTo: document.trailingAnchor),
+            targetView.bottomAnchor.constraint(equalTo: document.bottomAnchor)
         ])
     }
 

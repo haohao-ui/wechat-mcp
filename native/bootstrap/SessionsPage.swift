@@ -87,8 +87,8 @@ public final class SessionsPageController: NSViewController {
         detailTextView.string = "暂无选中轮次。请在上方输入框手动输入有效 turn_id 并点击查询，以查看详细快照、角色修订与发送状态。"
         textScroll.documentView = detailTextView
         textScroll.heightAnchor.constraint(equalToConstant: 180).isActive = true
-        textScroll.widthAnchor.constraint(equalToConstant: 640).isActive = true
         provStack.addArrangedSubview(textScroll)
+        textScroll.widthAnchor.constraint(equalTo: provStack.widthAnchor).isActive = true
 
         provenanceBox.setContent(provStack)
         mainStack.addArrangedSubview(provenanceBox)
@@ -107,7 +107,8 @@ public final class SessionsPageController: NSViewController {
             mainStack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -20),
             mainStack.topAnchor.constraint(equalTo: document.topAnchor, constant: 16),
             mainStack.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -16),
-            box.widthAnchor.constraint(equalTo: mainStack.widthAnchor)
+            box.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
+            provenanceBox.widthAnchor.constraint(equalTo: mainStack.widthAnchor)
         ])
     }
 
@@ -134,7 +135,7 @@ public final class SessionsPageController: NSViewController {
 
         let nameLbl = NSTextField(labelWithString: name)
         nameLbl.font = NSFont.systemFont(ofSize: 12, weight: .bold)
-        nameLbl.widthAnchor.constraint(equalToConstant: 180).isActive = true
+        nameLbl.widthAnchor.constraint(equalToConstant: 140).isActive = true
 
         let humanState = sessionStateHumanReadable(
             state: session.state,
@@ -143,9 +144,9 @@ public final class SessionsPageController: NSViewController {
             handoff: session.handoff
         )
 
-        let stateLbl = NSTextField(labelWithString: humanState)
+        let stateLbl = NSTextField(wrappingLabelWithString: humanState)
         stateLbl.font = NSFont.systemFont(ofSize: 12)
-        stateLbl.widthAnchor.constraint(equalToConstant: 240).isActive = true
+        stateLbl.widthAnchor.constraint(lessThanOrEqualToConstant: 320).isActive = true
 
         if session.handoff == true || session.state == "handoff" {
             stateLbl.textColor = .systemOrange

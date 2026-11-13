@@ -573,6 +573,14 @@ func runTests() -> Int32 {
             visibleText(updateVC.view, "目标版本:")
         )
 
+        let detailToggle = collectViews(updateVC.view).compactMap { $0 as? NSButton }.first { $0.title == "显示技术详情" }
+        check("technical_disclosure_available", detailToggle != nil)
+        check("technical_details_collapsed_initially", !visibleText(updateVC.view, "防降级高水位"))
+        detailToggle?.performClick(nil)
+        check("technical_details_expand_without_losing_diagnostics", visibleText(updateVC.view, "防降级高水位"))
+        detailToggle?.performClick(nil)
+        check("technical_details_collapse_again", !visibleText(updateVC.view, "防降级高水位"))
+
         // 11.2 故障恢复状态渲染（720宽与680宽分别展开恢复卡、受控说明、事务 ID、两行禁用按钮）
         updateVC.applyStatusPayload(UpdateStatusPayload(
             currentRelease: UpdateReleaseInfo(releaseId: "0.1.0-aarch64", sequence: 1, architecture: "aarch64", componentsConsistent: false),
