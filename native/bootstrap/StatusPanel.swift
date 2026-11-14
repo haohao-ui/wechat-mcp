@@ -2,6 +2,8 @@
 import Foundation
 import AppKit
 
+let hostStatusDidRefreshNotification = Notification.Name("WeChatHostStatusDidRefresh")
+
 /// 获取宿主程序当前版本号：优先读取 ~/.wechat-rpa/VERSION，其次读取 Info.plist 中的版本信息
 public func hostAppVersion() -> String {
     let home = FileManager.default.homeDirectoryForCurrentUser
@@ -396,6 +398,8 @@ public final class StatusPanelController: NSViewController {
         } else {
             pauseResumeButton.title = "暂停机器人"
         }
+        NotificationCenter.default.post(name: hostStatusDidRefreshNotification, object: self,
+                                        userInfo: ["items": items, "input": input])
     }
 
     private func collectStatusInput() -> StatusInput {

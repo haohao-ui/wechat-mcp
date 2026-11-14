@@ -30,7 +30,22 @@ public final class SessionsPageController: NSViewController {
     public override func viewDidLoad() {
         super.viewDidLoad()
         setupUI()
+        NotificationCenter.default.addObserver(self, selector: #selector(hostStatusRefreshed(_:)),
+                                               name: hostStatusDidRefreshNotification, object: context)
         refreshSessions()
+    }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
+
+    public override func viewWillAppear() {
+        super.viewWillAppear()
+        refreshSessions()
+    }
+
+    @objc private func hostStatusRefreshed(_ notification: Notification) {
+        guard view.window != nil,
+              let input = notification.userInfo?["input"] as? StatusInput else { return }
+        renderSessions(input.sessions)
     }
 
     private func setupUI() {
@@ -114,14 +129,18 @@ public final class SessionsPageController: NSViewController {
 
     public func refreshSessions() {
         let (_, input) = context.collectLatestStatus()
+        renderSessions(input.sessions)
+    }
+
+    private func renderSessions(_ sessions: [String: SessionHealthInput]) {
         sessionsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
-        if input.sessions.isEmpty {
+        if sessions.isEmpty {
             sessionsStack.addArrangedSubview(emptyLabel)
             return
         }
 
-        for (name, session) in input.sessions.sorted(by: { $0.key < $1.key }) {
+        for (name, session) in sessions.sorted(by: { $0.key < $1.key }) {
             let row = createSessionRow(name: name, session: session)
             sessionsStack.addArrangedSubview(row)
         }

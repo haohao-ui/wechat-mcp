@@ -33,7 +33,23 @@ public final class OverviewPageController: NSViewController {
     public override func viewDidLoad() {
         super.viewDidLoad()
         setupUI()
+        NotificationCenter.default.addObserver(self, selector: #selector(hostStatusRefreshed(_:)),
+                                               name: hostStatusDidRefreshNotification, object: context)
         refreshData()
+    }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
+
+    public override func viewWillAppear() {
+        super.viewWillAppear()
+        refreshData()
+    }
+
+    @objc private func hostStatusRefreshed(_ notification: Notification) {
+        guard view.window != nil,
+              let input = notification.userInfo?["input"] as? StatusInput,
+              let items = notification.userInfo?["items"] as? [StatusItem] else { return }
+        applyStatus(items: items, input: input)
     }
 
     private func setupUI() {
@@ -113,7 +129,10 @@ public final class OverviewPageController: NSViewController {
 
     public func refreshData() {
         let (items, input) = context.collectLatestStatus()
+        applyStatus(items: items, input: input)
+    }
 
+    private func applyStatus(items: [StatusItem], input: StatusInput) {
         // 统计指标
         let activeCount = input.sessions.filter { $0.value.state == "watching" || $0.value.state == "listening" }.count
         let handoffCount = input.sessions.filter { $0.value.handoff == true || $0.value.state == "handoff" }.count
