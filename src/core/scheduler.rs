@@ -616,7 +616,58 @@ impl BotCoordinator {
             }
         }
 
+        coord.restore_list_state();
         Ok(coord)
+    }
+
+    fn list_state_path(&self) -> PathBuf {
+        self.root.join("list-state.json")
+    }
+
+    fn active_chat_path(&self) -> PathBuf {
+        self.root.join("active-chat.json")
+    }
+
+    fn save_list_state(&self) {
+        let _ = write_private(&self.list_state_path(), &json!(self.list_state));
+    }
+
+    fn save_active_chat(&self) {
+        let _ = write_private(
+            &self.active_chat_path(),
+            &json!({"active": self.active_name, "at": (self.clock)()}),
+        );
+    }
+
+    /// Preview digests are the only signal a restart has for a message that arrived while the bot was
+    /// down and left no unread badge; an in-memory list state lost it and the chat was never visited
+    /// (device 2026-11-10: the paused 示例联系人甲 message stayed unanswered after the restart). Load it,
+    /// and on the first run of a build that did not persist it, check each allowlisted chat once.
+    fn restore_list_state(&mut self) {
+        if let Ok(saved) = read_json::<HashMap<String, ListState>>(&self.list_state_path()) {
+            self.list_state = saved;
+        } else if self.root.join("health.json").exists() {
+            let now = (self.clock)();
+            let names: Vec<String> = self
+                .config
+                .allowlist
+                .iter()
+                .map(|entry| entry.recipient.clone())
+                .collect();
+            for name in &names {
+                self.pending.entry(name.clone()).or_insert((now, 0));
+            }
+            self.log_event("list_state_bootstrap", json!({"sessions": names}));
+        }
+        if let Ok(saved) = read_json::<Value>(&self.active_chat_path()) {
+            if let Some(active) = saved.get("active").and_then(Value::as_str) {
+                if !active.is_empty() {
+                    let now = (self.clock)();
+                    self.pending.entry(active.to_string()).or_insert((now, 0));
+                    self.log_event("active_chat_resume", json!({"recipient": active}));
+                }
+            }
+        }
     }
 
     pub fn log_event(&self, event: &str, fields: Value) {
@@ -845,7 +896,7 @@ impl BotCoordinator {
             return Ok(());
         }
 
-        if let Some(cap) = &mut self.capture {
+        let switched = if let Some(cap) = &mut self.capture {
             if !cap.is_connected() {
                 cap.prepare_target(recipient, &root, &names, group);
                 cap.start().await?;
@@ -862,6 +913,12 @@ impl BotCoordinator {
                     "fallback": switch.get("fallback"),
                 }),
             );
+            true
+        } else {
+            false
+        };
+        if switched {
+            self.save_active_chat();
             return Ok(());
         }
 
@@ -915,6 +972,7 @@ impl BotCoordinator {
         let marker = child.root.join("routing-disabled.json");
         if marker.exists() {
             child.cursor = None;
+            let _ = fs::remove_file(child.root.join("baseline-established.json"));
         }
 
         let connect_res = self.connect(&recipient).await;
@@ -1139,7 +1197,9 @@ impl BotCoordinator {
         Ok(())
     }
 
-    /// Whether this chat already has a reply baseline (persisted cursor with bubbles).
+    /// Whether this chat already has a reply baseline. A chat with no messages keeps an empty
+    /// cursor, so the marker written on its first baseline pass is what makes "once per chat ever"
+    /// hold; without it an empty chat was reopened on every sweep.
     fn has_baseline(
         &mut self,
         name: &str,
@@ -1148,11 +1208,9 @@ impl BotCoordinator {
         let Some(entry) = entries.get(name) else {
             return Ok(true);
         };
-        Ok(self
-            .session(entry)?
-            .cursor
-            .as_ref()
-            .is_some_and(|c| !c.bubbles.is_empty()))
+        let child = self.session(entry)?;
+        Ok(child.cursor.as_ref().is_some_and(|c| !c.bubbles.is_empty())
+            || child.root.join("baseline-established.json").exists())
     }
 
     pub async fn due_sessions(&mut self, names: &[String]) -> Result<HashSet<String>> {
@@ -1231,6 +1289,7 @@ impl BotCoordinator {
 
         let now = (self.clock)();
         let mut due = HashSet::new();
+        let mut list_state_changed = false;
 
         for name in names {
             let row = rows.get(name);
@@ -1277,6 +1336,7 @@ impl BotCoordinator {
                 }
             }
 
+            let state_before = self.list_state.get(name).cloned();
             if let Some(r) = row {
                 let low = match &prior_opt {
                     Some(p) => p.min_red.min(r.red_pixels),
@@ -1304,6 +1364,9 @@ impl BotCoordinator {
                             left: false,
                         },
                     );
+                }
+                if state_before.as_ref() != self.list_state.get(name) {
+                    list_state_changed = true;
                 }
             }
 
@@ -1346,6 +1409,9 @@ impl BotCoordinator {
             }
         }
 
+        if list_state_changed {
+            self.save_list_state();
+        }
         Ok(due)
     }
 
@@ -3516,9 +3582,182 @@ mod tests {
         assert!(due_after_restart(0, 0.0, false));
     }
 
+    fn preview_rows() -> MockCoordinatorCapture {
+        let mut cap = MockCoordinatorCapture::new();
+        cap.rows = vec![SessionRow {
+            name: "c".to_string(),
+            preview_digest: "d1".to_string(),
+            preview_key: Some("k1".to_string()),
+            preview_time: Some("12:00".to_string()),
+            red_pixels: 25,
+            y: 100,
+        }];
+        cap
+    }
+
+    #[test]
+    fn list_state_survives_a_restart() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry {
+            recipient: "c".to_string(),
+            kind: "private".to_string(),
+            aliases: None,
+        }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        coord.capture = Some(Box::new(preview_rows()));
+        let entry = AllowlistEntry {
+            recipient: "c".to_string(),
+            kind: "private".to_string(),
+            aliases: None,
+        };
+        let child = coord.session(&entry).unwrap();
+        let bubble = Bubble {
+            text: "seen".to_string(),
+            digest: "dig_seen".to_string(),
+            direction: "inbound".to_string(),
+            kind: None,
+            media_id: None,
+            phash: None,
+            filename: None,
+            sender: None,
+            transfer_pending: None,
+            image_source: None,
+            x: None,
+            y: None,
+            width: None,
+            height: None,
+            extra: Map::new(),
+        };
+        let mut frame = test_frame(vec![bubble], "snap");
+        frame.title_lines = vec!["c".to_string()];
+        let cursor_path = child.cursor_path.clone();
+        child.cursor = Some(frame.clone());
+        write_private(&cursor_path, &serde_json::to_value(&frame).unwrap()).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let due = rt.block_on(async { coord.due_sessions(&["c".to_string()]).await.unwrap() });
+        assert!(due.contains("c"));
+        assert!(td.path().join("state/list-state.json").exists());
+        drop(coord);
+
+        let mut again = BotCoordinator::new(&cfg_path).unwrap();
+        assert_eq!(
+            again.list_state.get("c").and_then(|s| s.digest.clone()),
+            Some("d1".to_string()),
+            "the stored preview digest comes back"
+        );
+        again.capture = Some(Box::new(preview_rows()));
+        let due = rt.block_on(async { again.due_sessions(&["c".to_string()]).await.unwrap() });
+        assert!(
+            !due.contains("c"),
+            "an unchanged preview is not reopened after a restart"
+        );
+    }
+
+    #[test]
+    fn upgrade_without_list_state_checks_each_chat_once() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry {
+            recipient: "c".to_string(),
+            kind: "private".to_string(),
+            aliases: None,
+        }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let first = BotCoordinator::new(&cfg_path).unwrap();
+        assert!(
+            first.pending.is_empty(),
+            "a fresh state dir needs no bootstrap"
+        );
+        drop(first);
+        // A state dir from a build that did not persist list state: one pass over the allowlist.
+        fs::write(td.path().join("state/health.json"), b"{}").unwrap();
+        let coord = BotCoordinator::new(&cfg_path).unwrap();
+        assert!(
+            coord.pending.contains_key("c"),
+            "one visit per allowlisted chat on upgrade"
+        );
+    }
+
+    #[test]
+    fn active_chat_is_rechecked_once_after_a_restart() {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry {
+            recipient: "c".to_string(),
+            kind: "private".to_string(),
+            aliases: None,
+        }];
+        let cfg_path = create_test_config(td.path(), allow);
+        fs::write(
+            td.path().join("state/active-chat.json"),
+            br#"{"active":"c"}"#,
+        )
+        .unwrap();
+        let coord = BotCoordinator::new(&cfg_path).unwrap();
+        assert!(
+            coord.pending.contains_key("c"),
+            "the last open chat is checked once"
+        );
+    }
+
     #[test]
     fn no_periodic_idle_visit() {
         assert!(!due_after_restart(0, 100_000.0, true));
+    }
+
+    /// An empty chat has no bubbles for the cursor to remember; the marker written on its first
+    /// baseline pass stops the coordinator from reopening it every sweep.
+    fn empty_chat_due(marker: bool) -> bool {
+        let td = TestDir::new();
+        let allow = vec![AllowlistEntry {
+            recipient: "c".to_string(),
+            kind: "private".to_string(),
+            aliases: None,
+        }];
+        let cfg_path = create_test_config(td.path(), allow);
+        let mut coord = BotCoordinator::new(&cfg_path).unwrap();
+        let mut cap = MockCoordinatorCapture::new();
+        cap.rows = vec![SessionRow {
+            name: "c".to_string(),
+            preview_digest: "d1".to_string(),
+            preview_key: Some("k1".to_string()),
+            preview_time: Some("12:00".to_string()),
+            red_pixels: 0,
+            y: 100,
+        }];
+        coord.capture = Some(Box::new(cap));
+        let entry = AllowlistEntry {
+            recipient: "c".to_string(),
+            kind: "private".to_string(),
+            aliases: None,
+        };
+        let child = coord.session(&entry).unwrap();
+        child.cursor = Some(test_frame(Vec::new(), "empty"));
+        if marker {
+            fs::write(child.root.join("baseline-established.json"), b"{}").unwrap();
+        }
+        coord.list_state.insert(
+            "c".to_string(),
+            ListState {
+                digest: Some("d1".to_string()),
+                key: Some("k1".to_string()),
+                time: Some("12:00".to_string()),
+                min_red: 0,
+                left: false,
+            },
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async { coord.due_sessions(&["c".to_string()]).await.unwrap() })
+            .contains("c")
+    }
+
+    #[test]
+    fn empty_chat_with_established_baseline_is_not_reopened_every_sweep() {
+        assert!(!empty_chat_due(true));
+    }
+
+    #[test]
+    fn empty_chat_without_marker_still_gets_its_first_baseline() {
+        assert!(empty_chat_due(false));
     }
 
     #[test]
