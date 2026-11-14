@@ -2,6 +2,11 @@
 import Foundation
 import AppKit
 
+// Strip terminal control sequences only for display; preserve the original log files.
+func plainLogDisplayText(_ line: String) -> String {
+    line.replacingOccurrences(of: "\u{001B}\\[[0-?]*[ -/]*[@-~]", with: "", options: .regularExpression)
+}
+
 public final class LogsPageController: NSViewController {
     private let context: StatusPanelController
 
@@ -175,7 +180,7 @@ public final class LogsPageController: NSViewController {
             return true
         }
 
-        textView.string = filtered.joined(separator: "\n")
+        textView.string = filtered.map(plainLogDisplayText).joined(separator: "\n")
         textView.scrollToEndOfDocument(nil)
     }
 
