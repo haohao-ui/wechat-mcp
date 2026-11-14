@@ -25,3 +25,8 @@ gateway.local.json
 *.log
 .DS_Store
 !src/bin/
+
+# 商业文档 PDF 由 render_report.py 用 Chrome 生成，链接会写入本机绝对路径；只保留 md/html 源文件
+docs/business/*.pdf
+# Python 不是本项目开发语言：离线报告脚本只保留在本机，不入库
+docs/business/*.py

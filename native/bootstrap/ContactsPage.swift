@@ -690,7 +690,7 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         switch res {
         case .success(let updated):
             do {
-                try context.persistConfig(updated)
+                try context.persistConfig(updated, restartCore: false)
                 loadContactsData()
             } catch {
                 let alert = NSAlert(error: error)

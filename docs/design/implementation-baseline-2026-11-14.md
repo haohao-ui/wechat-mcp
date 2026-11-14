@@ -1,5 +1,6 @@
 # 桌面改版基线核对
 
+后续状态：本文件保留首轮记录；跨分支迁移冲突已按用户确认方案在隔离分支完成集成，最终结果见 [UI与收发分支集成报告](2026-11-14-ui-runtime-integration.md)。
 2026-11-14。工作树：`/path/to/desktop-ui-redesign/wechat-mcp`；分支 `codex/desktop-ui-implementation`。
 
 ## 基线选择与隔离

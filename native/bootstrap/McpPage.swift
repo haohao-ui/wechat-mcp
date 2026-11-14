@@ -128,6 +128,17 @@ public struct McpPageLogic {
         }
     }
 
+    /// Turns the open API on or off; bind and port keep their values (defaults when absent).
+    public static func updateOpenApiEnabled(config: [String: Any], enabled: Bool) -> [String: Any] {
+        var updated = config
+        var openApi = config["open_api"] as? [String: Any] ?? [:]
+        openApi["enabled"] = enabled
+        if openApi["bind"] == nil { openApi["bind"] = "127.0.0.1" }
+        if openApi["port"] == nil { openApi["port"] = 8770 }
+        updated["open_api"] = openApi
+        return updated
+    }
+
     public static func parseMcpInfoPayload(json: String) throws -> McpInfoPayload {
         guard let data = json.data(using: .utf8) else {
             throw NSError(domain: "McpPage", code: 1, userInfo: [NSLocalizedDescriptionKey: "无效 UTF8 数据"])
@@ -196,6 +207,7 @@ public final class McpPageController: NSViewController {
 
     // UI - Open API Section
     private let openApiEnabledLabel = NSTextField(wrappingLabelWithString: "")
+    private let openApiEnabledCheckbox = NSButton(checkboxWithTitle: "启用对外接口（外部大脑通过 HTTP 接入）", target: nil, action: nil)
     private let openApiUrlLabel = NSTextField(labelWithString: "")
     private let openApiTokenMaskedLabel = NSTextField(labelWithString: "令牌: ••••")
     private let copyTokenButton = NSButton(title: "复制", target: nil, action: nil)
@@ -310,6 +322,9 @@ public final class McpPageController: NSViewController {
         openApiStack.spacing = 10
         openApiStack.translatesAutoresizingMaskIntoConstraints = false
 
+        openApiEnabledCheckbox.target = self
+        openApiEnabledCheckbox.action = #selector(handleOpenApiToggle)
+        openApiStack.addArrangedSubview(openApiEnabledCheckbox)
         openApiStack.addArrangedSubview(openApiEnabledLabel)
         openApiStack.addArrangedSubview(openApiUrlLabel)
 
@@ -489,11 +504,12 @@ public final class McpPageController: NSViewController {
         // Open API Info
         let openApi = raw["open_api"] as? [String: Any]
         let isEnabled = (openApi?["enabled"] as? Bool) ?? false
+        openApiEnabledCheckbox.state = isEnabled ? .on : .off
         if isEnabled {
-            openApiEnabledLabel.stringValue = "开关状态: 已开启 (只读，请到「设置」页修改 open_api.enabled)"
+            openApiEnabledLabel.stringValue = "开关状态: 已开启"
             openApiEnabledLabel.textColor = .systemGreen
         } else {
-            openApiEnabledLabel.stringValue = "开关状态: 已关闭 (只读，请到「设置」页修改 open_api.enabled)"
+            openApiEnabledLabel.stringValue = "开关状态: 已关闭"
             openApiEnabledLabel.textColor = .secondaryLabelColor
         }
 
@@ -568,6 +584,22 @@ public final class McpPageController: NSViewController {
         if let shell = view.window?.contentViewController as? ShellViewController {
             shell.selectPage(id: "brain")
         }
+    }
+
+    @objc private func handleOpenApiToggle() {
+        let enabled = openApiEnabledCheckbox.state == .on
+        let updated = McpPageLogic.updateOpenApiEnabled(config: context.currentRawConfig, enabled: enabled)
+        do {
+            // The HTTP listener starts with serve-core: saving restarts the core to apply it.
+            try context.persistConfig(updated)
+            openApiStatusLabel.stringValue = enabled ? "已开启，服务重启后生效（约数秒）" : "已关闭，服务重启后生效（约数秒）"
+            openApiStatusLabel.textColor = .systemGreen
+        } catch {
+            openApiEnabledCheckbox.state = enabled ? .off : .on
+            openApiStatusLabel.stringValue = "保存失败: \(error.localizedDescription)"
+            openApiStatusLabel.textColor = .systemRed
+        }
+        populateCurrentValues()
     }
 
     @objc private func handleTestConnection() {
