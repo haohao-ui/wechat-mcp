@@ -45,5 +45,7 @@ input.sessions = ["实时待人工": SessionHealthInput(state: "handoff", handof
 publish(context)
 check("sessions_refresh_from_host_snapshot", text(sessions.view, "实时待人工") && button(sessions.view, "恢复自动回复"))
 check("sessions_keep_query_text_during_refresh", query?.stringValue == "unsaved-query")
+check("log_display_strips_ansi_but_keeps_chinese", plainLogDisplayText("\u{001B}[2m时间\u{001B}[0m \u{001B}[32mINFO\u{001B}[0m 已暂停") == "时间 INFO 已暂停")
+check("log_display_preserves_plain_content", plainLogDisplayText("[INFO] 状态 [paused]") == "[INFO] 状态 [paused]")
 print("RESULT: \(failures) failures")
 exit(failures == 0 ? 0 : 1)
