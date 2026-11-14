@@ -276,7 +276,20 @@ public struct UpdateCandidateDetail: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.releaseId = try container.decode(String.self, forKey: .releaseId)
         self.sequence = try container.decode(UInt64.self, forKey: .sequence)
-        self.publishedAt = try container.decodeIfPresent(String.self, forKey: .publishedAt)
+        if !container.contains(.publishedAt) {
+            self.publishedAt = nil
+        } else if try container.decodeNil(forKey: .publishedAt) {
+            self.publishedAt = nil
+        } else if let text = try? container.decode(String.self, forKey: .publishedAt) {
+            self.publishedAt = text
+        } else {
+            let timestamp = try container.decode(UInt64.self, forKey: .publishedAt)
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "zh_CN")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            formatter.dateFormat = "yyyy-MM-dd HH:mm 'UTC'"
+            self.publishedAt = formatter.string(from: Date(timeIntervalSince1970: TimeInterval(timestamp)))
+        }
         self.sizeBytes = try container.decodeIfPresent(UInt64.self, forKey: .sizeBytes)
         self.releaseNotes = try container.decodeIfPresent(String.self, forKey: .releaseNotes)
         self.compatible = (try container.decodeIfPresent(Bool.self, forKey: .compatible)) ?? true
@@ -765,6 +778,13 @@ public final class UpdatePageController: NSViewController {
     }
 
     public func applyCheckResult(_ result: UpdateCheckResult) {
+        if (result.status == .available || result.status == .alreadyInstalled),
+           result.verification?.publisherVerified != true {
+            applyCheckResult(UpdateCheckResult(status: .unverifiedTrustRoot,
+                reason: "响应未提供发布者验签成功证明", candidate: result.candidate,
+                verification: result.verification))
+            return
+        }
         self.currentCheckResult = result
 
         let showsCandidateDetails = result.status != .unconfigured
@@ -807,33 +827,33 @@ public final class UpdatePageController: NSViewController {
             localSigningLabel.stringValue = "禁止重签 (需要发布者验证通过)"
 
         case .alreadyInstalled:
-            candidateStatusLabel.stringValue = "当前已是最新版本"
+            candidateStatusLabel.stringValue = "此版本已有匹配的安装记录"
             candidateStatusLabel.textColor = .systemGreen
             if let cand = result.candidate {
                 candidateVersionLabel.stringValue = "\(cand.releaseId) (seq: \(cand.sequence))"
             }
             candidatePublishedLabel.stringValue = "-"
             candidateSizeLabel.stringValue = "-"
-            publisherVerificationBadge.stringValue = "已生效"
+            publisherVerificationBadge.stringValue = "清单签名与安装记录已核对"
             publisherVerificationBadge.textColor = .systemGreen
-            localSigningLabel.stringValue = "已在运行"
-            compatibilityLabel.stringValue = "当前版本已与本地环境兼容"
+            localSigningLabel.stringValue = "运行状态需单独核验"
+            compatibilityLabel.stringValue = "清单与当前环境兼容"
             releaseNotesView.string = "没有待更新的候选版本。"
 
         case .incompatible:
-            candidateStatusLabel.stringValue = "候选版本不兼容当前环境"
+            candidateStatusLabel.stringValue = "更新检查未通过"
             candidateStatusLabel.textColor = .systemRed
             candidateVersionLabel.stringValue = "-"
             candidatePublishedLabel.stringValue = "-"
             candidateSizeLabel.stringValue = "-"
-            publisherVerificationBadge.stringValue = "未通过兼容性核验"
+            publisherVerificationBadge.stringValue = "签名或环境检查未通过"
             publisherVerificationBadge.textColor = .systemRed
             localSigningLabel.stringValue = "禁止重签"
             compatibilityLabel.stringValue = result.reason ?? "不满足最低系统或架构要求"
             releaseNotesView.string = "该版本无法安装在当前目标专用机上。"
 
         case .available:
-            candidateStatusLabel.stringValue = "发现可用版本并通过完整验证"
+            candidateStatusLabel.stringValue = "发现新版本，清单签名已验证"
             candidateStatusLabel.textColor = .systemGreen
             if let cand = result.candidate {
                 candidateVersionLabel.stringValue = "\(cand.releaseId) (seq: \(cand.sequence))"
@@ -841,12 +861,12 @@ public final class UpdatePageController: NSViewController {
                 if let sz = cand.sizeBytes {
                     candidateSizeLabel.stringValue = UpdatePageLogic.formatBytes(sz)
                 }
-                compatibilityLabel.stringValue = cand.compatible ? "系统环境兼容" : "不兼容"
+                compatibilityLabel.stringValue = cand.compatible ? "清单与当前系统兼容，安装包待校验" : "不兼容"
                 releaseNotesView.string = cand.releaseNotes ?? "（暂无说明）"
             }
             publisherVerificationBadge.stringValue = "发布者签名已验证"
             publisherVerificationBadge.textColor = .systemGreen
-            localSigningLabel.stringValue = signingStatus.userFacingDescription
+            localSigningLabel.stringValue = "安装包与本机签名尚未校验"
         }
 
         // 始终确保写按钮禁用
@@ -963,8 +983,8 @@ public final class UpdatePageController: NSViewController {
                     self.isChecking = false
                     self.checkButton.isEnabled = true
                     self.applyCheckResult(res)
-                    self.actionFeedbackLabel.stringValue = "检查完成 (只读呈现)。"
-                    self.actionFeedbackLabel.textColor = .secondaryLabelColor
+                    self.actionFeedbackLabel.stringValue = res.status == .incompatible ? "检查未通过，请查看提示。" : "清单检查完成，未下载或安装。"
+                    self.actionFeedbackLabel.textColor = res.status == .incompatible ? .systemRed : .secondaryLabelColor
                 }
             } catch {
                 DispatchQueue.main.async {

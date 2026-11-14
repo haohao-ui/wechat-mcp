@@ -119,6 +119,35 @@ fn main() {
             println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
             std::process::exit(0);
         }
+        "check"
+            if !args
+                .iter()
+                .any(|arg| arg == "--manifest" || arg == "--trusted-keys") =>
+        {
+            if args.len() != 4 || args[2] != "--config" {
+                eprintln!("error: source check requires --config <path>");
+                std::process::exit(2);
+            }
+            let config = match config::BotConfig::load(&args[3]) {
+                Ok(config) => config,
+                Err(error) => {
+                    eprintln!("error: invalid_config: {error:#}");
+                    std::process::exit(2);
+                }
+            };
+            if config.updater.is_none() {
+                eprintln!("error: check requires --manifest unless updater.source is configured");
+                std::process::exit(2);
+            }
+            let result = wechat_mcp::updater::check::check_release_blocking(config, None);
+            match result {
+                Ok(result) => println!("{}", serde_json::to_string_pretty(&result).unwrap()),
+                Err(error) => {
+                    eprintln!("error: {error:#}");
+                    std::process::exit(1);
+                }
+            }
+        }
         "check" => {
             let mut config_path: Option<PathBuf> = None;
             let mut manifest_path: Option<PathBuf> = None;

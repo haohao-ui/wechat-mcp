@@ -232,6 +232,16 @@ func runTests() -> Int32 {
         check("check_unverified_install_blocked", UpdatePageLogic.canInstall(checkResult: checkRes, transaction: .idle) == false)
     }
 
+    // Backend timestamps are numeric; older responses used ISO strings.
+    do {
+        let numeric = """
+        {"status":"available","candidate":{"release_id":"1.0.0","sequence":2,"published_at":0,"compatible":true,"requires_local_signing":true},"verification":{"publisher_verified":true}}
+        """
+        let parsed = try UpdatePageLogic.parseCheckPayload(jsonString: numeric)
+        check("numeric_published_at_decodes", parsed.candidate?.publishedAt == "1970-01-01 00:00 UTC")
+        check("verified_manifest_does_not_enable_install", UpdatePageLogic.canInstall(checkResult: parsed, transaction: .idle) == false)
+    } catch { check("numeric_published_at_decodes", false, "\(error)") }
+
     // 4. 检查更新 - 已是最新版本（Already Installed）
     do {
         let alreadyJson = """
@@ -481,6 +491,17 @@ func runTests() -> Int32 {
                 return field.stringValue == text && !field.isHiddenOrHasHiddenAncestor
             }
         }
+        for status in [UpdateCheckStatus.available, .alreadyInstalled] {
+            updateVC.applyCheckResult(UpdateCheckResult(status: status,
+                candidate: UpdateCandidateDetail(releaseId: "unverified", sequence: 2)))
+            check("missing_verification_never_shows_verified_\(status.rawValue)",
+                visibleText(updateVC.view, "已发现候选版本（来源尚未验证）"))
+        }
+        updateVC.applyCheckResult(UpdateCheckResult(status: .available,
+            candidate: UpdateCandidateDetail(releaseId: "verified", sequence: 3),
+            verification: UpdateVerificationInfo(publisherVerified: true)))
+        check("verified_manifest_is_not_full_package_validation", visibleText(updateVC.view, "发现新版本，清单签名已验证") && visibleText(updateVC.view, "清单与当前系统兼容，安装包待校验"))
+        updateVC.applyCheckResult(UpdateCheckResult(status: .unconfigured))
         let unconfiguredButtons = collectViews(updateVC.view).compactMap { $0 as? NSButton }
         for title in ["下载更新", "安装并重启", "延期更新"] {
             check(

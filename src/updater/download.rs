@@ -202,6 +202,27 @@ pub(crate) mod tests {
                 envelope,
             }
         }
+        pub(crate) fn resign(&mut self) {
+            use ring::signature::KeyPair;
+            let pkcs8 =
+                ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+                    .unwrap();
+            let key = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+            let public: String = key
+                .public_key()
+                .as_ref()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            std::fs::write(self.root.join("trusted.json"),serde_json::json!({"schema":1,"keys":[{"key_id":"ephemeral-test-only","public_key_hex":public}]}).to_string()).unwrap();
+            self.envelope.signature =
+                sign_manifest_with_ed25519_key(&key, &self.envelope.manifest).unwrap();
+            std::fs::write(
+                self.root.join("feed/envelope.json"),
+                serde_json::to_vec(&self.envelope).unwrap(),
+            )
+            .unwrap();
+        }
         fn receipt_count(&self) -> usize {
             std::fs::read_dir(self.root.join("state/update-downloads"))
                 .into_iter()
