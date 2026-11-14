@@ -87,6 +87,8 @@ chmod 0755 "$OUT_DIR/Apps/微信客服助手.app/Contents/MacOS/wechat-cs-host"
 cp native/bootstrap/brain-default-role.json "$OUT_DIR/Apps/微信客服助手.app/Contents/Resources/brain-default-role.json"
 
 cp native/bootstrap/Info.plist "$OUT_DIR/Apps/微信客服助手.app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$OUT_DIR/Apps/微信客服助手.app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $SEQUENCE" "$OUT_DIR/Apps/微信客服助手.app/Contents/Info.plist"
 chmod 0644 "$OUT_DIR/Apps/微信客服助手.app/Contents/Info.plist"
 
 if [ -f native/bootstrap/gateway.test.json ]; then
@@ -108,7 +110,7 @@ fi
 echo "==> 归档打包 tar.gz..."
 TAR_NAME="wechat-mcp-${VERSION}-macos-${CANON_ARCH}.tar.gz"
 TAR_PATH="$OUT_DIR/$TAR_NAME"
-tar -czf "$TAR_PATH" -C "$OUT_DIR" bin Apps resources
+COPYFILE_DISABLE=1 tar -czf "$TAR_PATH" -C "$OUT_DIR" bin Apps resources
 
 TAR_SIZE=$(stat -f %z "$TAR_PATH" 2>/dev/null || stat -c %s "$TAR_PATH")
 TAR_SHA=$(shasum -a 256 "$TAR_PATH" | awk '{print $1}')

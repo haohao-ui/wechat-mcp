@@ -4,22 +4,16 @@ import AppKit
 
 let hostStatusDidRefreshNotification = Notification.Name("WeChatHostStatusDidRefresh")
 
-/// 获取宿主程序当前版本号：优先读取 ~/.wechat-rpa/VERSION，其次读取 Info.plist 中的版本信息
+/// 显示当前运行 App 的构建信息；安装记录由更新读模型单独提供。
 public func hostAppVersion() -> String {
-    let home = FileManager.default.homeDirectoryForCurrentUser
-    let versionFile = home.appendingPathComponent(".wechat-rpa/VERSION")
-    if let data = try? Data(contentsOf: versionFile),
-       let str = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-       !str.isEmpty {
-        return str
-    }
-    if let info = Bundle.main.infoDictionary,
-       let build = info["CFBundleVersion"] as? String,
+    guard let info = Bundle.main.infoDictionary,
+          let short = info["CFBundleShortVersionString"] as? String,
+          !short.isEmpty else { return "开发构建" }
+    if let build = info["CFBundleVersion"] as? String,
        !build.isEmpty, build != "1" {
-        let short = info["CFBundleShortVersionString"] as? String ?? "0.1.0"
         return "\(short) (\(build))"
     }
-    return Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
+    return short
 }
 
 public final class StatusPanelController: NSViewController {

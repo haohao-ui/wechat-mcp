@@ -3,93 +3,27 @@
 use super::executor::{VerifiedManifestEnvelope, calculate_manifest_digest};
 use super::journal::load_highest_accepted_sequence;
 use super::manifest::load_trusted_keys;
+use super::private_fs::PrivateDirectory;
 use super::source::Transport;
 use crate::core::config::BotConfig;
 use anyhow::{Context, Result, bail};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::path::Path;
+use std::io::{Read, Seek, SeekFrom};
+use std::os::fd::AsRawFd;
 
 fn hex_digest(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DownloadReceipt {
-    pub status: &'static str,
+    pub status: String,
     pub candidate_id: String,
     pub release_id: String,
     pub sequence: u64,
     pub manifest_sha256: String,
-}
-
-struct PrivateDirectory(File);
-impl PrivateDirectory {
-    fn open(path: &Path) -> Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
-            .open(path)?;
-        Self::checked(file)
-    }
-    fn checked(file: File) -> Result<Self> {
-        let meta = file.metadata()?;
-        if !meta.is_dir()
-            || meta.uid() != unsafe { libc::geteuid() }
-            || meta.mode() & 0o777 != 0o700
-        {
-            bail!("download_directory_requires_current_owner_and_0700");
-        }
-        Ok(Self(file))
-    }
-    fn child(&self, name: &str, exclusive: bool) -> Result<Self> {
-        let name = std::ffi::CString::new(name)?;
-        let result = unsafe { libc::mkdirat(self.0.as_raw_fd(), name.as_ptr(), 0o700) };
-        if result != 0 {
-            let error = std::io::Error::last_os_error();
-            if exclusive || error.kind() != std::io::ErrorKind::AlreadyExists {
-                return Err(error.into());
-            }
-        }
-        let fd = unsafe {
-            libc::openat(
-                self.0.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        self.0.sync_all()?;
-        Self::checked(unsafe { File::from_raw_fd(fd) })
-    }
-    fn create_file(&self, name: &str) -> Result<File> {
-        let name = std::ffi::CString::new(name)?;
-        let fd = unsafe {
-            libc::openat(
-                self.0.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0o600,
-            )
-        };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        Ok(unsafe { File::from_raw_fd(fd) })
-    }
-    fn write(&self, name: &str, bytes: &[u8]) -> Result<()> {
-        let mut file = self.create_file(name)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        self.0.sync_all()?;
-        Ok(())
-    }
 }
 
 struct UncommittedDownload<'a> {
@@ -174,7 +108,7 @@ pub async fn download_candidate(
         bail!("artifact_sha256_mismatch");
     }
     let receipt = DownloadReceipt {
-        status: "downloaded",
+        status: "downloaded".into(),
         candidate_id,
         release_id: manifest.release_id.clone(),
         sequence: manifest.sequence,
@@ -186,18 +120,18 @@ pub async fn download_candidate(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::updater::manifest::{
         ReleaseManifest, SignedEnvelope, sign_manifest_with_ed25519_key,
     };
     use ring::signature::KeyPair;
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
-    struct Fixture {
-        root: std::path::PathBuf,
-        config: BotConfig,
-        envelope: SignedEnvelope,
+    pub(crate) struct Fixture {
+        pub(crate) root: std::path::PathBuf,
+        pub(crate) config: BotConfig,
+        pub(crate) envelope: SignedEnvelope,
     }
     impl Drop for Fixture {
         fn drop(&mut self) {
@@ -205,7 +139,7 @@ mod tests {
         }
     }
     impl Fixture {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             let root =
                 std::env::temp_dir().join(format!("production-download-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir(&root).unwrap();
