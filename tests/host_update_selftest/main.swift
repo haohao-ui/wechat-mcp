@@ -466,6 +466,80 @@ func runTests() -> Int32 {
         }
     }
 
+    // Real process bounds plus fixture-only download client/UI state tests.
+    do {
+        let started = ProcessInfo.processInfo.systemUptime
+        let hung = runUpdatePageCommand(executable: "/bin/sh", arguments: ["-c", "trap '' TERM; while :; do sleep 1; done"], timeout: 0.1)
+        check("updater_process_ignoring_term_is_bounded", hung.timedOut && ProcessInfo.processInfo.systemUptime - started < 3.5)
+        let flood = runUpdatePageCommand(executable: "/usr/bin/yes", arguments: ["bounded-test-output"], timeout: 2)
+        check("updater_process_output_is_bounded", flood.status != 0 && flood.output.count <= 4 * 1024 * 1024)
+        let good = runUpdatePageCommand(executable: "/bin/sh", arguments: ["-c", "printf result; printf diagnostics >&2"], timeout: 1)
+        check("updater_process_drains_both_streams", good.status == 0 && String(data: good.output, encoding: .utf8) == "resultdiagnostics")
+    }
+    do {
+        let digest = String(repeating: "a", count: 64)
+        let expected = UpdateCheckResult(status: .available, candidate: UpdateCandidateDetail(releaseId: "fixture-release", sequence: 2), verification: UpdateVerificationInfo(publisherVerified: true), manifestSha256: digest)
+        let statusJSON = """
+        {"current_release":{"architecture":"fixture","status":"unknown","source":"unknown"},"candidate_release":null,"transaction":{"status":"idle","recovery_required":false},"guard":{"highest_accepted_sequence":0,"maintenance_active":false}}
+        """
+        let checkJSON = """
+        {"status":"available","candidate":{"release_id":"fixture-release","sequence":2,"compatible":true,"requires_local_signing":true},"verification":{"publisher_verified":true},"manifest_sha256":"\(digest)"}
+        """
+        let lock = NSLock()
+        var mode = "good"
+        var calls = 0
+        let client = UpdateClient(configPath: "/fixture/config.json", executor: { executable, arguments, _ in
+            if arguments.first == "control" {
+                let body = arguments.contains("update-check") ? checkJSON : statusJSON
+                return ControlRun(status: 0, output: Data(body.utf8), timedOut: false)
+            }
+            if arguments.first == "status" {
+                return ControlRun(status: 0, output: Data("{\"status\":\"idle\",\"maintenance_active\":false,\"capabilities\":{\"schema\":1,\"download\":true}}".utf8), timedOut: false)
+            }
+            lock.lock(); calls += 1; let currentMode = mode; lock.unlock()
+            let returnedDigest = currentMode == "changed" ? String(repeating: "b", count: 64) : digest
+            let body = """
+            {"status":"downloaded","candidate_id":"11111111-1111-4111-8111-111111111111","release_id":"fixture-release","sequence":2,"manifest_sha256":"\(returnedDigest)"}
+            """
+            return ControlRun(status: 0, output: Data(body.utf8), timedOut: false)
+        })
+        do { let receipt = try client.downloadUpdate(expected: expected); check("download_receipt_pins_manifest", receipt.manifestSha256 == digest) }
+        catch { check("download_receipt_pins_manifest", false, "\(error)") }
+        lock.lock(); mode = "changed"; lock.unlock()
+        do { _ = try client.downloadUpdate(expected: expected); check("changed_source_is_not_download_success", false) }
+        catch { check("changed_source_is_not_download_success", true) }
+        let timedOut = UpdateClient(configPath: "/fixture/config.json", executor: { _,_,_ in ControlRun(status: 0, output: Data(checkJSON.utf8), timedOut: true) })
+        do { _ = try timedOut.checkUpdate(); check("timed_out_check_cannot_enable_download", false) }
+        catch { check("timed_out_check_cannot_enable_download", true) }
+        let legacy = UpdateClient(configPath: "/fixture/config.json", executor: { _,_,_ in ControlRun(status: 0, output: Data("{\"status\":\"idle\",\"maintenance_active\":false}".utf8), timedOut: false) })
+        check("old_updater_without_capabilities_stays_disabled", (try? legacy.supportsDownload()) == false)
+        lock.lock(); mode = "good"; calls = 0; lock.unlock()
+        let context = StatusPanelController(worker: SocketWorker())
+        let page = UpdatePageController(context: context, client: client)
+        _ = page.view
+        func descendants(_ root: NSView) -> [NSView] { [root] + root.subviews.flatMap { descendants($0) } }
+        let checkButton = descendants(page.view).compactMap { $0 as? NSButton }.first { $0.title == "检查更新" }!
+        let download = descendants(page.view).compactMap { $0 as? NSButton }.first { $0.title == "下载更新" }!
+        func waitFor(_ condition: () -> Bool) {
+            let deadline = ProcessInfo.processInfo.systemUptime + 5
+            while !condition() && ProcessInfo.processInfo.systemUptime < deadline { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01)) }
+        }
+        checkButton.performClick(nil)
+        waitFor { checkButton.isEnabled && download.isEnabled }
+        check("download_enabled_only_after_verified_check_and_capability", download.isEnabled)
+        download.performClick(nil)
+        download.performClick(nil)
+        waitFor { download.title == "已下载" }
+        lock.lock(); let downloads = calls; lock.unlock()
+        check("one_download_click_is_not_replayed", downloads == 1)
+        check("successful_download_never_claims_installation", descendants(page.view).compactMap { $0 as? NSTextField }.contains { $0.stringValue == "更新包已下载并校验，尚未安装。" })
+        check("download_validation_scope_is_clear", descendants(page.view).compactMap { $0 as? NSTextField }.contains { $0.stringValue == "更新包已下载，安装前将继续验证" })
+        check("downloaded_candidate_cannot_be_downloaded_twice", download.title == "已下载" && !download.isEnabled)
+        for title in ["安装并重启", "延期更新"] {
+            check("install_actions_stay_disabled_after_download_\(title)", descendants(page.view).compactMap { $0 as? NSButton }.first { $0.title == title }?.isEnabled == false)
+        }
+    }
+
     // 11. 离屏 UI 完整高度渲染夹具（不透明 Aqua，包含完整卡片流与底部按钮，验证720宽及宿主最小680宽）
     do {
         let dummyWorker = SocketWorker()

@@ -1,8 +1,57 @@
 // native/bootstrap/UpdatePage.swift
 // Application update management, version verification, drain coordination, and failure recovery.
-// STRICT READ-ONLY PHASE: All real downloads, installs, deferrals, and rollbacks are disabled.
+// Verified downloads are enabled only when the actual updater reports support.
+// Installation, deferral and rollback stay disabled until production transactions are ready.
 import Foundation
 import AppKit
+import Darwin
+
+/// Bounded updater/control execution for this page. No child or pipe can keep
+/// the UI waiting indefinitely after its deadline, and output is memory-bounded.
+public func runUpdatePageCommand(executable: String, arguments: [String], timeout: Double) -> ControlRun {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: executable)
+    process.arguments = arguments
+    process.standardInput = FileHandle.nullDevice
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = pipe
+    do { try process.run() } catch { return ControlRun(status: -1, output: Data(), timedOut: false) }
+    try? pipe.fileHandleForWriting.close()
+    let fd = pipe.fileHandleForReading.fileDescriptor
+    _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+    let deadline = ProcessInfo.processInfo.systemUptime + max(0.05, timeout)
+    var output = Data()
+    var eof = false
+    var failed = false
+    var timedOut = false
+    var buffer = [UInt8](repeating: 0, count: 16384)
+    while true {
+        var count = 0
+        repeat {
+            count = Darwin.read(fd, &buffer, buffer.count)
+            if count > 0 {
+                if output.count + count > 4 * 1024 * 1024 { failed = true; break }
+                output.append(contentsOf: buffer.prefix(count))
+            } else if count == 0 { eof = true }
+            else if errno != EAGAIN && errno != EINTR { failed = true }
+        } while count > 0 || (count < 0 && errno == EINTR)
+        if failed || (!process.isRunning && eof) { break }
+        if ProcessInfo.processInfo.systemUptime >= deadline { timedOut = true; break }
+        usleep(10_000)
+    }
+    if process.isRunning {
+        process.terminate()
+        let grace = ProcessInfo.processInfo.systemUptime + 0.5
+        while process.isRunning && ProcessInfo.processInfo.systemUptime < grace { usleep(10_000) }
+        if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        let killDeadline = ProcessInfo.processInfo.systemUptime + 2
+        while process.isRunning && ProcessInfo.processInfo.systemUptime < killDeadline { usleep(10_000) }
+    }
+    try? pipe.fileHandleForReading.close()
+    if failed { return ControlRun(status: -1, output: Data("更新器输出或管道超出限制".utf8), timedOut: timedOut) }
+    return ControlRun(status: process.isRunning ? -1 : process.terminationStatus, output: output, timedOut: timedOut)
+}
 
 // MARK: - Update Data Models
 
@@ -317,17 +366,25 @@ public struct UpdateCheckResult: Codable, Equatable {
     public let reason: String?
     public let candidate: UpdateCandidateDetail?
     public let verification: UpdateVerificationInfo?
+    public let manifestSha256: String?
+
+    enum CodingKeys: String, CodingKey {
+        case status, reason, candidate, verification
+        case manifestSha256 = "manifest_sha256"
+    }
 
     public init(
         status: UpdateCheckStatus,
         reason: String? = nil,
         candidate: UpdateCandidateDetail? = nil,
-        verification: UpdateVerificationInfo? = nil
+        verification: UpdateVerificationInfo? = nil,
+        manifestSha256: String? = nil
     ) {
         self.status = status
         self.reason = reason
         self.candidate = candidate
         self.verification = verification
+        self.manifestSha256 = manifestSha256
     }
 }
 
@@ -432,6 +489,34 @@ public enum UpdatePageLogic {
     }
 }
 
+public struct UpdateDownloadReceipt: Decodable, Equatable {
+    public let status: String
+    public let candidateId: String
+    public let releaseId: String
+    public let sequence: UInt64
+    public let manifestSha256: String
+    enum CodingKeys: String, CodingKey {
+        case status, sequence
+        case candidateId = "candidate_id"
+        case releaseId = "release_id"
+        case manifestSha256 = "manifest_sha256"
+    }
+}
+
+private struct UpdaterCapabilityResponse: Decodable {
+    struct Capabilities: Decodable { let schema: UInt32; let download: Bool }
+    let status: String
+    let maintenanceActive: Bool?
+    let capabilities: Capabilities?
+    enum CodingKeys: String, CodingKey {
+        case status, capabilities
+        case maintenanceActive = "maintenance_active"
+    }
+    var canDownload: Bool {
+        capabilities?.schema == 1 && capabilities?.download == true && maintenanceActive == false && ["idle", "committed"].contains(status)
+    }
+}
+
 // MARK: - Update Client
 
 public final class UpdateClient {
@@ -440,7 +525,7 @@ public final class UpdateClient {
     private let configPath: String
     private let executor: CommandExecutor
 
-    public init(configPath: String? = nil, executor: @escaping CommandExecutor = runControlCommand) {
+    public init(configPath: String? = nil, executor: @escaping CommandExecutor = runUpdatePageCommand) {
         self.configPath = configPath ?? (FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".WeChatRPABot/config.json").path)
         self.executor = executor
     }
@@ -448,7 +533,7 @@ public final class UpdateClient {
     public func fetchStatus() throws -> UpdateStatusPayload {
         let args = ["control", "update-status", "--config", configPath]
         let run = executor(controlBinaryPath(), args, 10.0)
-        guard run.status == 0 else {
+        guard run.status == 0 && !run.timedOut else {
             let errStr = String(data: run.output, encoding: .utf8) ?? "未知错误"
             throw UpdateClientError.commandFailed(code: run.status, message: errStr)
         }
@@ -463,13 +548,56 @@ public final class UpdateClient {
             args.append(mp)
         }
         let run = executor(controlBinaryPath(), args, 15.0)
-        guard run.status == 0 else {
+        guard run.status == 0 && !run.timedOut else {
             let errStr = String(data: run.output, encoding: .utf8) ?? "未知错误"
             throw UpdateClientError.commandFailed(code: run.status, message: errStr)
         }
         let outStr = String(data: run.output, encoding: .utf8) ?? "{}"
         return try UpdatePageLogic.parseCheckPayload(jsonString: outStr)
     }
+    private func updaterPath() throws -> String {
+        let path = URL(fileURLWithPath: controlBinaryPath()).deletingLastPathComponent().appendingPathComponent("wechat-updater").path
+        var file = stat()
+        var parent = stat()
+        let directory = (path as NSString).deletingLastPathComponent
+        guard lstat(path, &file) == 0, file.st_mode & S_IFMT == S_IFREG,
+              file.st_uid == geteuid(), file.st_mode & 0o022 == 0,
+              lstat(directory, &parent) == 0, parent.st_mode & S_IFMT == S_IFDIR,
+              parent.st_uid == geteuid(), parent.st_mode & 0o022 == 0,
+              FileManager.default.isExecutableFile(atPath: path) else {
+            throw UpdateClientError.parseError("可信更新器不可用")
+        }
+        return path
+    }
+
+    public func supportsDownload() throws -> Bool {
+        let run = executor(try updaterPath(), ["status", "--config", configPath], 5)
+        guard run.status == 0 && !run.timedOut else { return false }
+        return (try JSONDecoder().decode(UpdaterCapabilityResponse.self, from: run.output)).canDownload
+    }
+
+    public func downloadUpdate(expected: UpdateCheckResult) throws -> UpdateDownloadReceipt {
+        guard expected.status == .available, expected.verification?.publisherVerified == true,
+              let digest = expected.manifestSha256, digest.count == 64,
+              digest.allSatisfy({ $0.isHexDigit }), let candidate = expected.candidate,
+              try supportsDownload() else {
+            throw UpdateClientError.parseError("更新清单尚未验证或更新器暂不支持下载")
+        }
+        let run = executor(try updaterPath(), ["download", "--config", configPath], 660)
+        guard run.status == 0 && !run.timedOut else {
+            let text = String(data: run.output, encoding: .utf8) ?? ""
+            let message = text.contains("download_cache_quota_exceeded") ? "更新缓存已满，请清理未使用候选后重试" : text.contains("concurrent_download_in_progress") ? "已有更新包正在下载，请稍后重试" : "下载或校验未完成，请重试"
+            throw UpdateClientError.commandFailed(code: run.status, message: message)
+        }
+        let receipt = try JSONDecoder().decode(UpdateDownloadReceipt.self, from: run.output)
+        guard receipt.status == "downloaded", UUID(uuidString: receipt.candidateId)?.uuidString.lowercased() == receipt.candidateId,
+              receipt.releaseId == candidate.releaseId, receipt.sequence == candidate.sequence,
+              receipt.manifestSha256 == digest else {
+            throw UpdateClientError.parseError("更新源或下载结果已变化，请重新检查更新")
+        }
+        return receipt
+    }
+
 }
 
 // MARK: - Update Page View Controller
@@ -481,6 +609,9 @@ public final class UpdatePageController: NSViewController {
     // 页面状态（只读）
     private var currentStatusPayload: UpdateStatusPayload?
     private var currentCheckResult: UpdateCheckResult?
+    private var downloadSupported = false
+    private var isDownloading = false
+    private var downloadedReceipt: UpdateDownloadReceipt?
     private var signingStatus = UpdateSigningStatus(keychainAvailable: true, localCertificateFound: true)
     private var isChecking = false
 
@@ -626,6 +757,7 @@ public final class UpdatePageController: NSViewController {
             button.isEnabled = false
             button.toolTip = "当前仅支持检查状态，此操作尚未启用"
         }
+        downloadButton.action = #selector(handleDownloadUpdate)
         let writes = NSStackView(views: [downloadButton])
         writes.spacing = 12
         body.addArrangedSubview(writes)
@@ -775,6 +907,7 @@ public final class UpdatePageController: NSViewController {
 
         // 事务与阶段
         updateTransactionUI(payload.transaction)
+        refreshDownloadState()
     }
 
     public func applyCheckResult(_ result: UpdateCheckResult) {
@@ -869,10 +1002,33 @@ public final class UpdatePageController: NSViewController {
             localSigningLabel.stringValue = "安装包与本机签名尚未校验"
         }
 
-        // 始终确保写按钮禁用
-        downloadButton.isEnabled = false
+        refreshDownloadState()
         installButton.isEnabled = false
         deferButton.isEnabled = false
+    }
+
+    private func refreshDownloadState() {
+        let safeStatus = currentStatusPayload.map { !$0.guardInfo.maintenanceActive && !$0.transaction.recoveryRequired && [.idle, .committed].contains($0.transaction.status) } ?? false
+        let verified = currentCheckResult?.status == .available && currentCheckResult?.verification?.publisherVerified == true
+        let digest = currentCheckResult?.manifestSha256
+        let validDigest = digest?.count == 64 && digest?.allSatisfy({ $0.isHexDigit }) == true
+        let downloaded = downloadedReceipt != nil && downloadedReceipt?.manifestSha256 == digest
+        downloadButton.isEnabled = downloadSupported && safeStatus && verified && validDigest && !isChecking && !isDownloading && !downloaded
+        downloadButton.title = isDownloading ? "下载中…" : downloaded ? "已下载" : "下载更新"
+        if downloaded && currentCheckResult?.status == .available {
+            compatibilityLabel.stringValue = "更新包已下载，安装前将继续验证"
+            localSigningLabel.stringValue = "安装包摘要已验证，尚未解包与本机签名"
+        }
+        downloadButton.toolTip = downloadSupported ? "下载到本机私有缓存，不会停止业务或安装" : "当前更新器未报告可用的下载能力"
+        checkButton.isEnabled = !isChecking && !isDownloading
+        refreshStatusButton.isEnabled = !isDownloading
+        if downloadSupported {
+            readOnlyBadge.stringValue = "可下载"
+            writeControlsNote.stringValue = "支持已验证清单的受限下载；安装、延期和恢复尚未启用。"
+        } else {
+            readOnlyBadge.stringValue = "仅检查"
+            writeControlsNote.stringValue = "下载需由更新器报告支持；安装、延期和恢复尚未启用。"
+        }
     }
 
     private func friendlyCheckReason(_ reason: String?) -> String {
@@ -969,9 +1125,10 @@ public final class UpdatePageController: NSViewController {
     // MARK: - Actions
 
     @objc private func handleCheckUpdate() {
-        guard !isChecking else { return }
+        guard !isChecking && !isDownloading else { return }
         isChecking = true
-        checkButton.isEnabled = false
+        downloadSupported = false
+        refreshDownloadState()
         actionFeedbackLabel.stringValue = "正在查询更新状态 (只读查询)..."
         actionFeedbackLabel.textColor = .systemBlue
 
@@ -979,7 +1136,9 @@ public final class UpdatePageController: NSViewController {
             guard let self = self else { return }
             do {
                 let res = try self.client.checkUpdate()
+                let supportsDownload = res.status == .available && res.verification?.publisherVerified == true ? ((try? self.client.supportsDownload()) ?? false) : false
                 DispatchQueue.main.async {
+                    self.downloadSupported = supportsDownload
                     self.isChecking = false
                     self.checkButton.isEnabled = true
                     self.applyCheckResult(res)
@@ -989,7 +1148,8 @@ public final class UpdatePageController: NSViewController {
             } catch {
                 DispatchQueue.main.async {
                     self.isChecking = false
-                    self.checkButton.isEnabled = true
+                    self.downloadSupported = false
+                    self.refreshDownloadState()
                     self.actionFeedbackLabel.stringValue = "检查失败: \(error.localizedDescription)"
                     self.actionFeedbackLabel.textColor = .systemRed
                 }
@@ -997,9 +1157,42 @@ public final class UpdatePageController: NSViewController {
         }
     }
 
-    /// 关键安全防线：所有写入操作全部重定向到此 handler，严格禁止任何模拟写入或状态修改
+    @objc private func handleDownloadUpdate() {
+        guard downloadButton.isEnabled, !isDownloading, let expected = currentCheckResult else { return }
+        isDownloading = true
+        refreshDownloadState()
+        actionFeedbackLabel.stringValue = "正在下载并校验更新包，不改变业务运行状态。"
+        actionFeedbackLabel.textColor = .systemBlue
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            do {
+                let receipt = try self.client.downloadUpdate(expected: expected)
+                DispatchQueue.main.async {
+                    self.isDownloading = false
+                    if self.currentCheckResult?.manifestSha256 == receipt.manifestSha256 {
+                        self.downloadedReceipt = receipt
+                        self.actionFeedbackLabel.stringValue = "更新包已下载并校验，尚未安装。"
+                        self.actionFeedbackLabel.textColor = .systemGreen
+                    } else {
+                        self.actionFeedbackLabel.stringValue = "下载结果与当前清单不同，请重新检查更新。"
+                        self.actionFeedbackLabel.textColor = .systemOrange
+                    }
+                    self.refreshDownloadState()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isDownloading = false
+                    self.actionFeedbackLabel.stringValue = "下载未完成：\(error.localizedDescription)"
+                    self.actionFeedbackLabel.textColor = .systemRed
+                    self.refreshDownloadState()
+                }
+            }
+        }
+    }
+
+    /// 关键安全防线：尚未接入生产事务的安装/延期操作保持禁用，不模拟安装成功
     @objc public func handleDisabledWriteAction() {
-        actionFeedbackLabel.stringValue = "操作未启用: 当前阶段真实更新下载/安装/延期入口为只读禁用状态 (unsupported)，不进行任何写入或业务状态修改。"
+        actionFeedbackLabel.stringValue = "操作未启用: 当前阶段安装/延期/恢复入口尚未启用 (unsupported)，不进行任何写入或业务状态修改。"
         actionFeedbackLabel.textColor = .systemOrange
     }
 

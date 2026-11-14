@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
 
 fn hex_digest(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -55,6 +57,67 @@ impl Drop for UncommittedDownload<'_> {
     }
 }
 
+pub fn download_configured(config: &BotConfig) -> bool {
+    config
+        .updater
+        .as_ref()
+        .is_some_and(|settings| load_trusted_keys(&settings.trusted_keys).is_ok())
+        && PrivateDirectory::open(&config.state_dir).is_ok()
+}
+
+const MAX_CACHE_ENTRIES: usize = 8;
+const MAX_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
+fn check_cache_quota(directory: &PrivateDirectory, path: &Path, incoming: u64) -> Result<()> {
+    let expected = directory.0.metadata()?;
+    let actual = std::fs::symlink_metadata(path)?;
+    if !actual.is_dir() || actual.dev() != expected.dev() || actual.ino() != expected.ino() {
+        bail!("download_cache_binding_changed");
+    }
+    let mut count = 0;
+    let mut size = incoming;
+    for entry in std::fs::read_dir(path)? {
+        count += 1;
+        if count >= MAX_CACHE_ENTRIES {
+            bail!("download_cache_quota_exceeded");
+        }
+        let entry = entry?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("download_cache_unrecognized_entry"))?;
+        if uuid::Uuid::parse_str(&name)
+            .map(|id| id.to_string())
+            .ok()
+            .as_deref()
+            != Some(name.as_str())
+        {
+            bail!("download_cache_unrecognized_entry");
+        }
+        let child = directory.open_child(&name)?;
+        for leaf in std::fs::read_dir(entry.path())? {
+            let leaf = leaf?;
+            let name = leaf
+                .file_name()
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("download_cache_unrecognized_entry"))?;
+            if !["envelope.json", "artifact.tar.gz", "receipt.json"].contains(&name.as_str()) {
+                bail!("download_cache_unrecognized_entry");
+            }
+            let file = child.read_file(&name, super::source::ARTIFACT_LIMIT)?;
+            size = size
+                .checked_add(file.metadata()?.len())
+                .context("download_cache_size_overflow")?;
+            if size > MAX_CACHE_BYTES {
+                bail!("download_cache_quota_exceeded");
+            }
+        }
+    }
+    if size > MAX_CACHE_BYTES {
+        bail!("download_cache_quota_exceeded");
+    }
+    Ok(())
+}
+
 /// Downloads one immutable candidate into a private UUID namespace. The receipt
 /// is written last, only after publisher, compatibility, size and hash checks.
 /// Rejected downloads retain no valid receipt and can never be selected by apply.
@@ -76,7 +139,17 @@ pub async fn download_candidate(
     )?;
     let manifest = verified.manifest();
     let state = PrivateDirectory::open(&config.state_dir)?;
+    let _download_lock = state.exclusive_lock("update-download.lock")?;
     let downloads = state.child("update-downloads", false)?;
+    check_cache_quota(
+        &downloads,
+        &config.state_dir.join("update-downloads"),
+        manifest
+            .artifact
+            .size_bytes
+            .saturating_add(bytes.len() as u64)
+            .saturating_add(4096),
+    )?;
     let candidate_id = uuid::Uuid::new_v4().to_string();
     let candidate = downloads.child(&candidate_id, true)?;
     let mut cleanup = UncommittedDownload {
@@ -285,5 +358,60 @@ pub(crate) mod tests {
         symlink(&outside, fixture.root.join("state/update-downloads")).unwrap();
         assert!(download_candidate(&fixture.config, "12.7.6").await.is_err());
         assert_eq!(std::fs::read_dir(outside).unwrap().count(), 0);
+    }
+    #[tokio::test]
+    async fn cache_lock_and_entry_quota_reject_without_publishing() {
+        let fixture = Fixture::new();
+        let state = PrivateDirectory::open(&fixture.config.state_dir).unwrap();
+        let lock = state.exclusive_lock("update-download.lock").unwrap();
+        assert!(
+            download_candidate(&fixture.config, "12.7.6")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("concurrent_download")
+        );
+        drop(lock);
+        let cache = state.child("update-downloads", false).unwrap();
+        for _ in 0..MAX_CACHE_ENTRIES {
+            cache
+                .child(&uuid::Uuid::new_v4().to_string(), true)
+                .unwrap();
+        }
+        assert!(
+            download_candidate(&fixture.config, "12.7.6")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("quota_exceeded")
+        );
+        assert_eq!(fixture.receipt_count(), 0);
+    }
+
+    #[test]
+    fn aggregate_cache_byte_quota_uses_metadata_without_reading_sparse_files() {
+        let fixture = Fixture::new();
+        let state = PrivateDirectory::open(&fixture.config.state_dir).unwrap();
+        let cache = state.child("update-downloads", false).unwrap();
+        for _ in 0..2 {
+            let child = cache
+                .child(&uuid::Uuid::new_v4().to_string(), true)
+                .unwrap();
+            child
+                .create_file("artifact.tar.gz")
+                .unwrap()
+                .set_len(super::super::source::ARTIFACT_LIMIT)
+                .unwrap();
+        }
+        assert!(
+            check_cache_quota(
+                &cache,
+                &fixture.config.state_dir.join("update-downloads"),
+                1
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("quota_exceeded")
+        );
     }
 }

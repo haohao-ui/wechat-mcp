@@ -97,6 +97,38 @@ impl PrivateDirectory {
         self.0.sync_all()?;
         Self::checked(unsafe { File::from_raw_fd(fd) })
     }
+    pub(crate) fn exclusive_lock(&self, name: &str) -> Result<File> {
+        validate_leaf(name)?;
+        let name = std::ffi::CString::new(name)?;
+        let fd = unsafe {
+            libc::openat(
+                self.0.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDWR
+                    | libc::O_CREAT
+                    | libc::O_NOFOLLOW
+                    | libc::O_NONBLOCK
+                    | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        let meta = file.metadata()?;
+        if !meta.is_file()
+            || meta.uid() != unsafe { libc::geteuid() }
+            || meta.mode() & 0o777 != 0o600
+            || meta.nlink() != 1
+            || meta.len() != 0
+        {
+            bail!("download_lock_file_invalid");
+        }
+        fs2::FileExt::try_lock_exclusive(&file)
+            .map_err(|_| anyhow::anyhow!("concurrent_download_in_progress"))?;
+        Ok(file)
+    }
     pub(crate) fn create_file(&self, name: &str) -> Result<File> {
         validate_leaf(name)?;
         let name = std::ffi::CString::new(name)?;

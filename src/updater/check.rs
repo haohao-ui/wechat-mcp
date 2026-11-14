@@ -146,7 +146,7 @@ pub async fn check_release(
         "already_installed"
     };
     Ok(
-        json!({"status":status,"candidate":candidate,"verification":{"publisher_verified":true,"key_id":envelope.key_id}}),
+        json!({"status":status,"candidate":candidate,"manifest_sha256":calculate_manifest_digest(manifest)?,"verification":{"publisher_verified":true,"key_id":envelope.key_id}}),
     )
 }
 
