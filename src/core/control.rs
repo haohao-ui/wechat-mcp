@@ -2283,8 +2283,8 @@ pub fn execute_control_full_with_paths<W1: std::io::Write, W2: std::io::Write>(
                 }
             }
             let config_path = config_file.unwrap_or(default_config_path);
-            let state_dir = match BotConfig::load(&config_path) {
-                Ok(c) => c.state_dir,
+            let config = match BotConfig::load(&config_path) {
+                Ok(c) => c,
                 Err(e) => {
                     let _ = writeln!(
                         stderr,
@@ -2295,6 +2295,7 @@ pub fn execute_control_full_with_paths<W1: std::io::Write, W2: std::io::Write>(
                 }
             };
 
+            let state_dir = config.state_dir.clone();
             let journal_res = crate::updater::journal::UpdateJournal::load_from_state(&state_dir);
             let (journal, journal_err) = match journal_res {
                 Ok(j) => (j, None),
@@ -2344,6 +2345,7 @@ pub fn execute_control_full_with_paths<W1: std::io::Write, W2: std::io::Write>(
             };
 
             let out_obj = json!({
+                "download_cache": crate::updater::download::download_cache_status(&config),
                 "current_release": {
                     "release_id": Value::Null,
                     "sequence": Value::Null,

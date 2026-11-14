@@ -129,6 +129,7 @@ fn main() {
                 "maintenance_active": maintenance || journal_err.is_some() || seq_err.is_some(),
                 "journal": journal,
                 "error": journal_err.or(seq_err),
+                "download_cache": wechat_mcp::updater::download::download_cache_status(&cfg),
                 "capabilities": {"schema":1,"download":download_ready,"prepare":download_ready,"install":false,"rollback":false,"recover":false},
             });
             println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());

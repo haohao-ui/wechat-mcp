@@ -11,11 +11,13 @@ let base = URL(fileURLWithPath: config).deletingLastPathComponent().resolvingSym
 let stateURL = URL(fileURLWithPath: state).resolvingSymlinksInPath()
 guard stateURL.path.hasPrefix(base.path + "/"), stateURL.path != base.path else { fatalError("acceptance state must be isolated below configuration directory") }
 let cacheURL = stateURL.appendingPathComponent("update-downloads")
+let expectReuse = environment["WECHAT_UPDATE_EXPECT_REUSE"] == "1"
 let initialCandidates = (try? FileManager.default.contentsOfDirectory(at: cacheURL, includingPropertiesForKeys: nil)) ?? []
 let app = NSApplication.shared
 app.setActivationPolicy(.prohibited)
 let context = StatusPanelController(worker: SocketWorker())
 let client = UpdateClient(configPath: config)
+let expected = try client.checkUpdate()
 let page = UpdatePageController(context: context, client: client)
 let window = NSWindow(contentRect: NSRect(x: 0,y: 0,width: 1000,height: 800),styleMask: [.titled],backing: .buffered,defer: false)
 window.isReleasedWhenClosed = false
@@ -35,6 +37,9 @@ let download = views(page.view).compactMap { $0 as? NSButton }.first { $0.title 
 check.performClick(nil)
 spinUntil({ check.isEnabled && download.isEnabled },seconds: 30)
 guard download.isEnabled else { fatalError("verified source and updater capability did not enable download") }
+if expectReuse {
+    guard download.title == "校验本地更新包", text("本机有候选缓存，需重新校验更新包") else { fatalError("cache was not explicitly labelled pending revalidation") }
+}
 download.performClick(nil)
 spinUntil({ download.title == "已下载" || views(page.view).compactMap { $0 as? NSTextField }.contains { $0.stringValue.hasPrefix("下载未完成") } },seconds: 90)
 guard download.title == "已下载", !download.isEnabled,
@@ -46,11 +51,17 @@ guard !FileManager.default.fileExists(atPath: stateURL.appendingPathComponent("c
       !FileManager.default.fileExists(atPath: stateURL.appendingPathComponent("core.maintenance").path) else { fatalError("download wrote installation or maintenance state") }
 let cache = stateURL.appendingPathComponent("update-downloads")
 let candidates = try FileManager.default.contentsOfDirectory(at: cache,includingPropertiesForKeys: nil)
-guard candidates.count == initialCandidates.count + 1,
-      let created = candidates.first(where: { !initialCandidates.contains($0) }),
-      let receiptData = FileManager.default.contents(atPath: created.appendingPathComponent("receipt.json").path),
+let expectedCount = initialCandidates.count + (expectReuse ? 0 : 1)
+guard candidates.count == expectedCount else { fatalError("unexpected cache entry count") }
+let selected = candidates.first { candidate in
+    guard let data = FileManager.default.contents(atPath: candidate.appendingPathComponent("receipt.json").path),
+          let receipt = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+    return receipt["manifest_sha256"] as? String == expected.manifestSha256
+}
+guard let selectedCandidate = selected,
+      let receiptData = FileManager.default.contents(atPath: selectedCandidate.appendingPathComponent("receipt.json").path),
       let receipt = try JSONSerialization.jsonObject(with: receiptData) as? [String: Any],
-      receipt["status"] as? String == "downloaded" else { fatalError("one real download receipt required") }
+      receipt["status"] as? String == "downloaded" else { fatalError("real matching download receipt required") }
 page.view.layoutSubtreeIfNeeded()
 let rect = page.view.bounds
 guard abs(rect.width - 1000) < 1, abs(rect.height - 800) < 1 else { fatalError("viewport size mismatch") }
@@ -68,6 +79,7 @@ if let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1000, pixels
 }
 var proof = receipt
 proof["native_download_action_completed"] = true
+proof["reused_existing_cache"] = expectReuse
 proof["install_actions_disabled"] = true
 proof["installation_performed"] = false
 proof["cache_candidate_count"] = candidates.count

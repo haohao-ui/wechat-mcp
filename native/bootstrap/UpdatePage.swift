@@ -250,29 +250,51 @@ public struct UpdateGuardInfo: Codable, Equatable {
     }
 }
 
+public struct UpdateCachedCandidate: Codable, Equatable {
+    public let candidateId: String
+    public let releaseId: String
+    public let sequence: UInt64
+    public let manifestSha256: String
+    enum CodingKeys: String, CodingKey {
+        case sequence
+        case candidateId = "candidate_id"
+        case releaseId = "release_id"
+        case manifestSha256 = "manifest_sha256"
+    }
+}
+
+public struct UpdateDownloadCache: Codable, Equatable {
+    public let status: String
+    public let candidates: [UpdateCachedCandidate]
+}
+
 public struct UpdateStatusPayload: Codable, Equatable {
     public let currentRelease: UpdateReleaseInfo
     public let candidateRelease: UpdateCandidateSummary?
     public let transaction: UpdateTransactionInfo
     public let guardInfo: UpdateGuardInfo
+    public let downloadCache: UpdateDownloadCache?
 
     enum CodingKeys: String, CodingKey {
         case currentRelease = "current_release"
         case candidateRelease = "candidate_release"
         case transaction
         case guardInfo = "guard"
+        case downloadCache = "download_cache"
     }
 
     public init(
         currentRelease: UpdateReleaseInfo,
         candidateRelease: UpdateCandidateSummary? = nil,
         transaction: UpdateTransactionInfo,
-        guardInfo: UpdateGuardInfo
+        guardInfo: UpdateGuardInfo,
+        downloadCache: UpdateDownloadCache? = nil
     ) {
         self.currentRelease = currentRelease
         self.candidateRelease = candidateRelease
         self.transaction = transaction
         self.guardInfo = guardInfo
+        self.downloadCache = downloadCache
     }
 }
 
@@ -1013,11 +1035,15 @@ public final class UpdatePageController: NSViewController {
         let digest = currentCheckResult?.manifestSha256
         let validDigest = digest?.count == 64 && digest?.allSatisfy({ $0.isHexDigit }) == true
         let downloaded = downloadedReceipt != nil && downloadedReceipt?.manifestSha256 == digest
+        let cached = currentStatusPayload?.downloadCache?.status == "cached_not_revalidated" && currentStatusPayload?.downloadCache?.candidates.contains(where: { $0.manifestSha256 == digest }) == true
         downloadButton.isEnabled = downloadSupported && safeStatus && verified && validDigest && !isChecking && !isDownloading && !downloaded
-        downloadButton.title = isDownloading ? "下载中…" : downloaded ? "已下载" : "下载更新"
+        downloadButton.title = isDownloading ? "下载中…" : downloaded ? "已下载" : (cached && verified) ? "校验本地更新包" : "下载更新"
         if downloaded && currentCheckResult?.status == .available {
             compatibilityLabel.stringValue = "更新包已下载，安装前将继续验证"
             localSigningLabel.stringValue = "安装包摘要已验证，尚未解包与本机签名"
+        } else if cached && verified {
+            compatibilityLabel.stringValue = "本机有候选缓存，需重新校验更新包"
+            localSigningLabel.stringValue = "缓存尚未重新校验，不代表已安装"
         }
         downloadButton.toolTip = downloadSupported ? "下载到本机私有缓存，不会停止业务或安装" : "当前更新器未报告可用的下载能力"
         checkButton.isEnabled = !isChecking && !isDownloading
@@ -1142,7 +1168,7 @@ public final class UpdatePageController: NSViewController {
                     self.isChecking = false
                     self.checkButton.isEnabled = true
                     self.applyCheckResult(res)
-                    self.actionFeedbackLabel.stringValue = res.status == .incompatible ? "检查未通过，请查看提示。" : "清单检查完成，未下载或安装。"
+                    self.actionFeedbackLabel.stringValue = res.status == .incompatible ? "检查未通过，请查看提示。" : "清单检查完成，本次未下载或安装。"
                     self.actionFeedbackLabel.textColor = res.status == .incompatible ? .systemRed : .secondaryLabelColor
                 }
             } catch {

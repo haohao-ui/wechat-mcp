@@ -118,6 +118,126 @@ fn check_cache_quota(directory: &PrivateDirectory, path: &Path, incoming: u64) -
     Ok(())
 }
 
+fn cached_receipts(config: &BotConfig) -> Result<Vec<DownloadReceipt>> {
+    let Some(settings) = &config.updater else {
+        return Ok(Vec::new());
+    };
+    let store = load_trusted_keys(&settings.trusted_keys)?;
+    let highest = load_highest_accepted_sequence(&config.state_dir)?;
+    let state = PrivateDirectory::open(&config.state_dir)?;
+    let cache = match state.open_child("update-downloads") {
+        Ok(cache) => cache,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(Vec::new());
+        }
+        Err(error) => return Err(error),
+    };
+    let path = config.state_dir.join("update-downloads");
+    let actual = std::fs::symlink_metadata(&path)?;
+    let expected = cache.0.metadata()?;
+    if !actual.is_dir() || actual.dev() != expected.dev() || actual.ino() != expected.ino() {
+        bail!("download_cache_binding_changed");
+    }
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(path)? {
+        if entries.len() >= MAX_CACHE_ENTRIES {
+            bail!("download_cache_quota_exceeded");
+        }
+        let name = entry?
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("download_cache_unrecognized_entry"))?;
+        if uuid::Uuid::parse_str(&name)
+            .map(|id| id.to_string())
+            .ok()
+            .as_deref()
+            != Some(name.as_str())
+        {
+            bail!("download_cache_unrecognized_entry");
+        }
+        entries.push(name);
+    }
+    entries.sort();
+    let mut receipts = Vec::new();
+    for name in entries {
+        let candidate = cache.open_child(&name)?;
+        // Incomplete or invalid candidates are not advertised. This does not
+        // remove them; quota and apply retain their strict validation boundary.
+        let verified = (|| -> Result<DownloadReceipt> {
+            let receipt: DownloadReceipt =
+                serde_json::from_slice(&candidate.read("receipt.json", 65536)?)?;
+            if receipt.status != "downloaded" || receipt.candidate_id != name {
+                bail!("cached_receipt_invalid");
+            }
+            let envelope = super::manifest::parse_signed_envelope(
+                &candidate.read("envelope.json", super::source::ENVELOPE_LIMIT)?,
+            )?;
+            store.verify_envelope(&envelope)?;
+            let manifest = &envelope.manifest;
+            if manifest.sequence <= highest
+                || receipt.release_id != manifest.release_id
+                || receipt.sequence != manifest.sequence
+                || receipt.manifest_sha256 != calculate_manifest_digest(manifest)?
+            {
+                bail!("cached_receipt_mismatch");
+            }
+            let artifact = candidate.read_file("artifact.tar.gz", super::source::ARTIFACT_LIMIT)?;
+            if artifact.metadata()?.len() != manifest.artifact.size_bytes {
+                bail!("cached_artifact_size_mismatch");
+            }
+            Ok(receipt)
+        })();
+        if let Ok(receipt) = verified {
+            receipts.push(receipt);
+        }
+    }
+    receipts.sort_by(|left, right| {
+        right
+            .sequence
+            .cmp(&left.sequence)
+            .then(left.candidate_id.cmp(&right.candidate_id))
+    });
+    Ok(receipts)
+}
+
+/// This is metadata discovery, never a claim of a current artifact hash or an
+/// installed/running release. Only explicit download/apply rechecks the bytes.
+pub fn download_cache_status(config: &BotConfig) -> serde_json::Value {
+    match cached_receipts(config) {
+        Ok(receipts) => {
+            serde_json::json!({"status":"cached_not_revalidated","candidates":receipts.iter().map(|receipt|serde_json::json!({"candidate_id":receipt.candidate_id,"release_id":receipt.release_id,"sequence":receipt.sequence,"manifest_sha256":receipt.manifest_sha256})).collect::<Vec<_>>()})
+        }
+        Err(_) => serde_json::json!({"status":"unavailable","candidates":[]}),
+    }
+}
+
+fn artifact_matches(
+    archive: impl Read,
+    manifest: &super::manifest::ReleaseManifest,
+) -> Result<bool> {
+    let mut archive = archive.take(manifest.artifact.size_bytes.saturating_add(1));
+    let mut hasher = Sha256::new();
+    let mut count = 0u64;
+    let mut buffer = [0u8; 65536];
+    loop {
+        let read = archive.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        count += read as u64;
+        if count > manifest.artifact.size_bytes {
+            return Ok(false);
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(count == manifest.artifact.size_bytes
+        && hex_digest(hasher.finalize().as_slice()) == manifest.artifact.sha256)
+}
+
 /// Downloads one immutable candidate into a private UUID namespace. The receipt
 /// is written last, only after publisher, compatibility, size and hash checks.
 /// Rejected downloads retain no valid receipt and can never be selected by apply.
@@ -141,13 +261,25 @@ pub async fn download_candidate(
     let state = PrivateDirectory::open(&config.state_dir)?;
     let _download_lock = state.exclusive_lock("update-download.lock")?;
     let downloads = state.child("update-downloads", false)?;
+    for receipt in cached_receipts(config).unwrap_or_default() {
+        if receipt.release_id == manifest.release_id
+            && receipt.sequence == manifest.sequence
+            && receipt.manifest_sha256 == calculate_manifest_digest(manifest)?
+        {
+            let candidate = downloads.open_child(&receipt.candidate_id)?;
+            let archive = candidate.read_file("artifact.tar.gz", super::source::ARTIFACT_LIMIT)?;
+            if artifact_matches(archive, manifest)? {
+                return Ok(receipt);
+            }
+        }
+    }
     check_cache_quota(
         &downloads,
         &config.state_dir.join("update-downloads"),
         manifest
             .artifact
             .size_bytes
-            .saturating_add(bytes.len() as u64)
+            .saturating_add((bytes.len() as u64).saturating_mul(2))
             .saturating_add(4096),
     )?;
     let candidate_id = uuid::Uuid::new_v4().to_string();
@@ -412,6 +544,100 @@ pub(crate) mod tests {
             .unwrap_err()
             .to_string()
             .contains("quota_exceeded")
+        );
+    }
+    #[tokio::test]
+    async fn restart_cache_is_metadata_only_until_explicit_hash_revalidation() {
+        let fixture = Fixture::new();
+        let first = download_candidate(&fixture.config, "12.7.6").await.unwrap();
+        let before = std::fs::read(
+            fixture
+                .config
+                .state_dir
+                .join("update-downloads")
+                .join(&first.candidate_id)
+                .join("receipt.json"),
+        )
+        .unwrap();
+        let status = download_cache_status(&fixture.config);
+        assert_eq!(status["status"], "cached_not_revalidated");
+        assert_eq!(status["candidates"][0]["candidate_id"], first.candidate_id);
+        let second = download_candidate(&fixture.config, "12.7.6").await.unwrap();
+        assert_eq!(first.candidate_id, second.candidate_id);
+        assert_eq!(
+            std::fs::read_dir(fixture.config.state_dir.join("update-downloads"))
+                .unwrap()
+                .count(),
+            1
+        );
+        assert_eq!(
+            before,
+            std::fs::read(
+                fixture
+                    .config
+                    .state_dir
+                    .join("update-downloads")
+                    .join(&first.candidate_id)
+                    .join("receipt.json")
+            )
+            .unwrap()
+        );
+        let corrupted = fixture
+            .config
+            .state_dir
+            .join("update-downloads")
+            .join(&first.candidate_id)
+            .join("artifact.tar.gz");
+        std::fs::write(&corrupted, b"RELEASE BYTES").unwrap();
+        assert_eq!(
+            download_cache_status(&fixture.config)["status"],
+            "cached_not_revalidated"
+        );
+        let replacement = download_candidate(&fixture.config, "12.7.6").await.unwrap();
+        assert_ne!(replacement.candidate_id, first.candidate_id);
+        assert_eq!(std::fs::read(corrupted).unwrap(), b"RELEASE BYTES");
+        assert_eq!(
+            std::fs::read(
+                fixture
+                    .config
+                    .state_dir
+                    .join("update-downloads")
+                    .join(replacement.candidate_id)
+                    .join("artifact.tar.gz")
+            )
+            .unwrap(),
+            b"release bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_receipt_is_not_trusted_after_key_change_or_metadata_tampering() {
+        let mut fixture = Fixture::new();
+        let receipt = download_candidate(&fixture.config, "12.7.6").await.unwrap();
+        fixture.resign();
+        assert!(
+            download_cache_status(&fixture.config)["candidates"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let fresh = download_candidate(&fixture.config, "12.7.6").await.unwrap();
+        assert_ne!(fresh.candidate_id, receipt.candidate_id);
+        let path = fixture
+            .config
+            .state_dir
+            .join("update-downloads")
+            .join(&fresh.candidate_id)
+            .join("receipt.json");
+        let mut modified: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        modified["manifest_sha256"] = serde_json::json!("00".repeat(32));
+        std::fs::write(path, modified.to_string()).unwrap();
+        assert!(
+            download_cache_status(&fixture.config)["candidates"]
+                .as_array()
+                .unwrap()
+                .is_empty()
         );
     }
 }
