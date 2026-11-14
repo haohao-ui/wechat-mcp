@@ -488,7 +488,7 @@ func runTests() -> Int32 {
         let lock = NSLock()
         var mode = "good"
         var calls = 0
-        let client = UpdateClient(configPath: "/fixture/config.json", executor: { executable, arguments, _ in
+        let responder: UpdateClient.CommandExecutor = { executable, arguments, _ in
             if arguments.first == "control" {
                 let body = arguments.contains("update-check") ? checkJSON : statusJSON
                 return ControlRun(status: 0, output: Data(body.utf8), timedOut: false)
@@ -502,7 +502,8 @@ func runTests() -> Int32 {
             {"status":"downloaded","candidate_id":"11111111-1111-4111-8111-111111111111","release_id":"fixture-release","sequence":2,"manifest_sha256":"\(returnedDigest)"}
             """
             return ControlRun(status: 0, output: Data(body.utf8), timedOut: false)
-        })
+        }
+        let client = UpdateClient(configPath: "/fixture/config.json", executor: responder)
         do { let receipt = try client.downloadUpdate(expected: expected); check("download_receipt_pins_manifest", receipt.manifestSha256 == digest) }
         catch { check("download_receipt_pins_manifest", false, "\(error)") }
         lock.lock(); mode = "changed"; lock.unlock()
@@ -538,6 +539,39 @@ func runTests() -> Int32 {
         for title in ["安装并重启", "延期更新"] {
             check("install_actions_stay_disabled_after_download_\(title)", descendants(page.view).compactMap { $0 as? NSButton }.first { $0.title == title }?.isEnabled == false)
         }
+    }
+
+    // Restarted page discovers cache metadata, but must explicitly revalidate it.
+    do {
+        let digest = String(repeating: "c", count: 64)
+        let status = """
+        {"current_release":{"architecture":"fixture","status":"unknown","source":"unknown"},"transaction":{"status":"idle","recovery_required":false},"guard":{"highest_accepted_sequence":0,"maintenance_active":false},"download_cache":{"status":"cached_not_revalidated","candidates":[{"candidate_id":"22222222-2222-4222-8222-222222222222","release_id":"cached-fixture","sequence":3,"manifest_sha256":"\(digest)"}]}}
+        """
+        let checkResponse = """
+        {"status":"available","candidate":{"release_id":"cached-fixture","sequence":3},"verification":{"publisher_verified":true},"manifest_sha256":"\(digest)"}
+        """
+        let receipt = """
+        {"status":"downloaded","candidate_id":"22222222-2222-4222-8222-222222222222","release_id":"cached-fixture","sequence":3,"manifest_sha256":"\(digest)"}
+        """
+        let client = UpdateClient(configPath: "/fixture/config.json", executor: { _,args,_ in
+            let body: String
+            if args.first == "control" { body = args.contains("update-check") ? checkResponse : status }
+            else if args.first == "status" { body = "{\"status\":\"idle\",\"maintenance_active\":false,\"capabilities\":{\"schema\":1,\"download\":true}}" }
+            else { body = receipt }
+            return ControlRun(status: 0, output: Data(body.utf8), timedOut: false)
+        })
+        let context = StatusPanelController(worker: SocketWorker())
+        let page = UpdatePageController(context: context, client: client)
+        _ = page.view
+        func views(_ root: NSView) -> [NSView] { [root] + root.subviews.flatMap { views($0) } }
+        let checkButton = views(page.view).compactMap { $0 as? NSButton }.first { $0.title == "检查更新" }!
+        let download = views(page.view).compactMap { $0 as? NSButton }.first { $0.title == "下载更新" }!
+        check("restart_cache_does_not_imply_verified_download", !download.isEnabled && download.title != "已下载")
+        checkButton.performClick(nil)
+        let end = ProcessInfo.processInfo.systemUptime + 5
+        while !download.isEnabled && ProcessInfo.processInfo.systemUptime < end { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01)) }
+        check("restart_offers_explicit_cached_package_revalidation", download.isEnabled && download.title == "校验本地更新包")
+        check("restart_labels_cache_as_unverified_bytes", views(page.view).compactMap { $0 as? NSTextField }.contains { $0.stringValue == "本机有候选缓存，需重新校验更新包" })
     }
 
     // 11. 离屏 UI 完整高度渲染夹具（不透明 Aqua，包含完整卡片流与底部按钮，验证720宽及宿主最小680宽）
