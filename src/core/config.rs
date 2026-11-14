@@ -91,6 +91,18 @@ impl Default for BrainConfig {
     }
 }
 
+/// Explicit release source and local code-signing references. Publisher private
+/// keys and keychain passwords are never embedded in application configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct UpdaterConfig {
+    pub source: crate::updater::source::ReleaseSource,
+    pub trusted_keys: PathBuf,
+    pub signing_identity: String,
+    pub keychain: PathBuf,
+    pub keychain_password_file: PathBuf,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BotConfig {
     pub schema_version: u32,
@@ -102,6 +114,8 @@ pub struct BotConfig {
     pub state_dir: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_root: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updater: Option<UpdaterConfig>,
     pub poll_seconds: u64,
     pub cooldown_seconds: u64,
     pub max_replies_per_hour: u64,
@@ -563,6 +577,7 @@ impl BotConfig {
             "allowlist",
             "state_dir",
             "install_root",
+            "updater",
             "poll_seconds",
             "cooldown_seconds",
             "max_replies_per_hour",
@@ -735,6 +750,26 @@ impl BotConfig {
             .transpose()
             .context("invalid ignorelist")?;
 
+        let updater: Option<UpdaterConfig> = map
+            .get("updater")
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()
+            .context("invalid updater configuration")?;
+        if let Some(settings) = &updater {
+            if install_root.is_none() {
+                bail!("updater_requires_explicit_install_root");
+            }
+            settings.source.validate()?;
+            if !settings.trusted_keys.is_absolute()
+                || !settings.keychain.is_absolute()
+                || !settings.keychain_password_file.is_absolute()
+                || settings.signing_identity.trim().is_empty()
+                || settings.signing_identity.chars().any(char::is_control)
+            {
+                bail!("invalid_updater_paths_or_signing_identity");
+            }
+        }
+
         Ok(BotConfig {
             schema_version,
             host: host.to_string(),
@@ -743,6 +778,7 @@ impl BotConfig {
             ignorelist,
             state_dir,
             install_root,
+            updater,
             poll_seconds,
             cooldown_seconds,
             max_replies_per_hour,
@@ -789,6 +825,47 @@ mod tests {
             "allowlist": [{"recipient": "示例联系人甲", "kind": "private"}],
             "state_dir": dir.join("state").to_str().unwrap()
         })
+    }
+
+    #[test]
+    fn updater_configuration_is_optional_explicit_and_strict() {
+        let td = temp_dir();
+        let path = td.join("config.json");
+        let mut value = base_config(&td);
+        fs::write(&path, value.to_string()).unwrap();
+        assert!(BotConfig::load(&path).unwrap().updater.is_none());
+        value["updater"] = json!({
+            "source": {"kind": "local", "directory": td.join("feed")},
+            "trusted_keys": td.join("trusted.json"),
+            "signing_identity": "Existing Local Identity",
+            "keychain": td.join("local.keychain-db"),
+            "keychain_password_file": td.join("keychain.pass")
+        });
+        fs::write(&path, value.to_string()).unwrap();
+        assert!(
+            BotConfig::load(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("explicit_install_root")
+        );
+        value["install_root"] = json!(td.join("install"));
+        fs::write(&path, value.to_string()).unwrap();
+        let loaded = BotConfig::load(&path).unwrap();
+        assert!(loaded.updater.is_some());
+        assert_eq!(
+            serde_json::from_value::<BotConfig>(serde_json::to_value(&loaded).unwrap()).unwrap(),
+            loaded
+        );
+        for source in [
+            json!({"kind":"local", "directory":"relative"}),
+            json!({"kind":"https", "manifest_url":"http://example.com/envelope.json"}),
+            json!({"kind":"local", "directory":td, "unexpected":true}),
+        ] {
+            value["updater"]["source"] = source;
+            fs::write(&path, value.to_string()).unwrap();
+            assert!(BotConfig::load(&path).is_err());
+        }
+        fs::remove_dir_all(td).unwrap();
     }
 
     #[test]

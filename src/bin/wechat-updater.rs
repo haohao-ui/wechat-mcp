@@ -6,7 +6,7 @@ use wechat_mcp::updater::manifest;
 
 fn print_usage() {
     eprintln!(
-        "Usage: wechat-updater <status|check|apply|rollback|recover> [--config <path>] [--manifest <path>] [--trusted-keys <path>]"
+        "Usage: wechat-updater <status|check|download|apply|rollback|recover> [--config <path>] [--manifest <path>] [--trusted-keys <path>]"
     );
 }
 
@@ -21,6 +21,32 @@ fn main() {
         "--version" | "-v" => {
             println!("wechat-updater 0.1.0");
             std::process::exit(0);
+        }
+        "download" => {
+            if args.len() != 4 || args[2] != "--config" {
+                eprintln!("error: download requires --config <path>");
+                std::process::exit(2);
+            }
+            let result = (|| -> anyhow::Result<_> {
+                let config = config::BotConfig::load(&args[3])?;
+                let output = std::process::Command::new("sw_vers")
+                    .arg("-productVersion")
+                    .output()?;
+                if !output.status.success() {
+                    anyhow::bail!("host_os_version_unavailable");
+                }
+                let host_os = String::from_utf8(output.stdout)?.trim().to_string();
+                tokio::runtime::Runtime::new()?.block_on(
+                    wechat_mcp::updater::download::download_candidate(&config, &host_os),
+                )
+            })();
+            match result {
+                Ok(receipt) => println!("{}", serde_json::to_string_pretty(&receipt).unwrap()),
+                Err(error) => {
+                    eprintln!("error: {error:#}");
+                    std::process::exit(1);
+                }
+            }
         }
         "status" => {
             let mut config_path: Option<PathBuf> = None;
