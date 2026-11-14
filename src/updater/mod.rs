@@ -1,3 +1,4 @@
+pub mod check;
 pub mod download;
 pub mod executor;
 pub mod journal;

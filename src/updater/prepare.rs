@@ -52,7 +52,7 @@ pub struct LocalComponent {
     pub size_bytes: u64,
 }
 
-fn validate_complete_payload(manifest: &ReleaseManifest) -> Result<()> {
+pub(crate) fn validate_complete_payload(manifest: &ReleaseManifest) -> Result<()> {
     validate_release_id_safe(&manifest.release_id)?;
     let expected: std::collections::HashSet<String> = BINS
         .iter()
@@ -461,7 +461,7 @@ pub async fn prepare_candidate(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     #[test]
     fn certificate_anchor_rejects_adhoc_and_malformed_hashes() {
@@ -476,7 +476,9 @@ mod tests {
             format!("certificate leaf = H\"{}\"", "ab".repeat(20))
         );
     }
-    fn complete_fixture(extra_archive_file: bool) -> crate::updater::download::tests::Fixture {
+    pub(crate) fn complete_fixture(
+        extra_archive_file: bool,
+    ) -> crate::updater::download::tests::Fixture {
         use ring::signature::KeyPair;
         let mut fixture = crate::updater::download::tests::Fixture::new();
         let paths = BINS

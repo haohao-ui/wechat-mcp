@@ -88,8 +88,16 @@ fn sample_manifest(sequence: u64, arch: &str) -> ReleaseManifest {
         release_id: format!("0.2.0-{}", sequence),
         sequence,
         channel: "stable".into(),
-        published_at: 1794297600,
-        expires_at: 1825833600,
+        published_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .saturating_sub(60),
+        expires_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 86400,
         target: TargetSpec {
             os: "macos".into(),
             arch: arch.into(),

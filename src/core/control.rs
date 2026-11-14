@@ -2393,144 +2393,28 @@ pub fn execute_control_full_with_paths<W1: std::io::Write, W2: std::io::Write>(
                 }
             }
             let config_path = config_file.unwrap_or(default_config_path);
-            let state_dir = match BotConfig::load(&config_path) {
-                Ok(c) => c.state_dir,
-                Err(_) => base.join("state"),
-            };
-
-            let Some(m_path) = manifest_file else {
-                let out_obj = json!({
-                    "status": "unconfigured",
-                    "reason": "distribution_source_not_configured",
-                    "candidate": null
-                });
-                let _ = writeln!(
-                    stdout,
-                    "{}",
-                    serde_json::to_string_pretty(&out_obj).unwrap_or_default()
-                );
-                return 0;
-            };
-
-            let manifest_bytes = match fs::read(&m_path) {
-                Ok(b) => b,
-                Err(e) => {
-                    let out_obj = json!({
-                        "status": "incompatible",
-                        "reason": format!("failed to read manifest: {e}"),
-                        "candidate": null
-                    });
-                    let _ = writeln!(
-                        stdout,
-                        "{}",
-                        serde_json::to_string_pretty(&out_obj).unwrap_or_default()
-                    );
-                    return 1;
+            let config = match BotConfig::load(&config_path) {
+                Ok(config) => config,
+                Err(error) => {
+                    let _ = writeln!(stderr, "invalid_config: {error:#}");
+                    return 2;
                 }
             };
-
-            let envelope: crate::updater::manifest::SignedEnvelope =
-                match crate::updater::manifest::parse_signed_envelope(&manifest_bytes) {
-                    Ok(env) => env,
-                    Err(e) => {
-                        let out_obj = json!({
-                            "status": "incompatible",
-                            "reason": format!("invalid signed envelope: {e}"),
-                            "candidate": null
-                        });
-                        let _ = writeln!(
-                            stdout,
-                            "{}",
-                            serde_json::to_string_pretty(&out_obj).unwrap_or_default()
-                        );
-                        return 1;
-                    }
-                };
-
-            let highest_seq = match crate::updater::journal::load_highest_accepted_sequence(
-                &state_dir,
+            let response = match crate::updater::check::check_release_blocking(
+                config,
+                manifest_file,
             ) {
-                Ok(s) => s,
-                Err(e) => {
-                    let out_obj = json!({
-                        "status": "incompatible",
-                        "reason": format!("cannot check update with corrupt sequence file: {e}"),
-                        "candidate": null
-                    });
-                    let _ = writeln!(
-                        stdout,
-                        "{}",
-                        serde_json::to_string_pretty(&out_obj).unwrap_or_default()
-                    );
-                    return 1;
+                Ok(response) => response,
+                Err(error) => {
+                    json!({"status":"incompatible","reason":format!("{error:#}"),"candidate":null,"verification":{"publisher_verified":false}})
                 }
             };
-
-            // 识别同 sequence 幂等已安装
-            if envelope.manifest.sequence == highest_seq {
-                let out_obj = json!({
-                    "status": "already_installed",
-                    "reason": "candidate sequence matches current installed sequence",
-                    "candidate": {
-                        "release_id": envelope.manifest.release_id,
-                        "sequence": envelope.manifest.sequence
-                    }
-                });
-                let _ = writeln!(
-                    stdout,
-                    "{}",
-                    serde_json::to_string_pretty(&out_obj).unwrap_or_default()
-                );
-                return 0;
-            }
-
-            // 生产环境下无可信根公钥配置必须 fail closed；测试公钥仅限 fixture 适配器注入，禁止外部测试 key 注入
-            let publisher_verified = false;
-
-            match crate::updater::manifest::validate_manifest_compatibility(
-                &envelope.manifest,
-                std::env::consts::ARCH,
-                "12.0",
-                highest_seq,
-            ) {
-                Ok(()) => {
-                    let out_obj = json!({
-                        "status": "unverified_trust_root",
-                        "candidate": {
-                            "release_id": envelope.manifest.release_id,
-                            "sequence": envelope.manifest.sequence,
-                            "published_at": envelope.manifest.published_at,
-                            "size_bytes": envelope.manifest.artifact.size_bytes,
-                            "release_notes": envelope.manifest.release_notes,
-                            "compatible": true,
-                            "requires_local_signing": true
-                        },
-                        "verification": {
-                            "publisher_verified": publisher_verified,
-                            "key_id": envelope.key_id
-                        }
-                    });
-                    let _ = writeln!(
-                        stdout,
-                        "{}",
-                        serde_json::to_string_pretty(&out_obj).unwrap_or_default()
-                    );
-                    0
-                }
-                Err(e) => {
-                    let out_obj = json!({
-                        "status": "incompatible",
-                        "reason": e.to_string(),
-                        "candidate": null
-                    });
-                    let _ = writeln!(
-                        stdout,
-                        "{}",
-                        serde_json::to_string_pretty(&out_obj).unwrap_or_default()
-                    );
-                    0
-                }
-            }
+            let _ = writeln!(
+                stdout,
+                "{}",
+                serde_json::to_string_pretty(&response).unwrap_or_default()
+            );
+            0
         }
         other => {
             let _ = writeln!(stderr, "unknown control action: {}", other);

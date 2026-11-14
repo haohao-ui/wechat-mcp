@@ -104,6 +104,9 @@ impl TrustedKeyStore {
     /// 4. 添加域分离前缀 "WECHAT_MCP_UPDATE_MANIFEST_V1\n"
     /// 5. ring::signature::ED25519 验签
     pub fn verify_envelope(&self, envelope: &SignedEnvelope) -> Result<()> {
+        if envelope.envelope_schema != 1 || envelope.manifest.manifest_schema != 1 {
+            bail!("unsupported_release_schema");
+        }
         let pubkey_bytes = match self.keys.get(&envelope.key_id) {
             Some(k) => k,
             None => bail!(
@@ -139,8 +142,26 @@ impl TrustedKeyStore {
             anyhow::anyhow!("signature_verification_failed: cryptographic signature mismatch")
         })?;
 
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| anyhow::anyhow!("release_verification_clock_invalid"))?
+            .as_secs();
+        validate_release_time(&envelope.manifest, now)?;
         Ok(())
     }
+}
+
+fn validate_release_time(manifest: &ReleaseManifest, now: u64) -> Result<()> {
+    if manifest.expires_at <= manifest.published_at {
+        bail!("release_validity_interval_invalid");
+    }
+    if manifest.expires_at <= now {
+        bail!("release_manifest_expired");
+    }
+    if manifest.published_at > now.saturating_add(300) {
+        bail!("release_manifest_not_yet_valid");
+    }
+    Ok(())
 }
 
 /// Trusted release key file used by the CLI verification path.
@@ -331,6 +352,29 @@ pub fn validate_manifest_compatibility(
     host_os_ver: &str,
     highest_accepted_seq: u64,
 ) -> Result<()> {
+    validate_manifest_environment(manifest, host_arch, host_os_ver)?;
+    if manifest.sequence == highest_accepted_seq {
+        bail!(
+            "sequence_already_installed: candidate sequence {} matches highest accepted sequence (re-installation rejected)",
+            manifest.sequence
+        );
+    }
+    if manifest.sequence < highest_accepted_seq {
+        bail!(
+            "downgrade_rejected: candidate sequence {} is lower than highest accepted sequence {}",
+            manifest.sequence,
+            highest_accepted_seq
+        );
+    }
+
+    Ok(())
+}
+
+pub(crate) fn validate_manifest_environment(
+    manifest: &ReleaseManifest,
+    host_arch: &str,
+    host_os_ver: &str,
+) -> Result<()> {
     if manifest.target.os != "macos" {
         bail!(
             "os_incompatible: manifest target OS is '{}', host is macos",
@@ -362,20 +406,6 @@ pub fn validate_manifest_compatibility(
                 max_os
             );
         }
-    }
-
-    if manifest.sequence == highest_accepted_seq {
-        bail!(
-            "sequence_already_installed: candidate sequence {} matches highest accepted sequence (re-installation rejected)",
-            manifest.sequence
-        );
-    }
-    if manifest.sequence < highest_accepted_seq {
-        bail!(
-            "downgrade_rejected: candidate sequence {} is lower than highest accepted sequence {}",
-            manifest.sequence,
-            highest_accepted_seq
-        );
     }
 
     // 组件白名单与合理性初步检查

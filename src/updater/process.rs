@@ -77,6 +77,7 @@ pub(crate) enum PathTool {
     Security,
     Plutil,
     Lipo,
+    SwVers,
     #[cfg(test)]
     Shell,
 }
@@ -87,6 +88,7 @@ impl PathTool {
             Self::Security => "/usr/bin/security",
             Self::Plutil => "/usr/bin/plutil",
             Self::Lipo => "/usr/bin/lipo",
+            Self::SwVers => "/usr/bin/sw_vers",
             #[cfg(test)]
             Self::Shell => "/bin/sh",
         }
