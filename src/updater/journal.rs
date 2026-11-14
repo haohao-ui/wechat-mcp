@@ -519,15 +519,48 @@ pub struct CurrentReleaseCommitRecord {
     pub tx_id: String,
     pub release_id: String,
     pub sequence: u64,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_watermark",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub highest_accepted_sequence: Option<u64>,
     pub channel: String,
     pub manifest_digest: String,
     pub installed_at: u64,
+}
+
+fn deserialize_watermark<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<u64>, D::Error> {
+    u64::deserialize(deserializer).map(Some)
+}
+
+impl CurrentReleaseCommitRecord {
+    pub fn accepted_sequence(&self) -> Result<u64> {
+        match (self.record_schema, self.highest_accepted_sequence) {
+            (1, None) => Ok(self.sequence),
+            (2, Some(highest)) if highest >= self.sequence => Ok(highest),
+            _ => bail!("invalid_release_record_schema_or_watermark"),
+        }
+    }
 }
 
 pub fn atomic_commit_release_record(
     state_dir: &Path,
     record: &CurrentReleaseCommitRecord,
 ) -> Result<()> {
+    let highest = record.accepted_sequence()?;
+    if record.record_schema == 2 {
+        let previous = load_highest_accepted_sequence(state_dir)?;
+        if highest < previous {
+            bail!("accepted_sequence_regression_rejected");
+        }
+    } else if load_current_release_record(state_dir)?
+        .is_some_and(|previous| previous.record_schema == 2)
+    {
+        bail!("release_record_schema_downgrade_rejected");
+    }
     if !state_dir.exists() {
         fs::create_dir_all(state_dir)?;
         fs::set_permissions(state_dir, fs::Permissions::from_mode(0o700))?;
@@ -548,8 +581,11 @@ pub fn atomic_commit_release_record(
 
     fs::rename(&tmp_path, &record_path)?;
 
-    // 同时原子更新高水位文件，确保旧组件读取兼容
-    save_highest_accepted_sequence(state_dir, record.sequence)?;
+    // v2 has one authoritative atomic commit. A lower legacy mirror is ignored;
+    // writing a second authority would introduce a crash window during rollback.
+    if record.record_schema == 1 {
+        save_highest_accepted_sequence(state_dir, record.sequence)?;
+    }
 
     sync_dir(state_dir)?;
     Ok(())
@@ -557,11 +593,11 @@ pub fn atomic_commit_release_record(
 
 pub fn load_current_release_record(state_dir: &Path) -> Result<Option<CurrentReleaseCommitRecord>> {
     let record_path = state_dir.join("current_release.json");
-    if !record_path.exists() {
+    let Some(bytes) = read_limited_private_file(&record_path, 64 * 1024)? else {
         return Ok(None);
-    }
-    let bytes = fs::read(&record_path)?;
+    };
     let record: CurrentReleaseCommitRecord = serde_json::from_slice(&bytes)?;
+    record.accepted_sequence()?;
     Ok(Some(record))
 }
 
@@ -1284,12 +1320,18 @@ pub fn check_startup_guard_readonly_with_root(
                             }
                         };
 
-                    if commit_record.record_schema != 1 {
+                    if commit_record.accepted_sequence().is_err() {
                         return StartupDualCheckDecision::RecoveryRequired {
                             reason: format!(
                                 "unsupported_record_schema: {}",
                                 commit_record.record_schema
                             ),
+                        };
+                    }
+
+                    if let Err(error) = load_highest_accepted_sequence(state_dir) {
+                        return StartupDualCheckDecision::RecoveryRequired {
+                            reason: format!("invalid_accepted_sequence: {error}"),
                         };
                     }
 
@@ -1395,10 +1437,10 @@ pub fn sync_dir(dir: &Path) -> Result<()> {
 /// 读取旧版原始 highest_accepted_sequence 文件
 pub fn load_raw_highest_accepted_sequence(state_dir: &Path) -> Result<Option<u64>> {
     let seq_path = state_dir.join("highest_accepted_sequence");
-    if !seq_path.exists() {
+    let Some(bytes) = read_limited_private_file(&seq_path, 64)? else {
         return Ok(None);
-    }
-    let content = fs::read_to_string(&seq_path)?;
+    };
+    let content = std::str::from_utf8(&bytes)?;
     match content.trim().parse::<u64>() {
         Ok(val) => Ok(Some(val)),
         Err(e) => bail!(
@@ -1416,16 +1458,17 @@ pub fn load_highest_accepted_sequence(state_dir: &Path) -> Result<u64> {
 
     match (record_opt, old_seq_opt) {
         (Some(record), Some(old_seq)) => {
-            if record.sequence != old_seq {
+            let highest = record.accepted_sequence()?;
+            if (record.record_schema == 1 && highest != old_seq) || old_seq > highest {
                 bail!(
                     "sequence_conflict_detected: current_release.json sequence {} != highest_accepted_sequence file {}",
-                    record.sequence,
+                    highest,
                     old_seq
                 );
             }
-            Ok(record.sequence)
+            Ok(highest)
         }
-        (Some(record), None) => Ok(record.sequence),
+        (Some(record), None) => record.accepted_sequence(),
         (None, Some(old_seq)) => Ok(old_seq),
         (None, None) => Ok(0),
     }

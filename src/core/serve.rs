@@ -1460,6 +1460,7 @@ mod tests {
 
         let record = crate::updater::journal::CurrentReleaseCommitRecord {
             record_schema: 1,
+            highest_accepted_sequence: None,
             tx_id: tx_id.to_string(),
             release_id: "1.0.1".to_string(),
             sequence: 2,
@@ -1551,6 +1552,7 @@ mod tests {
 
         let record = crate::updater::journal::CurrentReleaseCommitRecord {
             record_schema: 1,
+            highest_accepted_sequence: None,
             tx_id: tx_id.to_string(),
             release_id: "1.0.1".to_string(),
             sequence: 2,

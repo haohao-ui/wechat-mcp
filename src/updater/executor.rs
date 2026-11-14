@@ -831,6 +831,7 @@ impl<'a> SandboxUpdateExecutor<'a> {
                 // 准备单一权威提交记录
                 let commit_record = CurrentReleaseCommitRecord {
                     record_schema: 1,
+                    highest_accepted_sequence: None,
                     tx_id: tx_id.clone(),
                     release_id: manifest.release_id.clone(),
                     sequence: manifest.sequence,
