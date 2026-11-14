@@ -37,6 +37,23 @@ fn visible_pages_follow_host_status_without_discarding_input() {
         .env("WECHAT_MCP_BIN", "/usr/bin/false")
         .output()
         .unwrap();
+    // A stale install marker must never override the executable bundle version.
+    let app = temp.join("VersionProbe.app/Contents");
+    std::fs::create_dir_all(app.join("MacOS")).unwrap();
+    std::fs::copy(&bin, app.join("MacOS/refresh-selftest")).unwrap();
+    std::fs::write(app.join("Info.plist"), r#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleExecutable</key><string>refresh-selftest</string><key>CFBundleIdentifier</key><string>local.wechat-mcp.host</string><key>CFBundleShortVersionString</key><string>9.8.7</string><key>CFBundleVersion</key><string>123</string></dict></plist>"#).unwrap();
+    std::fs::create_dir_all(temp.join(".wechat-rpa")).unwrap();
+    std::fs::write(temp.join(".wechat-rpa/VERSION"), "stale-install-marker").unwrap();
+    let version = Command::new(app.join("MacOS/refresh-selftest"))
+        .arg("--host-version")
+        .env("CFFIXED_USER_HOME", &temp)
+        .output()
+        .unwrap();
+    assert!(version.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&version.stdout).trim(),
+        "9.8.7 (123)"
+    );
     let _ = std::fs::remove_dir_all(temp);
     assert!(
         result.status.success(),

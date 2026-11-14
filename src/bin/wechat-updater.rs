@@ -233,6 +233,62 @@ fn main() {
             println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
             std::process::exit(0);
         }
+        "apply" if args.iter().any(|arg| arg == "--candidate") => {
+            let result = (|| -> anyhow::Result<_> {
+                let mut config_path = None;
+                let mut candidate_id = None;
+                let mut dry_run = false;
+                let mut index = 2;
+                while index < args.len() {
+                    match args[index].as_str() {
+                        "--config" if config_path.is_none() && index + 1 < args.len() => {
+                            config_path = Some(args[index + 1].clone());
+                            index += 2;
+                        }
+                        "--candidate" if candidate_id.is_none() && index + 1 < args.len() => {
+                            candidate_id = Some(args[index + 1].clone());
+                            index += 2;
+                        }
+                        "--dry-run" if !dry_run => {
+                            dry_run = true;
+                            index += 1;
+                        }
+                        _ => anyhow::bail!("invalid_candidate_apply_argument"),
+                    }
+                }
+                let config_path = config_path
+                    .ok_or_else(|| anyhow::anyhow!("candidate_apply_requires_config"))?;
+                let candidate_id = candidate_id
+                    .ok_or_else(|| anyhow::anyhow!("candidate_apply_requires_candidate"))?;
+                if !dry_run {
+                    anyhow::bail!(
+                        "production_install_pending_transaction_implementation: use --dry-run to prepare without installation"
+                    );
+                }
+                let config = config::BotConfig::load(config_path)?;
+                let output = std::process::Command::new("sw_vers")
+                    .arg("-productVersion")
+                    .output()?;
+                if !output.status.success() {
+                    anyhow::bail!("host_os_version_unavailable");
+                }
+                let host_os = String::from_utf8(output.stdout)?.trim().to_string();
+                tokio::runtime::Runtime::new()?.block_on(
+                    wechat_mcp::updater::prepare::prepare_candidate(
+                        &config,
+                        &candidate_id,
+                        &host_os,
+                    ),
+                )
+            })();
+            match result {
+                Ok(prepared) => println!("{}", serde_json::to_string_pretty(&prepared).unwrap()),
+                Err(error) => {
+                    eprintln!("error: {error:#}");
+                    std::process::exit(1);
+                }
+            }
+        }
         "apply" | "rollback" | "recover" => {
             // 检查是否有未知参数，若有未知参数报错退出码 2
             let action = &args[1];

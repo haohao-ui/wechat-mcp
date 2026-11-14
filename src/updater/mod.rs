@@ -9,3 +9,7 @@ pub mod unpack;
 
 #[cfg(test)]
 pub mod tests;
+
+pub mod prepare;
+pub(crate) mod private_fs;
+pub(crate) mod process;

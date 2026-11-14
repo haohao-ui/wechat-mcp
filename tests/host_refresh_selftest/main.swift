@@ -1,6 +1,11 @@
 import AppKit
 import Foundation
 
+if CommandLine.arguments.dropFirst() == ["--host-version"] {
+    print(hostAppVersion())
+    exit(0)
+}
+
 let app = NSApplication.shared
 app.setActivationPolicy(.prohibited)
 let context = StatusPanelController(worker: SocketWorker())
