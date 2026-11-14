@@ -96,15 +96,13 @@ pub async fn check_release(
         journal::read_limited_private_file(&config.state_dir.join("current_release.json"), 65536)?
     {
         let record: CurrentReleaseCommitRecord = serde_json::from_slice(&bytes)?;
-        if record.record_schema != 1 {
+        if record.accepted_sequence().is_err() {
             bail!("unsupported_current_release_record_schema");
         }
     }
     let highest = journal::load_highest_accepted_sequence(&config.state_dir)?;
     let status = if manifest.sequence > highest {
         "available"
-    } else if manifest.sequence < highest {
-        bail!("downgrade_rejected: source sequence is below accepted high water mark");
     } else {
         let record_bytes = journal::read_limited_private_file(
             &config.state_dir.join("current_release.json"),
@@ -118,7 +116,7 @@ pub async fn check_release(
         )?
         .context("installed_release_journal_missing")?;
         let transaction: UpdateJournal = serde_json::from_slice(&journal_bytes)?;
-        if record.record_schema != 1
+        if record.accepted_sequence().is_err()
             || record.release_id != manifest.release_id
             || record.sequence != manifest.sequence
             || record.manifest_digest != calculate_manifest_digest(manifest)?
@@ -236,6 +234,7 @@ mod tests {
         let digest = calculate_manifest_digest(manifest).unwrap();
         let record = CurrentReleaseCommitRecord {
             record_schema: 1,
+            highest_accepted_sequence: None,
             tx_id: tx.clone(),
             release_id: manifest.release_id.clone(),
             sequence: manifest.sequence,
@@ -281,6 +280,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response["status"], "already_installed");
+        let mut upgraded = record.clone();
+        upgraded.record_schema = 2;
+        upgraded.highest_accepted_sequence = Some(manifest.sequence + 10);
+        journal::atomic_commit_release_record(&fixture.config.state_dir, &upgraded).unwrap();
+        let response = check_release(&fixture.config, None, "12.7.6")
+            .await
+            .unwrap();
+        assert_eq!(response["status"], "already_installed");
+        assert_eq!(
+            journal::load_highest_accepted_sequence(&fixture.config.state_dir).unwrap(),
+            manifest.sequence + 10
+        );
         transaction.stage = TransactionStage::RecoveryRequired;
         transaction
             .persist_atomic(&fixture.config.state_dir)

@@ -3325,6 +3325,86 @@ print(checkMode())
 
     assert_eq!(run_guard("INACTIVE"), "INACTIVE");
 
+    // Same v2 fixtures are exercised by the real Swift guard and Rust guard.
+    for (field, value, allowed) in [
+        ("highest_accepted_sequence", serde_json::json!(2000), true),
+        (
+            "highest_accepted_sequence",
+            serde_json::json!(u64::MAX),
+            true,
+        ),
+        ("highest_accepted_sequence", serde_json::json!(1001), false),
+        ("highest_accepted_sequence", serde_json::Value::Null, false),
+        (
+            "highest_accepted_sequence",
+            serde_json::json!(2000.5),
+            false,
+        ),
+        ("highest_accepted_sequence", serde_json::json!(true), false),
+        ("record_schema", serde_json::json!(3), false),
+        ("unknown", serde_json::json!(1), false),
+    ] {
+        let mut record = commit_record_correct.clone();
+        record["record_schema"] = serde_json::json!(2);
+        record["highest_accepted_sequence"] = serde_json::json!(2000);
+        record[field] = value;
+        fs::write(&record_path, record.to_string()).unwrap();
+        let expected = if allowed {
+            "INACTIVE"
+        } else {
+            "RECOVERY_REQUIRED"
+        };
+        assert_eq!(run_guard(expected), expected, "{record}");
+        let decision = wechat_mcp::updater::journal::check_startup_guard_readonly_with_root(
+            &state_dir,
+            Some(&releases_dir),
+            Some(&current_link),
+            releases_dir.parent(),
+            None,
+        );
+        assert_eq!(
+            decision == wechat_mcp::updater::journal::StartupDualCheckDecision::AllowStartup,
+            allowed,
+            "{decision:?}: {record}"
+        );
+    }
+    // A v2 rollback keeps its older legacy mirror readable, but never accepts a
+    // mirror above the authoritative high water mark or malformed bytes.
+    let mut record = commit_record_correct.clone();
+    record["record_schema"] = serde_json::json!(2);
+    record["highest_accepted_sequence"] = serde_json::json!(2000);
+    fs::write(&record_path, record.to_string()).unwrap();
+    let mirror_path = state_dir.join("highest_accepted_sequence");
+    for (mirror, allowed) in [
+        ("1002", true),
+        ("2000", true),
+        ("2001", false),
+        ("bad", false),
+    ] {
+        fs::write(&mirror_path, mirror).unwrap();
+        fs::set_permissions(&mirror_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let expected = if allowed {
+            "INACTIVE"
+        } else {
+            "RECOVERY_REQUIRED"
+        };
+        assert_eq!(run_guard(expected), expected, "legacy mirror: {mirror}");
+        let decision = wechat_mcp::updater::journal::check_startup_guard_readonly_with_root(
+            &state_dir,
+            Some(&releases_dir),
+            Some(&current_link),
+            releases_dir.parent(),
+            None,
+        );
+        assert_eq!(
+            decision == wechat_mcp::updater::journal::StartupDualCheckDecision::AllowStartup,
+            allowed,
+            "legacy mirror: {mirror}: {decision:?}"
+        );
+    }
+    fs::remove_file(mirror_path).unwrap();
+    fs::write(&record_path, commit_record_correct.to_string()).unwrap();
+
     // 场景 H: 篡改 current 软链接指向非预期目录 -> RECOVERY_REQUIRED
     fs::remove_file(&current_link).unwrap();
     let foreign_dir = releases_dir.join("0.9.9-foreign");

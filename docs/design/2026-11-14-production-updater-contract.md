@@ -51,9 +51,9 @@
 
 本设计不包含公开发布仓库或泄露私有仓库Token。需要线上分发时由用户提供/确认发布地址；任何公网上线另按具体发布范围执行。
 
-## 追加待确认：成功安装后的回退水位
+## 已追加确认：成功安装后的回退水位
 
-实现时确认，原current_release.json的sequence同时充当已安装版本序号和防降级水位。成功安装B后直接恢复A的记录会使水位倒退；仅恢复指针而保留B的release_id或digest又会形成虚假安装记录。因此提出以下精确兼容改动，等待单独确认后才能实施：
+实现时确认，原current_release.json的sequence同时充当已安装版本序号和防降级水位。成功安装B后直接恢复A的记录会使水位倒退；仅恢复指针而保留B的release_id或digest又会形成虚假安装记录。用户已明确确认“允许按此兼容方案实施”，按以下精确兼容改动推进：
 
 - CurrentReleaseCommitRecord新增highest_accepted_sequence，record_schema从1升级为2；sequence仍表示当前实际安装的发布清单序号，新增字段表示历史最高已接受序号。
 - 读取器和Rust/Swift启动守卫同时支持v1与v2。v1水位视为sequence；v2必须满足highest_accepted_sequence >= sequence；其他未知schema继续拒绝。
@@ -61,4 +61,4 @@
 - 首次登记或明确事务提交才写v2；只读status/check不迁移文件。journal_schema仍为1，不放宽其闭合字段。
 - 测试覆盖v1兼容、v2非法水位、成功回退后重放旧包被拒绝、Rust/Swift守卫一致，以及写入中断恢复。
 
-此追加未获确认前，只实现不依赖该记录格式的来源与下载，不执行生产安装/回退。
+确认已解除该接口阻挡。继续生产基线、事务、恢复与实机部署验收；没有据此宣称已完成。

@@ -389,6 +389,7 @@ func runTests() -> Int32 {
         if let sDir = stateDirPath {
             let seqFile = URL(fileURLWithPath: sDir).appendingPathComponent("highest_accepted_sequence")
             try? "1001\n".write(to: seqFile, atomically: true, encoding: .utf8)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: seqFile.path)
 
             do {
                 let status1001 = try realClient.fetchStatus()
