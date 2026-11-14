@@ -74,7 +74,7 @@ fn main() {
                     std::process::exit(2);
                 }
             };
-            let state_dir = cfg.state_dir;
+            let state_dir = cfg.state_dir.clone();
 
             let journal_res = UpdateJournal::load_from_state(&state_dir);
             let (journal, journal_err) = match journal_res {
@@ -108,6 +108,20 @@ fn main() {
                 .ok()
                 .flatten();
 
+            let root = cfg.install_root.as_ref();
+            let releases = root.map(|path| path.join("releases"));
+            let current = root.map(|path| path.join("current"));
+            let guard_ready = journal::check_startup_guard_readonly_with_root(
+                &state_dir,
+                releases.as_deref(),
+                current.as_deref(),
+                root.map(|p| p.as_path()),
+                None,
+            ) == journal::StartupDualCheckDecision::AllowStartup;
+            let download_ready = guard_ready
+                && !maintenance
+                && matches!(status_str, "idle" | "committed")
+                && wechat_mcp::updater::download::download_configured(&cfg);
             let out = serde_json::json!({
                 "status": status_str,
                 "highest_accepted_sequence": highest_seq,
@@ -115,6 +129,7 @@ fn main() {
                 "maintenance_active": maintenance || journal_err.is_some() || seq_err.is_some(),
                 "journal": journal,
                 "error": journal_err.or(seq_err),
+                "capabilities": {"schema":1,"download":download_ready,"prepare":download_ready,"install":false,"rollback":false,"recover":false},
             });
             println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
             std::process::exit(0);
