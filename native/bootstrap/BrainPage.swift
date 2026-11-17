@@ -35,6 +35,9 @@ private enum BrainPageStrings {
     static let rollbackConfirmButton = "确认回滚"
     static let cancel = "取消"
     static let historyUnavailable = "版本历史暂不可用"
+    static let legacyIncompleteDraftNotice = "此版本未保存完整草稿，仅显示已保存的内容"
+    static let legacyIncompleteDraftShort = "未保存完整草稿 (仅已存内容)"
+    static let missingFieldIndicator = "[缺失]"
     static let diffSelectHint = "请选择两个版本进行对比"
     static let tryItNotice = "合成测试仅执行确定性组装预览 (assemble_only)，标明【未调用模型】，不产生费用，绝不发送真实微信消息。"
     static let saveDraftFirstNotice = "请先保存客服角色草稿。请先保存角色草稿，再执行「试一试」。"
@@ -928,51 +931,114 @@ public struct BrainPageLogic {
         let rev2 = v2.revisionId
         lines.append("【版本对比】\(rev1) (左) vs \(rev2) (右)")
         lines.append("--------------------------------------------------")
+
+        if v1.content == nil || v1.isDraft != true {
+            lines.append("※ 版本 A (\(rev1)): 此版本未保存完整草稿，仅显示已保存的内容。")
+        }
+        if v2.content == nil || v2.isDraft != true {
+            lines.append("※ 版本 B (\(rev2)): 此版本未保存完整草稿，仅显示已保存的内容。")
+        }
         
-        let name1 = v1.content?.name ?? "(未设置)"
-        let name2 = v2.content?.name ?? "(未设置)"
+        let name1 = v1.content?.name
+        let name2 = v2.content?.name
+        let name1Desc = name1 ?? BrainPageStrings.missingFieldIndicator
+        let name2Desc = name2 ?? BrainPageStrings.missingFieldIndicator
         if name1 != name2 {
-            lines.append("• 角色名称: [\(name1)] -> [\(name2)]")
+            lines.append("• 角色名称: [\(name1Desc)] -> [\(name2Desc)]")
         } else {
-            lines.append("• 角色名称: 无变化 [\(name1)]")
+            lines.append("• 角色名称: 无变化 [\(name1Desc)]")
         }
 
-        let tone1 = v1.content?.tone ?? "(未设置)"
-        let tone2 = v2.content?.tone ?? "(未设置)"
+        let tone1 = v1.content?.tone
+        let tone2 = v2.content?.tone
+        let tone1Desc = tone1 ?? BrainPageStrings.missingFieldIndicator
+        let tone2Desc = tone2 ?? BrainPageStrings.missingFieldIndicator
         if tone1 != tone2 {
-            lines.append("• 角色语气: [\(tone1)] -> [\(tone2)]")
+            lines.append("• 角色语气: [\(tone1Desc)] -> [\(tone2Desc)]")
         } else {
-            lines.append("• 角色语气: 无变化 [\(tone1)]")
+            lines.append("• 角色语气: 无变化 [\(tone1Desc)]")
         }
 
-        let p1 = v1.content?.persona ?? ""
-        let p2 = v2.content?.persona ?? ""
-        if p1 != p2 {
+        let p1 = v1.content?.persona
+        let p2 = v2.content?.persona
+        if p1 == nil && p2 == nil {
+            lines.append("• 人设设定 (Persona): 双方均缺失 [缺失]")
+        } else if let p1 = p1, let p2 = p2 {
+            if p1 != p2 {
+                lines.append("• 人设设定 (Persona):")
+                lines.append("  [- 左]: \(p1.prefix(120))\(p1.count > 120 ? "..." : "")")
+                lines.append("  [+ 右]: \(p2.prefix(120))\(p2.count > 120 ? "..." : "")")
+            } else {
+                lines.append("• 人设设定 (Persona): 无变化 (\(p1.count) 字符)")
+            }
+        } else {
+            let leftDesc = p1 != nil ? "\(p1!.prefix(120))\(p1!.count > 120 ? "..." : "")" : BrainPageStrings.missingFieldIndicator
+            let rightDesc = p2 != nil ? "\(p2!.prefix(120))\(p2!.count > 120 ? "..." : "")" : BrainPageStrings.missingFieldIndicator
             lines.append("• 人设设定 (Persona):")
-            lines.append("  [- 左]: \(p1.prefix(120))\(p1.count > 120 ? "..." : "")")
-            lines.append("  [+ 右]: \(p2.prefix(120))\(p2.count > 120 ? "..." : "")")
+            lines.append("  [- 左]: \(leftDesc)")
+            lines.append("  [+ 右]: \(rightDesc)")
+        }
+
+        let g1 = v1.content?.goals
+        let g2 = v2.content?.goals
+        if g1 == nil && g2 == nil {
+            lines.append("• 核心目标: 双方均缺失 [缺失]")
         } else {
-            lines.append("• 人设设定 (Persona): 无变化 (\(p1.count) 字符)")
+            let g1Desc = g1 != nil ? "[\(g1!.joined(separator: ", "))]" : BrainPageStrings.missingFieldIndicator
+            let g2Desc = g2 != nil ? "[\(g2!.joined(separator: ", "))]" : BrainPageStrings.missingFieldIndicator
+            if g1 != g2 {
+                lines.append("• 核心目标: \(g1Desc) -> \(g2Desc)")
+            } else {
+                lines.append("• 核心目标: 无变化 \(g1Desc)")
+            }
         }
 
-        let g1 = (v1.content?.goals ?? []).joined(separator: ", ")
-        let g2 = (v2.content?.goals ?? []).joined(separator: ", ")
-        if g1 != g2 {
-            lines.append("• 核心目标: [\(g1)] -> [\(g2)]")
-        }
-
-        let r1 = (v1.content?.rules ?? []).joined(separator: ", ")
-        let r2 = (v2.content?.rules ?? []).joined(separator: ", ")
-        if r1 != r2 {
-            lines.append("• 业务规则: [\(r1)] -> [\(r2)]")
-        }
-
-        let k1 = (v1.content?.knowledgeRefs ?? []).map { $0.knowledgeId }.joined(separator: ", ")
-        let k2 = (v2.content?.knowledgeRefs ?? []).map { $0.knowledgeId }.joined(separator: ", ")
-        if k1 != k2 {
-            lines.append("• 知识库引用: [\(k1)] -> [\(k2)]")
+        let r1 = v1.content?.rules
+        let r2 = v2.content?.rules
+        if r1 == nil && r2 == nil {
+            lines.append("• 业务规则: 双方均缺失 [缺失]")
         } else {
-            lines.append("• 知识库引用: 无变化 (\(v1.content?.knowledgeRefs?.count ?? 0) 篇)")
+            let r1Desc = r1 != nil ? "[\(r1!.joined(separator: ", "))]" : BrainPageStrings.missingFieldIndicator
+            let r2Desc = r2 != nil ? "[\(r2!.joined(separator: ", "))]" : BrainPageStrings.missingFieldIndicator
+            if r1 != r2 {
+                lines.append("• 业务规则: \(r1Desc) -> \(r2Desc)")
+            } else {
+                lines.append("• 业务规则: 无变化 \(r1Desc)")
+            }
+        }
+
+        let k1 = v1.content?.knowledgeRefs
+        let k2 = v2.content?.knowledgeRefs
+        if k1 == nil && k2 == nil {
+            lines.append("• 知识库引用: 双方均缺失 [缺失]")
+        } else {
+            let k1Desc = k1 != nil ? "[\(k1!.map { $0.knowledgeId }.joined(separator: ", "))]" : BrainPageStrings.missingFieldIndicator
+            let k2Desc = k2 != nil ? "[\(k2!.map { $0.knowledgeId }.joined(separator: ", "))]" : BrainPageStrings.missingFieldIndicator
+            if k1 != k2 {
+                lines.append("• 知识库引用: \(k1Desc) -> \(k2Desc)")
+            } else {
+                lines.append("• 知识库引用: 无变化 (\(k1?.count ?? 0) 篇)")
+            }
+        }
+
+        let tmpl1 = v1.content?.templates
+        let tmpl2 = v2.content?.templates
+        if tmpl1 != nil || tmpl2 != nil {
+            let t1Desc = tmpl1 != nil ? "已保存" : BrainPageStrings.missingFieldIndicator
+            let t2Desc = tmpl2 != nil ? "已保存" : BrainPageStrings.missingFieldIndicator
+            if t1Desc != t2Desc {
+                lines.append("• 异常回复模板: \(t1Desc) -> \(t2Desc)")
+            }
+        }
+
+        let bg1 = v1.content?.budget
+        let bg2 = v2.content?.budget
+        if bg1 != nil || bg2 != nil {
+            let b1Desc = bg1 != nil ? "\(bg1!.maxInputBytes)B" : BrainPageStrings.missingFieldIndicator
+            let b2Desc = bg2 != nil ? "\(bg2!.maxInputBytes)B" : BrainPageStrings.missingFieldIndicator
+            if b1Desc != b2Desc {
+                lines.append("• 上下文预算: \(b1Desc) -> \(b2Desc)")
+            }
         }
 
         return lines.joined(separator: "\n")
@@ -1400,6 +1466,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     private var historyVersions: [BrainHistoryVersion] = []
     private let historyTable = NSTableView()
     private let historyEmptyLabel = NSTextField(wrappingLabelWithString: "")
+    private let historyDetailNoticeLabel = NSTextField(wrappingLabelWithString: "")
     private let diffVerAPopup = NSPopUpButton()
     private let diffVerBPopup = NSPopUpButton()
     private let runDiffButton = NSButton(title: "对比差异", target: nil, action: nil)
@@ -2075,6 +2142,12 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         ])
 
         tableStack.addArrangedSubview(scroll)
+        historyDetailNoticeLabel.font = NSFont.systemFont(ofSize: 11)
+        historyDetailNoticeLabel.textColor = .secondaryLabelColor
+        historyDetailNoticeLabel.maximumNumberOfLines = 0
+        historyDetailNoticeLabel.lineBreakMode = .byWordWrapping
+        historyDetailNoticeLabel.preferredMaxLayoutWidth = 460
+        tableStack.addArrangedSubview(historyDetailNoticeLabel)
         tableBox.setContent(tableStack, inset: 6)
         stack.addArrangedSubview(tableBox)
 
@@ -3035,13 +3108,15 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     @objc private func handleRollback() {
         guard let payload = listPayload else { return }
         let targetGen = payload.generation > 1 ? payload.generation - 1 : 1
+        let targetGenItem = historyGenerations.first(where: { $0.generation == targetGen })
         statusMessageLabel.stringValue = "正在执行版本回退..."
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             do {
                 _ = try self.client.rollback(targetGeneration: targetGen, expectedGeneration: payload.generation)
                 DispatchQueue.main.async {
-                    self.statusMessageLabel.stringValue = "已回退至代次 \(targetGen)"
+                    let msgSuffix = targetGenItem?.draft == nil ? "（\(BrainPageStrings.legacyIncompleteDraftNotice)）" : ""
+                    self.statusMessageLabel.stringValue = "已回退至代次 \(targetGen)\(msgSuffix)"
                     self.reloadBrainData()
                 }
             } catch {
@@ -3065,9 +3140,22 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             return
         }
 
+        let targetGenItem = historyGenerations.first(where: { $0.generation == selectedGenNum })
+
         let alert = NSAlert()
         alert.messageText = "回滚客服角色配置到第 \(selectedGenNum) 代？"
-        alert.informativeText = "回滚将原子切换至选定历史代次的配置，未保存的草稿将丢失，现有会话将在新轮次生效选定版本。"
+
+        var alertInfo = "回滚将原子切换至选定历史代次的配置，未保存的草稿将丢失。\n"
+        let defRoleId = targetGenItem?.active?.defaultRef?.roleId ?? targetGenItem?.draft?.defaultRef?.roleId ?? BrainPageStrings.missingFieldIndicator
+        let defRevId = targetGenItem?.active?.defaultRef?.revisionId ?? targetGenItem?.draft?.defaultRef?.revisionId ?? BrainPageStrings.missingFieldIndicator
+        let overrideCount = targetGenItem?.active?.overrides.count ?? targetGenItem?.draft?.overrides.count ?? 0
+
+        if targetGenItem?.draft == nil {
+            alertInfo += "\n【特别说明】此版本未保存完整草稿，仅显示已保存的内容。回滚时仅恢复已存运行内容，草稿配置将保持缺失（[缺失]），不编造或补全内容。\n"
+        }
+        alertInfo += "\n• 运行配置: 默认角色=\(defRoleId), 版本=\(defRevId), 覆盖规则=\(overrideCount)条"
+        alertInfo += "\n• 草稿状态: \(targetGenItem?.draft != nil ? "已保存完整草稿" : "此版本未保存完整草稿，仅显示已保存的内容 ([缺失])")"
+        alert.informativeText = alertInfo
         alert.alertStyle = .warning
 
         let checkbox = NSButton(checkboxWithTitle: BrainPageStrings.rollbackCheckboxPrompt, target: nil, action: nil)
@@ -3091,7 +3179,8 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             do {
                 _ = try self.client.rollback(targetGeneration: selectedGenNum, expectedGeneration: payload.generation)
                 DispatchQueue.main.async {
-                    self.statusMessageLabel.stringValue = "已回退至代次 \(selectedGenNum)"
+                    let msgSuffix = targetGenItem?.draft == nil ? "（\(BrainPageStrings.legacyIncompleteDraftNotice)）" : ""
+                    self.statusMessageLabel.stringValue = "已回退至代次 \(selectedGenNum)\(msgSuffix)"
                     self.statusMessageLabel.textColor = .systemGreen
                     self.reloadBrainData()
                 }
@@ -3231,11 +3320,11 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
                 text = rev
             case "col_status":
                 if let curGen = listPayload?.generation, genItem.generation == curGen {
-                    text = "当前激活"
+                    text = genItem.draft != nil ? "当前激活 (含草稿)" : "当前激活 (未存草稿)"
                 } else if genItem.draft != nil {
-                    text = "含草稿"
+                    text = "已存草稿"
                 } else {
-                    text = "历史稳定版"
+                    text = BrainPageStrings.legacyIncompleteDraftNotice
                 }
             default:
                 text = "-"
@@ -3299,6 +3388,26 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     }
 
     public func tableViewSelectionDidChange(_ notification: Notification) {
+        if let tbl = notification.object as? NSTableView, tbl == historyTable {
+            let row = historyTable.selectedRow
+            if row >= 0 && row < historyGenerations.count {
+                let gen = historyGenerations[row]
+                let defaultRoleId = gen.active?.defaultRef?.roleId ?? gen.draft?.defaultRef?.roleId ?? BrainPageStrings.missingFieldIndicator
+                let defaultRevId = gen.active?.defaultRef?.revisionId ?? gen.draft?.defaultRef?.revisionId ?? BrainPageStrings.missingFieldIndicator
+                let overrideCount = gen.active?.overrides.count ?? gen.draft?.overrides.count ?? 0
+                if gen.draft == nil {
+                    historyDetailNoticeLabel.stringValue = "第 \(gen.generation) 代：\(BrainPageStrings.legacyIncompleteDraftNotice)。\n• 已保存运行配置: 默认角色=\(defaultRoleId), 版本=\(defaultRevId), 覆盖规则=\(overrideCount)条\n• 草稿状态: \(BrainPageStrings.legacyIncompleteDraftNotice) (\(BrainPageStrings.missingFieldIndicator))"
+                    historyDetailNoticeLabel.textColor = .systemOrange
+                } else {
+                    historyDetailNoticeLabel.stringValue = "第 \(gen.generation) 代：已保存完整草稿与配置。\n• 默认角色=\(defaultRoleId), 版本=\(defaultRevId), 覆盖规则=\(overrideCount)条"
+                    historyDetailNoticeLabel.textColor = .secondaryLabelColor
+                }
+            } else {
+                historyDetailNoticeLabel.stringValue = ""
+            }
+            return
+        }
+
         if let tbl = notification.object as? NSTableView, tbl == overridesTableView {
             let row = overridesTableView.selectedRow
             if row >= 0 && row < currentDraftBindings.overrides.count {
