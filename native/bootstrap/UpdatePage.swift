@@ -63,25 +63,25 @@ public struct RollbackStatusInfo: Codable, Equatable {
     }
 
     public var localizedReason: String {
-        guard let r = reason else { return canRollback ? "可安全回滚" : "暂不可回滚" }
+        guard let r = reason else { return canRollback ? L10n.t(.updateReasonSafe) : L10n.t(.updateReasonCannot) }
         switch r {
-        case "no_previous_version": return "无可回滚的上一版本"
-        case "no_matching_completed_update": return "未找到匹配的已完成更新记录"
-        case "previous_release_corrupt": return "上一版本程序文件损坏或被篡改"
-        case "backup_corrupt": return "数据库在线备份损坏或不完整"
-        case "rollback_not_supported_by_release": return "该发布版本不支持整包换回"
-        case "database_schema_changed": return "数据库结构已发生变化，拒绝回滚"
-        case "database_checkpoint_required": return "存在未提交事务，需完全停止服务"
-        case "stop_core_first": return "核心服务运行中，需先停止服务"
-        case "recovery_required": return "存在中断的更新事务，需执行受控恢复"
-        case "install_root_unconfigured": return "未配置程序安装目录"
-        case "rollback_state_invalid": return "回滚状态无效"
+        case "no_previous_version": return L10n.t(.updatePageNoPreviousVersion)
+        case "no_matching_completed_update": return L10n.t(.updateReasonNoMatching)
+        case "previous_release_corrupt": return L10n.t(.updateReasonPrevCorrupt)
+        case "backup_corrupt": return L10n.t(.updateReasonBackupCorrupt)
+        case "rollback_not_supported_by_release": return L10n.t(.updateReasonNotSupported)
+        case "database_schema_changed": return L10n.t(.updateReasonSchemaChanged)
+        case "database_checkpoint_required": return L10n.t(.updateReasonCheckpointRequired)
+        case "stop_core_first": return L10n.t(.updateReasonStopCoreFirst)
+        case "recovery_required": return L10n.t(.updateReasonRecoveryRequired)
+        case "install_root_unconfigured": return L10n.t(.updateReasonInstallRootUnconfigured)
+        case "rollback_state_invalid": return L10n.t(.updateReasonRollbackStateInvalid)
         default: return r
         }
     }
 
     public var formattedInstalledAt: String {
-        guard let ts = installedAt, ts > 0 else { return "未知" }
+        guard let ts = installedAt, ts > 0 else { return L10n.t(.statusUnknown) }
         let date = Date(timeIntervalSince1970: ts)
         let fmt = DateFormatter()
         fmt.dateFormat = "yyyy-MM-dd HH:mm:ss"
@@ -154,7 +154,7 @@ public struct UpdateReleaseInfo: Codable, Equatable {
     /// 用户友好的整套版本描述（空值/null 均明确显示无法核验/未知，不当做未安装或解码失败）
     public var userFacingReleaseDescription: String {
         guard let rid = releaseId, !rid.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return "整套版本无法核验 (未知)"
+            return L10n.t(.updateReleaseDescUnknown)
         }
         return rid
     }
@@ -162,9 +162,9 @@ public struct UpdateReleaseInfo: Codable, Equatable {
     /// 用户友好的核心编译版本描述（独立呈现）
     public var userFacingCoreVersionDescription: String {
         guard let cv = coreVersion, !cv.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return "未知 (未报告)"
+            return L10n.t(.updateCoreVersionUnknown)
         }
-        return "\(cv) (核心编译版)"
+        return L10n.t(.updateCoreCompiledVersion, cv)
     }
 
     /// 用户友好的安装序列号描述（绝不拿 guard.highestAcceptedSequence 填补）
@@ -172,7 +172,7 @@ public struct UpdateReleaseInfo: Codable, Equatable {
         if let s = sequence {
             return "\(s)"
         }
-        return "未知 (未标记)"
+        return L10n.t(.updateSeqUnknown)
     }
 
     /// 用户友好的状态与来源描述：缺失或未知均明确标注不可信，不默认正常
@@ -181,30 +181,30 @@ public struct UpdateReleaseInfo: Codable, Equatable {
         let src = source?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
         if st.isEmpty && src.isEmpty {
-            return "未提供状态/来源 (旧数据源，不可信)"
+            return L10n.t(.updateOldDataSourceUntrusted)
         }
 
         let stDesc: String
         switch st.lowercased() {
-        case "unknown": stDesc = "状态未知"
-        case "installed": stDesc = "已安装"
-        case "verified": stDesc = "已验证"
-        case "": stDesc = "无状态"
-        default: stDesc = "未知状态 [\(st)]"
+        case "unknown": stDesc = L10n.t(.updateStateUnknown)
+        case "installed": stDesc = L10n.t(.updateStateInstalled)
+        case "verified": stDesc = L10n.t(.updateStateVerified)
+        case "": stDesc = L10n.t(.updateStateNone)
+        default: stDesc = L10n.t(.updateStateUnknownFmt, st)
         }
 
         let srcDesc: String
         switch src.lowercased() {
-        case "unknown": srcDesc = "来源未知"
-        case "signed_package": srcDesc = "签名发布包"
-        case "": srcDesc = "无来源"
-        default: srcDesc = "未知来源 [\(src)]"
+        case "unknown": srcDesc = L10n.t(.updateSourceUnknown)
+        case "signed_package": srcDesc = L10n.t(.updateSourceSignedPackage)
+        case "": srcDesc = L10n.t(.updateSourceNone)
+        default: srcDesc = L10n.t(.updateSourceUnknownFmt, src)
         }
 
         if isTrustedInstalledRelease {
             return "\(stDesc) (\(srcDesc))"
         } else {
-            return "\(stDesc) / \(srcDesc) (不可信)"
+            return L10n.t(.updateUntrustedStatusSourceFmt, stDesc, srcDesc)
         }
     }
 }
@@ -278,9 +278,9 @@ public struct UpdateGuardInfo: Codable, Equatable {
 
     public var userFacingGuardDescription: String {
         if let s = highestAcceptedSequence {
-            return "\(s) (防降级高水位，非安装版本)"
+            return L10n.t(.updateHighWatermarkNotice, s)
         }
-        return "无 (null)"
+        return L10n.t(.updateNullValue)
     }
 }
 
@@ -418,15 +418,15 @@ public struct UpdateSigningStatus: Equatable {
 
     public var userFacingDescription: String {
         if canPerformLocalSigning {
-            return "专用机自签名证书与钥匙串就绪 (待发布者验证通过后重签)"
+            return L10n.t(.updateKeychainReady)
         }
         if let err = lastError, !err.isEmpty {
-            return "签名不可用: \(err)"
+            return L10n.t(.updateSigningUnavailableFmt, err)
         }
         if !keychainAvailable {
-            return "钥匙串处于锁定状态或未解锁"
+            return L10n.t(.updateKeychainLocked)
         }
-        return "专用机本地自签名证书未找到"
+        return L10n.t(.updateCertNotFound)
     }
 }
 
@@ -437,9 +437,9 @@ public enum UpdateClientError: LocalizedError, Equatable {
 
     public var errorDescription: String? {
         switch self {
-        case .networkOffline(let msg): return "网络连接失败: \(msg)"
-        case .commandFailed(let code, let msg): return "命令执行错误 [\(code)]: \(msg)"
-        case .parseError(let msg): return "数据解析失败: \(msg)"
+        case .networkOffline(let msg): return L10n.t(.updateErrNetworkOfflineFmt, msg)
+        case .commandFailed(let code, let msg): return L10n.t(.updateErrCommandFailedFmt, code, msg)
+        case .parseError(let msg): return L10n.t(.updateErrParseFmt, msg)
         }
     }
 }
@@ -449,7 +449,7 @@ public enum UpdateClientError: LocalizedError, Equatable {
 public enum UpdatePageLogic {
     public static func parseStatusPayload(jsonString: String) throws -> UpdateStatusPayload {
         guard let data = jsonString.data(using: .utf8) else {
-            throw UpdateClientError.parseError("无法将字符串转为 UTF-8 字节")
+            throw UpdateClientError.parseError("Cannot encode string to UTF-8")
         }
         let decoder = JSONDecoder()
         return try decoder.decode(UpdateStatusPayload.self, from: data)
@@ -457,7 +457,7 @@ public enum UpdatePageLogic {
 
     public static func parseCheckPayload(jsonString: String) throws -> UpdateCheckResult {
         guard let data = jsonString.data(using: .utf8) else {
-            throw UpdateClientError.parseError("无法将字符串转为 UTF-8 字节")
+            throw UpdateClientError.parseError("Cannot encode string to UTF-8")
         }
         let decoder = JSONDecoder()
         return try decoder.decode(UpdateCheckResult.self, from: data)
@@ -473,22 +473,22 @@ public enum UpdatePageLogic {
     }
 
     public static func recoveryGuide(for transaction: UpdateTransactionInfo) -> String {
-        guard transaction.recoveryRequired else { return "系统状态正常，无需恢复。" }
-        let stage = transaction.stage ?? "未知阶段"
-        let err = transaction.error ?? "未知错误"
-        let tx = transaction.transactionId ?? "无事务ID"
+        guard transaction.recoveryRequired else { return L10n.t(.updateRecoveryNormal) }
+        let stage = transaction.stage ?? L10n.t(.statusUnknown)
+        let err = transaction.error ?? L10n.t(.statusUnknown)
+        let tx = transaction.transactionId ?? "-"
 
         return """
-        【更新异常中断，需要人工恢复】
-        - 事务 ID: \(tx)
-        - 中断阶段: \(stage)
-        - 错误原因: \(err)
+        \(L10n.t(.updateRecoveryReportTitle))
+        \(L10n.t(.updateRecoveryTxFmt, tx))
+        \(L10n.t(.updateRecoveryStageFmt, stage))
+        \(L10n.t(.updateRecoveryReasonFmt, err))
 
-        只读说明与受控恢复指引:
-        1. 维护标志文件已记录；实际核心进程存活状态与业务数据完整性未知。
-        2. 当前界面处于严格只读受控阶段，禁止通过界面清除维护标志或进行破坏性写入。
-        3. 真实版本回退能力当前处于 unsupported 禁用状态，不可直接回退；需要专门受控恢复。
-        4. 请核对 ~/.wechat-rpa/logs/core.log 与 host.log 获取详细故障上下文并联系管理员。
+        \(L10n.t(.updateRecoveryGuideHeader))
+        \(L10n.t(.updateRecoveryGuideItem1))
+        \(L10n.t(.updateRecoveryGuideItem2))
+        \(L10n.t(.updateRecoveryGuideItem3))
+        \(L10n.t(.updateRecoveryGuideItem4))
         """
     }
 
@@ -519,7 +519,7 @@ public final class UpdateClient {
         let args = ["control", "update-status", "--config", configPath]
         let run = executor(controlBinaryPath(), args, 10.0)
         guard run.status == 0 else {
-            let errStr = String(data: run.output, encoding: .utf8) ?? "未知错误"
+            let errStr = String(data: run.output, encoding: .utf8) ?? L10n.t(.statusUnknown)
             throw UpdateClientError.commandFailed(code: run.status, message: errStr)
         }
         let outStr = String(data: run.output, encoding: .utf8) ?? "{}"
@@ -534,7 +534,7 @@ public final class UpdateClient {
         }
         let run = executor(controlBinaryPath(), args, 15.0)
         guard run.status == 0 else {
-            let errStr = String(data: run.output, encoding: .utf8) ?? "未知错误"
+            let errStr = String(data: run.output, encoding: .utf8) ?? L10n.t(.statusUnknown)
             throw UpdateClientError.commandFailed(code: run.status, message: errStr)
         }
         let outStr = String(data: run.output, encoding: .utf8) ?? "{}"
@@ -568,15 +568,15 @@ public final class UpdateClient {
         let args = ["rollback", "--config", configPath, "--expected-version", expectedVersion]
         let run = executor(updater, args, 30.0)
         guard !run.timedOut else {
-            return .failure(UpdateError("执行回滚操作超时"))
+            return .failure(UpdateError(L10n.t(.updateRollbackTimeout)))
         }
         guard !run.output.isEmpty else {
-            return .failure(UpdateError("回滚失败：无输出"))
+            return .failure(UpdateError(L10n.t(.updateRollbackNoOutput)))
         }
         if run.status == 0 {
             return .success(UpdatePageStrings.rollbackSuccess)
         } else {
-            return .failure(UpdateError("回滚未完成 (退出码 \(run.status))"))
+            return .failure(UpdateError(L10n.t(.updateRollbackExitCodeFmt, run.status)))
         }
     }
 }
@@ -605,23 +605,23 @@ public final class UpdatePageController: NSViewController {
     private var isChecking = false
 
     // UI - 当前版本卡片 (全部使用 wrappingLabelWithString 并设受限宽度)
-    private let currentReleaseLabel = NSTextField(wrappingLabelWithString: "加载中...")
-    private let coreVersionLabel = NSTextField(wrappingLabelWithString: "未知")
-    private let currentSeqLabel = NSTextField(wrappingLabelWithString: "未知 (未标记)")
-    private let guardSeqLabel = NSTextField(wrappingLabelWithString: "无 (null)")
-    private let releaseTrustLabel = NSTextField(wrappingLabelWithString: "未校验")
-    private let architectureLabel = NSTextField(wrappingLabelWithString: "未知")
-    private let consistencyBadge = NSTextField(wrappingLabelWithString: "未校验 (未知)")
-    private let supervisorStatusLabel = NSTextField(wrappingLabelWithString: "检查中...")
+    private let currentReleaseLabel = NSTextField(wrappingLabelWithString: L10n.t(.loading))
+    private let coreVersionLabel = NSTextField(wrappingLabelWithString: L10n.t(.statusUnknown))
+    private let currentSeqLabel = NSTextField(wrappingLabelWithString: L10n.t(.updateSeqUnknown))
+    private let guardSeqLabel = NSTextField(wrappingLabelWithString: L10n.t(.updateNullValue))
+    private let releaseTrustLabel = NSTextField(wrappingLabelWithString: L10n.t(.statusUnverified))
+    private let architectureLabel = NSTextField(wrappingLabelWithString: L10n.t(.statusUnknown))
+    private let consistencyBadge = NSTextField(wrappingLabelWithString: L10n.t(.updateReleaseDescUnknown))
+    private let supervisorStatusLabel = NSTextField(wrappingLabelWithString: L10n.t(.statusChecking))
 
     // UI - 回滚到上一版本卡片
-    private let previousVersionLabel = NSTextField(wrappingLabelWithString: "查询中...")
-    private let rollbackEligibilityLabel = NSTextField(wrappingLabelWithString: "检查中...")
-    private let rollbackButton = NSButton(title: "回滚到上一版本…", target: nil, action: nil)
+    private let previousVersionLabel = NSTextField(wrappingLabelWithString: L10n.t(.statusQuerying))
+    private let rollbackEligibilityLabel = NSTextField(wrappingLabelWithString: L10n.t(.statusChecking))
+    private let rollbackButton = NSButton(title: L10n.t(.updatePageSectionRollback) + "…", target: nil, action: nil)
     private let rollbackReasonSideLabel = NSTextField(wrappingLabelWithString: "")
 
     // UI - 候选更新卡片
-    private let candidateStatusLabel = NSTextField(wrappingLabelWithString: "尚未检查更新")
+    private let candidateStatusLabel = NSTextField(wrappingLabelWithString: L10n.t(.updateCandidateNotCheckedYet))
     private let candidateVersionLabel = NSTextField(wrappingLabelWithString: "-")
     private let candidatePublishedLabel = NSTextField(wrappingLabelWithString: "-")
     private let candidateSizeLabel = NSTextField(wrappingLabelWithString: "-")
@@ -631,19 +631,19 @@ public final class UpdatePageController: NSViewController {
     private let releaseNotesView = NSTextView()
 
     // UI - 流程流水线与进度
-    private let pipelineStepsLabel = NSTextField(wrappingLabelWithString: "检查 → 下载 → 验证 → 本机签名 → 等待排空 → 备份 → 安装 → 自检")
-    private let currentStageLabel = NSTextField(wrappingLabelWithString: "空闲")
+    private let pipelineStepsLabel = NSTextField(wrappingLabelWithString: L10n.t(.updatePipelineSteps))
+    private let currentStageLabel = NSTextField(wrappingLabelWithString: L10n.t(.updateStageIdle))
     private let progressBar = NSProgressIndicator()
     private let progressDetailLabel = NSTextField(wrappingLabelWithString: "")
     private let drainWarningLabel = NSTextField(wrappingLabelWithString: "")
-    private let permissionsNoteLabel = NSTextField(wrappingLabelWithString: "提示：专用机应用更新后将由本地自签名钥匙串重签名，若系统权限重置需在「设置」中重新授权。")
+    private let permissionsNoteLabel = NSTextField(wrappingLabelWithString: L10n.t(.updatePermissionsNotice))
 
     // UI - 操作按钮 (分行排布)
-    private let checkButton = NSButton(title: "检查更新", target: nil, action: nil)
-    private let refreshStatusButton = NSButton(title: "刷新状态", target: nil, action: nil)
-    private let downloadButton = NSButton(title: "下载更新 (未启用)", target: nil, action: nil)
-    private let installButton = NSButton(title: "安装并重启 (未启用)", target: nil, action: nil)
-    private let deferButton = NSButton(title: "延期更新 (未启用)", target: nil, action: nil)
+    private let checkButton = NSButton(title: L10n.t(.actionRecheck), target: nil, action: nil)
+    private let refreshStatusButton = NSButton(title: L10n.t(.actionRefresh), target: nil, action: nil)
+    private let downloadButton = NSButton(title: L10n.t(.updateBtnDownloadDisabled), target: nil, action: nil)
+    private let installButton = NSButton(title: L10n.t(.updateBtnInstallDisabled), target: nil, action: nil)
+    private let deferButton = NSButton(title: L10n.t(.updateBtnDeferDisabled), target: nil, action: nil)
     private let actionFeedbackLabel = NSTextField(wrappingLabelWithString: "")
 
     // UI - 恢复卡片 (当出现 recovery_required 时高亮)
@@ -690,22 +690,22 @@ public final class UpdatePageController: NSViewController {
         headerLabel.font = NSFont.systemFont(ofSize: 18, weight: .bold)
         contentStack.addArrangedSubview(headerLabel)
 
-        let introLabel = NSTextField(wrappingLabelWithString: "管理微信客服助手整套原生组件与核心服务更新，支持更新检查、候选验证、受控维护以及回滚至上一稳定版本。")
+        let introLabel = NSTextField(wrappingLabelWithString: L10n.t(.updateIntroDesc))
         introLabel.font = NSFont.systemFont(ofSize: 12)
         introLabel.textColor = .secondaryLabelColor
         contentStack.addArrangedSubview(introLabel)
 
         // 2. 当前版本卡片
-        let currentBox = createSectionBox(title: "当前运行环境 (真实读模型)")
+        let currentBox = createSectionBox(title: L10n.t(.updateSectionCurrentEnv))
         let currentGrid = NSGridView(views: [
-            [NSTextField(labelWithString: "当前整套版本:"), currentReleaseLabel],
-            [NSTextField(labelWithString: "核心编译版本:"), coreVersionLabel],
-            [NSTextField(labelWithString: "整套安装序列:"), currentSeqLabel],
-            [NSTextField(labelWithString: "防降级高水位:"), guardSeqLabel],
-            [NSTextField(labelWithString: "发布状态与来源:"), releaseTrustLabel],
-            [NSTextField(labelWithString: "宿主运行架构:"), architectureLabel],
-            [NSTextField(labelWithString: "组件一致性:"), consistencyBadge],
-            [NSTextField(labelWithString: "维护抑制状态:"), supervisorStatusLabel]
+            [NSTextField(labelWithString: L10n.t(.updateLabelCurrentSuite)), currentReleaseLabel],
+            [NSTextField(labelWithString: L10n.t(.updateLabelCoreVersion)), coreVersionLabel],
+            [NSTextField(labelWithString: L10n.t(.updateLabelInstallSeq)), currentSeqLabel],
+            [NSTextField(labelWithString: "Downgrade guard:"), guardSeqLabel],
+            [NSTextField(labelWithString: "Status & source:"), releaseTrustLabel],
+            [NSTextField(labelWithString: L10n.t(.updateLabelHostArch)), architectureLabel],
+            [NSTextField(labelWithString: L10n.t(.updateLabelConsistency)), consistencyBadge],
+            [NSTextField(labelWithString: "Maintenance:"), supervisorStatusLabel]
         ])
         currentGrid.rowSpacing = 6
         currentGrid.columnSpacing = 12
@@ -721,7 +721,7 @@ public final class UpdatePageController: NSViewController {
         contentStack.addArrangedSubview(currentBox)
 
         // 3. 候选版本卡片
-        let candidateBox = createSectionBox(title: "候选版本与发布说明")
+        let candidateBox = createSectionBox(title: L10n.t(.updateSectionCandidate))
         let candStack = NSStackView()
         candStack.orientation = .vertical
         candStack.alignment = .leading
@@ -732,12 +732,12 @@ public final class UpdatePageController: NSViewController {
         candidateStatusLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 580).isActive = true
 
         let candGrid = NSGridView(views: [
-            [NSTextField(labelWithString: "目标版本:"), candidateVersionLabel],
-            [NSTextField(labelWithString: "发布时间:"), candidatePublishedLabel],
-            [NSTextField(labelWithString: "更新包大小:"), candidateSizeLabel],
-            [NSTextField(labelWithString: "发布者验证:"), publisherVerificationBadge],
-            [NSTextField(labelWithString: "本机重签名:"), localSigningLabel],
-            [NSTextField(labelWithString: "兼容性说明:"), compatibilityLabel]
+            [NSTextField(labelWithString: L10n.t(.updateLabelTargetVersion)), candidateVersionLabel],
+            [NSTextField(labelWithString: "Published at:"), candidatePublishedLabel],
+            [NSTextField(labelWithString: L10n.t(.updateLabelPackageSize)), candidateSizeLabel],
+            [NSTextField(labelWithString: L10n.t(.updateLabelPublisherVerify)), publisherVerificationBadge],
+            [NSTextField(labelWithString: L10n.t(.updateLabelLocalSign)), localSigningLabel],
+            [NSTextField(labelWithString: L10n.t(.updateLabelCompatibility)), compatibilityLabel]
         ])
         candGrid.rowSpacing = 6
         candGrid.columnSpacing = 12
@@ -749,7 +749,7 @@ public final class UpdatePageController: NSViewController {
         compatibilityLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
         candStack.addArrangedSubview(candGrid)
 
-        let notesTitle = NSTextField(labelWithString: "版本发布说明:")
+        let notesTitle = NSTextField(labelWithString: L10n.t(.updateLabelReleaseNotes))
         notesTitle.font = NSFont.systemFont(ofSize: 12, weight: .bold)
         candStack.addArrangedSubview(notesTitle)
 
@@ -761,7 +761,7 @@ public final class UpdatePageController: NSViewController {
 
         releaseNotesView.isEditable = false
         releaseNotesView.font = NSFont.systemFont(ofSize: 11)
-        releaseNotesView.string = "（暂无发布说明）"
+        releaseNotesView.string = L10n.t(.updateReleaseNotesEmpty)
         notesScroll.documentView = releaseNotesView
         candStack.addArrangedSubview(notesScroll)
 
@@ -769,7 +769,7 @@ public final class UpdatePageController: NSViewController {
         contentStack.addArrangedSubview(candidateBox)
 
         // 4. 更新流程与进度流水线
-        let pipelineBox = createSectionBox(title: "更新阶段与进度")
+        let pipelineBox = createSectionBox(title: L10n.t(.updateSectionProgress))
         let pipeStack = NSStackView()
         pipeStack.orientation = .vertical
         pipeStack.alignment = .leading
@@ -782,7 +782,7 @@ public final class UpdatePageController: NSViewController {
         let stageRow = NSStackView()
         stageRow.orientation = .horizontal
         stageRow.spacing = 10
-        let stagePrefix = NSTextField(labelWithString: "当前执行阶段:")
+        let stagePrefix = NSTextField(labelWithString: "Stage:")
         stagePrefix.font = NSFont.systemFont(ofSize: 12, weight: .medium)
         currentStageLabel.font = NSFont.systemFont(ofSize: 12, weight: .bold)
         currentStageLabel.textColor = .systemBlue
@@ -836,14 +836,14 @@ public final class UpdatePageController: NSViewController {
         rbStack.alignment = .leading
         rbStack.spacing = 8
 
-        let rbNoticeLabel = NSTextField(wrappingLabelWithString: "说明：换回上一个已安装的版本。")
+        let rbNoticeLabel = NSTextField(wrappingLabelWithString: L10n.t(.updateRollbackNotice))
         rbNoticeLabel.font = NSFont.systemFont(ofSize: 11)
         rbNoticeLabel.textColor = .secondaryLabelColor
         rbStack.addArrangedSubview(rbNoticeLabel)
 
         let rbGrid = NSGridView(views: [
-            [NSTextField(labelWithString: "可回滚上一版本:"), previousVersionLabel],
-            [NSTextField(labelWithString: "回滚资格与原因:"), rollbackEligibilityLabel]
+            [NSTextField(labelWithString: L10n.t(.updateLabelRollbackVersion)), previousVersionLabel],
+            [NSTextField(labelWithString: L10n.t(.updateLabelRollbackEligibility)), rollbackEligibilityLabel]
         ])
         rbGrid.rowSpacing = 6
         rbGrid.columnSpacing = 12
@@ -964,7 +964,7 @@ public final class UpdatePageController: NSViewController {
             let payload = try client.fetchStatus()
             applyStatusPayload(payload)
         } catch {
-            actionFeedbackLabel.stringValue = "状态获取提示: \(error.localizedDescription)"
+            actionFeedbackLabel.stringValue = L10n.t(.updateStatusFetchNoticeFmt, error.localizedDescription)
             actionFeedbackLabel.textColor = .secondaryLabelColor
         }
         loadRollbackStatus()
@@ -1005,7 +1005,7 @@ public final class UpdatePageController: NSViewController {
             }
         case .failure:
             self.currentRollbackStatus = nil
-            self.previousVersionLabel.stringValue = "未知"
+            self.previousVersionLabel.stringValue = L10n.t(.statusUnknown)
             let reasonText = UpdatePageStrings.rollbackUnavailable
             self.rollbackEligibilityLabel.stringValue = reasonText
             self.rollbackEligibilityLabel.textColor = UpdatePageTokens.statusOffText
@@ -1037,27 +1037,27 @@ public final class UpdatePageController: NSViewController {
             releaseTrustLabel.textColor = .secondaryLabelColor
         }
 
-        architectureLabel.stringValue = payload.currentRelease.architecture.isEmpty ? "未知" : payload.currentRelease.architecture
+        architectureLabel.stringValue = payload.currentRelease.architecture.isEmpty ? L10n.t(.statusUnknown) : payload.currentRelease.architecture
 
         if let c = payload.currentRelease.componentsConsistent {
             if c {
-                consistencyBadge.stringValue = "整套组件版本一致"
+                consistencyBadge.stringValue = L10n.t(.updateConsistencyConsistent)
                 consistencyBadge.textColor = .systemGreen
             } else {
-                consistencyBadge.stringValue = "⚠️ 组件版本不一致"
+                consistencyBadge.stringValue = L10n.t(.updateConsistencyInconsistent)
                 consistencyBadge.textColor = .systemRed
             }
         } else {
-            consistencyBadge.stringValue = "未校验 (未知)"
+            consistencyBadge.stringValue = L10n.t(.updateReleaseDescUnknown)
             consistencyBadge.textColor = .secondaryLabelColor
         }
 
         if payload.guardInfo.maintenanceActive {
-            supervisorStatusLabel.stringValue = "处于维护抑制态 (核心启动被抑制)"
+            supervisorStatusLabel.stringValue = L10n.t(.updateSupervisorSuppressed)
             supervisorStatusLabel.textColor = .systemOrange
         } else {
             // 真实求实：不处于维护抑制态不等于运行正常
-            supervisorStatusLabel.stringValue = "未处于维护抑制态 (运行健康度未经验证)"
+            supervisorStatusLabel.stringValue = L10n.t(.updateSupervisorUnsuppressed)
             supervisorStatusLabel.textColor = .secondaryLabelColor
         }
 
@@ -1070,63 +1070,63 @@ public final class UpdatePageController: NSViewController {
 
         switch result.status {
         case .unconfigured:
-            candidateStatusLabel.stringValue = "更新源尚未配置"
+            candidateStatusLabel.stringValue = L10n.t(.updateCandidateSourceUnconfigured)
             candidateStatusLabel.textColor = .systemOrange
-            candidateVersionLabel.stringValue = "无可用版本 (null)"
+            candidateVersionLabel.stringValue = L10n.t(.updateCandidateNoVersion)
             candidatePublishedLabel.stringValue = "-"
             candidateSizeLabel.stringValue = "-"
-            publisherVerificationBadge.stringValue = "未配置公钥根"
+            publisherVerificationBadge.stringValue = L10n.t(.updatePublisherNoRootKey)
             publisherVerificationBadge.textColor = .secondaryLabelColor
-            localSigningLabel.stringValue = "未配置发布源，禁止重签"
-            compatibilityLabel.stringValue = result.reason ?? "生产环境下需配置授权更新清单；禁止任意未经验证的网络下载"
-            releaseNotesView.string = "系统未配置已批准的更新清单或分发源。为保障微信业务与专用机安全，禁止使用任意 URL 下载执行内容。"
+            localSigningLabel.stringValue = L10n.t(.updateSigningForbiddenNoSource)
+            compatibilityLabel.stringValue = result.reason ?? L10n.t(.updateCompatibilityDefaultReason)
+            releaseNotesView.string = L10n.t(.updateReleaseNotesUnconfigured)
 
         case .unverifiedTrustRoot:
-            candidateStatusLabel.stringValue = "已发现候选版本（来源尚未验证）"
+            candidateStatusLabel.stringValue = L10n.t(.updateCandidateFoundUnverified)
             candidateStatusLabel.textColor = .systemOrange
             if let cand = result.candidate {
                 candidateVersionLabel.stringValue = "\(cand.releaseId) (seq: \(cand.sequence))"
-                candidatePublishedLabel.stringValue = cand.publishedAt ?? "未知"
+                candidatePublishedLabel.stringValue = cand.publishedAt ?? L10n.t(.statusUnknown)
                 if let sz = cand.sizeBytes {
                     candidateSizeLabel.stringValue = UpdatePageLogic.formatBytes(sz)
                 } else {
-                    candidateSizeLabel.stringValue = "未知"
+                    candidateSizeLabel.stringValue = L10n.t(.statusUnknown)
                 }
-                compatibilityLabel.stringValue = cand.compatible ? "架构兼容 (发布者未验证)" : "架构或系统不兼容"
-                releaseNotesView.string = cand.releaseNotes ?? "（无详细发布说明）"
+                compatibilityLabel.stringValue = cand.compatible ? L10n.t(.updateCompatArchVerified) : L10n.t(.updateCompatIncompatible)
+                releaseNotesView.string = cand.releaseNotes ?? L10n.t(.updateNoDetailedNotes)
             }
-            publisherVerificationBadge.stringValue = "尚未验证（无可信根公钥配置）"
+            publisherVerificationBadge.stringValue = L10n.t(.updatePublisherUnverifiedNoKey)
             publisherVerificationBadge.textColor = .systemRed
-            localSigningLabel.stringValue = "禁止重签 (需要发布者验证通过)"
+            localSigningLabel.stringValue = L10n.t(.updateSigningNeedVerify)
 
         case .alreadyInstalled:
-            candidateStatusLabel.stringValue = "当前已是最新版本"
+            candidateStatusLabel.stringValue = L10n.t(.updateCandidateAlreadyLatest)
             candidateStatusLabel.textColor = .systemGreen
             if let cand = result.candidate {
                 candidateVersionLabel.stringValue = "\(cand.releaseId) (seq: \(cand.sequence))"
             }
             candidatePublishedLabel.stringValue = "-"
             candidateSizeLabel.stringValue = "-"
-            publisherVerificationBadge.stringValue = "已生效"
+            publisherVerificationBadge.stringValue = L10n.t(.updatePublisherApplied)
             publisherVerificationBadge.textColor = .systemGreen
-            localSigningLabel.stringValue = "已在运行"
-            compatibilityLabel.stringValue = "当前版本已与本地环境兼容"
-            releaseNotesView.string = "没有待更新的候选版本。"
+            localSigningLabel.stringValue = L10n.t(.updateLocalRunning)
+            compatibilityLabel.stringValue = L10n.t(.updateCompatCurrentOk)
+            releaseNotesView.string = L10n.t(.updateNoCandidateNotes)
 
         case .incompatible:
-            candidateStatusLabel.stringValue = "候选版本不兼容当前环境"
+            candidateStatusLabel.stringValue = L10n.t(.updateCandidateIncompatibleEnv)
             candidateStatusLabel.textColor = .systemRed
             candidateVersionLabel.stringValue = "-"
             candidatePublishedLabel.stringValue = "-"
             candidateSizeLabel.stringValue = "-"
-            publisherVerificationBadge.stringValue = "未通过兼容性核验"
+            publisherVerificationBadge.stringValue = L10n.t(.updatePublisherFailedCompat)
             publisherVerificationBadge.textColor = .systemRed
-            localSigningLabel.stringValue = "禁止重签"
-            compatibilityLabel.stringValue = result.reason ?? "不满足最低系统或架构要求"
-            releaseNotesView.string = "该版本无法安装在当前目标专用机上。"
+            localSigningLabel.stringValue = L10n.t(.updateSigningForbidden)
+            compatibilityLabel.stringValue = result.reason ?? L10n.t(.updateCompatRequirementsNotMet)
+            releaseNotesView.string = L10n.t(.updateCannotInstallOnHost)
 
         case .available:
-            candidateStatusLabel.stringValue = "发现可用版本并通过完整验证"
+            candidateStatusLabel.stringValue = L10n.t(.updateCandidateAvailableVerified)
             candidateStatusLabel.textColor = .systemGreen
             if let cand = result.candidate {
                 candidateVersionLabel.stringValue = "\(cand.releaseId) (seq: \(cand.sequence))"
@@ -1134,10 +1134,10 @@ public final class UpdatePageController: NSViewController {
                 if let sz = cand.sizeBytes {
                     candidateSizeLabel.stringValue = UpdatePageLogic.formatBytes(sz)
                 }
-                compatibilityLabel.stringValue = cand.compatible ? "系统环境兼容" : "不兼容"
-                releaseNotesView.string = cand.releaseNotes ?? "（暂无说明）"
+                compatibilityLabel.stringValue = cand.compatible ? L10n.t(.updateCompatSystemCompatible) : L10n.t(.updateCompatSystemIncompatible)
+                releaseNotesView.string = cand.releaseNotes ?? L10n.t(.updateNotesNone)
             }
-            publisherVerificationBadge.stringValue = "发布者签名已验证"
+            publisherVerificationBadge.stringValue = L10n.t(.updatePublisherSignatureVerified)
             publisherVerificationBadge.textColor = .systemGreen
             localSigningLabel.stringValue = signingStatus.userFacingDescription
         }
@@ -1150,7 +1150,7 @@ public final class UpdatePageController: NSViewController {
 
     private func updateTransactionUI(_ transaction: UpdateTransactionInfo) {
         if transaction.recoveryRequired {
-            currentStageLabel.stringValue = "故障需要恢复 (\(transaction.stage ?? "Unknown"))"
+            currentStageLabel.stringValue = L10n.t(.updateRecoveryNeededFmt, transaction.stage ?? "Unknown")
             currentStageLabel.textColor = .systemRed
             recoveryBox.isHidden = false
             recoveryDetailsLabel.stringValue = UpdatePageLogic.recoveryGuide(for: transaction)
@@ -1163,34 +1163,34 @@ public final class UpdatePageController: NSViewController {
         recoveryBox.isHidden = true
         switch transaction.status {
         case .idle:
-            currentStageLabel.stringValue = "空闲"
+            currentStageLabel.stringValue = L10n.t(.updateStageIdle)
             currentStageLabel.textColor = .secondaryLabelColor
             progressBar.doubleValue = 0.0
             progressDetailLabel.stringValue = ""
             drainWarningLabel.stringValue = ""
 
         case .inProgress:
-            let stageName = transaction.stage ?? "执行中"
-            currentStageLabel.stringValue = "状态: \(stageName) (外部事务)"
+            let stageName = transaction.stage ?? L10n.t(.updateStageExecuting)
+            currentStageLabel.stringValue = L10n.t(.updateStageExternalTxFmt, stageName, "external")
             currentStageLabel.textColor = .systemBlue
             if stageName == "Draining" {
-                drainWarningLabel.stringValue = "⚠️ 外部更新事务处于排空等待态；延期请由管理员命令行协调。"
+                drainWarningLabel.stringValue = L10n.t(.updateDrainWaitingNotice)
             } else {
                 drainWarningLabel.stringValue = ""
             }
 
         case .committed:
-            currentStageLabel.stringValue = "最近记录已提交"
+            currentStageLabel.stringValue = L10n.t(.updateRecentCommitted)
             currentStageLabel.textColor = .systemGreen
             progressBar.doubleValue = 100.0
-            progressDetailLabel.stringValue = "已记录生效"
+            progressDetailLabel.stringValue = L10n.t(.updateRecordApplied)
             drainWarningLabel.stringValue = ""
 
         case .rolledBack:
-            currentStageLabel.stringValue = "已安全记录回退状态"
+            currentStageLabel.stringValue = L10n.t(.updateRollbackRecordedSafe)
             currentStageLabel.textColor = .systemOrange
             progressBar.doubleValue = 0.0
-            progressDetailLabel.stringValue = "保持旧版本记录"
+            progressDetailLabel.stringValue = L10n.t(.updateKeepOldRecord)
             drainWarningLabel.stringValue = ""
 
         case .recoveryRequired:
@@ -1232,7 +1232,7 @@ public final class UpdatePageController: NSViewController {
         guard !isChecking else { return }
         isChecking = true
         checkButton.isEnabled = false
-        actionFeedbackLabel.stringValue = "正在查询更新状态..."
+        actionFeedbackLabel.stringValue = L10n.t(.updateCheckingStatus)
         actionFeedbackLabel.textColor = .systemBlue
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -1243,14 +1243,14 @@ public final class UpdatePageController: NSViewController {
                     self.isChecking = false
                     self.checkButton.isEnabled = true
                     self.applyCheckResult(res)
-                    self.actionFeedbackLabel.stringValue = "检查完成。"
+                    self.actionFeedbackLabel.stringValue = L10n.t(.updateCheckComplete)
                     self.actionFeedbackLabel.textColor = .secondaryLabelColor
                 }
             } catch {
                 DispatchQueue.main.async {
                     self.isChecking = false
                     self.checkButton.isEnabled = true
-                    self.actionFeedbackLabel.stringValue = "检查失败: \(error.localizedDescription)"
+                    self.actionFeedbackLabel.stringValue = L10n.t(.updateCheckFailedFmt, error.localizedDescription)
                     self.actionFeedbackLabel.textColor = .systemRed
                 }
             }
@@ -1259,14 +1259,14 @@ public final class UpdatePageController: NSViewController {
 
     @objc private func handleRollback() {
         guard let info = currentRollbackStatus, info.canRollback, let ver = info.version else {
-            actionFeedbackLabel.stringValue = "当前不可回滚：\(currentRollbackStatus?.localizedReason ?? "未检测到可回滚版本")"
+            actionFeedbackLabel.stringValue = L10n.t(.updateCannotRollbackFmt, currentRollbackStatus?.localizedReason ?? L10n.t(.updateNoRollbackDetected))
             actionFeedbackLabel.textColor = .systemRed
             return
         }
 
         let alert = NSAlert()
-        alert.messageText = "确认换回上一个已安装的版本（\(ver)）？"
-        alert.informativeText = "换回上一个已安装的版本将直接整包替换为上一个应用程序包。操作成功后需要重启应用以完成替换。确认继续吗？"
+        alert.messageText = L10n.t(.updateRollbackConfirmTitleFmt, ver)
+        alert.informativeText = L10n.t(.updateRollbackConfirmBody)
         alert.alertStyle = .critical
 
         let checkbox = NSButton(checkboxWithTitle: UpdatePageStrings.rollbackCheckboxPrompt, target: nil, action: nil)
@@ -1278,12 +1278,12 @@ public final class UpdatePageController: NSViewController {
         let resp = alert.runModal()
         guard resp == .alertFirstButtonReturn else { return }
         guard checkbox.state == .on else {
-            actionFeedbackLabel.stringValue = "回滚已取消：请勾选确认方可执行回滚。"
+            actionFeedbackLabel.stringValue = L10n.t(.updateRollbackCancelledCheckbox)
             actionFeedbackLabel.textColor = .systemRed
             return
         }
 
-        actionFeedbackLabel.stringValue = "正在换回上一个已安装的版本 (\(ver))..."
+        actionFeedbackLabel.stringValue = L10n.t(.updateRollbackingFmt, ver)
         actionFeedbackLabel.textColor = .systemBlue
         rollbackButton.isEnabled = false
 
@@ -1297,7 +1297,7 @@ public final class UpdatePageController: NSViewController {
                     self.actionFeedbackLabel.textColor = .systemGreen
                     self.loadRollbackStatus()
                 case .failure(let err):
-                    self.actionFeedbackLabel.stringValue = "回滚失败: \(err)"
+                    self.actionFeedbackLabel.stringValue = L10n.t(.updateRollbackFailedFmt, "\(err)")
                     self.actionFeedbackLabel.textColor = .systemRed
                     self.rollbackButton.isEnabled = true
                 }
@@ -1307,12 +1307,12 @@ public final class UpdatePageController: NSViewController {
 
     /// 关键安全防线：所有写入操作全部重定向到此 handler，严格禁止任何模拟写入或状态修改
     @objc public func handleDisabledWriteAction() {
-        actionFeedbackLabel.stringValue = "操作未启用: 当前阶段真实更新下载/安装/延期入口为只读禁用状态 (unsupported)，不进行任何写入或业务状态修改。"
+        actionFeedbackLabel.stringValue = L10n.t(.updateFeatureDisabledNotice)
         actionFeedbackLabel.textColor = .systemOrange
     }
 
     @objc private func handleRefreshStatus() {
-        actionFeedbackLabel.stringValue = "正在刷新状态..."
+        actionFeedbackLabel.stringValue = L10n.t(.updateRefreshingStatus)
         actionFeedbackLabel.textColor = .systemBlue
         refreshStatusButton.isEnabled = false
 
@@ -1323,13 +1323,13 @@ public final class UpdatePageController: NSViewController {
                 DispatchQueue.main.async {
                     self.applyStatusPayload(payload)
                     self.refreshStatusButton.isEnabled = true
-                    self.actionFeedbackLabel.stringValue = "状态已刷新。"
+                    self.actionFeedbackLabel.stringValue = L10n.t(.updateStatusRefreshed)
                     self.actionFeedbackLabel.textColor = .secondaryLabelColor
                 }
             } catch {
                 DispatchQueue.main.async {
                     self.refreshStatusButton.isEnabled = true
-                    self.actionFeedbackLabel.stringValue = "状态刷新失败: \(error.localizedDescription)"
+                    self.actionFeedbackLabel.stringValue = L10n.t(.updateStatusRefreshFailedFmt, error.localizedDescription)
                     self.actionFeedbackLabel.textColor = .systemRed
                 }
             }

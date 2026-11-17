@@ -44,8 +44,8 @@ public final class LogsPageController: NSViewController {
     private let logSourcePopup = NSPopUpButton()
     private let logLevelPopup = NSPopUpButton()
     private let searchField = NSSearchField()
-    private let pauseTailButton = NSButton(title: "暂停", target: nil, action: nil)
-    private let clearButton = NSButton(title: "清屏", target: nil, action: nil)
+    private let pauseTailButton = NSButton(title: L10n.t(.actionPause), target: nil, action: nil)
+    private let clearButton = NSButton(title: L10n.t(.logsClear), target: nil, action: nil)
 
     // Log display
     private let textView = NSTextView()
@@ -119,11 +119,11 @@ public final class LogsPageController: NSViewController {
         logSourcePopup.target = self
         logSourcePopup.action = #selector(handleSourceChanged)
 
-        logLevelPopup.addItems(withTitles: ["全部", "警告及以上", "只看错误"])
+        logLevelPopup.addItems(withTitles: [L10n.t(.logsLevelAll), L10n.t(.logsLevelWarnAndAbove), L10n.t(.logsLevelErrorOnly)])
         logLevelPopup.target = self
         logLevelPopup.action = #selector(handleFilterChanged)
 
-        searchField.placeholderString = "搜索日志..."
+        searchField.placeholderString = L10n.t(.logsSearchPlaceholder)
         searchField.widthAnchor.constraint(equalToConstant: 180).isActive = true
         searchField.target = self
         searchField.action = #selector(handleFilterChanged)
@@ -133,9 +133,9 @@ public final class LogsPageController: NSViewController {
         clearButton.target = self
         clearButton.action = #selector(handleClear)
 
-        controlBar.addArrangedSubview(NSTextField(labelWithString: "来源:"))
+        controlBar.addArrangedSubview(NSTextField(labelWithString: L10n.t(.logsSourceLabel)))
         controlBar.addArrangedSubview(logSourcePopup)
-        controlBar.addArrangedSubview(NSTextField(labelWithString: "级别:"))
+        controlBar.addArrangedSubview(NSTextField(labelWithString: L10n.t(.logsLevelLabel)))
         controlBar.addArrangedSubview(logLevelPopup)
         controlBar.addArrangedSubview(searchField)
         controlBar.addArrangedSubview(pauseTailButton)
@@ -238,7 +238,7 @@ public final class LogsPageController: NSViewController {
 
     @objc private func handlePauseResumeTail() {
         isPaused.toggle()
-        pauseTailButton.title = isPaused ? "继续" : "暂停"
+        pauseTailButton.title = isPaused ? L10n.t(.actionResume) : L10n.t(.actionPause)
     }
 
     @objc private func handleClear() {

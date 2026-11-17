@@ -123,6 +123,628 @@ public enum L10nKey: String, CaseIterable {
     case evExternalDisconnected, evExternalConnected, evExternalPending, evExternalFix, evBuiltinRunning
     // 诊断报告
     case diagTitle, diagVersion, diagHost, diagTime
+
+    case actionConfirm
+    case actionCopy
+    case actionDelete
+    case actionFailedTitle
+    case actionOK
+    case actionPause
+    case actionRefresh
+    case actionResume
+    case brainActionActivateConfig
+    case brainActionArchiveRole
+    case brainActionCopyRole
+    case brainActionExitCodeFmt
+    case brainActionInitRole
+    case brainActionInvalidGenerationFmt
+    case brainActionRollbackConfig
+    case brainActionSaveBindings
+    case brainActionSaveRole
+    case brainActivateRoleConfirmTitleFmt
+    case brainActivateRoleDialogBodyDefault
+    case brainActivateRoleDialogBodyExisting
+    case brainActivateRoleDialogBodyNewDefault
+    case brainActivateRoleDialogTitleFmt
+    case brainActivatingRole
+    case brainActivationScopeMismatch
+    case brainActivationScopeMismatchErr
+    case brainActivationUnconfirmedFmt
+    case brainAddOverride
+    case brainAddOverrideErrContact
+    case brainAddOverrideErrExistsFmt
+    case brainAddOverrideErrGeneral
+    case brainAddOverrideErrMustAllowlist
+    case brainAddOverrideErrRole
+    case brainAddOverrideFailed
+    case brainAddOverrideSelectContact
+    case brainAddOverrideSelectRole
+    case brainAllowlistContactLabel
+    case brainAllowlistUnavailableFmt
+    case brainAssemblePreview
+    case brainBindRoleLabel
+    case brainBindingsDraftSavedSuccess
+    case brainBindingsIntro
+    case brainBindingsSavedSuccess
+    case brainBindingsSectionDesc
+    case brainBtnActivateConfig
+    case brainBtnAddOverride
+    case brainBtnConfirmActivate
+    case brainBtnCopyRole
+    case brainBtnDeleteOverride
+    case brainBtnDeleteRole
+    case brainBtnDiff
+    case brainBtnImportKnowledge
+    case brainBtnModelAndConn
+    case brainBtnNewRole
+    case brainBtnRollbackConfig
+    case brainBtnRollbackSelected
+    case brainBtnRollbackToSelectedVer
+    case brainBtnRunPreview
+    case brainBtnSaveBindingsDraft
+    case brainBtnSaveDraft
+    case brainBtnSetDefaultRole
+    case brainBtnTryIt
+    case brainBtnTryItPreview
+    case brainBtnUpdateOverride
+    case brainCasBindingConflictFmt
+    case brainCasBindingsConflictFmt
+    case brainCasRoleConflictFmt
+    case brainChatKindGroupOption
+    case brainChatKindPrivateOption
+    case brainColBoundRole
+    case brainColContactAllowlist
+    case brainColCreatedAt
+    case brainColDefaultRevId
+    case brainColGen
+    case brainColKind
+    case brainColRev
+    case brainColRole
+    case brainColStatus
+    case brainConfirmActivate
+    case brainConstraintsBoxNotice
+    case brainConstraintsBoxTitle
+    case brainCopySuffix
+    case brainCostNotePreviewOnly
+    case brainCostNoteUncalled
+    case brainCurrentAccountFmt
+    case brainCurrentAccountNone
+    case brainDefaultDraftReady
+    case brainDefaultRoleDraftReady
+    case brainDefaultRoleDraftSelectedFmt
+    case brainDefaultRoleLabel
+    case brainDefaultRolePriorityNotice
+    case brainDefaultRoleScopeNotice
+    case brainDefaultRoleSelectedFmt
+    case brainDefaultTemplateMissing
+    case brainDeleteDraftSuccess
+    case brainDeleteOverrideErrSelect
+    case brainDeleteOverrideSelectRule
+    case brainDeleteRoleActivePrompt
+    case brainDeleteRoleConfirmTitleFmt
+    case brainDeleteRoleDialogInfoSaved
+    case brainDeleteRoleDialogInfoUnsaved
+    case brainDeleteRoleDialogTitleFmt
+    case brainDeleteRoleDraftPrompt
+    case brainDeleteRoleFailedFmt
+    case brainDeleteRoleSuccess
+    case brainDeleteSelectedOverride
+    case brainDeliveryStatusFmt
+    case brainDeliveryUnknown
+    case brainDeliveryUnknownValue
+    case brainDiffBoxTitle
+    case brainDiffBudgetChangeFmt
+    case brainDiffBudgetChangedFmt
+    case brainDiffGoalsBothMissing
+    case brainDiffGoalsChangeFmt
+    case brainDiffGoalsChangedFmt
+    case brainDiffGoalsNoChangeFmt
+    case brainDiffHeaderFmt
+    case brainDiffIncompleteDraftNoticeAFmt
+    case brainDiffIncompleteDraftNoticeBFmt
+    case brainDiffKnowledgeBothMissing
+    case brainDiffKnowledgeChangeFmt
+    case brainDiffKnowledgeChangedFmt
+    case brainDiffKnowledgeNoChangeFmt
+    case brainDiffLabelVerA
+    case brainDiffLabelVerB
+    case brainDiffLeftFmt
+    case brainDiffLegacyVerAFmt
+    case brainDiffLegacyVerBFmt
+    case brainDiffNameChangedFmt
+    case brainDiffNameNoChangeFmt
+    case brainDiffPersonaBothMissing
+    case brainDiffPersonaHeader
+    case brainDiffPersonaNoChangeFmt
+    case brainDiffPersonaTitle
+    case brainDiffPersonaUnchangedFmt
+    case brainDiffRightFmt
+    case brainDiffRoleNameChangeFmt
+    case brainDiffRoleNameNoChangeFmt
+    case brainDiffRulesBothMissing
+    case brainDiffRulesChangeFmt
+    case brainDiffRulesChangedFmt
+    case brainDiffRulesNoChangeFmt
+    case brainDiffSavedIndicator
+    case brainDiffTemplatesChangeFmt
+    case brainDiffTemplatesChangedFmt
+    case brainDiffToneChangeFmt
+    case brainDiffToneChangedFmt
+    case brainDiffToneNoChangeFmt
+    case brainDoubleClickToEdit
+    case brainDraftLoadedNotice
+    case brainDraftLoadedStatus
+    case brainDraftRunningStatusPlaceholder
+    case brainDraftSavedNotice
+    case brainEnterMockMessagePrompt
+    case brainErrActionFailedFmt
+    case brainErrActionInvalidDataFmt
+    case brainErrFetchHistoryFailed
+    case brainErrFetchRoleFailed
+    case brainErrFetchRolesFailed
+    case brainErrFetchTurnFailed
+    case brainErrInvalidUtf8
+    case brainErrSaveKnowledgeFailed
+    case brainErrSaveKnowledgeInvalidResp
+    case brainErrTurnNotFound
+    case brainErrorUnknown
+    case brainFetchConfigFailed
+    case brainFetchHistoryFailed
+    case brainFetchRoleFailed
+    case brainFetchTurnDetailFailed
+    case brainGenActiveNoDraft
+    case brainGenActiveShort
+    case brainGenActiveWithDraft
+    case brainGenCurrentActive
+    case brainGenCurrentActiveNoDraft
+    case brainGenCurrentActiveWithDraft
+    case brainGenCurrentSuffix
+    case brainGenInitial
+    case brainGenItemTitleFmt
+    case brainGenOrdinalFmt
+    case brainGenSavedDraft
+    case brainGenerationFmt
+    case brainGoalsFieldHelper
+    case brainGoalsFieldLabel
+    case brainGoalsPlaceholder
+    case brainHistoryIntro
+    case brainHistoryNoticeCompleteFmt
+    case brainHistoryNoticeIncompleteFmt
+    case brainHistorySectionIntro
+    case brainHistoryTableBoxTitle
+    case brainImportAndBindKnowledge
+    case brainImportKnowledgeEmptyErr
+    case brainImportNewKnowledgeBtn
+    case brainInitDefaultRole
+    case brainKnowledgeAddBoxTitle
+    case brainKnowledgeContentField
+    case brainKnowledgeContentLabel
+    case brainKnowledgeIntro
+    case brainKnowledgeNone
+    case brainKnowledgeRefListLabel
+    case brainKnowledgeSavedSuccess
+    case brainKnowledgeSectionDesc
+    case brainKnowledgeSourceField
+    case brainKnowledgeSourceLabel
+    case brainKnowledgeSourcePlaceholder
+    case brainKnowledgeTitleContentRequired
+    case brainKnowledgeTitleField
+    case brainLabelAllowlistContact
+    case brainLabelBindPersona
+    case brainLoadConfigFailedFmt
+    case brainLoadRoleDraftFailedFmt
+    case brainLoadRolesFailedFmt
+    case brainMigratedFromLegacy
+    case brainModelAndConnection
+    case brainModelLoading
+    case brainModelStatusPending
+    case brainNewAssistantDefaultGoal
+    case brainNewAssistantDefaultName
+    case brainNewAssistantDefaultPersona
+    case brainNewAssistantDefaultTone
+    case brainNewRoleDefaultName
+    case brainNewRoleDefaultPersona
+    case brainNewRoleDefaultTone
+    case brainNo
+    case brainNoAllowlistContactsNotice
+    case brainNoKnowledgeReferenced
+    case brainNoOverrides
+    case brainNoOverridesDetail
+    case brainNoOverridesSummary
+    case brainNotReady
+    case brainOverrideAlreadyExistsFmt
+    case brainOverrideDeletedDraftFmt
+    case brainOverrideDeletedFromDraftFmt
+    case brainOverrideDraftAddedFmt
+    case brainOverrideDraftUpdatedFmt
+    case brainOverrideItemLineFmt
+    case brainOverrideLineFmt
+    case brainOverrideMustFromAllowlist
+    case brainOverrideNotFoundForUpdate
+    case brainOverridesBoxTitle
+    case brainPersonaFieldLabel
+    case brainPersonaSectionLabel
+    case brainPhaseEchoObserved
+    case brainPhaseModelGenerated
+    case brainPhaseSelfEcho
+    case brainPhaseSendTriggered
+    case brainPleaseSelectRolePrompt
+    case brainPreviewAssembling
+    case brainPreviewFailed
+    case brainPreviewGroupKind
+    case brainPreviewInputPrompt
+    case brainPreviewMockMessageLabel
+    case brainPreviewPrivateKind
+    case brainPreviewResultTitle
+    case brainProvenanceComplete
+    case brainProvenanceFull
+    case brainProvenanceLegacyNotRecorded
+    case brainProvenanceLegacyUnrecorded
+    case brainReadDefaultTemplateFailedFmt
+    case brainReferencedKnowledgeListTitle
+    case brainReplyModeFmt
+    case brainReplyModeLoading
+    case brainReplyModePending
+    case brainReplyModeUnset
+    case brainRestoreFailedFmt
+    case brainRestoredToGenerationFmt
+    case brainRestoringVersion
+    case brainRevisionStatusFmt
+    case brainRevisionStatusLineFmt
+    case brainRevisionStatusPlaceholder
+    case brainRoleActivatedFmt
+    case brainRoleActivatedSuccessFmt
+    case brainRoleCannotDeleteBound
+    case brainRoleColTitle
+    case brainRoleCopiedNotice
+    case brainRoleCopyNameFmt
+    case brainRoleDeletedSuccess
+    case brainRoleDraftSavedPrompt
+    case brainRoleListTitle
+    case brainRoleNameFieldLabel
+    case brainRoleNotEnabled
+    case brainRoleStateActiveFmt
+    case brainRoleStateDefaultPrefix
+    case brainRoleStateNewDraftRunningFmt
+    case brainRoleStateSavedNotActive
+    case brainRoleStateUnsavedDraft
+    case brainRoleTableTooltip
+    case brainRoleUnsavedModifiedNotice
+    case brainRollbackAlreadyCurrent
+    case brainRollbackBoxTitle
+    case brainRollbackCancelledCheckbox
+    case brainRollbackCancelledNotChecked
+    case brainRollbackDialogBodyFmt
+    case brainRollbackDialogDraftStatusFmt
+    case brainRollbackDialogIntro
+    case brainRollbackDialogRunConfigFmt
+    case brainRollbackDialogTitleFmt
+    case brainRollbackDraftIncomplete
+    case brainRollbackDraftSavedFull
+    case brainRollbackFailedFmt
+    case brainRollbackLegacySpecialNotice
+    case brainRollbackSelectGenPrompt
+    case brainRollbackSuccessFmt
+    case brainRollbackTargetGenLabel
+    case brainRollbackVersion
+    case brainRollbackingGenFmt
+    case brainRollingBack
+    case brainRollingBackToGenFmt
+    case brainRulesFieldHelper
+    case brainRulesFieldLabel
+    case brainRulesPlaceholder
+    case brainRunningAssemblePreview
+    case brainSaveBindingsDraft
+    case brainSaveCurrentBeforeDefault
+    case brainSaveCurrentBeforeNew
+    case brainSaveDraft
+    case brainSaveDraftBeforeSetDefault
+    case brainSaveKnowledgeFailed
+    case brainSaveKnowledgeFailedFmt
+    case brainSaveKnowledgeInvalidResp
+    case brainSavingBindingsDraft
+    case brainSavingDraft
+    case brainSavingKnowledge
+    case brainSavingKnowledgeToCore
+    case brainSavingRoleDraft
+    case brainSelectOrAddRolePrompt
+    case brainSelectTargetGenPrompt
+    case brainSelectedDefaultRoleFmt
+    case brainSimulatedUserMsgLabel
+    case brainStateDefaultPrefix
+    case brainStateEnabledFmt
+    case brainStateNewDraftRunningFmt
+    case brainStateSavedNotEnabled
+    case brainStateUnsavedDraft
+    case brainStatusSaved
+    case brainStatusUnknown
+    case brainSystemConstraintsNote
+    case brainSystemConstraintsTitle
+    case brainTableHistoryBoxTitle
+    case brainTargetGenAlreadyCurrent
+    case brainTargetGenLabel
+    case brainTemplateGreeting
+    case brainTemplateGreetingLabel
+    case brainTemplateInsufficient
+    case brainTemplateInsufficientLabel
+    case brainTemplateTooLarge
+    case brainTemplateTooLargeLabel
+    case brainTemplateUnsupported
+    case brainTemplateUnsupportedLabel
+    case brainTemplatesIntro
+    case brainTemplatesSectionDesc
+    case brainToneFieldLabel
+    case brainTryItBudgetFmt
+    case brainTryItConstraintsFmt
+    case brainTryItCostFreeNotice
+    case brainTryItCostIncurredFmt
+    case brainTryItFailedFmt
+    case brainTryItHeader
+    case brainTryItResultTitle
+    case brainTryItSnapshotShaFmt
+    case brainTryItStatusFmt
+    case brainTurnNotFound
+    case brainUnsavedBeforeActivatePrompt
+    case brainUnsavedChangesBlockActivation
+    case brainUnsavedChangesNotice
+    case brainUnsavedPromptSaveFirst
+    case brainUnsavedRoleDeleted
+    case brainUnsavedRoleNotice
+    case brainUpdateOverrideErrContact
+    case brainUpdateOverrideErrNotFound
+    case brainUpdateOverrideErrRole
+    case brainUpdateOverrideSelectContact
+    case brainUpdateOverrideSelectRole
+    case brainUpdateSelectedOverride
+    case brainVerDraftSuffix
+    case brainVerRunningSuffix
+    case brainVersionALabel
+    case brainVersionBLabel
+    case brainYes
+    case componentsBannerAlertMsg
+    case componentsBannerAlertTitle
+    case contactsActionAddAutoReply
+    case contactsActionIgnore
+    case contactsActionImmutable
+    case contactsActionSetIgnore
+    case contactsActionUnignore
+    case contactsCategoryGroup
+    case contactsCategoryIgnored
+    case contactsCategoryOfficial
+    case contactsCategoryPersonal
+    case contactsCategoryWork
+    case contactsChangeHandling
+    case contactsColHandling
+    case contactsColMsgs
+    case contactsColName
+    case contactsColWechat
+    case contactsDetailAddedOn
+    case contactsDetailBoxTitle
+    case contactsDetailEnterprise
+    case contactsDetailHandling
+    case contactsDetailRegion
+    case contactsDetailRemark
+    case contactsDetailSource
+    case contactsDetailTags
+    case contactsDetailWechat
+    case contactsErrorOfficialNoAutoReply
+    case contactsHandlingIgnored
+    case contactsHandlingNeverReply
+    case contactsHandlingRecordOnly
+    case contactsInitSync
+    case contactsInitSyncDialogConfirm
+    case contactsInitSyncDialogMsg
+    case contactsInitSyncDialogTitle
+    case contactsNoSelected
+    case contactsOffline
+    case contactsQuickSync
+    case contactsReviewNoticeTitle
+    case contactsReviewPrompt
+    case contactsSyncCompleted
+    case contactsSyncIncomplete
+    case contactsSyncLoading
+    case contactsSyncNever
+    case contactsTabGroupCount
+    case contactsTabIgnoredCount
+    case contactsTabOfficialCount
+    case contactsTabPersonalCount
+    case contactsTabWorkCount
+    case contactsWechatUnread
+    case contactsWechatWorkNone
+    case logsClear
+    case logsLevelAll
+    case logsLevelErrorOnly
+    case logsLevelLabel
+    case logsLevelWarnAndAbove
+    case logsSearchPlaceholder
+    case logsSourceLabel
+    case mcpBoxConfigExample
+    case mcpControlOffline
+    case mcpCopiedOpenApiConfig
+    case mcpCopiedSsh
+    case mcpCopiedSshPlaceholder
+    case mcpCopyOpenApiBtn
+    case mcpCopyOpsSshBtn
+    case mcpEndpointChatHistory
+    case mcpEndpointExternalService
+    case mcpEndpointOpenApi
+    case mcpEndpointToolService
+    case mcpErrorQueueInt
+    case mcpErrorTimeoutInt
+    case mcpFetchTokenFailed
+    case mcpFieldQueueMinutes
+    case mcpFieldQueueMinutesHelper
+    case mcpFieldTimeoutAction
+    case mcpFieldTimeoutActionHelper
+    case mcpFieldTimeoutHelper
+    case mcpFieldTimeoutSeconds
+    case mcpGroupDesktop
+    case mcpGroupOpenApi
+    case mcpGroupOps
+    case mcpOpenApiCheckFailed
+    case mcpOpenApiConnectedCount
+    case mcpOpenApiDisabled
+    case mcpOpenApiDisabledNotice
+    case mcpOpenApiEnabled
+    case mcpOpenApiUrl
+    case mcpPlaceholderLocalAddress
+    case mcpPlaceholderToken
+    case mcpPlaceholderUser
+    case mcpReadingToken
+    case mcpRegenerate
+    case mcpRegenerateTokenFailed
+    case mcpRegeneratingToken
+    case mcpSaveFailed
+    case mcpSectionEndpoints
+    case mcpSectionOpenApi
+    case mcpSectionTools
+    case mcpStatusClosed
+    case mcpStatusNotStarted
+    case mcpStatusReady
+    case mcpTestConnComplete
+    case mcpTestConnection
+    case mcpTestFailed
+    case mcpTestingConnection
+    case mcpTestingOpenApi
+    case mcpTokenCopied
+    case mcpTokenMasked
+    case mcpTokenMaskedWithTail
+    case mcpTokenRegeneratedSuccess
+    case mcpValidationError
+    case statusChecking
+    case statusNotReady
+    case statusQuerying
+    case statusUnknown
+    case statusUnverified
+    case updateBtnDeferDisabled
+    case updateBtnDownloadDisabled
+    case updateBtnInstallDisabled
+    case updateCandidateAlreadyLatest
+    case updateCandidateAvailableVerified
+    case updateCandidateFoundUnverified
+    case updateCandidateIncompatibleEnv
+    case updateCandidateNoVersion
+    case updateCandidateNotCheckedYet
+    case updateCandidateSourceUnconfigured
+    case updateCannotInstallOnHost
+    case updateCannotRollbackFmt
+    case updateCertNotFound
+    case updateCheckComplete
+    case updateCheckFailedFmt
+    case updateCheckingStatus
+    case updateCompatArchVerified
+    case updateCompatCurrentOk
+    case updateCompatIncompatible
+    case updateCompatRequirementsNotMet
+    case updateCompatSystemCompatible
+    case updateCompatSystemIncompatible
+    case updateCompatibilityDefaultReason
+    case updateConsistencyConsistent
+    case updateConsistencyInconsistent
+    case updateCoreCompiledVersion
+    case updateCoreVersionUnknown
+    case updateDrainWaitingNotice
+    case updateErrCommandFailedFmt
+    case updateErrNetworkOfflineFmt
+    case updateErrParseFmt
+    case updateFeatureDisabledNotice
+    case updateHighWatermarkNotice
+    case updateIntroDesc
+    case updateKeepOldRecord
+    case updateKeychainLocked
+    case updateKeychainReady
+    case updateLabelCompatibility
+    case updateLabelConsistency
+    case updateLabelCoreVersion
+    case updateLabelCurrentSuite
+    case updateLabelHostArch
+    case updateLabelInstallSeq
+    case updateLabelLocalSign
+    case updateLabelPackageSize
+    case updateLabelPublisherVerify
+    case updateLabelReleaseNotes
+    case updateLabelRollbackEligibility
+    case updateLabelRollbackVersion
+    case updateLabelTargetVersion
+    case updateLocalRunning
+    case updateNoCandidateNotes
+    case updateNoDetailedNotes
+    case updateNoRollbackDetected
+    case updateNotesNone
+    case updateNullValue
+    case updateOldDataSourceUntrusted
+    case updatePermissionsNotice
+    case updatePipelineSteps
+    case updatePublisherApplied
+    case updatePublisherFailedCompat
+    case updatePublisherNoRootKey
+    case updatePublisherSignatureVerified
+    case updatePublisherUnverifiedNoKey
+    case updateReasonBackupCorrupt
+    case updateReasonCannot
+    case updateReasonCheckpointRequired
+    case updateReasonInstallRootUnconfigured
+    case updateReasonNoMatching
+    case updateReasonNotSupported
+    case updateReasonPrevCorrupt
+    case updateReasonRecoveryRequired
+    case updateReasonRollbackStateInvalid
+    case updateReasonSafe
+    case updateReasonSchemaChanged
+    case updateReasonStopCoreFirst
+    case updateRecentCommitted
+    case updateRecordApplied
+    case updateRecoveryGuideHeader
+    case updateRecoveryGuideItem1
+    case updateRecoveryGuideItem2
+    case updateRecoveryGuideItem3
+    case updateRecoveryGuideItem4
+    case updateRecoveryNeededFmt
+    case updateRecoveryNormal
+    case updateRecoveryReasonFmt
+    case updateRecoveryReportTitle
+    case updateRecoveryStageFmt
+    case updateRecoveryTxFmt
+    case updateRefreshingStatus
+    case updateReleaseDescUnknown
+    case updateReleaseNotesEmpty
+    case updateReleaseNotesUnconfigured
+    case updateRollbackCancelledCheckbox
+    case updateRollbackConfirmBody
+    case updateRollbackConfirmTitleFmt
+    case updateRollbackExitCodeFmt
+    case updateRollbackFailedFmt
+    case updateRollbackNoOutput
+    case updateRollbackNotice
+    case updateRollbackRecordedSafe
+    case updateRollbackTimeout
+    case updateRollbackingFmt
+    case updateSectionCandidate
+    case updateSectionCurrentEnv
+    case updateSectionProgress
+    case updateSeqUnknown
+    case updateSigningForbidden
+    case updateSigningForbiddenNoSource
+    case updateSigningNeedVerify
+    case updateSigningUnavailableFmt
+    case updateSourceNone
+    case updateSourceSignedPackage
+    case updateSourceUnknown
+    case updateSourceUnknownFmt
+    case updateStageExecuting
+    case updateStageExternalTxFmt
+    case updateStageIdle
+    case updateStateInstalled
+    case updateStateNone
+    case updateStateUnknown
+    case updateStateUnknownFmt
+    case updateStateVerified
+    case updateStatusFetchNoticeFmt
+    case updateStatusRefreshFailedFmt
+    case updateStatusRefreshed
+    case updateSupervisorSuppressed
+    case updateSupervisorUnsuppressed
+    case updateUntrustedStatusSourceFmt
 }
 
 public enum L10n {
@@ -1068,6 +1690,1249 @@ public enum L10n {
             return e("宿主环境", "Host", "Hôte", "Host", "Host")
         case .diagTime:
             return e("生成时间", "Generated at", "Généré le", "Generato il", "Wygenerowano")
+
+        case .actionConfirm:
+            return e("确定", "Confirm", "Confirmer", "Conferma", "Potwierdź")
+        case .actionCopy:
+            return e("复制", "Copy", "Copier", "Copia", "Kopiuj")
+        case .actionDelete:
+            return e("删除", "Delete", "Supprimer", "Elimina", "Usuń")
+        case .actionFailedTitle:
+            return e("操作失败", "Action failed", "Action échouée", "Azione fallita", "Działanie nieudane")
+        case .actionOK:
+            return e("好的", "OK", "OK", "OK", "OK")
+        case .actionPause:
+            return e("暂停", "Pause", "Pause", "Pausa", "Wstrzymaj")
+        case .actionRefresh:
+            return e("刷新", "Refresh", "Actualiser", "Aggiorna", "Odśwież")
+        case .actionResume:
+            return e("继续", "Resume", "Reprendre", "Riprendi", "Wznów")
+        case .brainActionActivateConfig:
+            return e("启用配置", "Activate configuration", "Activer la configuration", "Attiva configurazione", "Aktywuj konfigurację")
+        case .brainActionArchiveRole:
+            return e("归档角色", "Archive role", "Archiver le rôle", "Archivia ruolo", "Archiwizuj rolę")
+        case .brainActionCopyRole:
+            return e("复制角色", "Copy role", "Copier le rôle", "Copia ruolo", "Kopiuj rolę")
+        case .brainActionExitCodeFmt:
+            return e("%1$@失败 (exit %2$d)", "%1$@ failed (exit %2$d)", "%1$@ échoué (sortie %2$d)", "%1$@ fallito (uscita %2$d)", "%1$@ nieudane (wyjście %2$d)")
+        case .brainActionInitRole:
+            return e("初始化客服角色", "Initialize customer service role", "Initialiser le rôle de service client", "Inizializza ruolo servizio clienti", "Inicjalizuj rolę obsługi klienta")
+        case .brainActionInvalidGenerationFmt:
+            return e("%@返回无效数据，无法获取 generation", "%@ returned invalid data; unable to get generation", "%@ a renvoyé des données invalides ; génération introuvable", "%@ ha restituito dati non validi; generazione introvabile", "%@ zwróciło nieprawidłowe dane; nie można pobrać generacji")
+        case .brainActionRollbackConfig:
+            return e("回退配置", "Rollback configuration", "Rétablir la configuration", "Ripristina configurazione", "Wycofaj konfigurację")
+        case .brainActionSaveBindings:
+            return e("保存绑定", "Save bindings", "Enregistrer les liaisons", "Salva associazioni", "Zapisz powiązania")
+        case .brainActionSaveRole:
+            return e("保存角色", "Save role", "Enregistrer le rôle", "Salva ruolo", "Zapisz rolę")
+        case .brainActivateRoleConfirmTitleFmt:
+            return e("启用角色「%@」？", "Activate role \"%@\"?", "Activer le rôle « %@ » ?", "Attivare il ruolo \"%@\"?", "Aktywować rolę „%@”?")
+        case .brainActivateRoleDialogBodyDefault:
+            return e("将把该角色设为账号默认角色，并启用整份会话配置。白名单内没有专属角色的会话将使用它；已有专属角色保持不变。仅影响新轮次。", "Will set this role as default and activate configuration. Whitelisted sessions without dedicated role will use it. Affects new turns only.", "Définit ce rôle par défaut et active la configuration pour les sessions sans rôle dédié. N'affecte que les nouveaux tours.", "Imposterà questo ruolo come predefinito e attiverà la configurazione. Ha effetto solo sui nuovi turni.", "Ustawi tę rolę jako domyślną i aktywuje konfigurację dla sesji bez dedykowanej roli. Dotyczy tylko nowych tur.")
+        case .brainActivateRoleDialogBodyExisting:
+            return e("将更新该角色已有的默认或专属绑定到当前已保存版本，并启用整份会话配置。其他角色绑定保持原样。仅影响新轮次。", "Updates existing default or override bindings to the saved version and activates the configuration. Affects new turns only.", "Met à jour les liaisons par défaut ou dédiées vers la version enregistrée et active la configuration. Affecte uniquement les nouveaux tours.", "Aggiorna le associazioni predefinite o dedicate alla versione salvata e attiva la configurazione. Ha effetto solo sui nuovi turni.", "Aktualizuje przypisania domyślne lub dedykowane do zapisanej wersji i aktywuje konfigurację. Wpływa tylko na nowe tury.")
+        case .brainActivateRoleDialogBodyNewDefault:
+            return e("将把该角色设为账号默认角色，并启用整份会话配置。白名单内没有专属角色的会话将使用它；已有专属角色保持不变。仅影响新轮次。", "Sets this role as account default and activates configuration. Chats without overrides will use it. Affects new turns only.", "Définit ce rôle par défaut et active la configuration. Utilisé pour les chats sans dérogation. Nouveaux tours uniquement.", "Imposta come predefinito per l'account e attiva la configurazione. Usato per chat senza eccezioni. Solo nuovi turni.", "Ustawia tę rolę jako domyślną i aktywuje konfigurację. Używana dla czatów bez wyjątków. Tylko nowe tury.")
+        case .brainActivateRoleDialogTitleFmt:
+            return e("启用角色「%@」？", "Activate role '%@'?", "Activer le rôle « %@ » ?", "Attivare il ruolo '%@'?", "Aktywować rolę „%@”?")
+        case .brainActivatingRole:
+            return e("正在保存适用范围并启用角色...", "Saving scope and activating role...", "Enregistrement de la portée et activation du rôle...", "Salvataggio dell'ambito e attivazione del ruolo...", "Zapisywanie zakresu i aktywowanie roli...")
+        case .brainActivationScopeMismatch:
+            return e("启用结果与预期范围不一致，请重新读取配置确认。", "Activation scope mismatch; reload configuration to verify.", "Résultat d'activation discordant ; rechargez la configuration pour vérifier.", "Ambito di attivazione discordante; ricarica la configurazione per verificare.", "Niezgodność zakresu aktywacji; załaduj konfigurację ponownie, aby zweryfikować.")
+        case .brainActivationScopeMismatchErr:
+            return e("启用结果与预期范围不一致，请重新读取配置确认。", "Activation result does not match expected scope; please reload config to verify.", "Le résultat de l'activation ne correspond pas à la portée attendue ; rechargez la configuration.", "Il risultato dell'attivazione non corrisponde all'ambito previsto; ricarica la configurazione.", "Wynik aktywacji nie jest zgodny z oczekiwanym zakresem; załaduj ponownie konfigurację.")
+        case .brainActivationUnconfirmedFmt:
+            return e("启用未确认：%1$@。请重新读取配置核对；已保存的绑定草稿会保留。", "Activation unconfirmed: %1$@. Reload configuration to check; saved draft bindings remain.", "Activation non confirmée : %1$@. Rechargez pour vérifier ; les liaisons enregistrées sont conservées.", "Attivazione non confermata: %1$@. Ricarica per verificare; le bozze salvate restano.", "Aktywacja niepotwierdzona: %1$@. Załaduj ponownie, aby sprawdzić; zapisany szkic pozostaje.")
+        case .brainAddOverride:
+            return e("添加覆盖", "Add override", "Ajouter une dérogation", "Aggiungi eccezione", "Dodaj wyjątek")
+        case .brainAddOverrideErrContact:
+            return e("添加失败：请先选择合法的白名单联系人", "Add failed: Please select a valid allowlist contact first", "Échec de l'ajout : Veuillez d'abord sélectionner un contact valide", "Aggiunta non riuscita: Seleziona prima un contatto valido della whitelist", "Dodawanie nie powiodło się: Wybierz najpierw prawidłowy kontakt z białej listy")
+        case .brainAddOverrideErrExistsFmt:
+            return e("添加失败：联系人「%@」已存在覆盖规则，可直接编辑", "Add failed: Override rule already exists for \"%@\", edit directly", "Échec de l'ajout : Une dérogation existe déjà pour « %@ », modifiez-la directement", "Aggiunta non riuscita: Esiste già una regola per \"%@\", modificala direttamente", "Dodawanie nie powiodło się: Reguła wyjątku już istnieje dla „%@”, edytuj bezpośrednio")
+        case .brainAddOverrideErrGeneral:
+            return e("添加覆盖失败", "Failed to add override", "Échec de l'ajout de dérogation", "Aggiunta eccezione non riuscita", "Nie udało się dodać wyjątku")
+        case .brainAddOverrideErrMustAllowlist:
+            return e("添加失败：联系人必须源自真实白名单，禁止凭姓名构造ID", "Add failed: Contact must originate from real allowlist; synthesized IDs not allowed", "Échec de l'ajout : Le contact doit provenir de la liste blanche réelle ; ID synthétisés interdits", "Aggiunta non riuscita: Il contatto deve provenire dalla whitelist reale; ID sintetizzati vietati", "Dodawanie nie powiodło się: Kontakt musi pochodzić z rzeczywistej białej listy; syntetyczne ID zabronione")
+        case .brainAddOverrideErrRole:
+            return e("添加失败：请选择有效的角色", "Add failed: Please select a valid role", "Échec de l'ajout : Veuillez sélectionner un rôle valide", "Aggiunta non riuscita: Seleziona un ruolo valido", "Dodawanie nie powiodło się: Wybierz prawidłową rolę")
+        case .brainAddOverrideFailed:
+            return e("添加覆盖失败", "Failed to add override", "Échec de l'ajout de la dérogation", "Aggiunta eccezione fallita", "Dodawanie wyjątku nieudane")
+        case .brainAddOverrideSelectContact:
+            return e("添加失败：请先选择合法的白名单联系人", "Add failed: select a valid allowlist contact", "Échec de l'ajout : sélectionnez un contact autorisé valide", "Aggiunta fallita: seleziona un contatto consentito valido", "Dodawanie nieudane: wybierz prawidłowy kontakt z białej listy")
+        case .brainAddOverrideSelectRole:
+            return e("添加失败：请选择有效的角色", "Add failed: select a valid role", "Échec de l'ajout : sélectionnez un rôle valide", "Aggiunta fallita: seleziona un ruolo valido", "Dodawanie nieudane: wybierz prawidłową rolę")
+        case .brainAllowlistContactLabel:
+            return e("白名单联系人:", "Allowlist Contact:", "Contact liste blanche :", "Contatto whitelist:", "Kontakt z białej listy:")
+        case .brainAllowlistUnavailableFmt:
+            return e("白名单联系人来源不可用 [%@]，已禁用新增与编辑", "Allowlist contacts source unavailable [%@]; adding and editing disabled", "Source de contacts liste blanche indisponible [%@] ; ajout et modification désactivés", "Fonte contatti whitelist non disponibile [%@]; aggiunta e modifica disabilitate", "Źródło kontaktów białej listy niedostępne [%@]; dodawanie i edycja wyłączone")
+        case .brainAssemblePreview:
+            return e("组装预览", "Assemble preview", "Aperçu d'assemblage", "Anteprima assemblaggio", "Podgląd złożenia")
+        case .brainBindRoleLabel:
+            return e("绑定客服角色:", "Bind Customer Service Role:", "Lier au rôle de service :", "Associa ruolo assistenza:", "Powiąż rolę obsługi:")
+        case .brainBindingsDraftSavedSuccess:
+            return e("绑定草稿保存成功！新配置将在启用后作用于新轮次。", "Bindings draft saved. Changes take effect on new turns after activation.", "Brouillon enregistré. Les modifications prendront effet après activation.", "Bozza salvata. Le modifiche avranno effetto dopo l'attivazione.", "Szkic przypisań zapisany. Zmiany zaczną działać po aktywacji w nowych turach.")
+        case .brainBindingsIntro:
+            return e("账号与联系人绑定。联系人唯一来源为白名单，本处仅引用不复制联系人清单；修改仅暂存为草稿，点击「保存绑定草稿」通过 CAS 校验后落盘；启用配置后在下一轮对话生效。", "Account and contact bindings. Source of truth is allowlist; changes saved as draft, committed via CAS on 'Save Bindings Draft', taking effect next turn after activation.", "Liaisons compte et contacts. Source unique : liste blanche ; modifications en brouillon validées par CAS, effectives au prochain tour après activation.", "Associazioni account e contatti. Unica fonte è la whitelist; modifiche in bozza salvate con CAS, attive dal turno successivo dopo l'abilitazione.", "Powiązania kont i kontaktów. Jedynym źródłem jest biała lista; zmiany w szkicu zapisywane przez CAS, aktywne w kolejnej turze po włączeniu.")
+        case .brainBindingsSavedSuccess:
+            return e("绑定草稿保存成功！新配置将在启用后作用于新轮次。", "Bindings draft saved successfully! New config takes effect on new turns after activation.", "Brouillon de liaisons enregistré avec succès ! Effectif lors des nouveaux tours après activation.", "Bozza associazioni salvata con successo! La nuova configurazione sarà attiva dai nuovi turni.", "Szkic powiązań zapisany pomyślnie! Nowa konfiguracja zacznie obowiązywać po włączeniu.")
+        case .brainBindingsSectionDesc:
+            return e("账号与联系人绑定。联系人唯一来源为白名单，本处仅引用不复制联系人清单；修改仅暂存为草稿，点击「保存绑定草稿」通过 CAS 校验后落盘；启用配置后在下一轮对话生效。", "Account and contact bindings. Contacts are referenced strictly from the allowlist. Edits are staged as drafts until saved via CAS. Changes take effect on the next conversation turn after activation.", "Liaisons compte et contacts. Les contacts proviennent de la liste autorisée. Enregistrez via CAS pour appliquer au prochain tour.", "Associazioni account e contatti. I contatti derivano dalla lista consentiti. Salva con CAS per attivare al turno successivo.", "Przypisania konta i kontaktów. Kontakty pochodzą wyłącznie z białej listy. Zapisz przez CAS, aby zastosować w następnej turze.")
+        case .brainBtnActivateConfig:
+            return e("启用配置", "Activate Configuration", "Activer la configuration", "Attiva configurazione", "Aktywuj konfigurację")
+        case .brainBtnAddOverride:
+            return e("添加覆盖", "Add Override", "Ajouter une dérogation", "Aggiungi eccezione", "Dodaj wyjątek")
+        case .brainBtnConfirmActivate:
+            return e("确认启用", "Confirm Activation", "Confirmer l'activation", "Conferma attivazione", "Potwierdź aktywację")
+        case .brainBtnCopyRole:
+            return e("复制角色", "Copy role", "Copier le rôle", "Copia ruolo", "Kopiuj rolę")
+        case .brainBtnDeleteOverride:
+            return e("删除选定覆盖", "Delete Selected Override", "Supprimer la dérogation", "Elimina eccezione selezionata", "Usuń wybrany wyjątek")
+        case .brainBtnDeleteRole:
+            return e("删除角色", "Delete Role", "Supprimer le rôle", "Elimina ruolo", "Usuń rolę")
+        case .brainBtnDiff:
+            return e("对比差异", "Compare Diffs", "Comparer les versions", "Confronta differenze", "Porównaj różnice")
+        case .brainBtnImportKnowledge:
+            return e("导入并关联至角色", "Import & Attach to Role", "Importer et lier au rôle", "Importa e associa al ruolo", "Importuj i połącz z rolą")
+        case .brainBtnModelAndConn:
+            return e("模型与连接…", "Model & Connection…", "Modèle et connexion…", "Modello e connessione…", "Model i połączenie…")
+        case .brainBtnNewRole:
+            return e("新增角色", "New Role", "Nouveau rôle", "Nuovo ruolo", "Nowa rola")
+        case .brainBtnRollbackConfig:
+            return e("回退版本", "Rollback Version", "Rétablir la version", "Ripristina versione", "Wycofaj wersję")
+        case .brainBtnRollbackSelected:
+            return e("回滚至选定版本…", "Restore selected version…", "Restaurer la version sélectionnée…", "Ripristina versione selezionata…", "Przywróć wybraną wersję…")
+        case .brainBtnRollbackToSelectedVer:
+            return e("回滚至选定版本…", "Rollback to Selected Version…", "Rétablir la version sélectionnée…", "Ripristina alla versione selezionata…", "Wycofaj do wybranej wersji…")
+        case .brainBtnRunPreview:
+            return e("组装预览", "Assemble Preview", "Aperçu d'assemblage", "Anteprima assemblaggio", "Podgląd złożenia")
+        case .brainBtnSaveBindingsDraft:
+            return e("保存绑定草稿", "Save Bindings Draft", "Enregistrer le brouillon de liaisons", "Salva bozza associazioni", "Zapisz szkic powiązań")
+        case .brainBtnSaveDraft:
+            return e("保存草稿", "Save Draft", "Enregistrer le brouillon", "Salva bozza", "Zapisz szkic")
+        case .brainBtnSetDefaultRole:
+            return e("设为默认角色…", "Set as Default Role…", "Définir comme rôle par défaut…", "Imposta come ruolo predefinito…", "Ustaw jako rolę domyślną…")
+        case .brainBtnTryIt:
+            return e("试一试 (组装预览)", "Try it (assemble preview)", "Essayer (aperçu d'assemblage)", "Prova (anteprima)", "Wypróbuj (podgląd złożenia)")
+        case .brainBtnTryItPreview:
+            return e("试一试 (组装预览)", "Try It (Assemble Preview)", "Essayer (Aperçu d'assemblage)", "Prova (Anteprima assemblaggio)", "Wypróbuj (Podgląd złożenia)")
+        case .brainBtnUpdateOverride:
+            return e("更新选定覆盖", "Update Selected Override", "Mettre à jour la dérogation", "Aggiorna eccezione selezionata", "Zaktualizuj wybrany wyjątek")
+        case .brainCasBindingConflictFmt:
+            return e("保存绑定冲突 [%1$d]：%2$@。已保留您当前未提交的绑定草稿与表单，请稍后重试。", "Binding conflict [%1$d]: %2$@. Uncommitted bindings and forms were preserved; try again later.", "Conflit de liaisons [%1$d] : %2$@. Les liaisons et formulaires non validés ont été conservés ; réessayez plus tard.", "Conflitto associazioni [%1$d]: %2$@. Le associazioni e i moduli non inviati sono stati mantenuti; riprova più tardi.", "Konflikt przypisań [%1$d]: %2$@. Niezatwierdzone przypisania i formularze zostały zachowane; spróbuj ponownie później.")
+        case .brainCasBindingsConflictFmt:
+            return e("保存绑定冲突 [%@]：%@。已保留您当前未提交的绑定草稿与表单，请稍后重试。", "Binding save conflict [%@]: %@. Unsubmitted binding draft and forms preserved; please retry later.", "Conflit d'enregistrement de liaison [%@] : %@. Brouillon non envoyé conservé ; veuillez réessayer plus tard.", "Conflitto di salvataggio associazione [%@]: %@. Bozza non inviata conservata; riprova più tardi.", "Konflikt zapisu powiązania [%@]: %@. Niezatwierdzony szkic zachowany; spróbuj ponownie później.")
+        case .brainCasRoleConflictFmt:
+            return e("并发修改冲突: %@。已保留您当前编辑的草稿，请核对最新版本后再次保存。", "Conflict: %@. Your unsaved draft was preserved; check the latest version and save again.", "Conflit : %@. Votre brouillon a été conservé ; vérifiez la version récente et enregistrez à nouveau.", "Conflitto: %@. La bozza non salvata è stata mantenuta; verifica la versione recente e salva di nuovo.", "Konflikt: %@. Twój niezapisany szkic został zachowany; sprawdź najnowszą wersję i zapisz ponownie.")
+        case .brainChatKindGroupOption:
+            return e("群聊 (group)", "Group chat (group)", "Chat de groupe (group)", "Chat di gruppo (group)", "Czat grupowy (group)")
+        case .brainChatKindPrivateOption:
+            return e("私聊 (private)", "Private chat (private)", "Chat privé (private)", "Chat privata (private)", "Czat prywatny (private)")
+        case .brainColBoundRole:
+            return e("绑定角色", "Bound Role", "Rôle associé", "Ruolo associato", "Powiązana rola")
+        case .brainColContactAllowlist:
+            return e("联系人/群 (白名单)", "Contact/Group (Allowlist)", "Contact/Groupe (Liste blanche)", "Contatto/Gruppo (Whitelist)", "Kontakt/Grupa (Biała lista)")
+        case .brainColCreatedAt:
+            return e("生成时间", "Created at", "Généré le", "Data creazione", "Czas utworzenia")
+        case .brainColDefaultRevId:
+            return e("默认版本 ID", "Default Revision ID", "ID de révision par défaut", "ID revisione predefinito", "ID domyślnej wersji")
+        case .brainColGen:
+            return e("代次", "Gen", "Gén", "Gen", "Gen")
+        case .brainColKind:
+            return e("类型", "Type", "Type", "Tipo", "Typ")
+        case .brainColRev:
+            return e("版本", "Revision", "Révision", "Revisione", "Wersja")
+        case .brainColRole:
+            return e("角色", "Role", "Rôle", "Ruolo", "Rola")
+        case .brainColStatus:
+            return e("状态", "Status", "État", "Stato", "Status")
+        case .brainConfirmActivate:
+            return e("确认启用", "Confirm activation", "Confirmer l'activation", "Conferma attivazione", "Potwierdź aktywację")
+        case .brainConstraintsBoxNotice:
+            return e("不可虚构事实、语音转写以本轮转写为准、未识别项点名并依提示回复。本约束由代码自动拼接在角色人设之后，不可在界面删改。", "Do not hallucinate facts; voice transcription takes precedence; name unrecognised items and reply per guidance. Appended automatically by code, read-only.", "Ne pas inventer de faits ; la transcription vocale prévaut ; nommer les éléments non reconnus. Joint automatiquement par le code, en lecture seule.", "Non inventare fatti; la trascrizione vocale ha la precedenza; indicare elementi non riconosciuti. Aggiunto automaticamente dal codice, in sola lettura.", "Nie zmyślaj faktów; transkrypcja głosowa ma pierwszeństwo; wymieniaj nierozpoznane elementy. Dołączane automatycznie, tylko do odczytu.")
+        case .brainConstraintsBoxTitle:
+            return e("系统能力约束 (只读)", "System Constraints (Read-only)", "Contraintes système (Lecture seule)", "Vincoli di sistema (Sola lettura)", "Ograniczenia systemowe (Tylko do odczytu)")
+        case .brainCopySuffix:
+            return e(" (副本)", " (Copy)", " (Copie)", " (Copia)", " (Kopia)")
+        case .brainCostNotePreviewOnly:
+            return e("未调用模型，仅组装预览", "Deterministic assembly preview only; no model call", "Aperçu d'assemblage uniquement ; aucun appel au modèle", "Solo anteprima deterministica; nessuna chiamata al modello", "Tylko podgląd złożenia; bez wywołania modelu")
+        case .brainCostNoteUncalled:
+            return e("未调用模型，仅组装预览", "Model not invoked; deterministic assembly preview only", "Modèle non invoqué ; aperçu d'assemblage déterministe uniquement", "Modello non invocato; solo anteprima di assemblaggio deterministica", "Model nie został wywołany; tylko deterministyczny podgląd złożenia")
+        case .brainCurrentAccountFmt:
+            return e("当前账号: %@", "Current account: %@", "Compte actuel : %@", "Account corrente: %@", "Bieżące konto: %@")
+        case .brainCurrentAccountNone:
+            return e("当前账号: -", "Account: -", "Compte : -", "Account: -", "Konto: -")
+        case .brainDefaultDraftReady:
+            return e("默认角色草稿已准备好，可直接编辑并保存。", "Default role draft ready; edit and save.", "Brouillon de rôle par défaut prêt ; modifiez et enregistrez.", "Bozza del ruolo predefinito pronta; modifica e salva.", "Szkic roli domyślnej jest gotowy; edytuj i zapisz.")
+        case .brainDefaultRoleDraftReady:
+            return e("默认角色草稿已准备好，可直接编辑并保存。", "Default role draft ready; edit directly and save.", "Brouillon de rôle par défaut prêt ; modifiez directement et enregistrez.", "Bozza ruolo predefinito pronta; modifica e salva.", "Szkic roli domyślnej jest gotowy; edytuj bezpośrednio i zapisz.")
+        case .brainDefaultRoleDraftSelectedFmt:
+            return e("默认角色草稿已选择为「%@」，待点击「保存绑定草稿」", "Default role draft selected as \"%@\", pending 'Save Bindings Draft'", "Brouillon du rôle par défaut défini sur « %@ », en attente d'enregistrement", "Bozza ruolo predefinito impostata su \"%@\", in attesa di salvataggio", "Wybrano szkic roli domyślnej jako „%@”, oczekuje na zapisanie szkicu powiązań")
+        case .brainDefaultRoleLabel:
+            return e("账号默认角色:", "Account Default Role:", "Rôle par défaut du compte :", "Ruolo predefinito dell'account:", "Domyślna rola konta:")
+        case .brainDefaultRolePriorityNotice:
+            return e("默认角色用于白名单内未指定专属角色的会话；专属角色保持优先。", "Default role is used for allowlist sessions without dedicated role; dedicated roles take precedence.", "Le rôle par défaut est utilisé pour les sessions sans rôle dédié ; les rôles dédiés restent prioritaires.", "Il ruolo predefinito è usato per le sessioni senza ruolo dedicato; i ruoli dedicati hanno la priorità.", "Rola domyślna jest używana dla sesji bez dedykowanej roli; dedykowane role mają pierwszeństwo.")
+        case .brainDefaultRoleScopeNotice:
+            return e("默认角色用于白名单内未指定专属角色的会话；专属角色保持优先。", "Default role is used for allowlist conversations without an override; overrides take precedence.", "Le rôle par défaut s'applique aux conversations sans dérogation ; les rôles dédiés sont prioritaires.", "Il ruolo predefinito si applica alle conversazioni senza eccezioni; i ruoli dedicati hanno priorità.", "Rola domyślna jest używana dla rozmów bez wyjątku; role dedykowane mają pierwszeństwo.")
+        case .brainDefaultRoleSelectedFmt:
+            return e("已选择「%@」为默认角色。请保存绑定草稿，再启用配置。", "Selected '%@' as default role. Save bindings draft before activating.", "« %@ » sélectionné par défaut. Enregistrez les liaisons avant d'activer.", "Selezionato '%@' come predefinito. Salva le associazioni prima di attivare.", "Wybrano „%@” jako rolę domyślną. Zapisz szkic przypisań przed aktywacją.")
+        case .brainDefaultTemplateMissing:
+            return e("默认角色模板缺失，请重新安装完整应用。", "Default role template missing; please reinstall application.", "Modèle de rôle par défaut manquant ; veuillez réinstaller l'application.", "Modello di ruolo predefinito mancante; reinstalla l'applicazione.", "Brak szablonu roli domyślnej; zainstaluj ponownie aplikację.")
+        case .brainDeleteDraftSuccess:
+            return e("未保存角色已删除", "Unsaved role deleted", "Rôle non enregistré supprimé", "Ruolo non salvato eliminato", "Niezapisana rola została usunięta")
+        case .brainDeleteOverrideErrSelect:
+            return e("删除失败：请在表格中或下拉框中选择要删除的覆盖规则", "Delete failed: Please select an override rule to delete in the table or dropdown", "Échec de suppression : Veuillez sélectionner une dérogation à supprimer dans le tableau", "Eliminazione non riuscita: Seleziona una regola da eliminare nella tabella o nel menu", "Usuwanie nie powiodło się: Wybierz regułę wyjątku do usunięcia w tabeli lub menu")
+        case .brainDeleteOverrideSelectRule:
+            return e("删除失败：请在表格中或下拉框中选择要删除的覆盖规则", "Delete failed: select an override to delete", "Échec de la suppression : sélectionnez une dérogation", "Eliminazione fallita: seleziona un'eccezione da eliminare", "Usuwanie nieudane: wybierz wyjątek do usunięcia")
+        case .brainDeleteRoleActivePrompt:
+            return e("删除后将从角色列表移除，历史对话和版本记录会保留。", "It will be removed from the list; historical chats and version records will be kept.", "Il sera retiré de la liste ; les conversations et versions historiques seront conservées.", "Verrà rimosso dall'elenco; conversazioni e versioni storiche saranno mantenute.", "Zostanie usunięta z listy; historia rozmów i wersje zostaną zachowane.")
+        case .brainDeleteRoleConfirmTitleFmt:
+            return e("删除角色「%@」？", "Delete role \"%@\"?", "Supprimer le rôle « %@ » ?", "Eliminare il ruolo \"%@\"?", "Usunąć rolę „%@”?")
+        case .brainDeleteRoleDialogInfoSaved:
+            return e("删除后将从角色列表移除，历史对话和版本记录会保留。", "After deletion, it is removed from the role list; history and version records are preserved.", "Après suppression, il est retiré de la liste ; l'historique et les versions sont conservés.", "Dopo l'eliminazione verrà rimosso dall'elenco; cronologia e versioni vengono conservate.", "Po usunięciu rola zniknie z listy; historia i wersje zostaną zachowane.")
+        case .brainDeleteRoleDialogInfoUnsaved:
+            return e("该角色尚未保存，删除后将丢弃这份草稿。", "This role has not been saved; deleting will discard this draft.", "Ce rôle n'a pas été enregistré ; la suppression supprimera ce brouillon.", "Questo ruolo non è stato salvato; l'eliminazione scarterà questa bozza.", "Ta rola nie została zapisana; usunięcie odrzuci ten szkic.")
+        case .brainDeleteRoleDialogTitleFmt:
+            return e("删除角色「%@」？", "Delete role '%@'?", "Supprimer le rôle « %@ » ?", "Eliminare il ruolo '%@'?", "Usunąć rolę „%@”?")
+        case .brainDeleteRoleDraftPrompt:
+            return e("该角色尚未保存，删除后将丢弃这份草稿。", "This role has not been saved; deleting will discard this draft.", "Ce rôle n'a pas été enregistré ; la suppression supprimera ce brouillon.", "Questo ruolo non è stato salvato; l'eliminazione scarterà questa bozza.", "Ta rola nie została zapisana; usunięcie odrzuci ten szkic.")
+        case .brainDeleteRoleFailedFmt:
+            return e("删除失败：%1$@", "Deletion failed: %1$@", "Échec de la suppression : %1$@", "Eliminazione non riuscita: %1$@", "Usuwanie nieudane: %1$@")
+        case .brainDeleteRoleSuccess:
+            return e("角色已删除", "Role deleted", "Rôle supprimé", "Ruolo eliminato", "Rola została usunięta")
+        case .brainDeleteSelectedOverride:
+            return e("删除选定覆盖", "Delete selected override", "Supprimer la dérogation", "Elimina eccezione selezionata", "Usuń zaznaczony wyjątek")
+        case .brainDeliveryStatusFmt:
+            return e("送达状态: %@", "Delivery status: %@", "État de remise : %@", "Stato di consegna: %@", "Status doręczenia: %@")
+        case .brainDeliveryUnknown:
+            return e("送达状态: 未知 (unknown)", "Delivery status: unknown", "État de livraison : inconnu", "Stato consegna: sconosciuto", "Stan doręczenia: nieznany")
+        case .brainDeliveryUnknownValue:
+            return e("未知 (unknown)", "Unknown (unknown)", "Inconnu (unknown)", "Sconosciuto (unknown)", "Nieznany (unknown)")
+        case .brainDiffBoxTitle:
+            return e("两版本差异对比", "Two-Version Diff Comparison", "Comparaison des différences entre deux versions", "Confronto differenze tra due versioni", "Porównanie różnic między dwoma wersjami")
+        case .brainDiffBudgetChangeFmt:
+            return e("• 上下文预算: %1$@ -> %2$@", "• Context budget: %1$@ -> %2$@", "• Budget de contexte : %1$@ -> %2$@", "• Budget di contesto: %1$@ -> %2$@", "• Budżet kontekstu: %1$@ -> %2$@")
+        case .brainDiffBudgetChangedFmt:
+            return e("• 上下文预算: %@ -> %@", "• Context budget: %@ -> %@", "• Budget de contexte : %@ -> %@", "• Budget di contesto: %@ -> %@", "• Budżet kontekstu: %@ -> %@")
+        case .brainDiffGoalsBothMissing:
+            return e("• 核心目标: 双方均缺失 [缺失]", "• Goals: Both missing [Missing]", "• Objectifs principaux : Manquant des deux côtés [Manquant]", "• Obiettivi principali: Mancante da entrambi i lati [Mancante]", "• Cele główne: Brak po obu stronach [Brak]")
+        case .brainDiffGoalsChangeFmt:
+            return e("• 核心目标: %1$@ -> %2$@", "• Goals: %1$@ -> %2$@", "• Objectifs : %1$@ -> %2$@", "• Obiettivi: %1$@ -> %2$@", "• Cele: %1$@ -> %2$@")
+        case .brainDiffGoalsChangedFmt:
+            return e("• 核心目标: %@ -> %@", "• Goals: %@ -> %@", "• Objectifs principaux : %@ -> %@", "• Obiettivi principali: %@ -> %@", "• Cele główne: %@ -> %@")
+        case .brainDiffGoalsNoChangeFmt:
+            return e("• 核心目标: 无变化 %@", "• Goals: unchanged %@", "• Objectifs : inchangés %@", "• Obiettivi: invariati %@", "• Cele: bez zmian %@")
+        case .brainDiffHeaderFmt:
+            return e("【版本对比】%1$@ (左) vs %2$@ (右)", "[Version Diff] %1$@ (left) vs %2$@ (right)", "[Diff de versions] %1$@ (gauche) vs %2$@ (droite)", "[Diff versioni] %1$@ (sinistra) vs %2$@ (destra)", "[Porównanie wersji] %1$@ (lewa) vs %2$@ (prawa)")
+        case .brainDiffIncompleteDraftNoticeAFmt:
+            return e("※ 版本 A (%@): 此版本未保存完整草稿，仅显示已保存的内容。", "※ Version A (%@): Incomplete draft; only saved content is shown.", "※ Version A (%@) : Brouillon incomplet ; seul le contenu enregistré est affiché.", "※ Versione A (%@): Bozza incompleta; solo il contenuto salvato viene mostrato.", "※ Wersja A (%@): Niepełny szkic; pokazano tylko zapisaną treść.")
+        case .brainDiffIncompleteDraftNoticeBFmt:
+            return e("※ 版本 B (%@): 此版本未保存完整草稿，仅显示已保存的内容。", "※ Version B (%@): Incomplete draft; only saved content is shown.", "※ Version B (%@) : Brouillon incomplet ; seul le contenu enregistré est affiché.", "※ Versione B (%@): Bozza incompleta; solo il contenu salvato viene mostrato.", "※ Wersja B (%@): Niepełny szkic; pokazano tylko zapisaną treść.")
+        case .brainDiffKnowledgeBothMissing:
+            return e("• 知识库引用: 双方均缺失 [缺失]", "• Knowledge refs: Both missing [Missing]", "• Références de connaissances : Manquant des deux côtés [Manquant]", "• Riferimenti di conoscenza: Mancante da entrambi i lati [Mancante]", "• Referencje bazy wiedzy: Brak po obu stronach [Brak]")
+        case .brainDiffKnowledgeChangeFmt:
+            return e("• 知识库引用: %1$@ -> %2$@", "• Knowledge refs: %1$@ -> %2$@", "• Références de connaissances : %1$@ -> %2$@", "• Riferimenti di conoscenza: %1$@ -> %2$@", "• Odwołania do wiedzy: %1$@ -> %2$@")
+        case .brainDiffKnowledgeChangedFmt:
+            return e("• 知识库引用: %@ -> %@", "• Knowledge refs: %@ -> %@", "• Références de connaissances : %@ -> %@", "• Riferimenti di conoscenza: %@ -> %@", "• Referencje bazy wiedzy: %@ -> %@")
+        case .brainDiffKnowledgeNoChangeFmt:
+            return e("• 知识库引用: 无变化 (%d 篇)", "• Knowledge refs: unchanged (%d documents)", "• Références de connaissances : inchangées (%d documents)", "• Riferimenti di conoscenza: invariati (%d documenti)", "• Odwołania do wiedzy: bez zmian (%d dokumentów)")
+        case .brainDiffLabelVerA:
+            return e("版本 A:", "Version A:", "Version A :", "Versione A:", "Wersja A:")
+        case .brainDiffLabelVerB:
+            return e("版本 B:", "Version B:", "Version B :", "Versione B:", "Wersja B:")
+        case .brainDiffLeftFmt:
+            return e("  [- 左]: %@", "  [- Left]: %@", "  [- Gauche] : %@", "  [- Sinistra]: %@", "  [- Lewa]: %@")
+        case .brainDiffLegacyVerAFmt:
+            return e("※ 版本 A (%@): 此版本未保存完整草稿，仅显示已保存的内容。", "※ Version A (%@): Incomplete draft saved; only saved content is shown.", "※ Version A (%@) : Brouillon incomplet ; seul le contenu enregistré est affiché.", "※ Versione A (%@): Bozza incompleta; viene mostrato solo il contenuto salvato.", "※ Wersja A (%@): Niepełny szkic; pokazano tylko zapisaną treść.")
+        case .brainDiffLegacyVerBFmt:
+            return e("※ 版本 B (%@): 此版本未保存完整草稿，仅显示已保存的内容。", "※ Version B (%@): Incomplete draft saved; only saved content is shown.", "※ Version B (%@) : Brouillon incomplet ; seul le contenu enregistré est affiché.", "※ Versione B (%@): Bozza incompleta; viene mostrato solo il contenuto salvato.", "※ Wersja B (%@): Niepełny szkic; pokazano tylko zapisaną treść.")
+        case .brainDiffNameChangedFmt:
+            return e("• 角色名称: [%@] -> [%@]", "• Role name: [%@] -> [%@]", "• Nom du rôle : [%@] -> [%@]", "• Nome ruolo: [%@] -> [%@]", "• Nazwa roli: [%@] -> [%@]")
+        case .brainDiffNameNoChangeFmt:
+            return e("• 角色名称: 无变化 [%@]", "• Role name: No change [%@]", "• Nom du rôle : Aucun changement [%@]", "• Nome ruolo: Nessuna modifica [%@]", "• Nazwa roli: Bez zmian [%@]")
+        case .brainDiffPersonaBothMissing:
+            return e("• 人设设定 (Persona): 双方均缺失 [缺失]", "• Persona: Both missing [Missing]", "• Persona : Manquant des deux côtés [Manquant]", "• Persona: Mancante da entrambi i lati [Mancante]", "• Persona: Brak po obu stronach [Brak]")
+        case .brainDiffPersonaHeader:
+            return e("• 人设设定 (Persona):", "• Persona:", "• Persona :", "• Persona:", "• Persona:")
+        case .brainDiffPersonaNoChangeFmt:
+            return e("• 人设设定 (Persona): 无变化 (%d 字符)", "• Persona: No change (%d characters)", "• Persona : Aucun changement (%d caractères)", "• Persona: Nessuna modifica (%d caratteri)", "• Persona: Bez zmian (%d znaków)")
+        case .brainDiffPersonaTitle:
+            return e("• 人设设定 (Persona):", "• Persona:", "• Persona :", "• Persona:", "• Persona:")
+        case .brainDiffPersonaUnchangedFmt:
+            return e("• 人设设定 (Persona): 无变化 (%d 字符)", "• Persona: unchanged (%d characters)", "• Persona : inchangée (%d caractères)", "• Persona: invariata (%d caratteri)", "• Persona: bez zmian (%d znaków)")
+        case .brainDiffRightFmt:
+            return e("  [+ 右]: %@", "  [+ Right]: %@", "  [+ Droite] : %@", "  [+ Destra]: %@", "  [+ Prawa]: %@")
+        case .brainDiffRoleNameChangeFmt:
+            return e("• 角色名称: [%1$@] -> [%2$@]", "• Role name: [%1$@] -> [%2$@]", "• Nom du rôle : [%1$@] -> [%2$@]", "• Nome ruolo: [%1$@] -> [%2$@]", "• Nazwa roli: [%1$@] -> [%2$@]")
+        case .brainDiffRoleNameNoChangeFmt:
+            return e("• 角色名称: 无变化 [%@]", "• Role name: unchanged [%@]", "• Nom du rôle : inchangé [%@]", "• Nome ruolo: invariato [%@]", "• Nazwa roli: bez zmian [%@]")
+        case .brainDiffRulesBothMissing:
+            return e("• 业务规则: 双方均缺失 [缺失]", "• Business rules: Both missing [Missing]", "• Règles métier : Manquant des deux côtés [Manquant]", "• Regole aziendali: Mancante da entrambi i lati [Mancante]", "• Reguły biznesowe: Brak po obu stronach [Brak]")
+        case .brainDiffRulesChangeFmt:
+            return e("• 业务规则: %1$@ -> %2$@", "• Rules: %1$@ -> %2$@", "• Règles : %1$@ -> %2$@", "• Regole: %1$@ -> %2$@", "• Reguły: %1$@ -> %2$@")
+        case .brainDiffRulesChangedFmt:
+            return e("• 业务规则: %@ -> %@", "• Business rules: %@ -> %@", "• Règles métier : %@ -> %@", "• Regole aziendali: %@ -> %@", "• Reguły biznesowe: %@ -> %@")
+        case .brainDiffRulesNoChangeFmt:
+            return e("• 业务规则: 无变化 %@", "• Business rules: No change %@", "• Règles métier : Aucun changement %@", "• Regole aziendali: Nessuna modifica %@", "• Reguły biznesowe: Bez zmian %@")
+        case .brainDiffSavedIndicator:
+            return e("已保存", "Saved", "Enregistré", "Salvato", "Zapisano")
+        case .brainDiffTemplatesChangeFmt:
+            return e("• 异常回复模板: %1$@ -> %2$@", "• Fallback templates: %1$@ -> %2$@", "• Modèles de secours : %1$@ -> %2$@", "• Modelli di riserva: %1$@ -> %2$@", "• Szablony awaryjne: %1$@ -> %2$@")
+        case .brainDiffTemplatesChangedFmt:
+            return e("• 异常回复模板: %@ -> %@", "• Fallback templates: %@ -> %@", "• Modèles de secours : %@ -> %@", "• Modelli di riserva: %@ -> %@", "• Szablony awaryjne: %@ -> %@")
+        case .brainDiffToneChangeFmt:
+            return e("• 角色语气: [%1$@] -> [%2$@]", "• Role tone: [%1$@] -> [%2$@]", "• Ton du rôle : [%1$@] -> [%2$@]", "• Tono ruolo: [%1$@] -> [%2$@]", "• Ton roli: [%1$@] -> [%2$@]")
+        case .brainDiffToneChangedFmt:
+            return e("• 角色语气: [%@] -> [%@]", "• Role tone: [%@] -> [%@]", "• Ton du rôle : [%@] -> [%@]", "• Tono ruolo: [%@] -> [%@]", "• Ton roli: [%@] -> [%@]")
+        case .brainDiffToneNoChangeFmt:
+            return e("• 角色语气: 无变化 [%@]", "• Role tone: unchanged [%@]", "• Ton du rôle : inchangé [%@]", "• Tono ruolo: invariato [%@]", "• Ton roli: bez zmian [%@]")
+        case .brainDoubleClickToEdit:
+            return e("双击角色名编辑", "Double-click role name to edit", "Double-cliquez pour modifier", "Fai doppio clic per modificare", "Kliknij dwukrotnie nazwę roli, aby edytować")
+        case .brainDraftLoadedNotice:
+            return e("草稿已加载，可编辑后保存或合成预览", "Draft loaded; edit and save or run assemble preview", "Brouillon chargé ; modifiez et enregistrez ou prévisualisez", "Bozza caricata; modifica e salva o esegui l'anteprima", "Szkic załadowany; edytuj i zapisz lub uruchom podgląd")
+        case .brainDraftLoadedStatus:
+            return e("草稿已加载，可编辑后保存或合成预览", "Draft loaded; edit and save, or synthesize preview", "Brouillon chargé ; modifiez et enregistrez, ou générez un aperçu", "Bozza caricata; modifica e salva o genera anteprima", "Szkic załadowany; edytuj i zapisz lub wygeneruj podgląd")
+        case .brainDraftRunningStatusPlaceholder:
+            return e("草稿: - · 运行: -", "Draft: - · Running: -", "Brouillon : - · Actif : -", "Bozza: - · Attivo: -", "Szkic: - · Aktywny: -")
+        case .brainDraftSavedNotice:
+            return e("草稿已保存。请在「适用会话」设置回复范围，再启用配置。", "Draft saved. Configure conversation scope in 'Conversations' before activating.", "Brouillon enregistré. Définissez le périmètre dans « Conversations » avant d'activer.", "Bozza salvata. Configura l'ambito in 'Conversazioni' prima di attivare.", "Szkic zapisany. Skonfiguruj zakres w „Rozmowach” przed aktywacją.")
+        case .brainEnterMockMessagePrompt:
+            return e("请输入模拟消息正文", "Enter a test message", "Saisissez un message de test", "Inserisci un messaggio di prova", "Wpisz wiadomość testową")
+        case .brainErrActionFailedFmt:
+            return e("%@失败 (exit %@)", "%@ failed (exit %@)", "Échec de %@ (sortie %@)", "%@ non riuscito (uscita %@)", "Niepowodzenie %@ (kod wyjścia %@)")
+        case .brainErrActionInvalidDataFmt:
+            return e("%@返回无效数据，无法获取 generation", "%@ returned invalid data, unable to obtain generation", "%@ a renvoyé des données invalides, impossible d'obtenir la génération", "%@ ha restituito dati non validi, impossibile ottenere la generazione", "%@ zwróciło nieprawidłowe dane, nie można uzyskać generacji")
+        case .brainErrFetchHistoryFailed:
+            return e("获取历史版本失败", "Failed to fetch history versions", "Échec de récupération de l'historique des versions", "Recupero cronologia versioni non riuscito", "Nie udało się pobrać historii wersji")
+        case .brainErrFetchRoleFailed:
+            return e("获取角色失败", "Failed to fetch role", "Échec de récupération du rôle", "Recupero del ruolo non riuscito", "Nie udało się pobrać roli")
+        case .brainErrFetchRolesFailed:
+            return e("获取客服角色配置失败", "Failed to fetch customer service roles configuration", "Échec de récupération de la configuration des rôles", "Recupero della configurazione dei ruoli non riuscito", "Nie udało się pobrać konfiguracji ról obsługi klienta")
+        case .brainErrFetchTurnFailed:
+            return e("获取轮次详情失败", "Failed to fetch turn details", "Échec de récupération des détails du tour", "Recupero dettagli turno non riuscito", "Nie udało się pobrać szczegółów tury")
+        case .brainErrInvalidUtf8:
+            return e("无效 UTF8 字符串", "Invalid UTF8 string", "Chaîne UTF-8 invalide", "Stringa UTF-8 non valida", "Nieprawidłowy ciąg znaków UTF-8")
+        case .brainErrSaveKnowledgeFailed:
+            return e("保存知识失败", "Failed to save knowledge", "Échec de l'enregistrement des connaissances", "Salvataggio conoscenza non riuscito", "Nie udało się zapisać wiedzy")
+        case .brainErrSaveKnowledgeInvalidResp:
+            return e("保存知识返回无效响应", "Invalid response returned while saving knowledge", "Réponse invalide renvoyée lors de l'enregistrement des connaissances", "Risposta non valida restituita durante il salvataggio della conoscenza", "Nieprawidłowa odpowiedź podczas zapisywania wiedzy")
+        case .brainErrTurnNotFound:
+            return e("轮次不存在", "Turn does not exist", "Le tour n'existe pas", "Il turno non esiste", "Tura nie istnieje")
+        case .brainErrorUnknown:
+            return e("未知错误", "Unknown error", "Erreur inconnue", "Errore sconosciuto", "Nieznany błąd")
+        case .brainFetchConfigFailed:
+            return e("获取客服角色配置失败", "Failed to fetch support persona configuration", "Échec de l'obtention de la configuration de la persona", "Recupero configurazione persona fallito", "Pobieranie konfiguracji persony nieudane")
+        case .brainFetchHistoryFailed:
+            return e("获取历史版本失败", "Failed to fetch version history", "Échec de récupération de l'historique", "Recupero cronologia versioni fallito", "Pobieranie historii wersji nieudane")
+        case .brainFetchRoleFailed:
+            return e("获取角色失败", "Failed to fetch role", "Échec de récupération du rôle", "Recupero ruolo fallito", "Pobieranie roli nieudane")
+        case .brainFetchTurnDetailFailed:
+            return e("获取轮次详情失败", "Failed to fetch turn details", "Échec de récupération des détails du tour", "Recupero dettagli turno fallito", "Pobieranie szczegółów tury nieudane")
+        case .brainGenActiveNoDraft:
+            return e("当前激活 (未存草稿)", "Active (no draft)", "Actif (sans brouillon)", "Attivo (senza bozza)", "Aktywny (bez szkicu)")
+        case .brainGenActiveShort:
+            return e("当前激活", "Active", "Actif", "Attivo", "Aktywny")
+        case .brainGenActiveWithDraft:
+            return e("当前激活 (含草稿)", "Active (with draft)", "Actif (avec brouillon)", "Attivo (con bozza)", "Aktywny (ze szkicem)")
+        case .brainGenCurrentActive:
+            return e("当前激活", "Current active", "Actif actuel", "Attivo corrente", "Bieżący aktywny")
+        case .brainGenCurrentActiveNoDraft:
+            return e("当前激活 (未存草稿)", "Current active (no draft)", "Actif actuel (sans brouillon)", "Attivo corrente (senza bozza)", "Bieżący aktywny (bez szkicu)")
+        case .brainGenCurrentActiveWithDraft:
+            return e("当前激活 (含草稿)", "Current active (with draft)", "Actif actuel (avec brouillon)", "Attivo corrente (con bozza)", "Bieżący aktywny (ze szkicem)")
+        case .brainGenCurrentSuffix:
+            return e(" (当前)", " (current)", " (actuel)", " (corrente)", " (bieżąca)")
+        case .brainGenInitial:
+            return e("初始代次", "Initial Gen", "Génération initiale", "Generazione iniziale", "Początkowa generacja")
+        case .brainGenItemTitleFmt:
+            return e("第 %1$@ 代%2$@", "Gen %1$@%2$@", "Gén %1$@%2$@", "Gen %1$@%2$@", "Gen %1$@%2$@")
+        case .brainGenOrdinalFmt:
+            return e("第 %@ 代", "Gen %@", "Gén %@", "Gen %@", "Gen %@")
+        case .brainGenSavedDraft:
+            return e("已存草稿", "Saved draft", "Brouillon enregistré", "Bozza salvata", "Zapisany szkic")
+        case .brainGenerationFmt:
+            return e("第 %llu 代", "Generation %llu", "Génération %llu", "Generazione %llu", "Generacja %llu")
+        case .brainGoalsFieldHelper:
+            return e("用逗号分隔多个目标", "Separate multiple goals with commas", "Séparez les objectifs par des virgules", "Separa gli obiettivi con virgole", "Rozdziel wiele celów przecinkami")
+        case .brainGoalsFieldLabel:
+            return e("核心目标:", "Key Goals:", "Objectifs clés :", "Obiettivi principali:", "Główne cele:")
+        case .brainGoalsPlaceholder:
+            return e("用逗号分隔多个目标", "Separate multiple goals with commas", "Séparez les objectifs par des virgules", "Separa gli obiettivi con virgole", "Oddziel cele przecinkami")
+        case .brainHistoryIntro:
+            return e("历史版本管理：可查看历次保存与启用的版本、对比任意两版本差异，并支持安全回滚至稳定代次。", "Version history management: view past saved and activated generations, diff any two revisions, and safely rollback to stable versions.", "Gestion de l'historique : affichez les générations enregistrées et actives, comparez deux révisions et rétablissez une version stable en toute sécurité.", "Gestione cronologia versioni: visualizza le generazioni passate, confronta due revisioni e ripristina versioni stabili in sicurezza.", "Zarządzanie historią wersji: przeglądaj zapisane i aktywne generacje, porównuj dwie wersje i bezpiecznie wycofuj do stabilnej generacji.")
+        case .brainHistoryNoticeCompleteFmt:
+            return e("第 %1$llu 代：已保存完整草稿与配置。\n• 默认角色=%2$@, 版本=%3$@, 覆盖规则=%4$d条", "Generation %1$llu: Complete draft and configuration saved.\n• Default role=%2$@, version=%3$@, overrides=%4$d", "Génération %1$llu : Brouillon complet et configuration enregistrés.\n• Rôle par défaut=%2$@, version=%3$@, dérogations=%4$d", "Generazione %1$llu: Bozza completa e configurazione salvate.\n• Ruolo predefinito=%2$@, versione=%3$@, eccezioni=%4$d", "Generacja %1$llu: Zapisano pełny szkic i konfigurację.\n• Rola domyślna=%2$@, wersja=%3$@, wyjątki=%4$d")
+        case .brainHistoryNoticeIncompleteFmt:
+            return e("第 %1$@ 代：%2$@。\n• 已保存运行配置: 默认角色=%3$@, 版本=%4$@, 覆盖规则=%5$@条\n• 草稿状态: %2$@ (%6$@)", "Gen %1$@: %2$@.\n• Saved active config: Default role=%3$@, revision=%4$@, overrides=%5$@\n• Draft status: %2$@ (%6$@)", "Gén %1$@ : %2$@.\n• Configuration enregistrée : Rôle=%3$@, révision=%4$@, dérogations=%5$@\n• Brouillon : %2$@ (%6$@)", "Gen %1$@: %2$@.\n• Config salvata: Ruolo=%3$@, revisione=%4$@, eccezioni=%5$@\n• Bozza: %2$@ (%6$@)", "Gen %1$@: %2$@.\n• Zapisana konfiguracja: Rola=%3$@, wersja=%4$@, wyjątki=%5$@\n• Szkic: %2$@ (%6$@)")
+        case .brainHistorySectionIntro:
+            return e("历史版本管理：可查看历次保存与启用的版本、对比任意两版本差异，并支持安全回滚至稳定代次。", "Version history: view past versions, compare diffs, and safely roll back to a stable generation.", "Historique des versions : affichez les versions, comparez et restaurez en sécurité.", "Cronologia versioni: visualizza le versioni, confronta le differenze e ripristina in sicurezza.", "Historia wersji: przeglądaj wersje, porównuj różnice i bezpiecznie przywracaj.")
+        case .brainHistoryTableBoxTitle:
+            return e("版本与代次历史", "Generations and version history", "Historique des versions et générations", "Cronologia versioni e generazioni", "Historia wersji i generacji")
+        case .brainImportAndBindKnowledge:
+            return e("导入并关联至角色", "Import and associate with role", "Importer et associer au rôle", "Importa e associa al ruolo", "Importuj i przypisz do roli")
+        case .brainImportKnowledgeEmptyErr:
+            return e("导入知识失败：标题与正文不能为空", "Import failed: Title and content cannot be empty", "Échec de l'importation : Le titre et le contenu ne peuvent pas être vides", "Importazione non riuscita: Titolo e contenuto non possono essere vuoti", "Importowanie nie powiodło się: Tytuł i treść nie mogą być puste")
+        case .brainImportNewKnowledgeBtn:
+            return e("导入/新建知识", "Import / New knowledge", "Importer / Créer une connaissance", "Importa / Crea conoscenza", "Importuj / Nowa wiedza")
+        case .brainInitDefaultRole:
+            return e("初始化客服角色", "Initialize support persona", "Initialiser la persona du support", "Inizializza persona di assistenza", "Zainicjuj personę obsługi")
+        case .brainKnowledgeAddBoxTitle:
+            return e("导入/新建知识", "Import / Create Knowledge", "Importer / Créer des connaissances", "Importa / Crea conoscenza", "Importuj / Utwórz wiedzę")
+        case .brainKnowledgeContentField:
+            return e("知识正文 (Markdown):", "Content (Markdown):", "Contenu (Markdown) :", "Contenuto (Markdown):", "Treść (Markdown):")
+        case .brainKnowledgeContentLabel:
+            return e("知识正文 (Markdown):", "Knowledge Content (Markdown):", "Contenu de la connaissance (Markdown) :", "Contenuto conoscenza (Markdown):", "Treść wiedzy (Markdown):")
+        case .brainKnowledgeIntro:
+            return e("业务知识 (Markdown/纯文本)。通过核心 brain-save-knowledge 控制接口保存，自动计算 SHA256 摘要并固定版本。", "Business knowledge (Markdown/Plain text). Saved via core brain-save-knowledge control API, automatically hashing SHA256 and pinning revision.", "Connaissances métier (Markdown/Texte brut). Enregistré via l'API de contrôle brain-save-knowledge avec empreinte SHA256 et version figée.", "Conoscenza aziendale (Markdown/Testo). Salvato tramite API brain-save-knowledge, calcolando SHA256 e bloccando la revisione.", "Wiedza biznesowa (Markdown/Zwykły tekst). Zapisywana przez API brain-save-knowledge z automatycznym haszem SHA256 i przypiętą wersją.")
+        case .brainKnowledgeNone:
+            return e("当前角色未引用任何知识", "Current role references no knowledge", "Aucune connaissance référencée pour ce rôle", "Nessuna conoscenza associata a questo ruolo", "Bieżąca rola nie odwołuje się do żadnej wiedzy")
+        case .brainKnowledgeRefListLabel:
+            return e("当前角色引用的知识列表:", "Knowledge referenced by current role:", "Connaissances référencées par le rôle :", "Conoscenze associate al ruolo corrente:", "Wiedza powiązana z bieżącą rolą:")
+        case .brainKnowledgeSavedSuccess:
+            return e("知识已成功保存至核心并关联到当前草稿！", "Knowledge saved to core and linked to current draft!", "Connaissances enregistrées et liées au brouillon actuel !", "Conoscenze salvate e collegate alla bozza attuale!", "Wiedza zapisana w rdzeniu i powiązana z bieżącym szkicem!")
+        case .brainKnowledgeSectionDesc:
+            return e("业务知识 (Markdown/纯文本)。通过核心 brain-save-knowledge 控制接口保存，自动计算 SHA256 摘要并固定版本。", "Business knowledge (Markdown/plain text). Saved via brain-save-knowledge with automatic SHA256 hashing and version pinning.", "Connaissances (Markdown/texte brut). Enregistrées via brain-save-knowledge avec empreinte SHA256 et version figée.", "Conoscenze (Markdown/testo semplice). Salvate tramite brain-save-knowledge con hash SHA256 e versione bloccata.", "Wiedza biznesowa (Markdown/zwykły tekst). Zapisywana przez brain-save-knowledge z automatycznym skrótem SHA256 i wersjonowaniem.")
+        case .brainKnowledgeSourceField:
+            return e("来源标识:", "Source:", "Source :", "Origine:", "Źródło:")
+        case .brainKnowledgeSourceLabel:
+            return e("来源标识:", "Source Identifier:", "Identifiant de la source :", "Identificatore sorgente:", "Identyfikator źródła:")
+        case .brainKnowledgeSourcePlaceholder:
+            return e("例如 faq.md 或 manual.txt", "e.g. faq.md or manual.txt", "par ex. faq.md ou manuel.txt", "es. faq.md o manuale.txt", "np. faq.md lub instrukcja.txt")
+        case .brainKnowledgeTitleContentRequired:
+            return e("导入知识失败：标题与正文不能为空", "Import knowledge failed: title and content cannot be empty", "Échec : le titre et le contenu ne peuvent pas être vides", "Importazione fallita: titolo e contenuto non possono essere vuoti", "Importowanie nieudane: tytuł i treść nie mogą być puste")
+        case .brainKnowledgeTitleField:
+            return e("知识标题:", "Title:", "Titre :", "Titolo:", "Tytuł:")
+        case .brainLabelAllowlistContact:
+            return e("白名单联系人:", "Allowlist contact:", "Contact autorisé :", "Contatto consentito:", "Kontakt z białej listy:")
+        case .brainLabelBindPersona:
+            return e("绑定客服角色:", "Bind support persona:", "Associer la persona :", "Associa persona:", "Przypisz personę obsługi:")
+        case .brainLoadConfigFailedFmt:
+            return e("加载客服角色配置失败: %@", "Failed to load support persona configuration: %@", "Échec du chargement de la configuration : %@", "Caricamento configurazione persona fallito: %@", "Ładowanie konfiguracji persony nieudane: %@")
+        case .brainLoadRoleDraftFailedFmt:
+            return e("读取角色草稿失败: %@", "Failed to load role draft: %@", "Échec de lecture du brouillon de rôle : %@", "Lettura bozza ruolo fallita: %@", "Odczyt szkicu roli nieudany: %@")
+        case .brainLoadRolesFailedFmt:
+            return e("加载客服角色配置失败: %@", "Failed to load customer service roles configuration: %@", "Échec du chargement de la configuration des rôles : %@", "Caricamento configurazione ruoli non riuscito: %@", "Nie udało się załadować konfiguracji ról obsługi: %@")
+        case .brainMigratedFromLegacy:
+            return e("从旧版迁移", "Migrated from legacy", "Migré depuis l'ancienne version", "Migrato dalla versione precedente", "Zmigrowano ze starszej wersji")
+        case .brainModelAndConnection:
+            return e("模型与连接…", "Model and connection…", "Modèle et connexion…", "Modello e connessione…", "Model i połączenie…")
+        case .brainModelLoading:
+            return e("模型：待加载", "Model: loading…", "Modèle : chargement…", "Modello: caricamento…", "Model: wczytywanie…")
+        case .brainModelStatusPending:
+            return e("模型：待加载", "Model: Loading...", "Modèle : Chargement...", "Modello: In caricamento...", "Model: Ładowanie...")
+        case .brainNewAssistantDefaultGoal:
+            return e("解答用户咨询", "Answer customer inquiries", "Répondre aux demandes des clients", "Rispondere alle richieste dei clienti", "Odpowiadaj na zapytania klientów")
+        case .brainNewAssistantDefaultName:
+            return e("新助手", "New Assistant", "Nouvel Assistant", "Nuovo Assistente", "Nowy Asystent")
+        case .brainNewAssistantDefaultPersona:
+            return e("您是一位专业友善的客服助手。", "You are a professional and friendly customer support assistant.", "Vous êtes un assistant de support client professionnel et amical.", "Sei un assistente di supporto clienti professionale e cordiale.", "Jesteś profesjonalnym i przyjaznym asystentem obsługi klienta.")
+        case .brainNewAssistantDefaultTone:
+            return e("温和自然", "Warm and natural", "Chaleureux et naturel", "Caloroso e naturale", "Ciepły i naturalny")
+        case .brainNewRoleDefaultName:
+            return e("新助手", "New Assistant", "Nouvel assistant", "Nuovo assistente", "Nowy asystent")
+        case .brainNewRoleDefaultPersona:
+            return e("您是一位专业友善的客服助手。", "You are a professional and friendly customer service assistant.", "Vous êtes un assistant de service client professionnel et aimable.", "Sei un assistente del servizio clienti professionale e cordiale.", "Jesteś profesjonalnym i życzliwym asystentem obsługi klienta.")
+        case .brainNewRoleDefaultTone:
+            return e("温和自然", "Warm and natural", "Chaleureux et naturel", "Caloroso e naturale", "Ciepły i naturalny")
+        case .brainNo:
+            return e("否", "No", "Non", "No", "Nie")
+        case .brainNoAllowlistContactsNotice:
+            return e("当前白名单无可用联系人，新增覆盖前请先确认白名单配置与通讯录同步", "No allowlist contacts available; verify allowlist configuration and contact sync before adding overrides", "Aucun contact autorisé ; vérifiez la configuration et la synchronisation avant d'ajouter une dérogation", "Nessun contatto consentito; verifica la configurazione e la sincronizzazione prima di aggiungere eccezioni", "Brak kontaktów na białej liście; sprawdź konfigurację i synchronizację przed dodaniem wyjątków")
+        case .brainNoKnowledgeReferenced:
+            return e("当前角色未引用任何知识", "No knowledge referenced by this role", "Aucune connaissance référencée par ce rôle", "Nessuna conoscenza associata a questo ruolo", "Ta rola nie odwołuje się do żadnej wiedzy")
+        case .brainNoOverrides:
+            return e("暂无特定联系人覆盖", "No specific contact overrides", "Aucune dérogation de contact spécifique", "Nessuna eccezione per contatti specifici", "Brak wyjątków dla określonych kontaktów")
+        case .brainNoOverridesDetail:
+            return e("暂无特定联系人覆盖（所有联系人均使用默认角色）", "No specific contact overrides (all contacts use default role)", "Aucune dérogation spécifique (tous les contacts utilisent le rôle par défaut)", "Nessuna eccezione specifica (tutti i contatti usano il ruolo predefinito)", "Brak wyjątków dla kontaktów (wszystkie kontakty używają roli domyślnej)")
+        case .brainNoOverridesSummary:
+            return e("暂无特定联系人覆盖（所有联系人均使用默认角色）", "No contact overrides (all contacts use default role)", "Aucune dérogation de contact (tous les contacts utilisent le rôle par défaut)", "Nessuna eccezione per contatti (tutti i contatti usano il ruolo predefinito)", "Brak wyjątków dla kontaktów (wszystkie kontakty używają roli domyślnej)")
+        case .brainNotReady:
+            return e("未就绪", "Not ready", "Non prêt", "Non pronto", "Niegotowe")
+        case .brainOverrideAlreadyExistsFmt:
+            return e("添加失败：联系人「%@」已存在覆盖规则，可直接编辑", "Add failed: override already exists for '%@'; edit it directly", "Échec : la dérogation existe déjà pour « %@ » ; modifiez-la directement", "Aggiunta fallita: esiste già un'eccezione per '%@'; modificala direttamente", "Dodawanie nieudane: wyjątek dla „%@” już istnieje; edytuj go bezpośrednio")
+        case .brainOverrideDeletedDraftFmt:
+            return e("已从草稿中删除覆盖规则 [%@]，待点击「保存绑定草稿」", "Override rule [%@] deleted from draft, pending 'Save Bindings Draft'", "Dérogation [%@] supprimée du brouillon, en attente d'enregistrement", "Regola [%@] eliminata dalla bozza, in attesa di salvataggio", "Usunięto regułę wyjątku [%@] ze szkicu, oczekuje na zapisanie szkicu")
+        case .brainOverrideDeletedFromDraftFmt:
+            return e("已从草稿中删除覆盖规则 [%@]，待点击「保存绑定草稿」", "Removed override [%@] from draft; click 'Save bindings draft' to commit", "Dérogation [%@] retirée du brouillon ; enregistrez pour valider", "Rimossa eccezione [%@] dalla bozza; salva per confermare", "Usunięto wyjątek [%@] ze szkicu; kliknij „Zapisz szkic przypisań”")
+        case .brainOverrideDraftAddedFmt:
+            return e("已添加针对「%@」的覆盖规则草稿，待保存", "Added override draft for '%@'; save to commit", "Dérogation ajoutée pour « %@ » ; enregistrez pour valider", "Aggiunta bozza di eccezione per '%@'; salva per confermare", "Dodano szkic wyjątku dla „%@”; zapisz, aby zatwierdzić")
+        case .brainOverrideDraftUpdatedFmt:
+            return e("已更新针对「%@」的覆盖规则草稿，待保存", "Updated override draft for '%@'; save to commit", "Dérogation mise à jour pour « %@ » ; enregistrez pour valider", "Aggiornata bozza di eccezione per '%@'; salva per confermare", "Zaktualizowano szkic wyjątku dla „%@”; zapisz, aby zatwierdzić")
+        case .brainOverrideItemLineFmt:
+            return e("• 联系人: %1$@ [%2$@] ➔ %3$@ (%4$@) [版本: %5$@]", "• Contact: %1$@ [%2$@] ➔ %3$@ (%4$@) [Revision: %5$@]", "• Contact : %1$@ [%2$@] ➔ %3$@ (%4$@) [Révision : %5$@]", "• Contatto: %1$@ [%2$@] ➔ %3$@ (%4$@) [Revisione: %5$@]", "• Kontakt: %1$@ [%2$@] ➔ %3$@ (%4$@) [Wersja: %5$@]")
+        case .brainOverrideLineFmt:
+            return e("• 联系人: %1$@ [%2$@] ➔ %3$@ (%4$@) [版本: %5$@]", "• Contact: %1$@ [%2$@] ➔ %3$@ (%4$@) [rev: %5$@]", "• Contact : %1$@ [%2$@] ➔ %3$@ (%4$@) [rév : %5$@]", "• Contatto: %1$@ [%2$@] ➔ %3$@ (%4$@) [rev: %5$@]", "• Kontakt: %1$@ [%2$@] ➔ %3$@ (%4$@) [wersja: %5$@]")
+        case .brainOverrideMustFromAllowlist:
+            return e("添加失败：联系人必须源自真实白名单，禁止凭姓名构造ID", "Add failed: contacts must originate from the authoritative allowlist; synthetic IDs forbidden", "Échec : les contacts doivent provenir de la liste autorisée ; identifiants synthétiques interdits", "Aggiunta fallita: i contatti devono provenire dalla lista consentiti; ID sintetici vietati", "Dodawanie nieudane: kontakty muszą pochodzić z autorytatywnej białej listy; syntetyczne ID zabronione")
+        case .brainOverrideNotFoundForUpdate:
+            return e("更新失败：未找到对应的覆盖规则，请先点击「添加覆盖」", "Update failed: override not found; click 'Add override' first", "Échec : dérogation introuvable ; cliquez d'abord sur « Ajouter une dérogation »", "Aggiornamento fallito: eccezione non trovata; clicca prima su 'Aggiungi eccezione'", "Aktualizacja nieudana: nie znaleziono wyjątku; najpierw kliknij „Dodaj wyjątek”")
+        case .brainOverridesBoxTitle:
+            return e("特定联系人 / 群覆盖规则 (白名单唯一来源)", "Specific Contact / Group Overrides (Allowlist Source)", "Dérogations pour contacts / groupes (Source liste blanche)", "Eccezioni contatti / gruppi specifici (Fonte whitelist)", "Wyjątki dla kontaktów / grup (Wyłączne źródło biała lista)")
+        case .brainPersonaFieldLabel:
+            return e("身份与业务范围：", "Persona & scope:", "Identité et périmètre :", "Identità e ambito:", "Tożsamość i zakres:")
+        case .brainPersonaSectionLabel:
+            return e("身份与业务范围：", "Identity & Business Scope:", "Identité et portée métier :", "Identità e ambito aziendale:", "Tożsamość i zakres biznesowy:")
+        case .brainPhaseEchoObserved:
+            return e("己方回显", "Self echo observed", "Écho propre observé", "Rilevato eco proprio", "Zaobserwowano własne echo")
+        case .brainPhaseModelGenerated:
+            return e("模型已生成", "Model generated", "Modèle généré", "Modello generato", "Model wygenerowany")
+        case .brainPhaseSelfEcho:
+            return e("己方回显", "Self echo", "Écho local", "Eco locale", "Własne echo")
+        case .brainPhaseSendTriggered:
+            return e("发送已触发", "Send triggered", "Envoi déclenché", "Invio attivato", "Wysyłanie wyzwolone")
+        case .brainPleaseSelectRolePrompt:
+            return e("请选择角色，或点击「新增角色」", "Please select a role, or click 'New Role'", "Veuillez sélectionner un rôle, ou cliquez sur « Nouveau rôle »", "Seleziona un ruolo o fai clic su 'Nuovo ruolo'", "Wybierz rolę lub kliknij „Nowa rola”")
+        case .brainPreviewAssembling:
+            return e("正在执行组装预览 (assemble_only)...", "Executing assembly preview (assemble_only)...", "Exécution de l'aperçu d'assemblage (assemble_only)...", "Esecuzione anteprima di assemblaggio (assemble_only)...", "Wykonywanie podglądu złożenia (assemble_only)...")
+        case .brainPreviewFailed:
+            return e("组装预览失败", "Assembly preview failed", "Échec de l'aperçu d'assemblage", "Anteprima assemblaggio fallita", "Podgląd złożenia nieudany")
+        case .brainPreviewGroupKind:
+            return e("群聊 (group)", "Group (group)", "Groupe (group)", "Gruppo (group)", "Grupa (group)")
+        case .brainPreviewInputPrompt:
+            return e("请输入模拟消息正文", "Please enter simulated message content", "Veuillez saisir le contenu du message simulé", "Inserisci il contenuto del messaggio simulato", "Wprowadź treść symulowanej wiadomości")
+        case .brainPreviewMockMessageLabel:
+            return e("模拟客户消息:", "Mock customer message:", "Message client simulé :", "Messaggio cliente simulato:", "Symulowana wiadomość klienta:")
+        case .brainPreviewPrivateKind:
+            return e("私聊 (private)", "Private (private)", "Privé (private)", "Privato (private)", "Prywatny (private)")
+        case .brainPreviewResultTitle:
+            return e("试一试决策快照与预览:", "Try It snapshot & preview:", "Instantané de test et aperçu :", "Istantanea di prova e anteprima:", "Migawka testu i podgląd:")
+        case .brainProvenanceComplete:
+            return e("包含完整轮次追溯", "Complete turn provenance included", "Traçabilité complète des tours incluse", "Tracciabilità completa dei turni inclusa", "Zawiera pełną historię pochodzenia tury")
+        case .brainProvenanceFull:
+            return e("包含完整轮次追溯", "Full turn provenance included", "Traçabilité complète du tour incluse", "Tracciabilità completa del turno inclusa", "Pełna identyfikowalność tury dołączona")
+        case .brainProvenanceLegacyNotRecorded:
+            return e("旧版未记录", "Not recorded in legacy version", "Non enregistré dans l'ancienne version", "Non registrato nella versione precedente", "Nie zarejestrowano w starszej wersji")
+        case .brainProvenanceLegacyUnrecorded:
+            return e("旧版未记录", "Unrecorded in legacy version", "Non enregistré dans l'ancienne version", "Non registrato nella versione precedente", "Niezarejestrowane w starszej wersji")
+        case .brainReadDefaultTemplateFailedFmt:
+            return e("读取默认角色模板失败：%@", "Failed to read default role template: %@", "Échec de lecture du modèle de rôle par défaut : %@", "Lettura modello di ruolo predefinito non riuscita: %@", "Nie udało się odczytać szablonu roli domyślnej: %@")
+        case .brainReferencedKnowledgeListTitle:
+            return e("当前角色引用的知识列表:", "Knowledge referenced by this role:", "Connaissances référencées par ce rôle :", "Conoscenze collegate a questo ruolo:", "Wiedza powiązana z tą rolą:")
+        case .brainReplyModeFmt:
+            return e("回复方式：%@", "Reply mode: %@", "Mode de réponse : %@", "Modalità di risposta: %@", "Tryb odpowiedzi: %@")
+        case .brainReplyModeLoading:
+            return e("回复方式：待加载", "Reply mode: loading…", "Mode de réponse : chargement…", "Modalità di risposta: caricamento…", "Tryb odpowiedzi: wczytywanie…")
+        case .brainReplyModePending:
+            return e("回复方式：待加载", "Reply mode: Loading...", "Mode de réponse : Chargement...", "Modalità di risposta: In caricamento...", "Tryb odpowiedzi: Ładowanie...")
+        case .brainReplyModeUnset:
+            return e("回复方式：未设置", "Reply mode: Not set", "Mode de réponse : Non défini", "Modalità di risposta: Non impostata", "Tryb odpowiedzi: Nie ustawiono")
+        case .brainRestoreFailedFmt:
+            return e("回退失败: %@", "Restore failed: %@", "Échec de la restauration : %@", "Ripristino fallito: %@", "Przywracanie nieudane: %@")
+        case .brainRestoredToGenerationFmt:
+            return e("已回退至代次 %1$llu%2$@", "Restored to generation %1$llu%2$@", "Restauré à la génération %1$llu%2$@", "Ripristinato alla generazione %1$llu%2$@", "Przywrócono do generacji %1$llu%2$@")
+        case .brainRestoringVersion:
+            return e("正在执行版本回退...", "Restoring version…", "Restauration de la version…", "Ripristino della versione in corso…", "Przywracanie wersji…")
+        case .brainRevisionStatusFmt:
+            return e("角色: %1$@ · 草稿: %2$@ · 运行: %3$@", "Role: %1$@ · Draft: %2$@ · Running: %3$@", "Rôle : %1$@ · Brouillon : %2$@ · Actif : %3$@", "Ruolo: %1$@ · Bozza: %2$@ · In esecuzione: %3$@", "Rola: %1$@ · Szkic: %2$@ · Aktywna: %3$@")
+        case .brainRevisionStatusLineFmt:
+            return e("角色: %1$@ · 草稿: %2$@ · 运行: %3$@", "Role: %1$@ · Draft: %2$@ · Active: %3$@", "Rôle : %1$@ · Brouillon : %2$@ · Actif : %3$@", "Ruolo: %1$@ · Bozza: %2$@ · Attivo: %3$@", "Rola: %1$@ · Szkic: %2$@ · Aktywny: %3$@")
+        case .brainRevisionStatusPlaceholder:
+            return e("草稿: - · 运行: -", "Draft: - · Active: -", "Brouillon : - · Actif : -", "Bozza: - · Attivo: -", "Szkic: - · Aktywny: -")
+        case .brainRoleActivatedFmt:
+            return e("角色「%1$@」已启用（%2$@），适用范围已核对。", "Role '%1$@' activated (%2$@); scope verified.", "Rôle « %1$@ » activé (%2$@) ; périmètre vérifié.", "Ruolo '%1$@' attivato (%2$@); ambito verificato.", "Rola „%1$@” aktywowana (%2$@); zakres zweryfikowany.")
+        case .brainRoleActivatedSuccessFmt:
+            return e("角色「%1$@」已启用（%2$@），适用范围已核对。", "Role \"%1$@\" activated (%2$@); scope verified.", "Rôle « %1$@ » activé (%2$@) ; portée vérifiée.", "Ruolo \"%1$@\" attivato (%2$@); ambito verificato.", "Rola „%1$@” aktywowana (%2$@); zakres zweryfikowany.")
+        case .brainRoleCannotDeleteBound:
+            return e("无法删除：该角色仍被会话配置引用，请先解除默认或专属角色绑定。", "Cannot delete: role is referenced in conversation settings; unbind it first.", "Suppression impossible : le rôle est référencé dans les conversations ; détachez-le d'abord.", "Impossibile eliminare: il ruolo è associato a conversazioni; scollega prima l'associazione.", "Nie można usunąć: rola jest powiązana z rozmowami; najpierw odepnij powiązanie.")
+        case .brainRoleColTitle:
+            return e("角色", "Role", "Rôle", "Ruolo", "Rola")
+        case .brainRoleCopiedNotice:
+            return e("已复制角色，编辑后点击「保存草稿」", "Role copied; edit and click 'Save Draft'", "Rôle copié ; modifiez et cliquez sur « Enregistrer le brouillon »", "Ruolo copiato; modifica e fai clic su 'Salva bozza'", "Skopiowano rolę; edytuj i kliknij „Zapisz szkic”")
+        case .brainRoleCopyNameFmt:
+            return e("%@ (副本)", "%@ (Copy)", "%@ (Copie)", "%@ (Copia)", "%@ (Kopia)")
+        case .brainRoleDeletedSuccess:
+            return e("角色已删除", "Role deleted", "Rôle supprimé", "Ruolo eliminato", "Rola została usunięta")
+        case .brainRoleDraftSavedPrompt:
+            return e("草稿已保存。请在「适用会话」设置回复范围，再启用配置。", "Draft saved. Please configure reply scope under 'Applicable Sessions', then activate.", "Brouillon enregistré. Définissez la portée sous « Sessions concernées » avant d'activer.", "Bozza salvata. Configura l'ambito in 'Sessioni applicabili', poi attiva.", "Szkic zapisany. Skonfiguruj zakres w „Odpowiednie sesje”, a następnie włącz konfigurację.")
+        case .brainRoleListTitle:
+            return e("角色列表", "Role List", "Liste des rôles", "Elenco ruoli", "Lista ról")
+        case .brainRoleNameFieldLabel:
+            return e("角色名称:", "Role name:", "Nom du rôle :", "Nome ruolo:", "Nazwa roli:")
+        case .brainRoleNotEnabled:
+            return e("未启用", "Not enabled", "Non activé", "Non abilitato", "Nie włączono")
+        case .brainRoleStateActiveFmt:
+            return e("已启用: %@", "Active: %@", "Actif : %@", "Attivo: %@", "Aktywne: %@")
+        case .brainRoleStateDefaultPrefix:
+            return e("默认 · ", "Default · ", "Par défaut · ", "Predefinito · ", "Domyślny · ")
+        case .brainRoleStateNewDraftRunningFmt:
+            return e("有新草稿 · 运行: %@", "New draft · Running: %@", "Nouveau brouillon · Actif : %@", "Nuova bozza · In esecuzione: %@", "Nowy szkic · Działa: %@")
+        case .brainRoleStateSavedNotActive:
+            return e("已保存 · 未启用", "Saved · Inactive", "Enregistré · Inactif", "Salvato · Non attivo", "Zapisano · Nieaktywne")
+        case .brainRoleStateUnsavedDraft:
+            return e("未保存草稿", "Unsaved draft", "Brouillon non enregistré", "Bozza non salvata", "Niezapisany szkic")
+        case .brainRoleTableTooltip:
+            return e("双击角色名编辑", "Double click role name to edit", "Double-cliquez sur le rôle pour modifier", "Doppio clic sul nome per modificare", "Kliknij dwukrotnie nazwę roli, aby edytować")
+        case .brainRoleUnsavedModifiedNotice:
+            return e("角色有未保存的修改 · ⌘S 保存草稿", "Role has unsaved changes · ⌘S to save draft", "Modifications non enregistrées · ⌘S pour enregistrer", "Modifiche non salvate · ⌘S per salvare", "Niezapisane zmiany w roli · ⌘S aby zapisać szkic")
+        case .brainRollbackAlreadyCurrent:
+            return e("选定代次已是当前代次，无需回滚", "Selected generation is already current; rollback not needed", "La génération sélectionnée est déjà la génération actuelle ; rétablissement inutile", "La generazione selezionata è già quella corrente; ripristino non necessario", "Wybrana generacja jest już bieżącą; wycofywanie nie jest potrzebne")
+        case .brainRollbackBoxTitle:
+            return e("回滚到历史版本 (二次确认受控)", "Restore historical version (controlled confirmation)", "Restaurer une version historique (contrôlé)", "Ripristina versione storica (conferma controllata)", "Przywróć wersję historyczną (kontrolowane potwierdzenie)")
+        case .brainRollbackCancelledCheckbox:
+            return e("回滚已取消：请勾选确认方可执行回滚。", "Rollback cancelled: check the box to confirm rollback.", "Retour annulé : cochez la case pour confirmer.", "Ripristino annullato: seleziona la casella per confermare.", "Przywracanie anulowane: zaznacz pole wyboru, aby potwierdzić.")
+        case .brainRollbackCancelledNotChecked:
+            return e("回滚已取消：请勾选确认方可执行回滚。", "Rollback cancelled: Please check the confirmation box to proceed.", "Rétablissement annulé : Veuillez cocher la case pour confirmer.", "Ripristino annullato: Spunta la casella di conferma per procedere.", "Wycofanie anulowane: Zaznacz pole potwierdzenia, aby kontynuować.")
+        case .brainRollbackDialogBodyFmt:
+            return e("回滚将原子切换至选定历史代次的配置，未保存的草稿将丢失。\n%1$@\n• 运行配置: 默认角色=%2$@, 版本=%3$@, 覆盖规则=%4$d条\n• 草稿状态: %5$@", "Restoring atomically switches to the selected historical configuration; unsaved drafts will be lost.\n%1$@\n• Running config: default role=%2$@, version=%3$@, overrides=%4$d\n• Draft state: %5$@", "La restauration bascule vers la configuration historique sélectionnée ; les brouillons non enregistrés seront perdus.\n%1$@\n• Config active : rôle par défaut=%2$@, version=%3$@, dérogations=%4$d\n• État du brouillon : %5$@", "Il ripristino passa alla configurazione storica selezionata; le bozze non salvate andranno perse.\n%1$@\n• Config attiva: ruolo predefinito=%2$@, versione=%3$@, eccezioni=%4$d\n• Stato bozza: %5$@", "Przywrócenie przełącza na wybraną konfigurację historyczną; niezapisane szkice zostaną utracone.\n%1$@\n• Aktywna konfiguracja: rola domyślna=%2$@, wersja=%3$@, wyjątki=%4$d\n• Stan szkicu: %5$@")
+        case .brainRollbackDialogDraftStatusFmt:
+            return e("\n• 草稿状态: %@", "\n• Draft status: %@", "\n• État du brouillon : %@", "\n• Stato bozza: %@", "\n• Status szkicu: %@")
+        case .brainRollbackDialogIntro:
+            return e("回滚将原子切换至选定历史代次的配置，未保存的草稿将丢失。\n", "Rollback will atomically switch to selected historical generation; unsaved drafts will be lost.\n", "Le rétablissement basculera de manière atomique vers la génération choisie ; les brouillons seront perdus.\n", "Il ripristino passerà in modo atomico alla generazione selezionata; le bozze andranno perse.\n", "Wycofanie atomowo przełączy na wybraną generację historyczną; niezapisane szkice zostaną utracone.\n")
+        case .brainRollbackDialogRunConfigFmt:
+            return e("\n• 运行配置: 默认角色=%1$@, 版本=%2$@, 覆盖规则=%3$@条", "\n• Active config: Default role=%1$@, Revision=%2$@, Overrides=%3$@", "\n• Config active : Rôle par défaut=%1$@, Révision=%2$@, Dérogations=%3$@", "\n• Config attiva: Ruolo predefinito=%1$@, Revisione=%2$@, Eccezioni=%3$@", "\n• Aktywna konfiguracja: Rola domyślna=%1$@, Wersja=%2$@, Wyjątki=%3$@")
+        case .brainRollbackDialogTitleFmt:
+            return e("回滚客服角色配置到第 %llu 代？", "Restore persona configuration to generation %llu?", "Restaurer la configuration à la génération %llu ?", "Ripristinare la configurazione alla generazione %llu?", "Przywrócić konfigurację do generacji %llu?")
+        case .brainRollbackDraftIncomplete:
+            return e("此版本未保存完整草稿，仅显示已保存的内容 ([缺失])", "Incomplete draft; only saved content is shown ([Missing])", "Brouillon incomplet ; seul le contenu enregistré est affiché ([Manquant])", "Bozza incompleta; si mostra solo il contenuto salvato ([Mancante])", "Niepełny szkic; pokazano tylko zapisaną treść ([Brak])")
+        case .brainRollbackDraftSavedFull:
+            return e("已保存完整草稿", "Complete draft saved", "Brouillon complet enregistré", "Bozza completa salvata", "Zapisano pełny szkic")
+        case .brainRollbackFailedFmt:
+            return e("回退失败: %@", "Rollback failed: %@", "Échec du rétablissement : %@", "Ripristino non riuscito: %@", "Wycofanie nie powiodło się: %@")
+        case .brainRollbackLegacySpecialNotice:
+            return e("\n【特别说明】此版本未保存完整草稿，仅显示已保存的内容。回滚时仅恢复已存运行内容，草稿配置将保持缺失（[缺失]），不编造或补全内容。\n", "\n[Notice] Incomplete draft; only saved content is shown. Restoring recovers saved active content only; missing fields remain [Missing].\n", "\n[Remarque] Brouillon incomplet ; seul le contenu enregistré est affiché. Restaure uniquement le contenu actif ; les champs manquants restent [Manquant].\n", "\n[Avviso] Bozza incompleta; viene mostrato solo il contenuto salvato. Ripristina solo il contenuto attivo; i campi mancanti restano [Mancante].\n", "\n[Uwaga] Niepełny szkic; pokazano tylko zapisaną treść. Przywracanie przywraca tylko zapisaną aktywną treść; brakujące pola pozostają oznaczone jako [Brak].\n")
+        case .brainRollbackSelectGenPrompt:
+            return e("请选择要回滚的目标代次", "Please select target generation to rollback to", "Veuillez sélectionner la génération cible pour le rétablissement", "Seleziona la generazione di destinazione per il ripristino", "Wybierz docelową generację do wycofania")
+        case .brainRollbackSuccessFmt:
+            return e("已回退至代次 %1$@%2$@", "Rolled back to generation %1$@%2$@", "Rétablissement effectué vers la génération %1$@%2$@", "Ripristinato alla generazione %1$@%2$@", "Wycofano do generacji %1$@%2$@")
+        case .brainRollbackTargetGenLabel:
+            return e("目标代次:", "Target generation:", "Génération cible :", "Generazione di destinazione:", "Docelowa generacja:")
+        case .brainRollbackVersion:
+            return e("回退版本", "Restore version", "Restaurer la version", "Ripristina versione", "Przywróć wersję")
+        case .brainRollbackingGenFmt:
+            return e("正在执行版本回退到第 %llu 代...", "Restoring version to generation %llu…", "Restauration vers la génération %llu…", "Ripristino alla generazione %llu in corso…", "Przywracanie do generacji %llu…")
+        case .brainRollingBack:
+            return e("正在执行版本回退...", "Executing rollback...", "Rétablissement de la version en cours...", "Esecuzione ripristino in corso...", "Wykonywanie wycofywania wersji...")
+        case .brainRollingBackToGenFmt:
+            return e("正在执行版本回退到第 %@ 代...", "Rolling back to generation %@...", "Rétablissement vers la génération %@ en cours...", "Ripristino alla generazione %@ in corso...", "Wycofywanie do generacji %@...")
+        case .brainRulesFieldHelper:
+            return e("用逗号分隔业务规则", "Separate business rules with commas", "Séparez les règles par des virgules", "Separa le regole con virgole", "Rozdziel reguły przecinkami")
+        case .brainRulesFieldLabel:
+            return e("业务规则:", "Business Rules:", "Règles métier :", "Regole aziendali:", "Reguły biznesowe:")
+        case .brainRulesPlaceholder:
+            return e("用逗号分隔业务规则", "Separate business rules with commas", "Séparez les règles par des virgules", "Separa le regole con virgole", "Oddziel reguły przecinkami")
+        case .brainRunningAssemblePreview:
+            return e("正在执行组装预览 (assemble_only)...", "Running assemble preview (assemble_only)…", "Exécution de l'aperçu d'assemblage (assemble_only)…", "Esecuzione anteprima assemblaggio (assemble_only)…", "Wykonywanie podglądu złożenia (assemble_only)…")
+        case .brainSaveBindingsDraft:
+            return e("保存绑定草稿", "Save bindings draft", "Enregistrer le brouillon de liaisons", "Salva bozza associazioni", "Zapisz szkic przypisań")
+        case .brainSaveCurrentBeforeDefault:
+            return e("请先保存当前角色，再添加默认角色。", "Please save current role before adding default role.", "Veuillez enregistrer le rôle actuel avant d'ajouter le rôle par défaut.", "Salva il ruolo corrente prima di aggiungere il ruolo predefinito.", "Zapisz bieżącą rolę przed dodaniem roli domyślnej.")
+        case .brainSaveCurrentBeforeNew:
+            return e("请先保存当前角色，再新建角色。", "Please save current role before creating a new role.", "Veuillez enregistrer le rôle actuel avant d'en créer un nouveau.", "Salva il ruolo corrente prima di crearne uno nuovo.", "Zapisz bieżącą rolę przed utworzeniem nowej roli.")
+        case .brainSaveDraft:
+            return e("保存草稿", "Save draft", "Enregistrer le brouillon", "Salva bozza", "Zapisz szkic")
+        case .brainSaveDraftBeforeSetDefault:
+            return e("请先保存角色草稿，再设为默认角色。", "Save role draft before setting as default role.", "Enregistrez le brouillon avant de le définir par défaut.", "Salva la bozza del ruolo prima di impostarlo come predefinito.", "Zapisz szkic roli przed ustawieniem jej jako domyślnej.")
+        case .brainSaveKnowledgeFailed:
+            return e("保存知识失败", "Failed to save knowledge", "Échec de l'enregistrement des connaissances", "Salvataggio conoscenza fallito", "Zapisywanie wiedzy nieudane")
+        case .brainSaveKnowledgeFailedFmt:
+            return e("保存知识失败: %@", "Failed to save knowledge: %@", "Échec de l'enregistrement des connaissances : %@", "Salvataggio conoscenza non riuscito: %@", "Nie udało się zapisać wiedzy: %@")
+        case .brainSaveKnowledgeInvalidResp:
+            return e("保存知识返回无效响应", "Invalid response when saving knowledge", "Réponse invalide lors de l'enregistrement des connaissances", "Risposta non valida durante il salvataggio della conoscenza", "Nieprawidłowa odpowiedź podczas zapisywania wiedzy")
+        case .brainSavingBindingsDraft:
+            return e("正在保存绑定草稿至核心...", "Saving bindings draft to core...", "Enregistrement du brouillon de liaisons dans le noyau...", "Salvataggio bozza associazioni nel core...", "Zapisywanie szkicu powiązań w rdzeniu...")
+        case .brainSavingDraft:
+            return e("正在保存草稿...", "Saving draft…", "Enregistrement du brouillon…", "Salvataggio bozza in corso…", "Zapisywanie szkicu…")
+        case .brainSavingKnowledge:
+            return e("正在通过核心接口保存知识...", "Saving knowledge via core interface...", "Enregistrement des connaissances via l'interface du noyau...", "Salvataggio della conoscenza tramite interfaccia core...", "Zapisywanie wiedzy przez interfejs rdzenia...")
+        case .brainSavingKnowledgeToCore:
+            return e("正在通过核心接口保存知识...", "Saving knowledge via core interface…", "Enregistrement des connaissances via l'interface du cœur…", "Salvataggio conoscenze tramite interfaccia principale…", "Zapisywanie wiedzy przez interfejs rdzenia…")
+        case .brainSavingRoleDraft:
+            return e("正在保存草稿...", "Saving draft...", "Enregistrement du brouillon...", "Salvataggio della bozza...", "Zapisywanie szkicu...")
+        case .brainSelectOrAddRolePrompt:
+            return e("请选择角色，或点击「新增角色」", "Select a role or click 'New role'", "Sélectionnez un rôle ou cliquez sur « Nouveau rôle »", "Seleziona un ruolo o clicca su 'Nuovo ruolo'", "Wybierz rolę lub kliknij „Nowa rola”")
+        case .brainSelectTargetGenPrompt:
+            return e("请选择要回滚的目标代次", "Select a target generation to restore", "Sélectionnez une génération cible à restaurer", "Seleziona una generazione di destinazione da ripristinare", "Wybierz generację docelową do przywrócenia")
+        case .brainSelectedDefaultRoleFmt:
+            return e("已选择「%@」为默认角色。请保存绑定草稿，再启用配置。", "Selected \"%@\" as default role. Please save bindings draft, then activate configuration.", "« %@ » sélectionné comme rôle par défaut. Enregistrez le brouillon puis activez.", "Selezionato \"%@\" come ruolo predefinito. Salva la bozza delle associazioni e attiva.", "Wybrano „%@” jako rolę domyślną. Zapisz szkic powiązań i włącz konfigurację.")
+        case .brainSimulatedUserMsgLabel:
+            return e("模拟客户消息:", "Simulated User Message:", "Message simulé de l'utilisateur :", "Messaggio utente simulato:", "Symulowana wiadomość klienta:")
+        case .brainStateDefaultPrefix:
+            return e("默认 · ", "Default · ", "Par défaut · ", "Predefinito · ", "Domyślny · ")
+        case .brainStateEnabledFmt:
+            return e("已启用: %@", "Active: %@", "Actif : %@", "Attivo: %@", "Aktywny: %@")
+        case .brainStateNewDraftRunningFmt:
+            return e("有新草稿 · 运行: %@", "New draft · Active: %@", "Nouveau brouillon · Actif : %@", "Nuova bozza · Attivo: %@", "Nowy szkic · Aktywny: %@")
+        case .brainStateSavedNotEnabled:
+            return e("已保存 · 未启用", "Saved · Not enabled", "Enregistré · Non activé", "Salvato · Non abilitato", "Zapisano · Nie włączono")
+        case .brainStateUnsavedDraft:
+            return e("未保存草稿", "Unsaved draft", "Brouillon non enregistré", "Bozza non salvata", "Niezapisany szkic")
+        case .brainStatusSaved:
+            return e("已保存", "Saved", "Enregistré", "Salvato", "Zapisano")
+        case .brainStatusUnknown:
+            return e("状态未知", "Status unknown", "État inconnu", "Stato sconosciuto", "Status nieznany")
+        case .brainSystemConstraintsNote:
+            return e("不可虚构事实、语音转写以本轮转写为准、未识别项点名并依提示回复。本约束由代码自动拼接在角色人设之后，不可在界面删改。", "No hallucinations; voice transcriptions take precedence; unrecognised items addressed per prompts. Automatically appended to persona; cannot be edited.", "Pas d'inventions ; transcriptions prioritaires ; éléments non reconnus traités selon les consignes. Ajouté automatiquement.", "Nessuna allucinazione; trascrizioni vocali prioritarie; elementi non riconosciuti gestiti su indicazione. Aggiunto in automatico.", "Zakaz zmyślania faktów; transkrypcje głosowe mają pierwszeństwo; nierozpoznane pozycje zgłaszane wg instrukcji. Dołączane automatycznie.")
+        case .brainSystemConstraintsTitle:
+            return e("系统能力约束 (只读)", "System capability constraints (read-only)", "Contraintes système (lecture seule)", "Vincoli di sistema (sola lettura)", "Ograniczenia systemowe (tylko odczyt)")
+        case .brainTableHistoryBoxTitle:
+            return e("版本与代次历史", "Revisions and Generations History", "Historique des révisions et générations", "Cronologia revisioni e generazioni", "Historia wersji i generacji")
+        case .brainTargetGenAlreadyCurrent:
+            return e("选定代次已是当前代次，无需回滚", "Selected generation is already current; no rollback needed", "La génération sélectionnée est déjà active ; aucun retour requis", "La generazione selezionata è già corrente; nessun ripristino necessario", "Wybrana generacja jest już bieżąca; przywracanie niepotrzebne")
+        case .brainTargetGenLabel:
+            return e("目标代次:", "Target Gen:", "Génération cible :", "Generazione di destinazione:", "Docelowa generacja:")
+        case .brainTemplateGreeting:
+            return e("欢迎语 (greeting):", "Greeting (greeting):", "Message de bienvenue (greeting) :", "Messaggio di benvenuto (greeting):", "Powitanie (greeting):")
+        case .brainTemplateGreetingLabel:
+            return e("欢迎语 (greeting):", "Greeting (greeting):", "Message d'accueil (greeting) :", "Messaggio di benvenuto (greeting):", "Powitanie (greeting):")
+        case .brainTemplateInsufficient:
+            return e("信息不足 (insufficient_info):", "Insufficient info (insufficient_info):", "Information insuffisante (insufficient_info) :", "Informazioni insufficienti (insufficient_info):", "Niewystarczające informacje (insufficient_info):")
+        case .brainTemplateInsufficientLabel:
+            return e("信息不足 (insufficient_info):", "Insufficient info (insufficient_info):", "Informations insuffisantes (insufficient_info) :", "Informazioni insufficienti (insufficient_info):", "Niewystarczające informacje (insufficient_info):")
+        case .brainTemplateTooLarge:
+            return e("文件超限 (too_large):", "File too large (too_large):", "Fichier trop volumineux (too_large) :", "File troppo grande (too_large):", "Plik za duży (too_large):")
+        case .brainTemplateTooLargeLabel:
+            return e("文件超限 (too_large):", "File too large (too_large):", "Fichier trop volumineux (too_large) :", "File troppo grande (too_large):", "Plik zbyt duży (too_large):")
+        case .brainTemplateUnsupported:
+            return e("格式不支持 (unsupported_type):", "Unsupported type (unsupported_type):", "Format non pris en charge (unsupported_type) :", "Formato non supportato (unsupported_type):", "Nieobsługiwany format (unsupported_type):")
+        case .brainTemplateUnsupportedLabel:
+            return e("格式不支持 (unsupported_type):", "Unsupported type (unsupported_type):", "Type non pris en charge (unsupported_type) :", "Tipo non supportato (unsupported_type):", "Nieobsługiwany typ (unsupported_type):")
+        case .brainTemplatesIntro:
+            return e("通用话术模板 (留空表示无自定义文案，进入待处理或人工接管):", "General reply templates (leave blank to use defaults or human takeover):", "Modèles de réponse généraux (laisser vide pour les défauts ou relais humain) :", "Modelli di risposta generali (lascia vuoto per impostazioni predefinite o operatore umano):", "Ogólne szablony odpowiedzi (pozostaw puste dla domyślnych lub przejęcia przez człowieka):")
+        case .brainTemplatesSectionDesc:
+            return e("通用话术模板 (留空表示无自定义文案，进入待处理或人工接管):", "Fallback reply templates (leave blank to fall back to pending/handoff):", "Modèles de réponse de secours (laisser vide pour passer en attente/transfert) :", "Modelli di risposta di ripiego (lascia vuoto per passare in attesa/operatore):", "Szablony odpowiedzi awaryjnych (zostaw puste, aby przekazać do obsługi):")
+        case .brainToneFieldLabel:
+            return e("语气风格:", "Tone & Style:", "Ton et style :", "Tono e stile:", "Ton i styl:")
+        case .brainTryItBudgetFmt:
+            return e("字节预算: 原始=%1$@, 纳入=%2$@, 是否截断=%3$@\n", "Byte budget: Original=%1$@, Included=%2$@, Truncated=%3$@\n", "Budget d'octets : Original=%1$@, Inclus=%2$@, Tronqué=%3$@\n", "Budget byte: Originale=%1$@, Incluso=%2$@, Troncato=%3$@\n", "Budżet bajtów: Oryginał=%1$@, Dołączono=%2$@, Obcięto=%3$@\n")
+        case .brainTryItConstraintsFmt:
+            return e("系统约束:\n%@\n", "System constraints:\n%@\n", "Contraintes système :\n%@\n", "Vincoli di sistema:\n%@\n", "Ograniczenia systemowe:\n%@\n")
+        case .brainTryItCostFreeNotice:
+            return e("未调用模型，仅确定性组装预览，不产生费用。\n", "Model not invoked; deterministic assembly preview only, free of charge.\n", "Modèle non invoqué ; aperçu d'assemblage déterministe uniquement, sans frais.\n", "Modello non invocato; solo anteprima di assemblaggio deterministica, gratuita.\n", "Model nie został wywołany; tylko deterministyczny podgląd złożenia, bez kosztów.\n")
+        case .brainTryItCostIncurredFmt:
+            return e("实际费用产生: %@\n", "Actual cost incurred: %@\n", "Frais réels engagés : %@\n", "Costo effettivo sostenuto: %@\n", "Faktycznie poniesiony koszt: %@\n")
+        case .brainTryItFailedFmt:
+            return e("试一试组装预览失败: %@", "Try It assemble preview failed: %@", "Échec de l'aperçu d'assemblage du test : %@", "Anteprima assemblaggio di prova fallita: %@", "Podgląd złożenia testu nieudany: %@")
+        case .brainTryItHeader:
+            return e("【试一试结果快照】\n未调用模型，仅确定性组装预览，不产生费用。\n", "[Try It Snapshot]\nDeterministic assembly preview only; no model call, no charges.\n", "[Instantané de test]\nAperçu déterministe uniquement ; aucun appel au modèle, aucun coût.\n", "[Istantanea di prova]\nSolo anteprima deterministica; nessuna chiamata al modello, nessun costo.\n", "[Migawka testu]\nTylko deterministyczny podgląd złożenia; brak wywołania modelu i opłat.\n")
+        case .brainTryItResultTitle:
+            return e("试一试决策快照与预览:", "Try It Decision Snapshot & Preview:", "Instantané de décision et aperçu du test :", "Istantanea decisionale e anteprima di prova:", "Migawka decyzyjna i podgląd testu:")
+        case .brainTryItSnapshotShaFmt:
+            return e("快照摘要: %@\n", "Snapshot SHA: %@\n", "Empreinte de l'instantané : %@\n", "SHA istantanea: %@\n", "SHA migawki: %@\n")
+        case .brainTryItStatusFmt:
+            return e("状态: %@\n", "Status: %@\n", "État : %@\n", "Stato: %@\n", "Status: %@\n")
+        case .brainTurnNotFound:
+            return e("轮次不存在", "Turn not found", "Tour introuvable", "Turno non trovato", "Tura nie istnieje")
+        case .brainUnsavedBeforeActivatePrompt:
+            return e("尚有未保存的修改，请先保存角色草稿及会话绑定，再启用。", "Unsaved changes exist. Please save role draft and bindings before activating.", "Modifications non enregistrées. Enregistrez le rôle et les liaisons avant d'activer.", "Ci sono modifiche non salvate. Salva la bozza del ruolo e le associazioni prima di attivare.", "Istnieją niezapisane zmiany. Zapisz szkic roli i powiązania przed aktywacją.")
+        case .brainUnsavedChangesBlockActivation:
+            return e("尚有未保存的修改，请先保存角色草稿及会话绑定，再启用。", "Unsaved changes exist; save role draft and conversation bindings before activating.", "Modifications non enregistrées ; enregistrez le brouillon et les liaisons avant d'activer.", "Ci sono modifiche non salvate; salva la bozza e le associazioni prima di attivare.", "Istnieją niezapisane zmiany; zapisz szkic roli i przypisania przed aktywacją.")
+        case .brainUnsavedChangesNotice:
+            return e("角色有未保存的修改 · ⌘S 保存草稿", "Role has unsaved changes · ⌘S to save draft", "Modifications non enregistrées pour le rôle · ⌘S pour enregistrer", "Il ruolo ha modifiche non salvate · ⌘S per salvare", "Rola zawiera niezapisane zmiany · ⌘S, aby zapisać szkic")
+        case .brainUnsavedPromptSaveFirst:
+            return e("尚未保存：填写角色设定后按 ⌘S 保存，再设置适用会话", "Unsaved: Fill role settings and press ⌘S to save, then configure applicable sessions", "Non enregistré : Remplissez les paramètres et appuyez sur ⌘S pour enregistrer", "Non salvato: Compila i campi e premi ⌘S per salvare, poi configura le sessioni", "Niezapisane: Wypełnij ustawienia i naciśnij ⌘S, aby zapisać, a potem skonfiguruj sesje")
+        case .brainUnsavedRoleDeleted:
+            return e("未保存角色已删除", "Unsaved role discarded", "Rôle non enregistré supprimé", "Ruolo non salvato scartato", "Odrzucono niezapisaną rolę")
+        case .brainUnsavedRoleNotice:
+            return e("尚未保存：填写角色设定后按 ⌘S 保存，再设置适用会话", "Not saved yet: fill role settings and press ⌘S to save, then configure conversations", "Pas encore enregistré : remplissez le rôle et appuyez sur ⌘S, puis configurez les conversations", "Non ancora salvato: compila le impostazioni e premi ⌘S per salvare, poi configura le conversazioni", "Jeszcze niezapisane: uzupełnij rolę i naciśnij ⌘S, aby zapisać, a następnie skonfiguruj rozmowy")
+        case .brainUpdateOverrideErrContact:
+            return e("更新失败：请选择要更新的白名单联系人", "Update failed: Please select an allowlist contact to update", "Échec de la mise à jour : Veuillez sélectionner un contact à mettre à jour", "Aggiornamento non riuscito: Seleziona un contatto da aggiornare", "Aktualizacja nie powiodła się: Wybierz kontakt do aktualizacji")
+        case .brainUpdateOverrideErrNotFound:
+            return e("更新失败：未找到对应的覆盖规则，请先点击「添加覆盖」", "Update failed: Corresponding override rule not found; click 'Add Override' first", "Échec de la mise à jour : Dérogation introuvable ; cliquez d'abord sur « Ajouter une dérogation »", "Aggiornamento non riuscito: Eccezione non trovata; fai clic prima su 'Aggiungi eccezione'", "Aktualizacja nie powiodła się: Nie znaleziono reguły wyjątku; najpierw kliknij „Dodaj wyjątek”")
+        case .brainUpdateOverrideErrRole:
+            return e("更新失败：请选择有效的角色", "Update failed: Please select a valid role", "Échec de la mise à jour : Veuillez sélectionner un rôle valide", "Aggiornamento non riuscito: Seleziona un ruolo valido", "Aktualizacja nie powiodła się: Wybierz prawidłową rolę")
+        case .brainUpdateOverrideSelectContact:
+            return e("更新失败：请选择要更新的白名单联系人", "Update failed: select an allowlist contact to update", "Échec de la mise à jour : sélectionnez un contact autorisé", "Aggiornamento fallito: seleziona un contatto consentito", "Aktualizacja nieudana: wybierz kontakt z białej listy")
+        case .brainUpdateOverrideSelectRole:
+            return e("更新失败：请选择有效的角色", "Update failed: select a valid role", "Échec de la mise à jour : sélectionnez un rôle valide", "Aggiornamento fallito: seleziona un ruolo valido", "Aktualizacja nieudana: wybierz prawidłową rolę")
+        case .brainUpdateSelectedOverride:
+            return e("更新选定覆盖", "Update selected override", "Mettre à jour la dérogation", "Aggiorna eccezione selezionata", "Zaktualizuj zaznaczony wyjątek")
+        case .brainVerDraftSuffix:
+            return e(" (草稿)", " (draft)", " (brouillon)", " (bozza)", " (szkic)")
+        case .brainVerRunningSuffix:
+            return e(" (运行中)", " (running)", " (en cours)", " (in esecuzione)", " (działa)")
+        case .brainVersionALabel:
+            return e("版本 A:", "Version A:", "Version A :", "Versione A:", "Wersja A:")
+        case .brainVersionBLabel:
+            return e("版本 B:", "Version B:", "Version B :", "Versione B:", "Wersja B:")
+        case .brainYes:
+            return e("是", "Yes", "Oui", "Sì", "Tak")
+        case .componentsBannerAlertMsg:
+            return e("成功响应横幅右侧按钮动作。", "Successfully responded to banner button click.", "Action du bouton de bannière exécutée.", "Azione del pulsante banner eseguita con successo.", "Pomyślnie obsłużono kliknięcie przycisku banera.")
+        case .componentsBannerAlertTitle:
+            return e("横幅操作触发", "Banner action triggered", "Action de bannière déclenchée", "Azione banner attivata", "Działanie banera wywołane")
+        case .contactsActionAddAutoReply:
+            return e("加入自动回复", "Add to auto-reply", "Ajouter à la réponse auto", "Aggiungi ad auto-risposta", "Dodaj do auto-odpowiedzi")
+        case .contactsActionIgnore:
+            return e("忽略", "Ignore", "Ignorer", "Ignora", "Ignoruj")
+        case .contactsActionImmutable:
+            return e("不可修改", "Immutable", "Non modifiable", "Non modificabile", "Niezmienne")
+        case .contactsActionSetIgnore:
+            return e("设为忽略", "Ignore", "Ignorer", "Ignora", "Ignoruj")
+        case .contactsActionUnignore:
+            return e("取消忽略", "Unignore", "Ne plus ignorer", "Annulla ignora", "Przestań ignorować")
+        case .contactsCategoryGroup:
+            return e("群聊", "Group chat", "Discussion de groupe", "Chat di gruppo", "Czat grupowy")
+        case .contactsCategoryIgnored:
+            return e("已忽略", "Ignored", "Ignorés", "Ignorati", "Ignorowani")
+        case .contactsCategoryOfficial:
+            return e("公众号", "Official accounts", "Comptes officiels", "Account ufficiali", "Konta oficjalne")
+        case .contactsCategoryPersonal:
+            return e("联系人", "Contacts", "Contacts", "Contatti", "Kontakty")
+        case .contactsCategoryWork:
+            return e("企业微信", "WeCom", "WeCom", "WeCom", "WeCom")
+        case .contactsChangeHandling:
+            return e("切换处理方式", "Change handling", "Changer le traitement", "Cambia gestione", "Zmień obsługę")
+        case .contactsColHandling:
+            return e("处理方式", "Handling", "Traitement", "Gestione", "Obsługa")
+        case .contactsColMsgs:
+            return e("消息数", "Messages", "Messages", "Messaggi", "Wiadomości")
+        case .contactsColName:
+            return e("名字 / 备注", "Name / Remark", "Nom / Remarque", "Nome / Nota", "Nazwa / Uwaga")
+        case .contactsColWechat:
+            return e("微信号", "WeChat ID", "ID WeChat", "ID WeChat", "ID WeChat")
+        case .contactsDetailAddedOn:
+            return e("添加时间:", "Added on:", "Ajouté le :", "Data aggiunta:", "Data dodania:")
+        case .contactsDetailBoxTitle:
+            return e("联系人详情", "Contact details", "Détails du contact", "Dettagli contatto", "Szczegóły kontaktu")
+        case .contactsDetailEnterprise:
+            return e("企业/实名:", "Company / Real name:", "Entreprise / Nom réel :", "Azienda / Nome reale:", "Firma / Imię i nazwisko:")
+        case .contactsDetailHandling:
+            return e("处理方式:", "Handling:", "Traitement :", "Gestione:", "Obsługa:")
+        case .contactsDetailRegion:
+            return e("地区:", "Region:", "Région :", "Regione:", "Region:")
+        case .contactsDetailRemark:
+            return e("备注名:", "Remark:", "Remarque :", "Nota:", "Uwaga:")
+        case .contactsDetailSource:
+            return e("来源:", "Source:", "Source :", "Origine:", "Źródło:")
+        case .contactsDetailTags:
+            return e("标签:", "Tags:", "Étiquettes :", "Tag:", "Tagi:")
+        case .contactsDetailWechat:
+            return e("微信号:", "WeChat ID:", "ID WeChat :", "ID WeChat:", "ID WeChat:")
+        case .contactsErrorOfficialNoAutoReply:
+            return e("公众号、服务号不可加入自动回复", "Official accounts cannot be added to auto-reply", "Les comptes officiels ne peuvent pas être ajoutés à la réponse automatique", "Gli account ufficiali non possono essere aggiunti alla risposta automatica", "Oficjalne konta nie mogą zostać dodane do auto-odpowiedzi")
+        case .contactsHandlingIgnored:
+            return e("已忽略", "Ignored", "Ignoré", "Ignorato", "Ignorowany")
+        case .contactsHandlingNeverReply:
+            return e("永不回复", "Never reply", "Ne jamais répondre", "Non rispondere mai", "Nigdy nie odpowiadaj")
+        case .contactsHandlingRecordOnly:
+            return e("仅记录", "Record only", "Enregistrement seul", "Solo registrazione", "Tylko zapis")
+        case .contactsInitSync:
+            return e("初始化通讯录", "Initialize address book", "Initialiser le carnet", "Inizializza rubrica", "Zainicjuj kontakty")
+        case .contactsInitSyncDialogConfirm:
+            return e("开始初始化", "Start initialization", "Démarrer l'initialisation", "Inizia inizializzazione", "Rozpocznij inicjalizację")
+        case .contactsInitSyncDialogMsg:
+            return e("将暂停自动回复并全量同步微信通讯录，预计耗时 2-3 分钟。是否继续？", "This will pause auto-reply and perform a full sync of WeChat contacts (takes 2-3 minutes). Continue?", "Cela mettra en pause la réponse automatique et effectuera une synchronisation complète (2-3 minutes). Continuer ?", "Questo metterà in pausa l'auto-risposta e sincronizzerà completamente i contatti WeChat (2-3 minuti). Continuare?", "Wstrzyma to auto-odpowiedź i przeprowadzi pełną synchronizację kontaktów WeChat (zajmie 2-3 minuty). Kontynuować?")
+        case .contactsInitSyncDialogTitle:
+            return e("初始化通讯录", "Initialize address book", "Initialiser le carnet", "Inizializza rubrica", "Zainicjuj kontakty")
+        case .contactsNoSelected:
+            return e("未选择联系人", "No contact selected", "Aucun contact sélectionné", "Nessun contatto selezionato", "Nie wybrano kontaktu")
+        case .contactsOffline:
+            return e("控制命令不可用 (离线状态)", "Control command unavailable (offline)", "Commande de contrôle indisponible (hors ligne)", "Comando di controllo non disponibile (offline)", "Polecenie sterujące niedostępne (tryb offline)")
+        case .contactsQuickSync:
+            return e("立即同步", "Sync now", "Synchroniser maintenant", "Sincronizza ora", "Synchronizuj teraz")
+        case .contactsReviewNoticeTitle:
+            return e("待确认项", "Pending review", "À vérifier", "In attesa di verifica", "Do weryfikacji")
+        case .contactsReviewPrompt:
+            return e("存在 %1$d 条重名待确认联系人（如：%2$@），请核对身份！", "Found %1$d duplicate contacts to review (e.g. %2$@); please verify identity!", "%1$d doublons de contacts à vérifier (ex. %2$@) ; vérifiez leur identité !", "Trovati %1$d contatti con lo stesso nome da verificare (es. %2$@); controlla l'identità!", "Znaleziono %1$d zduplikowanych kontaktów do weryfikacji (np. %2$@); sprawdź tożsamość!")
+        case .contactsSyncCompleted:
+            return e("上次同步已完成", "Last sync completed", "Dernière synchronisation terminée", "Ultima sincronizzazione completata", "Ostatnia synchronizacja zakończona")
+        case .contactsSyncIncomplete:
+            return e("同步未完整", "Sync incomplete", "Synchronisation incomplète", "Sincronizzazione incompleta", "Synchronizacja niekompletna")
+        case .contactsSyncLoading:
+            return e("正在加载通讯录...", "Loading address book…", "Chargement du carnet d'adresses…", "Caricamento rubrica…", "Wczytywanie kontaktów…")
+        case .contactsSyncNever:
+            return e("尚未同步通讯录", "Address book not synced yet", "Carnet non synchronisé", "Rubrica non ancora synchronizzata", "Kontakty jeszcze niezsynchronizowane")
+        case .contactsTabGroupCount:
+            return e("群聊 (%d)", "Group chat (%d)", "Discussion de groupe (%d)", "Chat di gruppo (%d)", "Czat grupowy (%d)")
+        case .contactsTabIgnoredCount:
+            return e("已忽略 (%d)", "Ignored (%d)", "Ignorés (%d)", "Ignorati (%d)", "Ignorowani (%d)")
+        case .contactsTabOfficialCount:
+            return e("公众号 (%d)", "Official accounts (%d)", "Comptes officiels (%d)", "Account ufficiali (%d)", "Konta oficjalne (%d)")
+        case .contactsTabPersonalCount:
+            return e("联系人 (%d)", "Contacts (%d)", "Contacts (%d)", "Contatti (%d)", "Kontakty (%d)")
+        case .contactsTabWorkCount:
+            return e("企业微信 (%d)", "WeCom (%d)", "WeCom (%d)", "WeCom (%d)", "WeCom (%d)")
+        case .contactsWechatUnread:
+            return e("—（未读到）", "— (Unread)", "— (Non lu)", "— (Non letto)", "— (Nie odczytano)")
+        case .contactsWechatWorkNone:
+            return e("—（企业微信无此项）", "— (Not available in WeCom)", "— (Non disponible dans WeCom)", "— (Non disponibile in WeCom)", "— (Niedostępne w WeCom)")
+        case .logsClear:
+            return e("清屏", "Clear", "Effacer", "Cancella", "Wyczyść")
+        case .logsLevelAll:
+            return e("全部", "All", "Tout", "Tutti", "Wszystko")
+        case .logsLevelErrorOnly:
+            return e("只看错误", "Errors only", "Erreurs uniquement", "Solo errori", "Tylko błędy")
+        case .logsLevelLabel:
+            return e("级别:", "Level:", "Niveau :", "Livello:", "Poziom:")
+        case .logsLevelWarnAndAbove:
+            return e("警告及以上", "Warnings and above", "Avertissements et plus", "Avvisi e superiori", "Ostrzeżenia i wyższe")
+        case .logsSearchPlaceholder:
+            return e("搜索日志...", "Search logs…", "Rechercher dans les journaux…", "Cerca nei registri…", "Szukaj w dziennikach…")
+        case .logsSourceLabel:
+            return e("来源:", "Source:", "Source :", "Origine:", "Źródło:")
+        case .mcpBoxConfigExample:
+            return e("客户端接入配置示例", "Client configuration examples", "Exemples de configuration client", "Esempi di configurazione client", "Przykłady konfiguracji klienta")
+        case .mcpControlOffline:
+            return e("控制命令不可用 (离线状态)", "Control command unavailable (offline)", "Commande de contrôle indisponible (hors ligne)", "Comando di controllo non disponibile (offline)", "Polecenie sterujące niedostępne (tryb offline)")
+        case .mcpCopiedOpenApiConfig:
+            return e("已复制对外接口配置", "API configuration copied", "Configuration API copiée", "Configurazione API copiata", "Skopiowano konfigurację API")
+        case .mcpCopiedSsh:
+            return e("已复制运维 SSH 命令", "Ops SSH command copied", "Commande SSH copiée", "Comando SSH copiato", "Skopiowano polecenie SSH")
+        case .mcpCopiedSshPlaceholder:
+            return e("已复制运维 SSH 命令（未检测到非回环 IPv4，已使用 <本机地址> 占位，请自行替换）", "Ops SSH command copied (no non-loopback IPv4 detected; replaced with <local-address>)", "Commande SSH copiée (aucun IPv4 hors boucle détecté ; <adresse-locale> utilisée)", "Comando SSH copiato (nessun IPv4 non di loopback trovato; usato segnaposto)", "Skopiowano polecenie SSH (nie wykryto zewnętrznego IPv4; użyto adresu lokalnego)")
+        case .mcpCopyOpenApiBtn:
+            return e("复制对外接口配置", "Copy API configuration", "Copier la configuration de l'API", "Copia configurazione API", "Kopiuj konfigurację API")
+        case .mcpCopyOpsSshBtn:
+            return e("复制运维 SSH 配置", "Copy ops SSH configuration", "Copier la configuration SSH d'exploitation", "Copia configurazione SSH operativa", "Kopiuj konfigurację SSH operacyjną")
+        case .mcpEndpointChatHistory:
+            return e("聊天历史查询", "Chat history query", "Requête d'historique de clavardage", "Query cronologia chat", "Zapytanie o historię czatu")
+        case .mcpEndpointExternalService:
+            return e("外部服务接口", "External service interface", "Interface de service externe", "Interfaccia servizio esterno", "Interfejs usługi zewnętrznej")
+        case .mcpEndpointOpenApi:
+            return e("对外接口", "External API", "API externe", "API esterna", "Zewnętrzne API")
+        case .mcpEndpointToolService:
+            return e("MCP 工具服务", "MCP tool service", "Service d'outils MCP", "Servizio strumenti MCP", "Usługa narzędzi MCP")
+        case .mcpErrorQueueInt:
+            return e("最长排队必须为整数", "Maximum queue must be an integer", "La file d'attente doit être un entier", "La coda massima deve essere un intero", "Maksymalna kolejka musi być liczbą całkowitą")
+        case .mcpErrorTimeoutInt:
+            return e("等待回复必须为整数", "Response timeout must be an integer", "Le délai de réponse doit être un entier", "Il timeout di risposta deve essere un intero", "Limit czasu odpowiedzi musi być liczbą całkowitą")
+        case .mcpFetchTokenFailed:
+            return e("获取令牌失败", "Failed to get token", "Échec de l'obtention du jeton", "Recupero token fallito", "Pobieranie tokena nieudane")
+        case .mcpFieldQueueMinutes:
+            return e("最长排队 (queue_minutes):", "Maximum queue (queue_minutes):", "File d'attente max (queue_minutes) :", "Coda massima (queue_minutes):", "Maksymalna kolejka (queue_minutes):")
+        case .mcpFieldQueueMinutesHelper:
+            return e("1–1440 分钟 (默认 30)", "1–1440 minutes (default 30)", "1–1440 minutes (défaut 30)", "1–1440 minuti (predefinito 30)", "1–1440 minut (domyślnie 30)")
+        case .mcpFieldTimeoutAction:
+            return e("超时后动作 (timeout_action):", "Timeout action (timeout_action):", "Action à expiration (timeout_action) :", "Azione al timeout (timeout_action):", "Działanie po przekroczeniu czasu (timeout_action):")
+        case .mcpFieldTimeoutActionHelper:
+            return e("skip=跳过, handoff=转人工, builtin=改用内置", "skip=skip, handoff=hand off, builtin=fallback to built-in", "skip=ignorer, handoff=transférer, builtin=passer à l'intégré", "skip=salta, handoff=passa a operatore, builtin=passa a integrato", "skip=pomiń, handoff=przekaż, builtin=przełącz na wbudowany")
+        case .mcpFieldTimeoutHelper:
+            return e("1–3600 秒 (默认 120)", "1–3600 seconds (default 120)", "1–3600 secondes (défaut 120)", "1–3600 secondi (predefinito 120)", "1–3600 sekund (domyślnie 120)")
+        case .mcpFieldTimeoutSeconds:
+            return e("等待回复 (timeout_seconds):", "Response timeout (timeout_seconds):", "Délai de réponse (timeout_seconds) :", "Timeout risposta (timeout_seconds):", "Limit czasu odpowiedzi (timeout_seconds):")
+        case .mcpGroupDesktop:
+            return e("通用桌面", "General desktop", "Bureau universel", "Desktop generico", "Pulpit ogólny")
+        case .mcpGroupOpenApi:
+            return e("对外接口", "External API", "API externe", "API esterna", "Zewnętrzne API")
+        case .mcpGroupOps:
+            return e("运维", "Operations", "Exploitation", "Operazioni", "Operacje")
+        case .mcpOpenApiCheckFailed:
+            return e("执行 open-api-check 失败", "Failed to execute open-api-check", "Échec de l'exécution d'open-api-check", "Esecuzione open-api-check fallita", "Wykonanie open-api-check nieudane")
+        case .mcpOpenApiConnectedCount:
+            return e("连接正常 (可用工具: %d 个)", "Connection normal (%d tools available)", "Connexion normale (%d outils disponibles)", "Connessione normale (%d strumenti disponibili)", "Połączenie prawidłowe (dostępne narzędzia: %d)")
+        case .mcpOpenApiDisabled:
+            return e("开关状态: 已关闭 (只读，请到「设置」页修改 open_api.enabled)", "State: disabled (read-only; update open_api.enabled in Settings)", "État : désactivé (lecture seule ; modifiez open_api.enabled dans Réglages)", "Stato: disabilitato (sola lettura; modifica open_api.enabled in Impostazioni)", "Stan: wyłączone (tylko odczyt; zmień open_api.enabled w Ustawieniach)")
+        case .mcpOpenApiDisabledNotice:
+            return e("对外接口未开启 (open_api.enabled=false)", "API disabled (open_api.enabled=false)", "API désactivée (open_api.enabled=false)", "API disabilitata (open_api.enabled=false)", "API wyłączone (open_api.enabled=false)")
+        case .mcpOpenApiEnabled:
+            return e("开关状态: 已开启 (只读，请到「设置」页修改 open_api.enabled)", "State: enabled (read-only; update open_api.enabled in Settings)", "État : activé (lecture seule ; modifiez open_api.enabled dans Réglages)", "Stato: abilitato (sola lettura; modifica open_api.enabled in Impostazioni)", "Stan: włączone (tylko odczyt; zmień open_api.enabled w Ustawieniach)")
+        case .mcpOpenApiUrl:
+            return e("接口地址: %@", "API URL: %@", "Adresse API : %@", "URL API: %@", "Adres API: %@")
+        case .mcpPlaceholderLocalAddress:
+            return e("<本机地址>", "<local-address>", "<adresse-locale>", "<indirizzo-locale>", "<adres-lokalny>")
+        case .mcpPlaceholderToken:
+            return e("<令牌>", "<token>", "<jeton>", "<token>", "<token>")
+        case .mcpPlaceholderUser:
+            return e("<用户>", "<user>", "<utilisateur>", "<utente>", "<użytkownik>")
+        case .mcpReadingToken:
+            return e("正在读取令牌...", "Reading token…", "Lecture du jeton…", "Lettura del token…", "Odczytywanie tokena…")
+        case .mcpRegenerate:
+            return e("重新生成", "Regenerate", "Régénérer", "Rigenera", "Wygeneruj ponownie")
+        case .mcpRegenerateTokenFailed:
+            return e("重新生成令牌失败", "Failed to regenerate token", "Échec de régénération du jeton", "Rigenerazione token fallita", "Nie udało się wygenerować tokena ponownie")
+        case .mcpRegeneratingToken:
+            return e("正在重新生成令牌...", "Regenerating token…", "Régénération du jeton…", "Rigenerazione del token…", "Ponowne generowanie tokena…")
+        case .mcpSaveFailed:
+            return e("保存失败: %@", "Save failed: %@", "Échec de l'enregistrement : %@", "Salvataggio non riuscito: %@", "Zapis nieudany: %@")
+        case .mcpSectionEndpoints:
+            return e("连接信息与入口", "Connection endpoints", "Points de connexion", "Punti di connessione", "Punkty połączeń")
+        case .mcpSectionOpenApi:
+            return e("对外接口", "External API", "API externe", "API esterna", "Zewnętrzne API")
+        case .mcpSectionTools:
+            return e("可用 MCP 工具", "Available MCP tools", "Outils MCP disponibles", "Strumenti MCP disponibili", "Dostępne narzędzia MCP")
+        case .mcpStatusClosed:
+            return e("已关闭", "Closed", "Fermé", "Chiuso", "Zamknięte")
+        case .mcpStatusNotStarted:
+            return e("未启动/未连接", "Not started / unconnected", "Non démarré / non connecté", "Non avviato / non connesso", "Nieuruchomione / niepołączone")
+        case .mcpStatusReady:
+            return e("已就绪", "Ready", "Prêt", "Pronto", "Gotowy")
+        case .mcpTestConnComplete:
+            return e("连接测试完成", "Connection test completed", "Test de connexion terminé", "Test di connessione completato", "Test połączenia ukończony")
+        case .mcpTestConnection:
+            return e("测试连接", "Test connection", "Tester la connexion", "Prova connessione", "Testuj połączenie")
+        case .mcpTestFailed:
+            return e("测试失败: %@", "Test failed: %@", "Test échoué : %@", "Test fallito: %@", "Test nieudany: %@")
+        case .mcpTestingConnection:
+            return e("正在测试连接...", "Testing connection…", "Test de connexion en cours…", "Test connessione in corso…", "Testowanie połączenia…")
+        case .mcpTestingOpenApi:
+            return e("正在测试对外接口连接...", "Testing API connection…", "Test de connexion API en cours…", "Test connessione API in corso…", "Testowanie połączenia API…")
+        case .mcpTokenCopied:
+            return e("令牌已复制到剪贴板", "Token copied to clipboard", "Jeton copié dans le presse-papiers", "Token copiato negli appunti", "Token skopiowany do schowka")
+        case .mcpTokenMasked:
+            return e("令牌: ••••", "Token: ••••", "Jeton : ••••", "Token: ••••", "Token: ••••")
+        case .mcpTokenMaskedWithTail:
+            return e("令牌: ••••%@", "Token: ••••%@", "Jeton : ••••%@", "Token: ••••%@", "Token: ••••%@")
+        case .mcpTokenRegeneratedSuccess:
+            return e("令牌已重新生成并生效", "Token regenerated and active", "Jeton régénéré et actif", "Token rigenerato ed efficace", "Token wygenerowany ponownie i aktywny")
+        case .mcpValidationError:
+            return e("校验错误: %@", "Validation error: %@", "Erreur de validation : %@", "Errore di validazione: %@", "Błąd walidacji: %@")
+        case .statusChecking:
+            return e("检查中...", "Checking…", "Vérification…", "Controllo…", "Sprawdzanie…")
+        case .statusNotReady:
+            return e("未就绪", "Not ready", "Pas prêt", "Non pronto", "Niegotowe")
+        case .statusQuerying:
+            return e("查询中...", "Querying…", "Recherche…", "Interrogazione…", "Odpytywanie…")
+        case .statusUnknown:
+            return e("未知", "Unknown", "Inconnu", "Sconosciuto", "Nieznany")
+        case .statusUnverified:
+            return e("未校验", "Unverified", "Non vérifié", "Non verificato", "Niezweryfikowano")
+        case .updateBtnDeferDisabled:
+            return e("延期更新 (未启用)", "Defer update (disabled)", "Différer (désactivé)", "Rinvia (disabilitato)", "Odrocz (wyłączone)")
+        case .updateBtnDownloadDisabled:
+            return e("下载更新 (未启用)", "Download (disabled)", "Télécharger (désactivé)", "Scarica (disabilitato)", "Pobierz (wyłączone)")
+        case .updateBtnInstallDisabled:
+            return e("安装并重启 (未启用)", "Install and restart (disabled)", "Installer et redémarrer (désactivé)", "Installa e riavvia (disabilitato)", "Instaluj i uruchom ponownie (wyłączone)")
+        case .updateCandidateAlreadyLatest:
+            return e("当前已是最新版本", "Already up to date", "Déjà à jour", "Già aggiornato", "Aktualna wersja")
+        case .updateCandidateAvailableVerified:
+            return e("发现可用版本并通过完整验证", "Available version found and fully verified", "Version disponible trouvée et entièrement vérifiée", "Trovata versione disponibile e completamente verificata", "Znaleziono dostępną wersję, w pełni zweryfikowaną")
+        case .updateCandidateFoundUnverified:
+            return e("已发现候选版本（来源尚未验证）", "Candidate found (source unverified)", "Version candidate trouvée (source non vérifiée)", "Trovata versione candidata (origine non verificata)", "Znaleziono wersję kandydującą (źródło niezweryfikowane)")
+        case .updateCandidateIncompatibleEnv:
+            return e("候选版本不兼容当前环境", "Candidate version incompatible with current environment", "Version candidate incompatible avec l'environnement actuel", "Versione candidata incompatibile con l'ambiente attuale", "Wersja kandydująca niezgodna z bieżącym środowiskiem")
+        case .updateCandidateNoVersion:
+            return e("无可用版本 (null)", "No version available (null)", "Aucune version disponible (null)", "Nessuna versione disponibile (null)", "Brak dostępnej wersji (null)")
+        case .updateCandidateNotCheckedYet:
+            return e("尚未检查更新", "Update not checked yet", "Mise à jour non vérifiée", "Aggiornamento non ancora verificato", "Aktualizacja jeszcze niesprawdzona")
+        case .updateCandidateSourceUnconfigured:
+            return e("更新源尚未配置", "Update source not configured", "Source de mise à jour non configurée", "Sorgente di aggiornamento non configurata", "Źródło aktualizacji nieskonfigurowane")
+        case .updateCannotInstallOnHost:
+            return e("该版本无法安装在当前目标专用机上。", "This version cannot be installed on the current target host.", "Cette version ne peut pas être installée sur la machine hôte cible.", "Questa versione non può essere installata sulla macchina di destinazione.", "Tej wersji nie można zainstalować na bieżącej maszynie docelowej.")
+        case .updateCannotRollbackFmt:
+            return e("当前不可回滚：%1$@", "Cannot roll back: %1$@", "Impossible de revenir en arrière : %1$@", "Impossibile ripristinare: %1$@", "Nie można przywrócić: %1$@")
+        case .updateCertNotFound:
+            return e("专用机本地自签名证书未找到", "Local self-signed certificate not found", "Certificat auto-signé local introuvable", "Certificato autofirmato locale non trovato", "Nie znaleziono lokalnego certyfikatu z podpisem własnym")
+        case .updateCheckComplete:
+            return e("检查完成。", "Check completed.", "Vérification terminée.", "Verifica completata.", "Sprawdzanie ukończone.")
+        case .updateCheckFailedFmt:
+            return e("检查失败: %@", "Check failed: %@", "Échec de la vérification : %@", "Verifica fallita: %@", "Sprawdzanie nieudane: %@")
+        case .updateCheckingStatus:
+            return e("正在查询更新状态...", "Querying update status…", "Recherche de l'état de mise à jour…", "Verifica stato aggiornamenti…", "Sprawdzanie stanu aktualizacji…")
+        case .updateCompatArchVerified:
+            return e("架构兼容 (发布者未验证)", "Architecture compatible (publisher unverified)", "Architecture compatible (éditeur non vérifié)", "Architettura compatibile (editore non verificato)", "Architektura zgodna (wydawca niezweryfikowany)")
+        case .updateCompatCurrentOk:
+            return e("当前版本已与本地环境兼容", "Current version compatible with local environment", "Version actuelle compatible avec l'environnement local", "Versione attuale compatibile con l'ambiente locale", "Bieżąca wersja jest zgodna ze środowiskiem lokalnym")
+        case .updateCompatIncompatible:
+            return e("架构或系统不兼容", "Architecture or system incompatible", "Architecture ou système incompatible", "Architettura o sistema incompatibile", "Architektura lub system niekompatybilny")
+        case .updateCompatRequirementsNotMet:
+            return e("不满足最低系统或架构要求", "Minimum system or architecture requirements not met", "Exigences minimales du système ou de l'architecture non respectées", "Requisiti minimi di sistema o architettura non soddisfatti", "Minimalne wymagania systemowe lub architektoniczne nie zostały spełnione")
+        case .updateCompatSystemCompatible:
+            return e("系统环境兼容", "System environment compatible", "Environnement système compatible", "Ambiente di sistema compatibile", "Środowisko systemowe zgodne")
+        case .updateCompatSystemIncompatible:
+            return e("不兼容", "Incompatible", "Incompatible", "Incompatibile", "Niezgodne")
+        case .updateCompatibilityDefaultReason:
+            return e("生产环境下需配置授权更新清单；禁止任意未经验证的网络下载", "Authorized update manifest required in production; unverified downloads forbidden", "Manifeste autorisé requis en production ; téléchargements arbitraires interdits", "Manifest autorizzato richiesto in produzione; vietati download non verificati", "W środowisku produkcyjnym wymagany jest autoryzowany manifest; pobieranie zabronione")
+        case .updateConsistencyConsistent:
+            return e("整套组件版本一致", "Component versions consistent", "Versions des composants cohérentes", "Versioni dei componenti coerenti", "Wersje komponentów są spójne")
+        case .updateConsistencyInconsistent:
+            return e("⚠️ 组件版本不一致", "⚠️ Component versions inconsistent", "⚠️ Versions des composants incohérentes", "⚠️ Versioni dei componenti incoerenti", "⚠️ Niespójne wersje komponentów")
+        case .updateCoreCompiledVersion:
+            return e("%@ (核心编译版)", "%@ (core compiled build)", "%@ (version compilée du cœur)", "%@ (build compilata del servizio principale)", "%@ (wersja skompilowana rdzenia)")
+        case .updateCoreVersionUnknown:
+            return e("未知 (未报告)", "Unknown (unreported)", "Inconnu (non rapporté)", "Sconosciuto (non segnalato)", "Nieznany (niezgłoszony)")
+        case .updateDrainWaitingNotice:
+            return e("⚠️ 外部更新事务处于排空等待态；延期请由管理员命令行协调。", "⚠️ External update transaction waiting for drain; contact admin for postponement.", "⚠️ Transaction de mise à jour en attente de purge ; contactez l'admin pour différer.", "⚠️ Transazione di aggiornamento in attesa di svuotamento; coordinare il rinvio da terminale.", "⚠️ Zewnętrzna transakcja aktualizacji oczekuje na opróżnienie; odroczenie z poziomu wiersza poleceń.")
+        case .updateErrCommandFailedFmt:
+            return e("命令执行错误 [%1$d]: %2$@", "Command failed [%1$d]: %2$@", "Commande échouée [%1$d] : %2$@", "Comando non riuscito [%1$d]: %2$@", "Błąd polecenia [%1$d]: %2$@")
+        case .updateErrNetworkOfflineFmt:
+            return e("网络连接失败: %@", "Network connection failed: %@", "Échec de connexion réseau : %@", "Connessione di rete non riuscita: %@", "Połączenie sieciowe nieudane: %@")
+        case .updateErrParseFmt:
+            return e("数据解析失败: %@", "Data parsing failed: %@", "Échec de l'analyse des données : %@", "Analisi dati fallita: %@", "Błąd analizy danych: %@")
+        case .updateFeatureDisabledNotice:
+            return e("操作未启用: 当前阶段真实更新下载/安装/延期入口为只读禁用状态 (unsupported)，不进行任何写入或业务状态修改。", "Operation disabled: update download/install/defer is read-only (unsupported); no writes performed.", "Opération désactivée : téléchargement/installation/report en lecture seule (non pris en charge) ; aucune modification.", "Operazione disabilitata: download/installazione/rinvio in sola lettura (non supportato); nessuna scrittura.", "Operacja wyłączona: pobieranie/instalacja/odroczenie w trybie tylko do odczytu (nieobsługiwane); brak modyfikacji.")
+        case .updateHighWatermarkNotice:
+            return e("%llu (防降级高水位，非安装版本)", "%llu (downgrade-guard watermark, not installed version)", "%llu (niveau anti-dégradation, pas la version installée)", "%llu (livello anti-degradazione, non la versione installata)", "%llu (zabezpieczenie przed obniżeniem wersji, nie wersja zainstalowana)")
+        case .updateIntroDesc:
+            return e("管理微信客服助手整套原生组件与核心服务更新，支持更新检查、候选验证、受控维护以及回滚至上一稳定版本。", "Manage updates for WeChat Support Assistant, including checks, candidate verification, maintenance and rollback.", "Gérez les mises à jour de l'Assistant WeChat : vérification, validation, maintenance et retour arrière.", "Gestisci gli aggiornamenti di WeChat Support Assistant: verifiche, convalide, manutenzione e ripristino.", "Zarządzaj aktualizacjami Asystenta WeChat: sprawdzanie, walidacja, konserwacja i przywracanie.")
+        case .updateKeepOldRecord:
+            return e("保持旧版本记录", "Keep previous version record", "Conserver l'enregistrement de version précédente", "Mantieni record versione precedente", "Zachowaj rekord poprzedniej wersji")
+        case .updateKeychainLocked:
+            return e("钥匙串处于锁定状态或未解锁", "Keychain locked or inaccessible", "Trousseau verrouillé ou inaccessible", "Portachiavi bloccato o inaccessibile", "Pęk kluczy zablokowany lub niedostępny")
+        case .updateKeychainReady:
+            return e("专用机自签名证书与钥匙串就绪 (待发布者验证通过后重签)", "Dedicated host certificate and keychain ready (re-sign after publisher verification)", "Certificat local et trousseau prêts (resignature après vérification de l'éditeur)", "Certificato locale e portachiavi pronti (rifirma dopo verifica dell'editore)", "Certyfikat i pęk kluczy gotowe (podpisz ponownie po weryfikacji wydawcy)")
+        case .updateLabelCompatibility:
+            return e("兼容性说明:", "Compatibility:", "Compatibilité :", "Compatibilità:", "Zgodność:")
+        case .updateLabelConsistency:
+            return e("组件一致性:", "Component consistency:", "Cohérence des composants :", "Coerenza componenti:", "Spójność komponentów:")
+        case .updateLabelCoreVersion:
+            return e("核心编译版本:", "Core binary version:", "Version binaire du cœur :", "Versione binaria principale:", "Wersja binarna rdzenia:")
+        case .updateLabelCurrentSuite:
+            return e("当前整套版本:", "Current release suite:", "Suite de version actuelle :", "Suite versione attuale:", "Bieżący zestaw wersji:")
+        case .updateLabelHostArch:
+            return e("宿主运行架构:", "Host architecture:", "Architecture hôte :", "Architettura host:", "Architektura hosta:")
+        case .updateLabelInstallSeq:
+            return e("整套安装序列:", "Installation sequence:", "Séquence d'installation :", "Sequenza di installazione:", "Sekwencja instalacji:")
+        case .updateLabelLocalSign:
+            return e("本机重签名:", "Local re-signing:", "Resignature locale :", "Rifirma locale:", "Lokalne ponowne podpisanie:")
+        case .updateLabelPackageSize:
+            return e("更新包大小:", "Package size:", "Taille du paquet :", "Dimensione pacchetto:", "Rozmiar pakietu:")
+        case .updateLabelPublisherVerify:
+            return e("发布者验证:", "Publisher verification:", "Vérification de l'éditeur :", "Verifica editore:", "Weryfikacja wydawcy:")
+        case .updateLabelReleaseNotes:
+            return e("版本发布说明:", "Release notes:", "Notes de version :", "Note di rilascio:", "Informacje o wydaniu:")
+        case .updateLabelRollbackEligibility:
+            return e("回滚资格与原因:", "Rollback eligibility & reason:", "Éligibilité au retour arrière :", "Idoneità al ripristino e motivo:", "Kwalifikowalność do przywrócenia i powód:")
+        case .updateLabelRollbackVersion:
+            return e("可回滚上一版本:", "Rollback version:", "Version de retour arrière :", "Versione di ripristino:", "Wersja do przywrócenia:")
+        case .updateLabelTargetVersion:
+            return e("目标版本:", "Target version:", "Version cible :", "Versione di destinazione:", "Wersja docelowa:")
+        case .updateLocalRunning:
+            return e("已在运行", "Running", "En cours d'exécution", "In esecuzione", "Działa")
+        case .updateNoCandidateNotes:
+            return e("没有待更新的候选版本。", "No pending update candidates.", "Aucune mise à jour en attente.", "Nessun aggiornamento in sospeso.", "Brak oczekujących aktualizacji.")
+        case .updateNoDetailedNotes:
+            return e("（无详细发布说明）", "(No detailed release notes)", "(Aucune note de version détaillée)", "(Nessuna nota di rilascio dettagliata)", "(Brak szczegółowych informacji o wydaniu)")
+        case .updateNoRollbackDetected:
+            return e("未检测到可回滚版本", "No rollback version detected", "Aucune version de retour arrière détectée", "Nessuna versione di ripristino rilevata", "Nie wykryto wersji do przywrócenia")
+        case .updateNotesNone:
+            return e("（暂无说明）", "(No release notes)", "(Aucune note de version)", "(Nessuna nota di rilascio)", "(Brak uwag)")
+        case .updateNullValue:
+            return e("无 (null)", "None (null)", "Aucun (null)", "Nessuno (null)", "Brak (null)")
+        case .updateOldDataSourceUntrusted:
+            return e("未提供状态/来源 (旧数据源，不可信)", "Status/source omitted (legacy source, untrusted)", "État/source non fournis (ancienne source, non fiable)", "Stato/origine omessi (vecchia sorgente, non affidabile)", "Brak stanu/źródła (stare źródło, niezaufane)")
+        case .updatePermissionsNotice:
+            return e("提示：专用机应用更新后将由本地自签名钥匙串重签名，若系统权限重置需在「设置」中重新授权。", "Note: Host apps are re-signed via local keychain; re-grant permissions in Settings if reset.", "Remarque : Réapplication de la signature locale ; réautorisez dans Réglages si réinitialisé.", "Nota: L'app viene rifirmata localmente; reimposta le autorizzazioni in Impostazioni se necessario.", "Uwaga: Aplikacja zostanie podpisana lokalnie; nadaj ponownie uprawnienia w Ustawieniach, jeśli zresetowano.")
+        case .updatePipelineSteps:
+            return e("检查 → 下载 → 验证 → 本机签名 → 等待排空 → 备份 → 安装 → 自检", "Check → Download → Verify → Local Sign → Drain → Backup → Install → Health", "Vérifier → Télécharger → Valider → Signer → Purger → Sauvegarder → Installer → Santé", "Verifica → Download → Convalida → Firma locale → Svuota → Backup → Installa → Salute", "Sprawdź → Pobierz → Weryfikuj → Podpis lokalny → Opróżnij → Kopia → Instaluj → Stan")
+        case .updatePublisherApplied:
+            return e("已生效", "Active", "Actif", "Attivo", "Aktywne")
+        case .updatePublisherFailedCompat:
+            return e("未通过兼容性核验", "Failed compatibility check", "Échec du contrôle de compatibilité", "Controllo compatibilità fallito", "Kontrola zgodności nieudana")
+        case .updatePublisherNoRootKey:
+            return e("未配置公钥根", "Public root key not configured", "Clé racine publique non configurée", "Chiave radice pubblica non configurata", "Klucz główny nie został skonfigurowany")
+        case .updatePublisherSignatureVerified:
+            return e("发布者签名已验证", "Publisher signature verified", "Signature de l'éditeur vérifiée", "Firma dell'editore verificata", "Podpis wydawcy zweryfikowany")
+        case .updatePublisherUnverifiedNoKey:
+            return e("尚未验证（无可信根公钥配置）", "Unverified (no trusted root public key)", "Non vérifié (aucune clé racine publique de confiance)", "Non verificato (nessuna chiave radice pubblica affidabile)", "Niezweryfikowano (brak zaufanego klucza głównego)")
+        case .updateReasonBackupCorrupt:
+            return e("数据库在线备份损坏或不完整", "Online database backup corrupt or incomplete", "Sauvegarde de base de données en ligne corrompue ou incomplète", "Backup del database online corrotto o incompleto", "Kopia zapasowa bazy danych online jest uszkodzona lub niekompletna")
+        case .updateReasonCannot:
+            return e("暂不可回滚", "Rollback currently unavailable", "Retour arrière non disponible", "Ripristino momentaneamente non disponibile", "Przywrócenie obecnie niedostępne")
+        case .updateReasonCheckpointRequired:
+            return e("存在未提交事务，需完全停止服务", "Uncommitted transactions exist; full service stop required", "Transactions non validées existantes ; arrêt complet requis", "Transazioni non confermate presenti; arresto completo richiesto", "Istnieją niezatwierdzone transakcje; wymagane całkowite zatrzymanie usługi")
+        case .updateReasonInstallRootUnconfigured:
+            return e("未配置程序安装目录", "Installation root directory unconfigured", "Répertoire d'installation non configuré", "Directory di installazione non configurata", "Nieskonfigurowany katalog instalacyjny")
+        case .updateReasonNoMatching:
+            return e("未找到匹配的已完成更新记录", "No matching completed update record found", "Aucun enregistrement de mise à jour terminée trouvé", "Nessun record di aggiornamento completato corrispondente", "Nie znaleziono pasującego wpisu ukończonej aktualizacji")
+        case .updateReasonNotSupported:
+            return e("该发布版本不支持整包换回", "This release does not support package rollback", "Cette version ne prend pas en charge le retour arrière complet", "Questa versione non supporta il ripristino del pacchetto", "Ta wersja nie obsługuje pełnego przywrócenia pakietu")
+        case .updateReasonPrevCorrupt:
+            return e("上一版本程序文件损坏或被篡改", "Previous release file corrupt or tampered with", "Fichier de la version précédente corrompu ou altéré", "File della versione precedente corrotto o manomesso", "Plik poprzedniej wersji uszkodzony lub zmodyfikowany")
+        case .updateReasonRecoveryRequired:
+            return e("存在中断的更新事务，需执行受控恢复", "Interrupted update transaction; controlled recovery required", "Transaction de mise à jour interrompue ; récupération contrôlée requise", "Transazione interrotta; richiesto ripristino controllato", "Przerwana transakcja aktualizacji; wymagane kontrolowane odzyskiwanie")
+        case .updateReasonRollbackStateInvalid:
+            return e("回滚状态无效", "Rollback state invalid", "État de retour arrière non valide", "Stato di ripristino non valido", "Nieprawidłowy stan przywracania")
+        case .updateReasonSafe:
+            return e("可安全回滚", "Safe to roll back", "Retour arrière sécurisé", "Ripristino sicuro", "Bezpieczne przywrócenie")
+        case .updateReasonSchemaChanged:
+            return e("数据库结构已发生变化，拒绝回滚", "Database schema changed; rollback rejected", "Schéma de base de données modifié ; retour refusé", "Schema database modificato; ripristino rifiutato", "Schemat bazy danych uległ zmianie; odmowa przywrócenia")
+        case .updateReasonStopCoreFirst:
+            return e("核心服务运行中，需先停止服务", "Core service running; must stop it first", "Service principal en cours d'exécution ; arrêt requis", "Servizio principale attivo; è necessario fermarlo prima", "Rdzeń usługi działa; należy go najpierw zatrzymać")
+        case .updateRecentCommitted:
+            return e("最近记录已提交", "Recent record committed", "Enregistrement récent validé", "Record recente confermato", "Niedawny rekord zatwierdzony")
+        case .updateRecordApplied:
+            return e("已记录生效", "Recorded and applied", "Enregistré et appliqué", "Registrato e applicato", "Zarejestrowano i zastosowano")
+        case .updateRecoveryGuideHeader:
+            return e("只读说明与受控恢复指引:", "Read-only notice and controlled recovery guide:", "Notice en lecture seule et guide de récupération contrôlée :", "Avviso di sola lettura e guida al ripristino controllato:", "Informacja tylko do odczytu i instrukcja kontrolowanego odzyskiwania:")
+        case .updateRecoveryGuideItem1:
+            return e("1. 维护标志文件已记录；实际核心进程存活状态与业务数据完整性未知。", "1. Maintenance flag recorded; actual core process status and data integrity unknown.", "1. Indicateur de maintenance enregistré ; état réel du cœur et intégrité inconnus.", "1. Flag di manutenzione registrato; stato del processo principale e integrità sconosciuti.", "1. Flaga konserwacji zarejestrowana; rzeczywisty stan rdzenia i integralność danych nieznane.")
+        case .updateRecoveryGuideItem2:
+            return e("2. 当前界面处于严格只读受控阶段，禁止通过界面清除维护标志或进行破坏性写入。", "2. Current UI strictly read-only; clearing flags or disruptive writes prohibited.", "2. Interface strictement en lecture seule ; effacement d'indicateurs ou écriture interdite.", "2. Interfaccia rigorosamente in sola lettura; vietato cancellare flag o scrivere dati.", "2. Interfejs ściśle tylko do odczytu; usuwanie flag lub zapisywanie zabronione.")
+        case .updateRecoveryGuideItem3:
+            return e("3. 真实版本回退能力当前处于 unsupported 禁用状态，不可直接回退；需要专门受控恢复。", "3. Version rollback disabled (unsupported); controlled recovery required.", "3. Retour de version désactivé (non pris en charge) ; récupération contrôlée requise.", "3. Ripristino versione disabilitato (non supportato); richiesto ripristino controllato.", "3. Przywracanie wersji wyłączone (nieobsługiwane); wymagane kontrolowane odzyskiwanie.")
+        case .updateRecoveryGuideItem4:
+            return e("4. 请核对 ~/.wechat-rpa/logs/core.log 与 host.log 获取详细故障上下文并联系管理员。", "4. Check ~/.wechat-rpa/logs/core.log and host.log for failure context and contact admin.", "4. Consultez ~/.wechat-rpa/logs/core.log et host.log pour les détails et contactez l'admin.", "4. Controlla ~/.wechat-rpa/logs/core.log e host.log per i dettagli e contatta l'amministratore.", "4. Sprawdź ~/.wechat-rpa/logs/core.log oraz host.log i skontaktuj się z administratorem.")
+        case .updateRecoveryNeededFmt:
+            return e("故障需要恢复 (%@)", "Recovery needed (%@)", "Récupération requise (%@)", "Ripristino necessario (%@)", "Wymagane odzyskanie (%@)")
+        case .updateRecoveryNormal:
+            return e("系统状态正常，无需恢复。", "System status normal; no recovery needed.", "État normal ; aucune récupération nécessaire.", "Stato normale; nessun ripristino necessario.", "Stan prawidłowy; odzyskiwanie niepotrzebne.")
+        case .updateRecoveryReasonFmt:
+            return e("- 错误原因: %@", "- Error reason: %@", "- Raison de l'erreur : %@", "- Motivo dell'errore: %@", "- Przyczyna błędu: %@")
+        case .updateRecoveryReportTitle:
+            return e("【更新异常中断，需要人工恢复】", "[Update interrupted abnormally; manual recovery required]", "[Mise à jour interrompue anormalement ; récupération manuelle requise]", "[Aggiornamento interrotto in modo anomalo; richiesto ripristino manuale]", "[Aktualizacja przerwana nieoczekiwanie; wymagane ręczne odzyskanie]")
+        case .updateRecoveryStageFmt:
+            return e("- 中断阶段: %@", "- Interrupted stage: %@", "- Étape interrompue : %@", "- Fase interrotta: %@", "- Przerwany etap: %@")
+        case .updateRecoveryTxFmt:
+            return e("- 事务 ID: %@", "- Transaction ID: %@", "- ID de transaction : %@", "- ID transazione: %@", "- ID transakcji: %@")
+        case .updateRefreshingStatus:
+            return e("正在刷新状态...", "Refreshing status…", "Actualisation de l'état…", "Aggiornamento stato…", "Odświeżanie stanu…")
+        case .updateReleaseDescUnknown:
+            return e("整套版本无法核验 (未知)", "Release suite unverifiable (unknown)", "Suite de versions non vérifiable (inconnue)", "Suite di versioni non verificabile (sconosciuta)", "Zestaw wersji niemożliwy do zweryfikowania (nieznany)")
+        case .updateReleaseNotesEmpty:
+            return e("（暂无发布说明）", "(No release notes)", "(Aucune note de version)", "(Nessuna nota di rilascio)", "(Brak informacji o wydaniu)")
+        case .updateReleaseNotesUnconfigured:
+            return e("系统未配置已批准的更新清单或分发源。为保障微信业务与专用机安全，禁止使用任意 URL 下载执行内容。", "System has no approved update manifest. To protect WeChat services, downloading from arbitrary URLs is forbidden.", "Aucun manifeste approuvé configuré. Pour la sécurité, le téléchargement depuis des URL arbitraires est interdit.", "Nessun manifest approvato configurato. Per motivi di sicurezza, è vietato scaricare da URL arbitrari.", "Brak zatwierdzonego manifestu aktualizacji. Ze względów bezpieczeństwa pobieranie z dowolnych adresów URL jest zabronione.")
+        case .updateRollbackCancelledCheckbox:
+            return e("回滚已取消：请勾选确认方可执行回滚。", "Rollback cancelled: check the box to confirm rollback.", "Retour arrière annulé : cochez la case pour confirmer.", "Ripristino annullato: seleziona la casella per confermare.", "Przywracanie anulowane: zaznacz pole wyboru, aby potwierdzić.")
+        case .updateRollbackConfirmBody:
+            return e("换回上一个已安装的版本将直接整包替换为上一个应用程序包。操作成功后需要重启应用以完成替换。确认继续吗？", "Replacing with the previously installed version swaps the entire application bundle. Restart the app after completion. Continue?", "Remplacer par la version précédente échange tout le paquet de l'application. Redémarrez après l'opération. Continuer ?", "La sostituzione con la versione precedente scambia l'intero pacchetto dell'applicazione. Riavvia dopo il completamento. Continuare?", "Zastąpienie poprzednią wersją podmienia cały pakiet aplikacji. Po zakończeniu uruchom aplikację ponownie. Kontynuować?")
+        case .updateRollbackConfirmTitleFmt:
+            return e("确认换回上一个已安装的版本（%@）？", "Replace with previous version (%@)?", "Remplacer par la version précédente (%@) ?", "Sostituire con la versione precedente (%@)?", "Zastąpić poprzednią wersją (%@)?")
+        case .updateRollbackExitCodeFmt:
+            return e("回滚未完成 (退出码 %d)", "Rollback incomplete (exit code %d)", "Retour arrière incomplet (code de sortie %d)", "Ripristino incompleto (codice di uscita %d)", "Przywracanie nieukończone (kod wyjścia %d)")
+        case .updateRollbackFailedFmt:
+            return e("回滚失败: %@", "Rollback failed: %@", "Échec du retour arrière : %@", "Ripristino fallito: %@", "Przywracanie nieudane: %@")
+        case .updateRollbackNoOutput:
+            return e("回滚失败：无输出", "Rollback failed: no output", "Échec du retour arrière : aucune sortie", "Ripristino fallito: nessun output", "Przywracanie nieudane: brak danych wyjściowych")
+        case .updateRollbackNotice:
+            return e("说明：换回上一个已安装的版本。", "Note: Replace with the previously installed version.", "Note : Remplacer par la version précédemment installée.", "Nota: Sostituisci con la versione precedentemente installata.", "Uwaga: Zastąp poprzednio zainstalowaną wersją.")
+        case .updateRollbackRecordedSafe:
+            return e("已安全记录回退状态", "Rollback state safely recorded", "État de retour arrière enregistré en toute sécurité", "Stato di ripristino registrato in sicurezza", "Stan przywrócenia bezpiecznie zarejestrowany")
+        case .updateRollbackTimeout:
+            return e("执行回滚操作超时", "Rollback operation timed out", "Délai d'attente du retour arrière dépassé", "Operazione di ripristino scaduta", "Przekroczono limit czasu przywracania")
+        case .updateRollbackingFmt:
+            return e("正在换回上一个已安装的版本 (%@)...", "Restoring previous version (%@)…", "Restauration de la version précédente (%@)…", "Ripristino versione precedente (%@)…", "Przywracanie poprzedniej wersji (%@)…")
+        case .updateSectionCandidate:
+            return e("候选版本与发布说明", "Candidate release & notes", "Version candidate et notes", "Versione candidata e note", "Wersja kandydująca i uwagi")
+        case .updateSectionCurrentEnv:
+            return e("当前运行环境 (真实读模型)", "Current environment (read model)", "Environnement actuel (modèle de lecture)", "Ambiente attuale (modello di lettura)", "Bieżące środowisko (model odczytu)")
+        case .updateSectionProgress:
+            return e("更新阶段与进度", "Update stage & progress", "Étape et progression", "Fase e avanzamento", "Etap i postęp")
+        case .updateSeqUnknown:
+            return e("未知 (未标记)", "Unknown (unmarked)", "Inconnu (non marqué)", "Sconosciuto (senza contrassegno)", "Nieznany (nieoznaczony)")
+        case .updateSigningForbidden:
+            return e("禁止重签", "Re-signing forbidden", "Resignature interdite", "Rifirma vietata", "Ponowne podpisywanie zabronione")
+        case .updateSigningForbiddenNoSource:
+            return e("未配置发布源，禁止重签", "Update source unconfigured; re-signing forbidden", "Source non configurée ; resignature interdite", "Sorgente non configurata; rifirma vietata", "Brak źródła; ponowne podpisywanie zabronione")
+        case .updateSigningNeedVerify:
+            return e("禁止重签 (需要发布者验证通过)", "Re-signing forbidden (publisher verification required)", "Resignature interdite (vérification de l'éditeur requise)", "Rifirma vietata (richiesta verifica editore)", "Ponowne podpisywanie zabronione (wymagana weryfikacja wydawcy)")
+        case .updateSigningUnavailableFmt:
+            return e("签名不可用: %@", "Signing unavailable: %@", "Signature indisponible : %@", "Firma non disponibile: %@", "Podpisywanie niedostępne: %@")
+        case .updateSourceNone:
+            return e("无来源", "No source", "Aucune source", "Nessuna origine", "Brak źródła")
+        case .updateSourceSignedPackage:
+            return e("签名发布包", "Signed release package", "Paquet signé", "Pacchetto firmato", "Podpisany pakiet")
+        case .updateSourceUnknown:
+            return e("来源未知", "Source unknown", "Source inconnue", "Origine sconosciuta", "Źródło nieznane")
+        case .updateSourceUnknownFmt:
+            return e("未知来源 [%@]", "Unknown source [%@]", "Source inconnue [%@]", "Origine sconosciuta [%@]", "Nieznane źródło [%@]")
+        case .updateStageExecuting:
+            return e("执行中", "Executing", "En cours d'exécution", "In esecuzione", "Wykonywanie")
+        case .updateStageExternalTxFmt:
+            return e("状态: %1$@ (%2$@)", "State: %1$@ (%2$@)", "État : %1$@ (%2$@)", "Stato: %1$@ (%2$@)", "Stan: %1$@ (%2$@)")
+        case .updateStageIdle:
+            return e("空闲", "Idle", "Inactif", "Inattivo", "Bezczynny")
+        case .updateStateInstalled:
+            return e("已安装", "Installed", "Installé", "Installato", "Zainstalowano")
+        case .updateStateNone:
+            return e("无状态", "No state", "Aucun état", "Nessun stato", "Brak stanu")
+        case .updateStateUnknown:
+            return e("状态未知", "State unknown", "État inconnu", "Stato sconosciuto", "Stan nieznany")
+        case .updateStateUnknownFmt:
+            return e("未知状态 [%@]", "Unknown state [%@]", "État inconnu [%@]", "Stato sconosciuto [%@]", "Nieznany stan [%@]")
+        case .updateStateVerified:
+            return e("已验证", "Verified", "Vérifié", "Verificato", "Zweryfikowano")
+        case .updateStatusFetchNoticeFmt:
+            return e("状态获取提示: %@", "Status notice: %@", "Avis d'état : %@", "Avviso di stato: %@", "Powiadomienie o stanie: %@")
+        case .updateStatusRefreshFailedFmt:
+            return e("状态刷新失败: %@", "Failed to refresh status: %@", "Échec de l'actualisation : %@", "Aggiornamento stato fallito: %@", "Odświeżanie stanu nieudane: %@")
+        case .updateStatusRefreshed:
+            return e("状态已刷新。", "Status refreshed.", "État actualisé.", "Stato aggiornato.", "Stan odświeżony.")
+        case .updateSupervisorSuppressed:
+            return e("处于维护抑制态 (核心启动被抑制)", "Maintenance suppression active (core launch suppressed)", "Suppression de maintenance active (lancement du cœur suspendu)", "Soppressione per manutenzione attiva (avvio del servizio principale bloccato)", "Tłumienie konserwacyjne aktywne (uruchamianie rdzenia wstrzymane)")
+        case .updateSupervisorUnsuppressed:
+            return e("未处于维护抑制态 (运行健康度未经验证)", "Maintenance suppression inactive (health unverified)", "Suppression de maintenance inactive (santé non vérifiée)", "Soppressione per manutenzione inattiva (stato di salute non verificato)", "Brak tłumienia konserwacyjnego (stan zdrowia niezweryfikowany)")
+        case .updateUntrustedStatusSourceFmt:
+            return e("%1$@ / %2$@ (不可信)", "%1$@ / %2$@ (untrusted)", "%1$@ / %2$@ (non fiable)", "%1$@ / %2$@ (non affidabile)", "%1$@ / %2$@ (niezaufane)")
         }
     }
 }
