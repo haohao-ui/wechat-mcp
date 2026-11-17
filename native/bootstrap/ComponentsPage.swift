@@ -488,9 +488,9 @@ public final class ComponentsPageController: NSViewController {
 
     @objc private func handleBannerAction() {
         let alert = NSAlert()
-        alert.messageText = "横幅操作触发"
-        alert.informativeText = "成功响应横幅右侧按钮动作。"
-        alert.addButton(withTitle: "好的")
+        alert.messageText = L10n.t(.componentsBannerAlertTitle)
+        alert.informativeText = L10n.t(.componentsBannerAlertMsg)
+        alert.addButton(withTitle: L10n.t(.actionOK))
         alert.runModal()
     }
 
