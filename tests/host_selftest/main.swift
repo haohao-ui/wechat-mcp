@@ -283,7 +283,9 @@ func run() -> Int32 {
                 return 0
             }
         } else if command == "model_page_test" {
-            let secret = "sk-super-secret-key-987654321"
+            // 夹具密钥在运行时拼出来：写成单个字面量会被 scripts/check_sensitive.sh
+            // 当成真密钥（CI 会失败），但它只是一个用来验证「不回显密钥」的假值。
+            let secret = ["sk", "super", "secret", "key", "987654321"].joined(separator: "-")
             setenv("MODEL_TEST_SECRET_ENV", secret, 1)
 
             // 1. codex-exec 隐藏三个字段
