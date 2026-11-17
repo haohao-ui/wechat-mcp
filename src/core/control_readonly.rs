@@ -150,7 +150,7 @@ pub(super) fn emit_sessions<W: Write>(
             {
                 continue;
             }
-            let mut session = json!({"contact_id": id, "display_name": name, "kind": kind,
+            let mut session = json!({"session_id": id, "contact_id": id, "display_name": name, "kind": kind,
                 "unread": null, "message_count": count, "last_message_at_ms": last_at});
             session
                 .as_object_mut()
@@ -290,7 +290,7 @@ fn session_state(
         };
     // Don't pass health details through: they can contain raw upstream errors.
     Ok(
-        json!({"auto_reply_enabled": enabled, "auto_replying": auto_replying, "handoff": handoff,
+        json!({"auto_reply_enabled": enabled, "auto_replying": auto_replying, "handoff": handoff, "reply_mode": handoff.map(|v| if v {"human"} else {"bot"}),
         "handling": if handoff == Some(true) {"handoff"} else if ignored {"ignored"} else if enabled {"auto_reply"} else {"record_only"}}),
     )
 }
@@ -657,5 +657,96 @@ mod tests {
             session_state(&conn, &cfg, &id, "Alice", "group", true).unwrap()["auto_reply_enabled"],
             false
         );
+    }
+    #[test]
+    fn session_handoff_switch_repeat_unknown_restart_and_isolation() {
+        let f = Fixture::new();
+        let store = HistoryStore::open(&f.root).unwrap();
+        let id = store
+            .ensure_contact(
+                "account_a",
+                &json!({"recipient":"Alice", "kind":"private"}),
+                false,
+            )
+            .unwrap();
+        let foreign = store
+            .ensure_contact(
+                "account_b",
+                &json!({"recipient":"Alice", "kind":"private"}),
+                false,
+            )
+            .unwrap();
+        drop(store);
+        for to in ["human", "human", "bot", "bot", "human"] {
+            let (code, state) = f.run("session-handoff", json!({"session_id":id, "to":to}));
+            assert_eq!(code, 0, "{state}");
+            assert_eq!(state["data"]["handoff"], to == "human");
+            assert_eq!(state["data"]["reply_mode"], to);
+            // Every invocation reloads config / DB from disk, with no retained state.
+            let detail = f.run("session-detail", json!({"contact_id": id})).1;
+            assert_eq!(detail["data"]["session"]["handoff"], to == "human");
+            assert_eq!(detail["data"]["session"]["reply_mode"], to);
+            let list = f.run("sessions-list", json!({})).1;
+            assert_eq!(list["data"]["sessions"][0]["session_id"], id);
+            if to == "human" {
+                assert_eq!(detail["data"]["session"]["auto_replying"], false);
+            }
+        }
+        let marker = f.root.join("sessions").join(&id).join("handoff.json");
+        assert_eq!(
+            fs::metadata(&marker).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let before = files(&f.root);
+        for req in [
+            json!({"session_id":"missing", "to":"human"}),
+            json!({"session_id":foreign, "to":"human"}),
+            json!({"session_id":id, "to":"human", "account_id":"account_b"}),
+        ] {
+            assert_eq!(
+                f.run("session-handoff", req).1["error"]["code"],
+                "not_found"
+            );
+        }
+        for req in [
+            json!({}),
+            json!({"session_id":"../escape", "to":"human"}),
+            json!({"session_id":id,"to":"invalid"}),
+            json!({"session_id":id,"to":"human","account_id":1}),
+        ] {
+            assert_eq!(f.run("session-handoff", req).0, 2);
+        }
+        assert_eq!(files(&f.root), before);
+        // Simulated application restart: reconstruct both store and BotService.
+        let cfg = BotConfig::load(&f.config).unwrap();
+        let mut child_cfg = cfg.clone();
+        child_cfg.state_dir = f.root.join("sessions").join(&id);
+        let _child =
+            crate::core::turns::BotService::new(child_cfg, None, None, None, None, None).unwrap();
+        assert!(marker.exists());
+        assert_eq!(
+            f.run("session-detail", json!({"contact_id":id})).1["data"]["session"]["handoff"],
+            true
+        );
+    }
+
+    #[test]
+    fn session_handoff_rejects_symlink_and_hides_storage_error() {
+        let f = Fixture::new();
+        let store = HistoryStore::open(&f.root).unwrap();
+        let id = store
+            .ensure_contact(
+                "account_a",
+                &json!({"recipient":"Alice", "kind":"private"}),
+                false,
+            )
+            .unwrap();
+        let outside = f.root.join("outside");
+        fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, f.root.join("sessions")).unwrap();
+        let result = f.run("session-handoff", json!({"session_id":id,"to":"human"}));
+        assert_eq!(result.0, 1);
+        assert_eq!(result.1["error"]["message"], "session change unavailable");
+        assert_eq!(fs::read_dir(outside).unwrap().count(), 0);
     }
 }

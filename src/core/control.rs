@@ -9,6 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::core::config::BotConfig;
 use crate::core::state::write_private;
 
+#[path = "control_handoff.rs"]
+mod handoff;
 #[path = "control_readonly.rs"]
 mod readonly;
 
@@ -778,7 +780,7 @@ pub fn execute_control_full_with_paths<W1: std::io::Write, W2: std::io::Write>(
     if action == "-h" || action == "--help" {
         let _ = writeln!(
             stdout,
-            "Usage: wechat-mcp control <status|start|stop|pause|resume|resume-session|config-check|model-probe|calibrate|migrate-history|history-status|merge-contact|unmerge-contact|history-backup|contacts-list|mcp-info|contacts-sync|open-api-check|open-api-token> [--config <path>]"
+            "Usage: wechat-mcp control <status|start|stop|pause|resume|resume-session|session-handoff|sessions-list|session-detail|config-check|model-probe|calibrate|migrate-history|history-status|merge-contact|unmerge-contact|history-backup|contacts-list|mcp-info|contacts-sync|open-api-check|open-api-token> [--config <path>]"
         );
         return 0;
     }
@@ -2316,7 +2318,10 @@ pub fn execute_control_full_with_paths<W1: std::io::Write, W2: std::io::Write>(
         }
         action
             if action.starts_with("brain-")
-                || matches!(action, "sessions-list" | "session-detail") =>
+                || matches!(
+                    action,
+                    "sessions-list" | "session-detail" | "session-handoff"
+                ) =>
         {
             execute_brain_control(action, args, stdout, stderr, default_config_path, paths)
         }
@@ -2794,6 +2799,10 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
     paths: &ControlPaths,
 ) -> i32 {
     use crate::core::brain_profiles::*;
+    let session_action = matches!(
+        action,
+        "sessions-list" | "session-detail" | "session-handoff"
+    );
     let mut config_file: Option<PathBuf> = None;
     let mut request_json: Option<String> = None;
     let mut idx = 1;
@@ -2826,7 +2835,11 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
             return emit_brain_error(
                 stdout,
                 "invalid_arguments",
-                &format!("config error: {e:#}"),
+                &if session_action {
+                    "config unavailable or invalid".into()
+                } else {
+                    format!("config error: {e:#}")
+                },
                 false,
                 None,
                 2,
@@ -2857,7 +2870,11 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
                 return emit_brain_error(
                     stdout,
                     "invalid_arguments",
-                    &format!("invalid request json: {e:#}"),
+                    &if session_action {
+                        "invalid request json".into()
+                    } else {
+                        format!("invalid request json: {e:#}")
+                    },
                     false,
                     None,
                     2,
@@ -2874,7 +2891,7 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
         }
     }
 
-    if readonly_action && !req_val.is_null() && !req_val.is_object() {
+    if (readonly_action || session_action) && !req_val.is_null() && !req_val.is_object() {
         return emit_brain_error(
             stdout,
             "invalid_arguments",
@@ -2884,7 +2901,9 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
             2,
         );
     }
-    if req_val.get("account_id").is_some_and(|v| !v.is_string()) && readonly_action {
+    if req_val.get("account_id").is_some_and(|v| !v.is_string())
+        && (readonly_action || session_action)
+    {
         return emit_brain_error(
             stdout,
             "invalid_arguments",
@@ -2894,7 +2913,10 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
             2,
         );
     }
-    if matches!(action, "sessions-list" | "session-detail") {
+    if session_action {
+        if action == "session-handoff" {
+            return handoff::execute(&cfg, &req_val, stdout);
+        }
         return readonly::emit_sessions(action, &cfg, &req_val, paths, stdout);
     }
 

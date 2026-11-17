@@ -83,6 +83,7 @@ public enum L10nKey: String, CaseIterable {
     // 会话
     case sessionsListBox, sessionsEmpty, kindGroup, kindPrivate
     case modeAuto, modeManual, modeExcluded, modePaused
+    case handoffConfirmBody, resumeConfirmBody, handoffChangeFailed
     case actionHandoff, handoffUnsupported, handoffRequested, resumeRequested
     case detailSelectHint, detailUnavailable, detailEmpty, visibleOnlyNote, sessionsApiUnavailable
     case messageFromCustomer, messageFromUs
@@ -761,6 +762,12 @@ public enum L10n {
             return e("已暂停", "Paused", "En pause", "In pausa", "Wstrzymane")
         case .actionHandoff:
             return e("转人工", "Hand over to a person", "Passer à un humain", "Passa a una persona", "Przekaż człowiekowi")
+        case .handoffConfirmBody:
+            return e("将 %@ 转人工？此会话会停止自动回复，直到手动恢复。已经发起的发送无法撤回。", "Hand %@ over to a person? Auto-replies stop until resumed. A send already started cannot be recalled.", "Passer %@ à un humain ? Les réponses automatiques restent arrêtées jusqu’à la reprise. Un envoi déjà lancé ne peut être annulé.", "Passare %@ a una persona? Le risposte automatiche restano ferme fino alla ripresa. Un invio già avviato non può essere annullato.", "Przekazać %@ człowiekowi? Automatyczne odpowiedzi zostaną zatrzymane do wznowienia. Rozpoczętej wysyłki nie można cofnąć.")
+        case .resumeConfirmBody:
+            return e("为 %@ 恢复自动回复？仍需核心服务在线且满足会话规则。", "Resume auto-replies for %@? The core must be online and conversation rules still apply.", "Reprendre les réponses automatiques pour %@ ? Le service doit être en ligne et les règles restent applicables.", "Riprendere le risposte automatiche per %@? Il servizio deve essere online e le regole restano valide.", "Wznowić automatyczne odpowiedzi dla %@? Usługa musi być online, a reguły rozmowy nadal obowiązują.")
+        case .handoffChangeFailed:
+            return e("未能确认会话状态是否已更改。请刷新查看后再试。", "The conversation change could not be confirmed. Refresh before trying again.", "Le changement n’a pas pu être confirmé. Actualisez avant de réessayer.", "La modifica non è stata confermata. Aggiorna prima di riprovare.", "Nie można potwierdzić zmiany. Odśwież przed ponowną próbą.")
         case .handoffUnsupported:
             return e("当前核心服务不支持从界面转人工，这个会话没有变化。", "The current core service cannot hand a conversation over from this screen. Nothing was changed.", "Le service principal actuel ne permet pas de passer la main depuis cet écran. Rien n'a été modifié.", "Il servizio principale attuale non consente il passaggio a una persona da questa schermata. Nulla è stato modificato.", "Bieżąca usługa główna nie pozwala przekazać rozmowy z tego ekranu. Nic nie zostało zmienione.")
         case .handoffRequested:
