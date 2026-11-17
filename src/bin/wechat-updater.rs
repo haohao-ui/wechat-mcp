@@ -169,33 +169,38 @@ fn main() {
                 println!("{}", serde_json::json!({"error":"invalid_config"}));
                 std::process::exit(2);
             };
-            let Some(root) = cfg.install_root else {
+            let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
                 println!(
                     "{}",
-                    serde_json::json!({"version":null,"installed_at":null,"can_rollback":false,"reason":"install_root_unconfigured"})
+                    serde_json::json!({"version":null,"installed_at":null,"can_rollback":false,"reason":"无法确定应用安装位置。"})
                 );
                 std::process::exit(1);
             };
+            let rollback = wechat_mcp::updater::app_rollback::AppRollback::for_home(&home);
             if action == "rollback-status" {
                 println!(
                     "{}",
-                    serde_json::to_string(&wechat_mcp::updater::manual_rollback::status(
-                        &root,
-                        &cfg.state_dir
-                    ))
-                    .unwrap()
+                    serde_json::to_string(&rollback.status(&cfg.state_dir)).unwrap()
                 );
             } else if action == "rollback-recover" {
-                if wechat_mcp::updater::manual_rollback::recover(&root, &cfg.state_dir).is_err() {
-                    println!(
-                        "{}",
-                        serde_json::json!({"error":"rollback_recovery_failed"})
-                    );
-                    std::process::exit(1);
-                }
+                let j = match rollback.recover(&cfg.state_dir) {
+                    Ok(j) => j,
+                    Err(_) => {
+                        println!(
+                            "{}",
+                            serde_json::json!({"error":"rollback_recovery_failed"})
+                        );
+                        std::process::exit(1);
+                    }
+                };
+                let committed = j.stage == TransactionStage::Committed;
                 println!(
                     "{}",
-                    serde_json::json!({"status":"current_restored","restart_required":true})
+                    serde_json::json!({
+                        "status": if committed { "rolled_back" } else { "current_restored" },
+                        "version": if committed { &j.target_release_id } else { &j.source_release_id },
+                        "transaction_id":j.transaction_id,"restart_required":true
+                    })
                 );
             } else {
                 let Some(expected) = expected else {
@@ -209,12 +214,7 @@ fn main() {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
-                match wechat_mcp::updater::manual_rollback::execute(
-                    &root,
-                    &cfg.state_dir,
-                    &expected,
-                    now,
-                ) {
+                match rollback.execute(&cfg.state_dir, &expected, now) {
                     Ok(j) => println!(
                         "{}",
                         serde_json::json!({"status":"rolled_back","version":j.target_release_id,"transaction_id":j.transaction_id,"restart_required":true})
@@ -222,7 +222,7 @@ fn main() {
                     Err(_) => {
                         println!(
                             "{}",
-                            serde_json::json!({"error":"rollback_failed","details":wechat_mcp::updater::manual_rollback::status(&root, &cfg.state_dir)})
+                            serde_json::json!({"error":"rollback_failed","details":rollback.status(&cfg.state_dir)})
                         );
                         std::process::exit(1);
                     }

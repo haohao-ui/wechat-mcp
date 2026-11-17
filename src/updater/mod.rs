@@ -1,3 +1,4 @@
+pub mod app_rollback;
 pub mod executor;
 pub mod journal;
 pub mod manifest;
