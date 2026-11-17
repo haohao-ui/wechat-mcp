@@ -2,6 +2,30 @@
 import Foundation
 import AppKit
 
+// MARK: - Design Tokens (待换成 Theme)
+private enum ContactsPageTokens {
+    static let brand = NSColor(red: 0x12/255.0, green: 0xA3/255.0, blue: 0x7A/255.0, alpha: 1.0)
+    static let brandDeep = NSColor(red: 0x0A/255.0, green: 0x5B/255.0, blue: 0x6B/255.0, alpha: 1.0)
+    static let statusOkText = NSColor(red: 0x12/255.0, green: 0x79/255.0, blue: 0x54/255.0, alpha: 1.0)
+    static let statusOkBg = NSColor(red: 0xE4/255.0, green: 0xF5/255.0, blue: 0xEF/255.0, alpha: 1.0)
+    static let statusWarnText = NSColor(red: 0x92/255.0, green: 0x5C/255.0, blue: 0x07/255.0, alpha: 1.0)
+    static let statusWarnBg = NSColor(red: 0xFB/255.0, green: 0xF1/255.0, blue: 0xE2/255.0, alpha: 1.0)
+    static let statusErrText = NSColor(red: 0xD3/255.0, green: 0x2F/255.0, blue: 0x2F/255.0, alpha: 1.0)
+    static let statusErrBg = NSColor(red: 0xFC/255.0, green: 0xEB/255.0, blue: 0xEB/255.0, alpha: 1.0)
+    static let statusOffText = NSColor(red: 0x6C/255.0, green: 0x70/255.0, blue: 0x74/255.0, alpha: 1.0)
+    static let statusOffBg = NSColor(red: 0xF0/255.0, green: 0xF1/255.0, blue: 0xF2/255.0, alpha: 1.0)
+    static let fieldBorder = NSColor(red: 0xC9/255.0, green: 0xCD/255.0, blue: 0xD4/255.0, alpha: 1.0)
+}
+
+// MARK: - Strings (待迁入 L10n)
+private enum ContactsPageStrings {
+    static let emptyAll = "暂无联系人数据，可点击上方【初始化通讯录】或【快速同步】拉取数据"
+    static let emptyCategory = "当前分类下暂无联系人"
+    static let selectDetailPrompt = "选择左侧联系人查看详细信息"
+    static let syncStarted = "正在启动通讯录同步..."
+    static let personaBinding = "绑定客服角色"
+}
+
 /// 页面逻辑的校验错误（不要让 String 直接实现 Error：设备上的 Swift 5.7 不支持 @retroactive）
 public struct PageError: Error, CustomStringConvertible, Equatable {
     public let message: String
@@ -284,6 +308,7 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
     private let reviewNoticeLabel = NSTextField(wrappingLabelWithString: "")
     private let categorySegment = NSSegmentedControl()
     private let contactsTable = NSTableView()
+    private let emptyLabel = NSTextField(wrappingLabelWithString: "")
 
     // Detail Panel
     private let detailBox = NSBox()
@@ -418,6 +443,14 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         contactsTable.rowHeight = 32
         tableScroll.documentView = contactsTable
 
+        // 空态提示
+        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
+        emptyLabel.alignment = .center
+        emptyLabel.textColor = .secondaryLabelColor
+        emptyLabel.font = NSFont.systemFont(ofSize: 13)
+        emptyLabel.isHidden = true
+        tableScroll.addSubview(emptyLabel)
+
         // 右侧详情
         setupDetailBox()
 
@@ -444,7 +477,10 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
             contentRow.heightAnchor.constraint(greaterThanOrEqualToConstant: 240),
             tableScroll.heightAnchor.constraint(equalTo: contentRow.heightAnchor),
             tableScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 380),
-            detailBox.widthAnchor.constraint(equalToConstant: 230)
+            detailBox.widthAnchor.constraint(equalToConstant: 230),
+            emptyLabel.centerXAnchor.constraint(equalTo: tableScroll.centerXAnchor),
+            emptyLabel.centerYAnchor.constraint(equalTo: tableScroll.centerYAnchor),
+            emptyLabel.widthAnchor.constraint(lessThanOrEqualTo: tableScroll.widthAnchor, constant: -32)
         ])
     }
 
@@ -566,6 +602,12 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
             displayedContacts = allContacts.filter { $0.category == "personal" && $0.handling != "ignored" }
         }
         contactsTable.reloadData()
+        if displayedContacts.isEmpty {
+            emptyLabel.stringValue = allContacts.isEmpty ? ContactsPageStrings.emptyAll : ContactsPageStrings.emptyCategory
+            emptyLabel.isHidden = false
+        } else {
+            emptyLabel.isHidden = true
+        }
         clearDetail()
     }
 

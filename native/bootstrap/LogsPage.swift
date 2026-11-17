@@ -2,13 +2,42 @@
 import Foundation
 import AppKit
 
+// MARK: - Design Tokens (待换成 Theme)
+private enum LogsPageTokens {
+    static let brand = NSColor(red: 0x12/255.0, green: 0xA3/255.0, blue: 0x7A/255.0, alpha: 1.0)
+    static let brandDeep = NSColor(red: 0x0A/255.0, green: 0x5B/255.0, blue: 0x6B/255.0, alpha: 1.0)
+    static let statusOkText = NSColor(red: 0x12/255.0, green: 0x79/255.0, blue: 0x54/255.0, alpha: 1.0)
+    static let statusOkBg = NSColor(red: 0xE4/255.0, green: 0xF5/255.0, blue: 0xEF/255.0, alpha: 1.0)
+    static let statusWarnText = NSColor(red: 0x92/255.0, green: 0x5C/255.0, blue: 0x07/255.0, alpha: 1.0)
+    static let statusWarnBg = NSColor(red: 0xFB/255.0, green: 0xF1/255.0, blue: 0xE2/255.0, alpha: 1.0)
+    static let statusErrText = NSColor(red: 0xD3/255.0, green: 0x2F/255.0, blue: 0x2F/255.0, alpha: 1.0)
+    static let statusErrBg = NSColor(red: 0xFC/255.0, green: 0xEB/255.0, blue: 0xEB/255.0, alpha: 1.0)
+    static let statusOffText = NSColor(red: 0x6C/255.0, green: 0x70/255.0, blue: 0x74/255.0, alpha: 1.0)
+    static let statusOffBg = NSColor(red: 0xF0/255.0, green: 0xF1/255.0, blue: 0xF2/255.0, alpha: 1.0)
+    static let fieldBorder = NSColor(red: 0xC9/255.0, green: 0xCD/255.0, blue: 0xD4/255.0, alpha: 1.0)
+}
+
+// MARK: - Strings (待迁入 L10n)
+private enum LogsPageStrings {
+    static let openLogsTitle = "打开日志文件夹"
+    static let openAttachmentsTitle = "打开附件文件夹"
+    static let copyDiagnosticsTitle = "复制诊断信息"
+    static let exportLogsTitle = "导出日志..."
+    static let diagnosticsCopied = "诊断信息已复制到剪贴板"
+    static let emptyLogsTitle = "当前暂无日志记录"
+    static let emptyFilterTitle = "无匹配日志，请尝试更换筛选条件"
+    static let exportSuccess = "日志已导出"
+    static let exportFailed = "导出日志失败"
+}
+
 public final class LogsPageController: NSViewController {
     private let context: StatusPanelController
 
     // Top action bar
-    private let openLogsButton = NSButton(title: "打开日志文件夹", target: nil, action: nil)
-    private let openAttachmentsButton = NSButton(title: "打开附件文件夹", target: nil, action: nil)
-    private let copyDiagnosticsButton = NSButton(title: "复制诊断信息", target: nil, action: nil)
+    private let openLogsButton = NSButton(title: LogsPageStrings.openLogsTitle, target: nil, action: nil)
+    private let openAttachmentsButton = NSButton(title: LogsPageStrings.openAttachmentsTitle, target: nil, action: nil)
+    private let copyDiagnosticsButton = NSButton(title: LogsPageStrings.copyDiagnosticsTitle, target: nil, action: nil)
+    private let exportLogsButton = NSButton(title: LogsPageStrings.exportLogsTitle, target: nil, action: nil)
     private let copyMessageLabel = NSTextField(labelWithString: "")
 
     // Controls
@@ -20,6 +49,7 @@ public final class LogsPageController: NSViewController {
 
     // Log display
     private let textView = NSTextView()
+    private let emptyStateLabel = NSTextField(wrappingLabelWithString: "")
     private var allLines: [String] = []
     private var currentTail: LogTail?
     private var tailTimer: Timer?
@@ -69,10 +99,13 @@ public final class LogsPageController: NSViewController {
         openAttachmentsButton.action = #selector(handleOpenAttachments)
         copyDiagnosticsButton.target = self
         copyDiagnosticsButton.action = #selector(handleCopyDiagnostics)
+        exportLogsButton.target = self
+        exportLogsButton.action = #selector(handleExportLogs)
 
         topBar.addArrangedSubview(openLogsButton)
         topBar.addArrangedSubview(openAttachmentsButton)
         topBar.addArrangedSubview(copyDiagnosticsButton)
+        topBar.addArrangedSubview(exportLogsButton)
         topBar.addArrangedSubview(copyMessageLabel)
         mainStack.addArrangedSubview(topBar)
 
@@ -122,13 +155,23 @@ public final class LogsPageController: NSViewController {
         scrollView.documentView = textView
         mainStack.addArrangedSubview(scrollView)
 
+        emptyStateLabel.translatesAutoresizingMaskIntoConstraints = false
+        emptyStateLabel.font = NSFont.systemFont(ofSize: 13)
+        emptyStateLabel.textColor = .secondaryLabelColor
+        emptyStateLabel.alignment = .center
+        emptyStateLabel.isHidden = true
+        scrollView.addSubview(emptyStateLabel)
+
         NSLayoutConstraint.activate([
             mainStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
             mainStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
             mainStack.topAnchor.constraint(equalTo: view.topAnchor, constant: 16),
             mainStack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16),
             scrollView.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
-            scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 500)
+            scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 500),
+            emptyStateLabel.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
+            emptyStateLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
+            emptyStateLabel.widthAnchor.constraint(lessThanOrEqualTo: scrollView.widthAnchor, constant: -32)
         ])
     }
 
@@ -177,6 +220,12 @@ public final class LogsPageController: NSViewController {
 
         textView.string = filtered.joined(separator: "\n")
         textView.scrollToEndOfDocument(nil)
+        if filtered.isEmpty {
+            emptyStateLabel.stringValue = allLines.isEmpty ? LogsPageStrings.emptyLogsTitle : LogsPageStrings.emptyFilterTitle
+            emptyStateLabel.isHidden = false
+        } else {
+            emptyStateLabel.isHidden = true
+        }
     }
 
     @objc private func handleSourceChanged() {
@@ -195,6 +244,8 @@ public final class LogsPageController: NSViewController {
     @objc private func handleClear() {
         allLines.removeAll()
         textView.string = ""
+        emptyStateLabel.stringValue = LogsPageStrings.emptyLogsTitle
+        emptyStateLabel.isHidden = false
     }
 
     @objc private func handleOpenLogs() {
@@ -207,10 +258,31 @@ public final class LogsPageController: NSViewController {
 
     @objc private func handleCopyDiagnostics() {
         context.copyDiagnostics()
-        copyMessageLabel.stringValue = "诊断信息已复制到剪贴板"
+        copyMessageLabel.stringValue = LogsPageStrings.diagnosticsCopied
         copyMessageLabel.textColor = .systemGreen
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
             self?.copyMessageLabel.stringValue = ""
+        }
+    }
+
+    @objc private func handleExportLogs() {
+        let savePanel = NSSavePanel()
+        savePanel.canCreateDirectories = true
+        savePanel.nameFieldStringValue = "wechat-rpa-logs-\(Int(Date().timeIntervalSince1970)).txt"
+        savePanel.begin { [weak self] response in
+            guard response == .OK, let url = savePanel.url, let self = self else { return }
+            let content = self.allLines.joined(separator: "\n")
+            do {
+                try content.write(to: url, atomically: true, encoding: .utf8)
+                self.copyMessageLabel.stringValue = LogsPageStrings.exportSuccess
+                self.copyMessageLabel.textColor = .systemGreen
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+                    self?.copyMessageLabel.stringValue = ""
+                }
+            } catch {
+                self.copyMessageLabel.stringValue = "\(LogsPageStrings.exportFailed): \(error.localizedDescription)"
+                self.copyMessageLabel.textColor = .systemRed
+            }
         }
     }
 }

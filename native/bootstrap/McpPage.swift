@@ -2,6 +2,37 @@
 import Foundation
 import AppKit
 
+// MARK: - Design Tokens (待换成 Theme)
+private enum McpPageTokens {
+    static let brand = NSColor(red: 0x12/255.0, green: 0xA3/255.0, blue: 0x7A/255.0, alpha: 1.0)
+    static let brandDeep = NSColor(red: 0x0A/255.0, green: 0x5B/255.0, blue: 0x6B/255.0, alpha: 1.0)
+    static let statusOkText = NSColor(red: 0x12/255.0, green: 0x79/255.0, blue: 0x54/255.0, alpha: 1.0)
+    static let statusOkBg = NSColor(red: 0xE4/255.0, green: 0xF5/255.0, blue: 0xEF/255.0, alpha: 1.0)
+    static let statusWarnText = NSColor(red: 0x92/255.0, green: 0x5C/255.0, blue: 0x07/255.0, alpha: 1.0)
+    static let statusWarnBg = NSColor(red: 0xFB/255.0, green: 0xF1/255.0, blue: 0xE2/255.0, alpha: 1.0)
+    static let statusErrText = NSColor(red: 0xD3/255.0, green: 0x2F/255.0, blue: 0x2F/255.0, alpha: 1.0)
+    static let statusErrBg = NSColor(red: 0xFC/255.0, green: 0xEB/255.0, blue: 0xEB/255.0, alpha: 1.0)
+    static let statusOffText = NSColor(red: 0x6C/255.0, green: 0x70/255.0, blue: 0x74/255.0, alpha: 1.0)
+    static let statusOffBg = NSColor(red: 0xF0/255.0, green: 0xF1/255.0, blue: 0xF2/255.0, alpha: 1.0)
+    static let fieldBorder = NSColor(red: 0xC9/255.0, green: 0xCD/255.0, blue: 0xD4/255.0, alpha: 1.0)
+}
+
+// MARK: - Strings (待迁入 L10n)
+private enum McpPageStrings {
+    static let modeBuiltin = "内置回复 (调用配置好的大模型生成回复)"
+    static let modeExternal = "外部回复 (MCP 接管)"
+    static let sectionReplyMode = "回复方式与决策"
+    static let saveSettingsBtn = "保存回复设置"
+    static let saveSuccess = "回复设置已保存"
+    static let goToPersona = "前往客服角色页面"
+    static let pointerText = "角色定义、知识与话术请前往【客服角色】页面管理；本页面仅管理回复模式、外部超时与对外接口连接。"
+    static let rotateTokenTitle = "重新生成对外接口访问令牌？"
+    static let rotateTokenInfo = "重新生成后将立即生效，当前连接的外部服务将会断开。确定重新生成吗？"
+    static let openApiBusy = "已有客户端连接中"
+    static let emptyEndpoints = "暂无可用服务端点"
+    static let emptyTools = "暂无可用 MCP 工具"
+}
+
 public struct McpExternalBrainInfo: Codable {
     public let timeoutSeconds: Int?
     public let timeoutAction: String?
@@ -36,13 +67,33 @@ public struct McpEndpointInfo: Codable {
     public let value: String
     public let ok: Bool
     public let detail: String
+    public let busy: Bool?
 
-    public init(id: String, label: String, value: String, ok: Bool, detail: String) {
+    enum CodingKeys: String, CodingKey {
+        case id
+        case label
+        case value
+        case ok
+        case detail
+        case busy
+    }
+
+    public init(id: String, label: String, value: String, ok: Bool, detail: String, busy: Bool? = nil) {
         self.id = id
         self.label = label
         self.value = value
         self.ok = ok
         self.detail = detail
+        self.busy = busy
+    }
+
+    public var isBusy: Bool {
+        if let b = busy { return b }
+        if id == "open_api" {
+            let lower = detail.lowercased()
+            return detail.contains("已有") || detail.contains("连接中") || detail.contains("忙碌") || lower.contains("busy")
+        }
+        return false
     }
 }
 
@@ -151,7 +202,7 @@ public struct McpPageLogic {
     }
 
     public static func brainPagePointerText() -> String {
-        return "角色定义、知识与话术请前往【大脑】页面管理；本页面仅管理大脑模式、外部超时与对外接口连接。"
+        return McpPageStrings.pointerText
     }
 
     public static func getPrimaryNonLoopbackIPv4() -> String? {
@@ -184,14 +235,14 @@ public final class McpPageController: NSViewController {
     private let context: StatusPanelController
 
     // UI - Brain Selection
-    private let modeBuiltinRadio = NSButton(radioButtonWithTitle: "内置大脑 (调用配置好的大模型生成回复)", target: nil, action: nil)
-    private let modeExternalRadio = NSButton(radioButtonWithTitle: "外部大脑 (MCP 协议接管消息轮询与回复决策)", target: nil, action: nil)
+    private let modeBuiltinRadio = NSButton(radioButtonWithTitle: McpPageStrings.modeBuiltin, target: nil, action: nil)
+    private let modeExternalRadio = NSButton(radioButtonWithTitle: McpPageStrings.modeExternal, target: nil, action: nil)
 
     // UI - External Brain Parameters
     private let timeoutField = NSTextField()
     private let timeoutActionPopup = NSPopUpButton()
     private let queueMinutesField = NSTextField()
-    private let saveBrainButton = NSButton(title: "保存大脑设置", target: nil, action: nil)
+    private let saveBrainButton = NSButton(title: McpPageStrings.saveSettingsBtn, target: nil, action: nil)
     private let brainStatusMessageLabel = NSTextField(wrappingLabelWithString: "")
 
     // UI - Open API Section
@@ -250,8 +301,8 @@ public final class McpPageController: NSViewController {
         contentStack.spacing = 16
         contentStack.translatesAutoresizingMaskIntoConstraints = false
 
-        // 1. 回复决策（大脑模式）
-        let brainBox = createSectionBox(title: "回复决策大脑")
+        // 1. 回复决策（回复方式）
+        let brainBox = createSectionBox(title: McpPageStrings.sectionReplyMode)
         let brainStack = NSStackView()
         brainStack.orientation = .vertical
         brainStack.alignment = .leading
@@ -266,7 +317,7 @@ public final class McpPageController: NSViewController {
         brainStack.addArrangedSubview(modeBuiltinRadio)
         brainStack.addArrangedSubview(modeExternalRadio)
 
-        // 外部大脑参数
+        // 外部回复参数
         let extParamsGrid = NSGridView(views: [
             [NSTextField(labelWithString: "等待回复 (timeout_seconds):"), timeoutField, NSTextField(labelWithString: "1–3600 秒 (默认 120)")],
             [NSTextField(labelWithString: "超时后动作 (timeout_action):"), timeoutActionPopup, NSTextField(labelWithString: "skip=跳过, handoff=转人工, builtin=改用内置")],
@@ -293,7 +344,7 @@ public final class McpPageController: NSViewController {
         let pointerLabel = NSTextField(wrappingLabelWithString: McpPageLogic.brainPagePointerText())
         pointerLabel.font = NSFont.systemFont(ofSize: 11)
         pointerLabel.textColor = .secondaryLabelColor
-        let goToBrainBtn = NSButton(title: "前往大脑页面", target: self, action: #selector(handleGoToBrain))
+        let goToBrainBtn = NSButton(title: McpPageStrings.goToPersona, target: self, action: #selector(handleGoToBrain))
         let pointerRow = NSStackView(views: [pointerLabel, goToBrainBtn])
         pointerRow.orientation = .horizontal
         pointerRow.spacing = 8
@@ -552,7 +603,7 @@ public final class McpPageController: NSViewController {
         case .success(let updated):
             do {
                 try context.persistConfig(updated)
-                brainStatusMessageLabel.stringValue = "大脑设置已保存"
+                brainStatusMessageLabel.stringValue = McpPageStrings.saveSuccess
                 brainStatusMessageLabel.textColor = .systemGreen
             } catch {
                 brainStatusMessageLabel.stringValue = "保存失败: \(error.localizedDescription)"
@@ -629,8 +680,8 @@ public final class McpPageController: NSViewController {
 
     @objc private func handleRotateToken() {
         let alert = NSAlert()
-        alert.messageText = "重新生成对外接口令牌"
-        alert.informativeText = "重新生成后将立即生效，当前连接的大脑将会断开。确定重新生成吗？"
+        alert.messageText = McpPageStrings.rotateTokenTitle
+        alert.informativeText = McpPageStrings.rotateTokenInfo
         alert.alertStyle = .warning
         alert.addButton(withTitle: "重新生成")
         alert.addButton(withTitle: "取消")
@@ -662,7 +713,7 @@ public final class McpPageController: NSViewController {
                         self.openApiStatusLabel.stringValue = "连接正常 (可用工具: \(payload.tools.count) 个)"
                         self.openApiStatusLabel.textColor = .systemGreen
                     } else if payload.busy {
-                        self.openApiStatusLabel.stringValue = "已有大脑连接中"
+                        self.openApiStatusLabel.stringValue = McpPageStrings.openApiBusy
                         self.openApiStatusLabel.textColor = .systemOrange
                     } else if payload.error == "disabled" {
                         self.openApiStatusLabel.stringValue = "对外接口未开启 (open_api.enabled=false)"
@@ -739,56 +790,70 @@ public final class McpPageController: NSViewController {
         // Endpoints
         for v in endpointsStack.arrangedSubviews { v.removeFromSuperview() }
         let endpoints = payload.endpoints ?? []
-        for ep in endpoints {
-            let row = NSStackView()
-            row.orientation = .horizontal
-            row.spacing = 8
+        if endpoints.isEmpty {
+            let emptyLabel = NSTextField(wrappingLabelWithString: McpPageStrings.emptyEndpoints)
+            emptyLabel.font = NSFont.systemFont(ofSize: 12)
+            emptyLabel.textColor = .secondaryLabelColor
+            endpointsStack.addArrangedSubview(emptyLabel)
+        } else {
+            for ep in endpoints {
+                let row = NSStackView()
+                row.orientation = .horizontal
+                row.spacing = 8
 
-            let isBusy = (ep.id == "open_api" && ep.detail == "已有大脑连接中")
-            let dot = NSTextField(labelWithString: "●")
-            if isBusy {
-                dot.textColor = .systemOrange
-            } else if ep.ok {
-                dot.textColor = .systemGreen
-            } else if ep.id == "open_api" && ep.detail == "已关闭" {
-                dot.textColor = .secondaryLabelColor
-            } else {
-                dot.textColor = .systemRed
+                let isBusy = ep.isBusy
+                let dot = NSTextField(labelWithString: "●")
+                if isBusy {
+                    dot.textColor = .systemOrange
+                } else if ep.ok {
+                    dot.textColor = .systemGreen
+                } else if ep.id == "open_api" && ep.detail == "已关闭" {
+                    dot.textColor = .secondaryLabelColor
+                } else {
+                    dot.textColor = .systemRed
+                }
+
+                let title = NSTextField(labelWithString: "\(ep.label):")
+                title.font = NSFont.boldSystemFont(ofSize: 12)
+                title.widthAnchor.constraint(equalToConstant: 120).isActive = true
+
+                let val = NSTextField(labelWithString: "\(ep.value)  \(ep.detail)")
+                val.font = NSFont.systemFont(ofSize: 11)
+                if isBusy {
+                    val.textColor = .systemOrange
+                } else {
+                    val.textColor = .secondaryLabelColor
+                }
+
+                row.addArrangedSubview(dot)
+                row.addArrangedSubview(title)
+                row.addArrangedSubview(val)
+                endpointsStack.addArrangedSubview(row)
             }
-
-            let title = NSTextField(labelWithString: "\(ep.label):")
-            title.font = NSFont.boldSystemFont(ofSize: 12)
-            title.widthAnchor.constraint(equalToConstant: 120).isActive = true
-
-            let val = NSTextField(labelWithString: "\(ep.value)  \(ep.detail)")
-            val.font = NSFont.systemFont(ofSize: 11)
-            if isBusy {
-                val.textColor = .systemOrange
-            } else {
-                val.textColor = .secondaryLabelColor
-            }
-
-            row.addArrangedSubview(dot)
-            row.addArrangedSubview(title)
-            row.addArrangedSubview(val)
-            endpointsStack.addArrangedSubview(row)
         }
 
         // Tools
         for v in toolsStack.arrangedSubviews { v.removeFromSuperview() }
         let groups = payload.toolGroups ?? []
-        for grp in groups {
-            let gTitle = NSTextField(labelWithString: "【\(grp.title)】")
-            gTitle.font = NSFont.boldSystemFont(ofSize: 12)
-            let gTools = NSTextField(wrappingLabelWithString: grp.tools.joined(separator: ", "))
-            gTools.font = NSFont.systemFont(ofSize: 11)
-            gTools.textColor = .secondaryLabelColor
+        if groups.isEmpty {
+            let emptyLabel = NSTextField(wrappingLabelWithString: McpPageStrings.emptyTools)
+            emptyLabel.font = NSFont.systemFont(ofSize: 12)
+            emptyLabel.textColor = .secondaryLabelColor
+            toolsStack.addArrangedSubview(emptyLabel)
+        } else {
+            for grp in groups {
+                let gTitle = NSTextField(labelWithString: "【\(grp.title)】")
+                gTitle.font = NSFont.boldSystemFont(ofSize: 12)
+                let gTools = NSTextField(wrappingLabelWithString: grp.tools.joined(separator: ", "))
+                gTools.font = NSFont.systemFont(ofSize: 11)
+                gTools.textColor = .secondaryLabelColor
 
-            let gBox = NSStackView(views: [gTitle, gTools])
-            gBox.orientation = .vertical
-            gBox.alignment = .leading
-            gBox.spacing = 2
-            toolsStack.addArrangedSubview(gBox)
+                let gBox = NSStackView(views: [gTitle, gTools])
+                gBox.orientation = .vertical
+                gBox.alignment = .leading
+                gBox.spacing = 2
+                toolsStack.addArrangedSubview(gBox)
+            }
         }
     }
 
@@ -798,7 +863,7 @@ public final class McpPageController: NSViewController {
         let home = NSHomeDirectory()
         let defaultEndpoints: [(String, String, Bool, String)] = [
             ("MCP 工具服务", "\(home)/.wechat-rpa/bin/wechat-mcp", FileManager.default.isExecutableFile(atPath: "\(home)/.wechat-rpa/bin/wechat-mcp"), ""),
-            ("外部大脑接口", "\(home)/.wechat-rpa/core.sock", FileManager.default.fileExists(atPath: "\(home)/.wechat-rpa/core.sock"), ""),
+            ("外部服务接口", "\(home)/.wechat-rpa/core.sock", FileManager.default.fileExists(atPath: "\(home)/.wechat-rpa/core.sock"), ""),
             ("聊天历史查询", "http://127.0.0.1:8765", false, ""),
             ("对外接口", "http://127.0.0.1:8770/mcp", false, "未启动/未连接")
         ]
