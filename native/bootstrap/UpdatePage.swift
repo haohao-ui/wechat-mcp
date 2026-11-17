@@ -24,12 +24,13 @@ private enum UpdatePageStrings {
     static let sectionRollback = "回滚到上一版本"
     static let sectionOperations = "操作与维护"
     static let sectionRecovery = "故障恢复指引"
+    static let rollbackAppNotice = "换回上一个已安装的版本"
     static let noPreviousVersion = "无可回滚的上一版本"
-    static let rollbackCheckboxPrompt = "我已知晓回滚将恢复至选定版本并覆盖当前程序"
+    static let rollbackCheckboxPrompt = "我已知晓将换回上一个已安装的版本并覆盖当前程序"
     static let rollbackConfirmButton = "确认回滚"
     static let cancel = "取消"
-    static let rollbackSuccess = "已成功回滚至上一版本，重启服务后生效"
-    static let rollbackUnavailable = "暂不可用（更新回滚服务尚未合入或不可用）"
+    static let rollbackSuccess = "已成功换回上一个已安装的版本，需要重启应用以完成替换"
+    static let rollbackUnavailable = "回滚功能暂不可用"
     static let emptyCandidate = "当前已是最新版本，未检测到可用更新"
 }
 
@@ -68,14 +69,14 @@ public struct RollbackStatusInfo: Codable, Equatable {
         case "no_matching_completed_update": return "未找到匹配的已完成更新记录"
         case "previous_release_corrupt": return "上一版本程序文件损坏或被篡改"
         case "backup_corrupt": return "数据库在线备份损坏或不完整"
-        case "rollback_not_supported_by_release": return "该发布版本不支持就地回滚"
+        case "rollback_not_supported_by_release": return "该发布版本不支持整包换回"
         case "database_schema_changed": return "数据库结构已发生变化，拒绝回滚"
         case "database_checkpoint_required": return "存在未提交事务，需完全停止服务"
         case "stop_core_first": return "核心服务运行中，需先停止服务"
         case "recovery_required": return "存在中断的更新事务，需执行受控恢复"
         case "install_root_unconfigured": return "未配置程序安装目录"
         case "rollback_state_invalid": return "回滚状态无效"
-        default: return "暂不可用 (\(r))"
+        default: return r
         }
     }
 
@@ -542,12 +543,15 @@ public final class UpdateClient {
 
     public func fetchRollbackStatus() -> Result<RollbackStatusInfo, UpdateError> {
         let updater = updaterBinaryPath()
+        guard FileManager.default.isExecutableFile(atPath: updater) else {
+            return .failure(UpdateError(UpdatePageStrings.rollbackUnavailable))
+        }
         let args = ["rollback-status", "--config", configPath]
         let run = executor(updater, args, 10.0)
         guard !run.timedOut else {
-            return .failure(UpdateError("查询回滚状态超时"))
+            return .failure(UpdateError(UpdatePageStrings.rollbackUnavailable))
         }
-        guard let jsonStr = String(data: run.output, encoding: .utf8), !jsonStr.isEmpty else {
+        guard run.status == 0, let jsonStr = String(data: run.output, encoding: .utf8), !jsonStr.isEmpty else {
             return .failure(UpdateError(UpdatePageStrings.rollbackUnavailable))
         }
         do {
@@ -615,6 +619,7 @@ public final class UpdatePageController: NSViewController {
     private let previousInstalledAtLabel = NSTextField(wrappingLabelWithString: "-")
     private let rollbackEligibilityLabel = NSTextField(wrappingLabelWithString: "检查中...")
     private let rollbackButton = NSButton(title: "回滚到上一版本…", target: nil, action: nil)
+    private let rollbackReasonSideLabel = NSTextField(wrappingLabelWithString: "")
 
     // UI - 候选更新卡片
     private let candidateStatusLabel = NSTextField(wrappingLabelWithString: "尚未检查更新")
@@ -832,6 +837,11 @@ public final class UpdatePageController: NSViewController {
         rbStack.alignment = .leading
         rbStack.spacing = 8
 
+        let rbNoticeLabel = NSTextField(wrappingLabelWithString: "说明：换回上一个已安装的版本。")
+        rbNoticeLabel.font = NSFont.systemFont(ofSize: 11)
+        rbNoticeLabel.textColor = .secondaryLabelColor
+        rbStack.addArrangedSubview(rbNoticeLabel)
+
         let rbGrid = NSGridView(views: [
             [NSTextField(labelWithString: "可回滚上一版本:"), previousVersionLabel],
             [NSTextField(labelWithString: "原安装时间:"), previousInstalledAtLabel],
@@ -847,7 +857,17 @@ public final class UpdatePageController: NSViewController {
         rollbackButton.target = self
         rollbackButton.action = #selector(handleRollback)
         rollbackButton.isEnabled = false
-        rbStack.addArrangedSubview(rollbackButton)
+
+        rollbackReasonSideLabel.font = NSFont.systemFont(ofSize: 11)
+        rollbackReasonSideLabel.textColor = UpdatePageTokens.statusWarnText
+        rollbackReasonSideLabel.lineBreakMode = .byTruncatingTail
+        rollbackReasonSideLabel.maximumNumberOfLines = 1
+
+        let rbBtnRow = NSStackView(views: [rollbackButton, rollbackReasonSideLabel])
+        rbBtnRow.orientation = .horizontal
+        rbBtnRow.spacing = 10
+        rbBtnRow.alignment = .centerY
+        rbStack.addArrangedSubview(rbBtnRow)
 
         rollbackBox.setContent(rbStack)
         contentStack.addArrangedSubview(rollbackBox)
@@ -975,20 +995,27 @@ public final class UpdatePageController: NSViewController {
                 self.previousVersionLabel.textColor = .secondaryLabelColor
             }
             self.previousInstalledAtLabel.stringValue = info.formattedInstalledAt
-            self.rollbackEligibilityLabel.stringValue = info.localizedReason
+            let reasonText = info.localizedReason
+            self.rollbackEligibilityLabel.stringValue = reasonText
             if info.canRollback {
                 self.rollbackEligibilityLabel.textColor = UpdatePageTokens.statusOkText
+                self.rollbackReasonSideLabel.stringValue = ""
                 self.rollbackButton.isEnabled = true
             } else {
                 self.rollbackEligibilityLabel.textColor = UpdatePageTokens.statusWarnText
+                self.rollbackReasonSideLabel.stringValue = reasonText
+                self.rollbackReasonSideLabel.textColor = UpdatePageTokens.statusWarnText
                 self.rollbackButton.isEnabled = false
             }
-        case .failure(let err):
+        case .failure:
             self.currentRollbackStatus = nil
             self.previousVersionLabel.stringValue = "未知"
             self.previousInstalledAtLabel.stringValue = "-"
-            self.rollbackEligibilityLabel.stringValue = err.message
+            let reasonText = UpdatePageStrings.rollbackUnavailable
+            self.rollbackEligibilityLabel.stringValue = reasonText
             self.rollbackEligibilityLabel.textColor = UpdatePageTokens.statusOffText
+            self.rollbackReasonSideLabel.stringValue = reasonText
+            self.rollbackReasonSideLabel.textColor = UpdatePageTokens.statusOffText
             self.rollbackButton.isEnabled = false
         }
     }
@@ -1243,8 +1270,8 @@ public final class UpdatePageController: NSViewController {
         }
 
         let alert = NSAlert()
-        alert.messageText = "确认回滚到上一版本（\(ver)）？"
-        alert.informativeText = "回滚将停止核心服务并将应用程序切换回上一版本，业务数据库保留。确认继续吗？"
+        alert.messageText = "确认换回上一个已安装的版本（\(ver)）？"
+        alert.informativeText = "换回上一个已安装的版本将直接整包替换为上一个应用程序包。操作成功后需要重启应用以完成替换。确认继续吗？"
         alert.alertStyle = .critical
 
         let checkbox = NSButton(checkboxWithTitle: UpdatePageStrings.rollbackCheckboxPrompt, target: nil, action: nil)
@@ -1261,7 +1288,7 @@ public final class UpdatePageController: NSViewController {
             return
         }
 
-        actionFeedbackLabel.stringValue = "正在执行版本回滚到 \(ver)..."
+        actionFeedbackLabel.stringValue = "正在换回上一个已安装的版本 (\(ver))..."
         actionFeedbackLabel.textColor = .systemBlue
         rollbackButton.isEnabled = false
 
@@ -1313,5 +1340,22 @@ public final class UpdatePageController: NSViewController {
             }
         }
         loadRollbackStatus()
+    }
+
+    // MARK: - Testing Hooks
+    public func applyRollbackStatusResultForTesting(_ result: Result<RollbackStatusInfo, UpdateError>) {
+        applyRollbackStatusResult(result)
+    }
+
+    public var isRollbackButtonEnabledForTesting: Bool {
+        return rollbackButton.isEnabled
+    }
+
+    public var rollbackReasonTextForTesting: String {
+        return rollbackReasonSideLabel.stringValue
+    }
+
+    public var rollbackSuccessMessageForTesting: String {
+        return UpdatePageStrings.rollbackSuccess
     }
 }
