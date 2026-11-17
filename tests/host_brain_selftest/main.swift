@@ -393,7 +393,7 @@ func runTests() -> Int32 {
     // 10. McpPage Navigation Pointer Check
     do {
         let pointerText = McpPageLogic.brainPagePointerText()
-        check("mcp_page_has_brain_pointer", pointerText.contains("大脑"))
+        check("mcp_page_has_brain_pointer", pointerText.contains("客服角色"))
     }
 
     // 11. Isolated UI Fixture View Loading & Controller Hierarchy Verification
