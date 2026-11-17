@@ -9,6 +9,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::core::config::BotConfig;
 use crate::core::state::write_private;
 
+#[path = "control_handoff.rs"]
+mod handoff;
+#[path = "control_readonly.rs"]
+mod readonly;
+
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         tokio::task::block_in_place(|| handle.block_on(f))
@@ -759,7 +764,7 @@ pub fn execute_control_full_with_paths<W1: std::io::Write, W2: std::io::Write>(
     if action == "-h" || action == "--help" {
         let _ = writeln!(
             stdout,
-            "Usage: wechat-mcp control <status|start|stop|pause|resume|resume-session|config-check|calibrate|migrate-history|history-status|merge-contact|unmerge-contact|history-backup|contacts-list|mcp-info|contacts-sync|open-api-check|open-api-token> [--config <path>]"
+            "Usage: wechat-mcp control <status|start|stop|pause|resume|resume-session|session-handoff|sessions-list|session-detail|config-check|calibrate|migrate-history|history-status|merge-contact|unmerge-contact|history-backup|contacts-list|mcp-info|contacts-sync|open-api-check|open-api-token> [--config <path>]"
         );
         return 0;
     }
@@ -2268,8 +2273,14 @@ pub fn execute_control_full_with_paths<W1: std::io::Write, W2: std::io::Write>(
                 0
             }
         }
-        action if action.starts_with("brain-") => {
-            execute_brain_control(action, args, stdout, stderr, default_config_path)
+        action
+            if action.starts_with("brain-")
+                || matches!(
+                    action,
+                    "sessions-list" | "session-detail" | "session-handoff"
+                ) =>
+        {
+            execute_brain_control(action, args, stdout, stderr, default_config_path, paths)
         }
         "update-status" => {
             let mut config_file: Option<PathBuf> = None;
@@ -2742,8 +2753,13 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
     stdout: &mut W1,
     _stderr: &mut W2,
     default_config_path: PathBuf,
+    paths: &ControlPaths,
 ) -> i32 {
     use crate::core::brain_profiles::*;
+    let session_action = matches!(
+        action,
+        "sessions-list" | "session-detail" | "session-handoff"
+    );
     let mut config_file: Option<PathBuf> = None;
     let mut request_json: Option<String> = None;
     let mut idx = 1;
@@ -2765,7 +2781,11 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
             return emit_brain_error(
                 stdout,
                 "invalid_arguments",
-                &format!("config error: {e:#}"),
+                &if session_action {
+                    "config unavailable or invalid".into()
+                } else {
+                    format!("config error: {e:#}")
+                },
                 false,
                 None,
                 2,
@@ -2786,7 +2806,11 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
                 return emit_brain_error(
                     stdout,
                     "invalid_arguments",
-                    &format!("invalid request json: {e:#}"),
+                    &if session_action {
+                        "invalid request json".into()
+                    } else {
+                        format!("invalid request json: {e:#}")
+                    },
                     false,
                     None,
                     2,
@@ -2801,6 +2825,25 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
         if req_acc != cfg.account_id {
             return emit_brain_error(stdout, "not_found", "account mismatch", false, None, 2);
         }
+    }
+
+    if session_action {
+        if (!req_val.is_null() && !req_val.is_object())
+            || req_val.get("account_id").is_some_and(|v| !v.is_string())
+        {
+            return emit_brain_error(
+                stdout,
+                "invalid_arguments",
+                "invalid session request",
+                false,
+                None,
+                2,
+            );
+        }
+        if action == "session-handoff" {
+            return handoff::execute(&cfg, &req_val, stdout);
+        }
+        return readonly::emit_sessions(action, &cfg, &req_val, paths, stdout);
     }
 
     let store = match Store::open(&cfg.state_dir) {
