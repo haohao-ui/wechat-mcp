@@ -2856,14 +2856,16 @@ fn test_contacts_and_mcp_pages_registered_in_shell_order() {
     let model_idx = src.find(", id: \"model\"").expect("model slot registered");
     let mcp_idx = src.find(", id: \"mcp\"").expect("mcp registered");
     let settings_idx = src.find(", id: \"settings\"").expect("settings registered");
-    let components_idx = src
-        .find("id: \"components\"")
-        .expect("components registered");
     let update_idx = src.find(", id: \"update\"").expect("update registered");
     let logs_idx = src.find(", id: \"logs\"").expect("logs registered");
     assert!(src.contains("ModelPageController(context: controller)"));
     assert!(!src.contains("ModelPagePlaceholderController"));
-    assert!(settings_idx < components_idx && components_idx < update_idx && update_idx < logs_idx);
+    // 「组件与配色」是设计规范交付物，不是产品页面：不得注册进导航。
+    assert!(
+        !src.contains("id: \"components\""),
+        "components page must not be registered in the product shell"
+    );
+    assert!(settings_idx < update_idx && update_idx < logs_idx);
 
     assert!(overview_idx < sessions_idx, "总览在会话之前");
     assert!(sessions_idx < contacts_idx, "会话在联系人之前");
