@@ -635,6 +635,49 @@ func runTests() -> Int32 {
         check("settings_page_jump_to_update", jumped == true)
     }
 
+    // 13. 应用更新页：整包换回上一个 .app、CLI 契约与状态联动
+    do {
+        // 13.1 CLI 契约解码：can_rollback = false 包含 reason
+        let rollbackBlockedJson = """
+        {
+            "version": "0.1.0",
+            "installed_at": 1700000000.0,
+            "can_rollback": false,
+            "reason": "stop_core_first"
+        }
+        """
+        guard let blockedInfo = try? JSONDecoder().decode(RollbackStatusInfo.self, from: rollbackBlockedJson.data(using: .utf8)!) else {
+            check("rollback_status_decode_blocked", false, "Failed to decode blocked rollback status")
+            return 1
+        }
+        check("rollback_status_version", blockedInfo.version == "0.1.0")
+        check("rollback_status_can_rollback_false", blockedInfo.canRollback == false)
+        check("rollback_status_reason_stop_core", blockedInfo.reason == "stop_core_first")
+        check("rollback_status_localized_reason", blockedInfo.localizedReason.contains("核心服务运行中"))
+
+        // 13.2 当命令不存在或查询失败时，降级显示「回滚功能暂不可用」
+        let dummyWorker = SocketWorker()
+        let dummySupervisor = CoreSupervisor()
+        let statusPanel = StatusPanelController(worker: dummyWorker, coreSupervisor: dummySupervisor)
+        let updateVC = UpdatePageController(context: statusPanel)
+        
+        // 验证失败注入时按钮禁用且原因显示为「回滚功能暂不可用」
+        updateVC.applyRollbackStatusResultForTesting(.failure(UpdateError("回滚功能暂不可用")))
+        check("rollback_unavailable_button_disabled", updateVC.isRollbackButtonEnabledForTesting == false)
+        check("rollback_unavailable_reason_text", updateVC.rollbackReasonTextForTesting == "回滚功能暂不可用")
+
+        // 13.3 验证 can_rollback = false 时按钮禁用并在按钮旁显示 reason
+        updateVC.applyRollbackStatusResultForTesting(.success(blockedInfo))
+        check("rollback_blocked_button_disabled", updateVC.isRollbackButtonEnabledForTesting == false)
+        check("rollback_blocked_reason_text", updateVC.rollbackReasonTextForTesting.contains("核心服务运行中"))
+
+        // 13.4 验证文案说明是「换回上一个已安装的版本」，执行成功后提示需要重启，不说「已生效」
+        let successNotice = updateVC.rollbackSuccessMessageForTesting
+        check("rollback_success_notice_restart", successNotice.contains("需要重启"))
+        check("rollback_success_notice_not_contain_shengxiao", !successNotice.contains("生效"))
+        check("rollback_success_notice_replace_app", successNotice.contains("换回上一个已安装的版本"))
+    }
+
     print("=== Update UI Selftests Completed: \(passed) PASS, \(failed) FAIL ===")
     return failed == 0 ? 0 : 1
 }
