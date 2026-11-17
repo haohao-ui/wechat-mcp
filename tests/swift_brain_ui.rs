@@ -81,6 +81,10 @@ fn test_swift_brain_ui_selftest() {
         root.join("native")
             .join("bootstrap")
             .join("BrainPage.swift"),
+        root.join("native").join("bootstrap").join("Theme.swift"),
+        root.join("native")
+            .join("bootstrap")
+            .join("ComponentsPage.swift"),
         root.join("native").join("eyes").join("Screens.swift"),
         root.join("tests")
             .join("host_brain_selftest")
