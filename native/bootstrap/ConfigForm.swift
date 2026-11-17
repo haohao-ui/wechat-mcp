@@ -49,13 +49,12 @@ public struct ConfigFormLogic {
         let defaultEnv = URLComponents(string: base)?.host == "api.deepseek.com" ? "DEEPSEEK_API_KEY" : "OPENAI_API_KEY"
         let env = explicitEnv.isEmpty ? defaultEnv : explicitEnv
         let source = backend == "codex-exec" ? "none" : (!file.isEmpty ? "file" : (!explicitEnv.isEmpty ? "env" : "default_env"))
-        let hasKey = source == "file" ? validKeyFile(file) : (source != "none" && validKey(ProcessInfo.processInfo.environment[env] ?? ""))
+        let hasKey = source == "file" ? !file.isEmpty : (source != "none" && validKey(ProcessInfo.processInfo.environment[env] ?? ""))
         masked["model_backend"] = backend
         masked["model_name"] = backend == "codex-exec" ? "" : name
         masked["base_url"] = backend == "codex-exec" || !validModelURL(base) ? "" : base
         masked["key_source"] = source
         masked["key_env_name"] = source == "env" || source == "default_env" ? env : ""
-        masked["key_file_path"] = source == "file" ? file : ""
         masked["model_state"] = backend == "codex-exec" ? "default_codex" : (hasKey && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && validModelURL(base) ? "configured" : "unconfigured")
         masked["api_key_status"] = hasKey ? "已配置" : "未配置"
         masked["timeout_seconds"] = mc["timeout_seconds"] as? Int ?? 60
