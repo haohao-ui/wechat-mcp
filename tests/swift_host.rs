@@ -94,6 +94,10 @@ fn host_selftest_bin() -> Option<&'static PathBuf> {
                 .join("bootstrap")
                 .join("ConfigForm.swift"),
             root.join("native").join("bootstrap").join("Actions.swift"),
+            root.join("native").join("bootstrap").join("Theme.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("ComponentsPage.swift"),
             root.join("native").join("eyes").join("Screens.swift"),
             root.join("tests").join("host_selftest").join("main.swift"),
         ];
@@ -2094,6 +2098,10 @@ fn host_task5_selftest_bin() -> Option<&'static PathBuf> {
             root.join("native")
                 .join("bootstrap")
                 .join("SettingsPage.swift"),
+            root.join("native").join("bootstrap").join("Theme.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("ComponentsPage.swift"),
             root.join("native").join("eyes").join("Screens.swift"),
             root.join("tests")
                 .join("host_task5_selftest")
@@ -2435,6 +2443,10 @@ fn host_task6_selftest_bin() -> Option<&'static PathBuf> {
                 .join("bootstrap")
                 .join("ContactsPage.swift"),
             root.join("native").join("bootstrap").join("McpPage.swift"),
+            root.join("native").join("bootstrap").join("Theme.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("ComponentsPage.swift"),
             root.join("native").join("eyes").join("Screens.swift"),
             root.join("tests")
                 .join("host_task6_selftest")
@@ -3540,4 +3552,135 @@ print(main())
 
     // 因为 install_root 已被移除，处于未配置状态，Committed 终态全要素检查必须严格拒绝（RECOVERY_REQUIRED）！
     assert_eq!(run_bin(), "RECOVERY_REQUIRED");
+}
+
+#[test]
+fn test_theme_status_tokens_and_colors() {
+    if !has_swiftc() {
+        eprintln!("swiftc not available, skipping test_theme_status_tokens_and_colors");
+        return;
+    }
+
+    let root = repo_root();
+    let temp = TempDir::new("theme_tokens_selftest");
+    let test_src = temp.path.join("main.swift");
+    let test_bin = temp.path.join("theme_tokens_test");
+
+    let swift_code = r##"
+import Foundation
+import AppKit
+
+func testTokens() -> Int32 {
+    let all = ThemeStatus.allCases
+    if all.count != 4 {
+        fputs("Expected 4 statuses, got \(all.count)\n", stderr)
+        return 1
+    }
+
+    // 1. 正常: #1AAD78 / #127954 / #E4F5EF
+    let normal = ThemeStatus.normal
+    if normal.rawValue != "正常" ||
+       normal.dotHex != "#1AAD78" ||
+       normal.textHex != "#127954" ||
+       normal.backgroundHex != "#E4F5EF" ||
+       normal.dotColor.hexString != "#1AAD78" ||
+       normal.textColor.hexString != "#127954" ||
+       normal.backgroundColor.hexString != "#E4F5EF" {
+        fputs("normal status mismatch\n", stderr)
+        return 2
+    }
+
+    // 2. 注意: #E08E0B / #925C07 / #FBF1E2
+    let warning = ThemeStatus.warning
+    if warning.rawValue != "注意" ||
+       warning.dotHex != "#E08E0B" ||
+       warning.textHex != "#925C07" ||
+       warning.backgroundHex != "#FBF1E2" ||
+       warning.dotColor.hexString != "#E08E0B" ||
+       warning.textColor.hexString != "#925C07" ||
+       warning.backgroundColor.hexString != "#FBF1E2" {
+        fputs("warning status mismatch\n", stderr)
+        return 3
+    }
+
+    // 3. 异常: #E5484D / #B73A3E / #FCE9EA
+    let error = ThemeStatus.error
+    if error.rawValue != "异常" ||
+       error.dotHex != "#E5484D" ||
+       error.textHex != "#B73A3E" ||
+       error.backgroundHex != "#FCE9EA" ||
+       error.dotColor.hexString != "#E5484D" ||
+       error.textColor.hexString != "#B73A3E" ||
+       error.backgroundColor.hexString != "#FCE9EA" {
+        fputs("error status mismatch\n", stderr)
+        return 4
+    }
+
+    // 4. 未启用: #9AA0A6 / #6C7074 / #F3F4F4
+    let inactive = ThemeStatus.inactive
+    if inactive.rawValue != "未启用" ||
+       inactive.dotHex != "#9AA0A6" ||
+       inactive.textHex != "#6C7074" ||
+       inactive.backgroundHex != "#F3F4F4" ||
+       inactive.dotColor.hexString != "#9AA0A6" ||
+       inactive.textColor.hexString != "#6C7074" ||
+       inactive.backgroundColor.hexString != "#F3F4F4" {
+        fputs("inactive status mismatch\n", stderr)
+        return 5
+    }
+
+    // 5. 校验主按钮与输入框以及品牌色常量
+    if Theme.Colors.primaryButtonDefaultHex != "#0A5B6B" ||
+       Theme.Colors.primaryButtonHoverHex != "#084B58" ||
+       Theme.Colors.primaryButtonTextHex != "#FFFFFF" ||
+       Theme.Colors.primaryButtonDisabledBgHex != "#F4F5F7" ||
+       Theme.Colors.primaryButtonDisabledTextHex != "#6B7280" ||
+       Theme.Colors.brandHex != "#12A37A" ||
+       Theme.Colors.brandLightHex != "#E2F5EE" ||
+       Theme.Colors.inputBorderHex != "#C9CDD4" ||
+       Theme.Colors.inputErrorBorderHex != "#E5484D" ||
+       Theme.Colors.inputErrorTextHex != "#B73A3E" ||
+       Theme.Colors.inputDisabledBgHex != "#F4F5F7" ||
+       Theme.Colors.inputDisabledTextHex != "#6B7280" {
+        fputs("theme constants mismatch\n", stderr)
+        return 6
+    }
+
+    print("STATUS_AND_COLORS_MATCH_OK")
+    return 0
+}
+
+exit(testTokens())
+"##;
+
+    fs::write(&test_src, swift_code).expect("write test script");
+
+    let files = [
+        root.join("native").join("bootstrap").join("Theme.swift"),
+        test_src,
+    ];
+
+    let mut cmd = Command::new("swiftc");
+    cmd.arg("-O");
+    for f in &files {
+        cmd.arg(f);
+    }
+    cmd.arg("-o").arg(&test_bin);
+    let comp = cmd.output().expect("compile swiftc test_bin");
+    assert!(
+        comp.status.success(),
+        "swiftc failed: {}",
+        String::from_utf8_lossy(&comp.stderr)
+    );
+
+    let run_res = Command::new(&test_bin).output().expect("run test_bin");
+    assert!(
+        run_res.status.success(),
+        "test_bin failed with exit code {:?}: {}",
+        run_res.status.code(),
+        String::from_utf8_lossy(&run_res.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&run_res.stdout);
+    assert!(stdout.contains("STATUS_AND_COLORS_MATCH_OK"));
 }
