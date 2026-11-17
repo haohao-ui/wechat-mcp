@@ -531,15 +531,16 @@ fn test_config_form_never_shows_key() {
         "config": {
             "account_id": "bot1",
             "model_config": {
-                "backend": "deepseek",
+                "backend": "openai-compatible",
                 "model": "chat",
+                "api_key_env": "WECHAT_TEST_INTENTIONALLY_MISSING_KEY",
                 "api_key": "mock_key"
             }
         }
     });
     let res1 = run_host_cmd("config", &payload_with_key).unwrap();
     assert!(!serde_json::to_string(&res1).unwrap().contains("mock_key"));
-    assert_eq!(res1["api_key_status"], "已配置");
+    assert_eq!(res1["api_key_status"], "未配置");
 
     // 2. 未配置 key
     let payload_no_key = serde_json::json!({
@@ -547,13 +548,59 @@ fn test_config_form_never_shows_key() {
         "config": {
             "account_id": "bot1",
             "model_config": {
-                "backend": "deepseek",
-                "model": "chat"
+                "backend": "openai-compatible",
+                "model": "chat",
+                "api_key_env": "WECHAT_TEST_INTENTIONALLY_MISSING_KEY"
             }
         }
     });
     let res2 = run_host_cmd("config", &payload_no_key).unwrap();
     assert_eq!(res2["api_key_status"], "未配置");
+}
+
+#[test]
+fn test_model_form_replaces_backend_and_validates() {
+    if !has_swiftc() {
+        return;
+    }
+    let td = TempDir::new("model_form");
+    let path = td.path.join("config.json");
+    let original = serde_json::json!({"schema_version":1,"model_config":{"backend":"openai-compatible","base_url":"https://example.com/v1","model":"chat","api_key_env":"TEST_KEY"}});
+    for (form, valid) in [
+        (
+            serde_json::json!({"backend":"codex-exec","model":"stale","supports_images":true,"images_per_model_call":16}),
+            true,
+        ),
+        (
+            serde_json::json!({"backend":"openai-compatible","base_url":"https://example.com/v1","model":"chat","key_source":"env","key_env_name":"TEST_KEY","timeout_seconds":180}),
+            true,
+        ),
+        (
+            serde_json::json!({"backend":"openai-compatible","base_url":"http://example.com","model":"chat"}),
+            false,
+        ),
+        (
+            serde_json::json!({"backend":"openai-compatible","base_url":"https://example.com","model":"chat","timeout_seconds":181}),
+            false,
+        ),
+    ] {
+        fs::write(&path, original.to_string()).unwrap();
+        let res = run_host_cmd("config", &serde_json::json!({"op":"update_and_save_form","target_path":path,"original_config":original,"form_inputs":{"model_config_form":form},"simulated_check_result":{"ok":true}})).unwrap();
+        assert_eq!(res["ok"], valid);
+        if valid {
+            let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            if form["backend"] == "codex-exec" {
+                assert_eq!(
+                    saved["model_config"],
+                    serde_json::json!({"backend":"codex-exec"})
+                );
+                assert_eq!(saved["images_per_model_call"], 16);
+            } else {
+                assert_eq!(saved["model_config"]["api_key_env"], "TEST_KEY");
+                assert!(saved["model_config"].get("api_key_file").is_none());
+            }
+        }
+    }
 }
 
 #[test]
@@ -746,10 +793,9 @@ fn test_config_save_preserves_untouched_keys_deep_equal() {
         "state_dir": "/custom/state/dir",
         "account_id": "test_bot_99",
         "model_config": {
-            "backend": "deepseek",
+            "backend": "openai-compatible",
             "model": "deepseek-chat",
-            "api_key": "custom_key",
-            "temperature": 0.3
+            "api_key_env": "CUSTOM_KEY"
         },
         "capture_backend": "native",
         "poll_seconds": 3,
