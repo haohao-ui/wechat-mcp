@@ -90,6 +90,7 @@ fn host_selftest_bin() -> Option<&'static PathBuf> {
             root.join("native")
                 .join("bootstrap")
                 .join("StatusModel.swift"),
+            root.join("native").join("bootstrap").join("L10n.swift"),
             root.join("native")
                 .join("bootstrap")
                 .join("ConfigForm.swift"),
@@ -316,7 +317,7 @@ fn test_status_recalibration_red() {
 }
 
 #[test]
-fn test_status_waiting_session_yellow_names_code() {
+fn test_status_waiting_session_yellow_localizes_reason() {
     if !has_swiftc() {
         eprintln!("swiftc not available, skipping test");
         return;
@@ -346,7 +347,7 @@ fn test_status_waiting_session_yellow_names_code() {
         item_map["sessions"]["reason"]
             .as_str()
             .unwrap()
-            .contains("screen_not_main:other_wechat_window")
+            .contains("窗口未就绪")
     );
 }
 
@@ -1167,7 +1168,7 @@ fn test_status_external_brain_unconnected_yellow_and_pending_count() {
         item_map["brain"]["reason"]
             .as_str()
             .unwrap()
-            .contains("外部大脑未连接")
+            .contains("外部回复（MCP 接管）未连接")
     );
     assert!(item_map["brain"]["reason"].as_str().unwrap().contains('3'));
 }
@@ -2080,6 +2081,7 @@ fn host_task5_selftest_bin() -> Option<&'static PathBuf> {
             root.join("native")
                 .join("bootstrap")
                 .join("StatusModel.swift"),
+            root.join("native").join("bootstrap").join("L10n.swift"),
             root.join("native")
                 .join("bootstrap")
                 .join("ConfigForm.swift"),
@@ -2270,7 +2272,7 @@ fn test_every_legacy_panel_control_has_new_home() {
 
     // 1. 保存配置
     assert!(
-        all_new_src.contains("保存配置") || all_new_src.contains("saveConfig"),
+        all_new_src.contains("actionSaveConfig") || all_new_src.contains("saveConfig"),
         "必须包含保存配置操作"
     );
     // 2. 重启桌面服务
@@ -2417,6 +2419,7 @@ fn host_task6_selftest_bin() -> Option<&'static PathBuf> {
             root.join("native")
                 .join("bootstrap")
                 .join("StatusModel.swift"),
+            root.join("native").join("bootstrap").join("L10n.swift"),
             root.join("native")
                 .join("bootstrap")
                 .join("ConfigForm.swift"),
@@ -2854,13 +2857,18 @@ fn test_contacts_and_mcp_pages_registered_in_shell_order() {
     let overview_idx = src.find("\"overview\"").expect("overview registered");
     let sessions_idx = src.find("\"sessions\"").expect("sessions registered");
     let contacts_idx = src.find("\"contacts\"").expect("contacts registered");
+    let persona_idx = src.find("\"brain\"").expect("persona registered");
+    let model_idx = src.find("\"model\"").expect("model slot registered");
     let mcp_idx = src.find("\"mcp\"").expect("mcp registered");
     let settings_idx = src.find("\"settings\"").expect("settings registered");
     let logs_idx = src.find("\"logs\"").expect("logs registered");
 
     assert!(overview_idx < sessions_idx, "总览在会话之前");
     assert!(sessions_idx < contacts_idx, "会话在联系人之前");
-    assert!(contacts_idx < mcp_idx, "联系人在MCP之前");
+    assert!(
+        contacts_idx < persona_idx && persona_idx < model_idx && model_idx < mcp_idx,
+        "联系人、客服角色、模型、MCP 顺序"
+    );
     assert!(mcp_idx < settings_idx, "MCP在设置之前");
     assert!(settings_idx < logs_idx, "设置在日志之前");
 }
@@ -2869,18 +2877,12 @@ fn test_contacts_and_mcp_pages_registered_in_shell_order() {
 fn test_settings_page_brain_and_allowlist_pointers() {
     let settings_src = fs::read_to_string("native/bootstrap/SettingsPage.swift")
         .expect("SettingsPage.swift exists");
-    assert!(
-        settings_src.contains("联系人") && settings_src.contains("MCP"),
-        "SettingsPage 必须包含指向联系人页和 MCP 页的说明"
-    );
-    assert!(
-        settings_src.contains("允许名单") || settings_src.contains("忽略名单"),
-        "SettingsPage 说明中必须包含允许名单/忽略名单"
-    );
-    assert!(
-        settings_src.contains("外部大脑") || settings_src.contains("大脑配置"),
-        "SettingsPage 说明中必须包含大脑配置"
-    );
+    let l10n = fs::read_to_string("native/bootstrap/L10n.swift").expect("L10n.swift exists");
+    assert!(settings_src.contains("L10n.t(.settingsMovedNote, L10n.replyModesPair)"));
+    assert!(l10n.contains("允许名单") && l10n.contains("MCP 接入"));
+    assert!(!settings_src.contains("外部大脑"));
+    assert!(!settings_src.contains("permissionStatus(kind)"));
+    assert!(settings_src.contains("context.statusSummary"));
 }
 
 /// 页面读取 control 命令输出时不能先 waitUntilExit 再读管道：输出超过管道缓冲（约 64KB，
@@ -3540,4 +3542,43 @@ print(main())
 
     // 因为 install_root 已被移除，处于未配置状态，Committed 终态全要素检查必须严格拒绝（RECOVERY_REQUIRED）！
     assert_eq!(run_bin(), "RECOVERY_REQUIRED");
+}
+
+#[test]
+fn test_t4_status_localization_and_session_contracts() {
+    if !has_swiftc() {
+        eprintln!("swiftc unavailable; T4 native checks skipped");
+        return;
+    }
+    let root = repo_root();
+    let out = root.join("target/swift_test_bin/host_t4_selftest");
+    fs::create_dir_all(out.parent().unwrap()).unwrap();
+    let mut sources: Vec<_> = fs::read_dir(root.join("native/bootstrap"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension().is_some_and(|ext| ext == "swift")
+                && path.file_name().unwrap() != "main.swift"
+        })
+        .collect();
+    sources.sort();
+    let compile = Command::new("swiftc")
+        .args(&sources)
+        .arg(root.join("native/eyes/Screens.swift"))
+        .arg(root.join("tests/host_t4_selftest/main.swift"))
+        .arg("-o")
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "T4 compile failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new(out).output().unwrap();
+    assert!(
+        run.status.success(),
+        "T4 behavior checks failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
 }

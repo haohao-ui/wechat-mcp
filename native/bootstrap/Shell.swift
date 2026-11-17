@@ -15,6 +15,54 @@ public struct ShellPageEntry {
 }
 
 public final class ShellViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+    private let coreCard = NSBox()
+    private let coreLabel = NSTextField(wrappingLabelWithString: "")
+    private let coreAction = NSButton()
+    private weak var context: StatusPanelController?
+    private var statusObserver: NSObjectProtocol?
+    private var languageObserver: NSObjectProtocol?
+    public var onLanguageChange: (() -> Void)?
+
+    public func bindStatus(_ context: StatusPanelController) {
+        self.context = context
+        statusObserver = NotificationCenter.default.addObserver(forName: StatusPanelController.statusDidChange, object: context, queue: .main) { [weak self] _ in self?.renderStatus() }
+        languageObserver = NotificationCenter.default.addObserver(forName: L10n.didChangeNotification, object: nil, queue: .main) { [weak self] _ in self?.onLanguageChange?() }
+        renderStatus()
+    }
+
+    deinit {
+        for observer in [statusObserver, languageObserver].compactMap({ $0 }) { NotificationCenter.default.removeObserver(observer) }
+    }
+
+    private func renderStatus() {
+        coreCard.title = L10n.t(.coreServiceTitle)
+        guard let summary = context?.statusSummary else { return }
+        coreLabel.stringValue = summary.tagText + "\n" + summary.cardText
+        coreLabel.textColor = summary.level == .red ? .systemRed : summary.level == .yellow ? .systemOrange : .labelColor
+        coreAction.title = summary.primaryActionTitle ?? ""
+        coreAction.isHidden = summary.primaryAction == nil
+    }
+
+    @objc private func performCoreAction() {
+        if let action = context?.statusSummary?.primaryAction { performStatusAction(action) }
+    }
+
+    public func performStatusAction(_ action: StatusIssueAction) {
+        switch action {
+        case .restartCore:
+            let alert = NSAlert()
+            alert.messageText = L10n.t(.confirmRestartBotTitle)
+            alert.informativeText = L10n.t(.confirmRestartBotBody)
+            alert.addButton(withTitle: L10n.t(.confirmRestart))
+            alert.addButton(withTitle: L10n.t(.cancel))
+            if alert.runModal() == .alertFirstButtonReturn { context?.restartBot() }
+        case .grantScreenRecording: requestPermission(.screen)
+        case .grantAccessibility: requestPermission(.accessibility)
+        case .openFolderSettings: openSystemSettings(for: .desktop)
+        case .gotoModel: selectPage(id: "model")
+        }
+    }
+
     private var pages: [ShellPageEntry] = []
     private let splitView = NSSplitView()
     private let sidebarTable = NSTableView()
@@ -42,19 +90,40 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
         sidebarScroll.autohidesScrollers = true
 
         let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("MainCol"))
-        col.title = "导航"
+        col.title = L10n.t(.appName)
         sidebarTable.addTableColumn(col)
         sidebarTable.headerView = nil
         sidebarTable.dataSource = self
         sidebarTable.delegate = self
-        sidebarTable.rowHeight = 36
+        sidebarTable.rowHeight = 46
         sidebarTable.intercellSpacing = NSSize(width: 0, height: 4)
         sidebarScroll.documentView = sidebarTable
 
         // 右侧内容区
         contentContainer.translatesAutoresizingMaskIntoConstraints = false
 
-        splitView.addArrangedSubview(sidebarScroll)
+        let sidebar = NSView()
+        sidebarScroll.translatesAutoresizingMaskIntoConstraints = false
+        coreCard.translatesAutoresizingMaskIntoConstraints = false
+        coreCard.title = L10n.t(.coreServiceTitle)
+        coreAction.target = self
+        coreAction.action = #selector(performCoreAction)
+        let cardStack = NSStackView(views: [coreLabel, coreAction])
+        cardStack.orientation = .vertical
+        cardStack.alignment = .leading
+        coreCard.setContent(cardStack, inset: 4)
+        sidebar.addSubview(sidebarScroll)
+        sidebar.addSubview(coreCard)
+        NSLayoutConstraint.activate([
+            sidebarScroll.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor),
+            sidebarScroll.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor),
+            sidebarScroll.topAnchor.constraint(equalTo: sidebar.topAnchor),
+            sidebarScroll.bottomAnchor.constraint(equalTo: coreCard.topAnchor, constant: -8),
+            coreCard.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 8),
+            coreCard.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -8),
+            coreCard.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor, constant: -12)
+        ])
+        splitView.addArrangedSubview(sidebar)
         splitView.addArrangedSubview(contentContainer)
 
         NSLayoutConstraint.activate([
@@ -62,8 +131,8 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
             splitView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             splitView.topAnchor.constraint(equalTo: view.topAnchor),
             splitView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            sidebarScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 140),
-            sidebarScroll.widthAnchor.constraint(lessThanOrEqualToConstant: 180)
+            sidebar.widthAnchor.constraint(greaterThanOrEqualToConstant: 200),
+            sidebar.widthAnchor.constraint(lessThanOrEqualToConstant: 250)
         ])
     }
 
@@ -71,7 +140,9 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
     public func register(page: NSViewController, id: String, title: String) {
         // 如果已存在同 id，替换
         if let idx = pages.firstIndex(where: { $0.id == id }) {
+            let replacingActive = activePageController === pages[idx].controller
             pages[idx] = ShellPageEntry(id: id, title: title, controller: page)
+            if replacingActive { selectPage(at: idx) }
         } else {
             pages.append(ShellPageEntry(id: id, title: title, controller: page))
         }
@@ -104,6 +175,8 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
         ])
     }
 
+    public var selectedPageID: String? { pages.first(where: { $0.controller === activePageController })?.id }
+
     public func selectPage(id: String) {
         if let idx = pages.firstIndex(where: { $0.id == id }) {
             selectPage(at: idx)
@@ -118,7 +191,9 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
 
     public func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let entry = pages[row]
-        let cell = NSTextField(labelWithString: "  \(entry.title)")
+        let cell = NSTextField(wrappingLabelWithString: entry.title)
+        cell.maximumNumberOfLines = 2
+        cell.toolTip = entry.title
         cell.font = NSFont.systemFont(ofSize: 13, weight: .medium)
         cell.alignment = .left
         return cell
@@ -148,6 +223,37 @@ extension NSBox {
             content.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -inset),
             content.topAnchor.constraint(equalTo: host.topAnchor, constant: inset),
             content.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -inset),
+        ])
+    }
+}
+
+/// Keeps the action identity separate from its translated button title.
+public final class StatusActionButton: NSButton {
+    private let actionValue: StatusIssueAction
+    private let handler: (StatusIssueAction) -> Void
+    public init(title: String, actionValue: StatusIssueAction, handler: @escaping (StatusIssueAction) -> Void) {
+        self.actionValue = actionValue
+        self.handler = handler
+        super.init(frame: .zero)
+        self.title = title
+        target = self
+        action = #selector(performAction)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    @objc private func performAction() { handler(actionValue) }
+}
+
+/// T5 replaces this slot by registering its controller with id "model".
+public final class ModelPagePlaceholderController: NSViewController {
+    public override func loadView() {
+        view = NSView()
+        let label = NSTextField(wrappingLabelWithString: L10n.t(.modelPagePending))
+        label.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
+            label.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
+            label.topAnchor.constraint(equalTo: view.topAnchor, constant: 24)
         ])
     }
 }

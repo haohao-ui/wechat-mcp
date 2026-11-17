@@ -6,16 +6,20 @@ public final class OverviewPageController: NSViewController {
     private let context: StatusPanelController
 
     // Top metrics
-    private let totalRepliesLabel = NSTextField(labelWithString: "今日回复: -")
-    private let activeSessionsLabel = NSTextField(labelWithString: "监听会话: -")
-    private let pendingHandoffLabel = NSTextField(labelWithString: "待人工: -")
+    private let totalRepliesLabel = NSTextField(labelWithString: L10n.t(.sentToday) + ": —")
+    private let activeSessionsLabel = NSTextField(labelWithString: L10n.t(.metricListening) + ": —")
+    private let pendingHandoffLabel = NSTextField(labelWithString: L10n.t(.metricHandoff) + ": —")
 
     // Top action buttons
-    private let recheckButton = NSButton(title: "重新检查", target: nil, action: nil)
-    private let pauseResumeButton = NSButton(title: "暂停自动回复", target: nil, action: nil)
+    private let recheckButton = NSButton(title: L10n.t(.actionRecheck), target: nil, action: nil)
+    private let pauseResumeButton = NSButton(title: L10n.t(.actionPauseAutoReply), target: nil, action: nil)
 
     // Diagnose rows container
     private let itemsStack = NSStackView()
+    private let issuesStack = NSStackView()
+    private var statsLoading = false
+    private var statusObserver: NSObjectProtocol?
+    public var onStatusAction: ((StatusIssueAction) -> Void)?
 
     public init(context: StatusPanelController) {
         self.context = context
@@ -34,6 +38,22 @@ public final class OverviewPageController: NSViewController {
         super.viewDidLoad()
         setupUI()
         refreshData()
+        statusObserver = NotificationCenter.default.addObserver(forName: StatusPanelController.statusDidChange, object: context, queue: .main) { [weak self] _ in
+            if let input = self?.context.statusInput { self?.renderData(input: input) }
+        }
+    }
+
+    deinit { if let observer = statusObserver { NotificationCenter.default.removeObserver(observer) } }
+
+    private func renderSummary() {
+        guard let summary = context.statusSummary else { return }
+        issuesStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        if summary.issues.isEmpty { issuesStack.addArrangedSubview(NSTextField(wrappingLabelWithString: L10n.t(.needsActionNone))) }
+        for issue in summary.issues {
+            let button = StatusActionButton(title: issue.actionTitle, actionValue: issue.action) { [weak self] action in self?.onStatusAction?(action) }
+            let row = NSStackView(views: [NSTextField(wrappingLabelWithString: issue.text), button])
+            issuesStack.addArrangedSubview(row)
+        }
     }
 
     private func setupUI() {
@@ -50,12 +70,12 @@ public final class OverviewPageController: NSViewController {
 
         // 1. Top Card: Metrics and Primary Actions
         let topCard = NSBox()
-        topCard.title = "运行概览"
+        topCard.title = L10n.t(.overviewRunBox)
         topCard.titleFont = NSFont.systemFont(ofSize: 13, weight: .bold)
 
         let topStack = NSStackView()
-        topStack.orientation = .horizontal
-        topStack.alignment = .centerY
+        topStack.orientation = .vertical
+        topStack.alignment = .leading
         topStack.spacing = 16
 
         for lbl in [totalRepliesLabel, activeSessionsLabel, pendingHandoffLabel] {
@@ -73,10 +93,19 @@ public final class OverviewPageController: NSViewController {
 
         topCard.setContent(topStack)
         mainStack.addArrangedSubview(topCard)
+        mainStack.addArrangedSubview(NSTextField(wrappingLabelWithString: L10n.t(.sentNotDelivered)))
+        let needsBox = NSBox()
+        needsBox.title = L10n.t(.needsActionTitle)
+        issuesStack.orientation = .vertical
+        issuesStack.alignment = .leading
+        issuesStack.spacing = 8
+        needsBox.setContent(issuesStack)
+        mainStack.addArrangedSubview(needsBox)
+        needsBox.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
 
         // 2. Health check items list
         let itemsBox = NSBox()
-        itemsBox.title = "系统检查与诊断"
+        itemsBox.title = L10n.t(.checksBox)
         itemsBox.titleFont = NSFont.systemFont(ofSize: 13, weight: .bold)
 
         itemsStack.orientation = .vertical
@@ -107,17 +136,33 @@ public final class OverviewPageController: NSViewController {
     }
 
     public func refreshData() {
-        let (items, input) = context.collectLatestStatus()
+        let (_, input) = context.collectLatestStatus()
+        renderData(input: input)
+    }
 
+    private func renderData(input: StatusInput) {
+        let items = evaluate(input)
         // 统计指标
         let activeCount = input.sessions.filter { $0.value.state == "watching" || $0.value.state == "listening" }.count
         let handoffCount = input.sessions.filter { $0.value.handoff == true || $0.value.state == "handoff" }.count
-        activeSessionsLabel.stringValue = "监听会话: \(activeCount)"
-        pendingHandoffLabel.stringValue = "待人工: \(handoffCount)"
+        activeSessionsLabel.stringValue = L10n.t(.metricListening) + ": \(activeCount)"
+        pendingHandoffLabel.stringValue = L10n.t(.metricHandoff) + ": \(handoffCount)"
 
-        let isPaused = (input.bot.healthState == "paused")
-        pauseResumeButton.title = isPaused ? "恢复自动回复" : "暂停自动回复"
+        let isPaused = context.statusSummary?.autoReplyPaused ?? true
+        pauseResumeButton.isEnabled = context.statusSummary?.state == .normal || context.statusSummary?.state == .manuallyPaused
+        pauseResumeButton.title = isPaused ? L10n.t(.actionResumeAutoReply) : L10n.t(.actionPauseAutoReply)
 
+        renderSummary()
+        if !statsLoading {
+            statsLoading = true
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let count = try? SessionDataClient().sentToday()
+                DispatchQueue.main.async {
+                    self?.statsLoading = false
+                    self?.totalRepliesLabel.stringValue = L10n.t(.sentToday) + ": " + (count.map(String.init) ?? "—")
+                }
+            }
+        }
         // 渲染各项检查
         itemsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
@@ -129,8 +174,8 @@ public final class OverviewPageController: NSViewController {
 
     private func createItemRow(item: StatusItem) -> NSView {
         let rowStack = NSStackView()
-        rowStack.orientation = .horizontal
-        rowStack.alignment = .centerY
+        rowStack.orientation = .vertical
+        rowStack.alignment = .leading
         rowStack.spacing = 10
 
         // 状态圆点
@@ -145,12 +190,10 @@ public final class OverviewPageController: NSViewController {
         // 标题与说明
         let titleLbl = NSTextField(labelWithString: itemTitle(key: item.key))
         titleLbl.font = NSFont.systemFont(ofSize: 12, weight: .bold)
-        titleLbl.widthAnchor.constraint(equalToConstant: 80).isActive = true
 
-        let descText = item.fix != nil ? "\(item.reason) （建议: \(item.fix!)）" : item.reason
+        let descText = item.fix != nil ? item.reason + L10n.t(.suggestionSuffix, item.fix!) : item.reason
         let descLbl = NSTextField(wrappingLabelWithString: descText)
         descLbl.font = NSFont.systemFont(ofSize: 12)
-        descLbl.widthAnchor.constraint(lessThanOrEqualToConstant: 380).isActive = true
 
         rowStack.addArrangedSubview(dot)
         rowStack.addArrangedSubview(titleLbl)
@@ -158,17 +201,17 @@ public final class OverviewPageController: NSViewController {
 
         // 行内操作按钮
         if item.key == "desktop_service" {
-            let btn = NSButton(title: "重启桌面服务", target: self, action: #selector(confirmRestartDesktopService))
+            let btn = NSButton(title: L10n.t(.actionRestartDesktopService), target: self, action: #selector(confirmRestartDesktopService))
             rowStack.addArrangedSubview(btn)
         } else if item.key == "bot" {
-            let btn = NSButton(title: "重启机器人", target: self, action: #selector(confirmRestartBot))
+            let btn = NSButton(title: L10n.t(.actionRestartBot), target: self, action: #selector(confirmRestartBot))
             rowStack.addArrangedSubview(btn)
         } else if item.key == "wechat" {
-            let btn = NSButton(title: "放回标准位置", target: self, action: #selector(handleRepositionWechat))
+            let btn = NSButton(title: L10n.t(.actionRepositionWechat), target: self, action: #selector(handleRepositionWechat))
             rowStack.addArrangedSubview(btn)
         } else if item.key == "permissions" && item.level != .green {
-            let scrBtn = NSButton(title: "请求屏幕录制权限", target: self, action: #selector(handleRequestScreen))
-            let accBtn = NSButton(title: "请求辅助功能权限", target: self, action: #selector(handleRequestAccessibility))
+            let scrBtn = NSButton(title: L10n.t(.permScreen), target: self, action: #selector(handleRequestScreen))
+            let accBtn = NSButton(title: L10n.t(.permAccessibility), target: self, action: #selector(handleRequestAccessibility))
             rowStack.addArrangedSubview(scrBtn)
             rowStack.addArrangedSubview(accBtn)
         }
@@ -177,17 +220,7 @@ public final class OverviewPageController: NSViewController {
     }
 
     private func itemTitle(key: String) -> String {
-        switch key {
-        case "permissions": return "权限"
-        case "desktop_service": return "桌面服务"
-        case "bot": return "机器人"
-        case "sessions": return "会话"
-        case "wechat": return "微信"
-        case "layout": return "布局"
-        case "disk": return "磁盘"
-        case "brain": return "MCP/大脑"
-        default: return key
-        }
+        return statusItemTitle(key: key)
     }
 
     @objc private func handleRecheck() {
@@ -202,10 +235,10 @@ public final class OverviewPageController: NSViewController {
 
     @objc private func confirmRestartDesktopService() {
         let alert = NSAlert()
-        alert.messageText = "确认重启桌面服务？"
-        alert.informativeText = "重启期间可能会短暂中断正在进行的屏幕与微信交互。"
-        alert.addButton(withTitle: "确认重启")
-        alert.addButton(withTitle: "取消")
+        alert.messageText = L10n.t(.confirmRestartDesktopTitle)
+        alert.informativeText = L10n.t(.confirmRestartDesktopBody)
+        alert.addButton(withTitle: L10n.t(.confirmRestart))
+        alert.addButton(withTitle: L10n.t(.cancel))
         if alert.runModal() == .alertFirstButtonReturn {
             context.restartDesktopService()
             refreshData()
@@ -214,10 +247,10 @@ public final class OverviewPageController: NSViewController {
 
     @objc private func confirmRestartBot() {
         let alert = NSAlert()
-        alert.messageText = "确认重启机器人？"
-        alert.informativeText = "重启机器人将重新初始化核心进程及所有监听任务。"
-        alert.addButton(withTitle: "确认重启")
-        alert.addButton(withTitle: "取消")
+        alert.messageText = L10n.t(.confirmRestartBotTitle)
+        alert.informativeText = L10n.t(.confirmRestartBotBody)
+        alert.addButton(withTitle: L10n.t(.confirmRestart))
+        alert.addButton(withTitle: L10n.t(.cancel))
         if alert.runModal() == .alertFirstButtonReturn {
             context.restartBot()
             refreshData()
