@@ -6,12 +6,30 @@ public final class SessionsPageController: NSViewController {
     private let context: StatusPanelController
     private let brainClient = BrainClient()
     private let sessionsStack = NSStackView()
-    private let emptyLabel = NSTextField(labelWithString: "暂无活跃会话")
+    private let banner = NSTextField(wrappingLabelWithString: "")
+    private let bannerAction = NSButton()
+    private let messageView = NSTextView()
+    private let messageTitle = NSTextField(labelWithString: "")
+    private let handoffButton = NSButton()
+    private let moreSessions = NSButton()
+    private let moreMessages = NSButton()
+    private let refreshButton = NSButton()
+    private var nextSessionOffset: Int?
+    private var nextMessageOffset: Int?
+    private var selectedContact: String?
+    private var rows: [RecordedSession] = []
+    private var messages: [RecordedMessage] = []
+    private var loading = false
+    private var hasAPIData = false
+    private var detailGeneration = 0
+    private var statusObserver: NSObjectProtocol?
+    public var onStatusAction: ((StatusIssueAction) -> Void)?
+    private let emptyLabel = NSTextField(labelWithString: L10n.t(.sessionsEmpty))
 
     // Provenance Detail Area
     private let provenanceBox = NSBox()
     private let turnSearchField = NSTextField()
-    private let queryTurnButton = NSButton(title: "查询轮次", target: nil, action: nil)
+    private let queryTurnButton = NSButton(title: L10n.t(.actionQueryTurn), target: nil, action: nil)
     private let detailTextView = NSTextView()
 
     public init(context: StatusPanelController) {
@@ -31,6 +49,24 @@ public final class SessionsPageController: NSViewController {
         super.viewDidLoad()
         setupUI()
         refreshSessions()
+        statusObserver = NotificationCenter.default.addObserver(forName: StatusPanelController.statusDidChange, object: context, queue: .main) { [weak self] _ in
+            self?.renderBanner()
+            if self?.hasAPIData == true { self?.renderRecordedRows() }
+        }
+    }
+
+    deinit { if let observer = statusObserver { NotificationCenter.default.removeObserver(observer) } }
+
+    private func renderBanner() {
+        guard let summary = context.statusSummary else { return }
+        banner.stringValue = summary.bannerText ?? ""
+        banner.isHidden = summary.bannerText == nil
+        bannerAction.title = summary.primaryActionTitle ?? ""
+        bannerAction.isHidden = summary.primaryAction == nil
+    }
+
+    @objc private func performBannerAction() {
+        if let action = context.statusSummary?.primaryAction { onStatusAction?(action) }
     }
 
     private func setupUI() {
@@ -45,8 +81,16 @@ public final class SessionsPageController: NSViewController {
         mainStack.spacing = 16
         mainStack.translatesAutoresizingMaskIntoConstraints = false
 
+        bannerAction.target = self
+        bannerAction.action = #selector(performBannerAction)
+        mainStack.addArrangedSubview(banner)
+        mainStack.addArrangedSubview(bannerAction)
+        refreshButton.title = L10n.t(.actionRecheck)
+        refreshButton.target = self
+        refreshButton.action = #selector(reloadSessions)
+        mainStack.addArrangedSubview(refreshButton)
         let box = NSBox()
-        box.title = "会话监听列表"
+        box.title = L10n.t(.sessionsListBox)
         box.titleFont = NSFont.systemFont(ofSize: 13, weight: .bold)
 
         sessionsStack.orientation = .vertical
@@ -59,9 +103,50 @@ public final class SessionsPageController: NSViewController {
 
         box.setContent(sessionsStack)
         mainStack.addArrangedSubview(box)
+        moreSessions.title = L10n.t(.loadMore)
+        moreSessions.target = self
+        moreSessions.action = #selector(loadMoreSessions)
+        moreSessions.isHidden = true
+        mainStack.addArrangedSubview(moreSessions)
+        let conversation = NSBox()
+        conversation.title = L10n.t(.navSessions)
+        let detailStack = NSStackView()
+        detailStack.orientation = .vertical
+        detailStack.alignment = .leading
+        detailStack.spacing = 8
+        detailStack.addArrangedSubview(messageTitle)
+        detailStack.addArrangedSubview(NSTextField(wrappingLabelWithString: L10n.t(.recordedOnlyNote)))
+        let messageScroll = NSScrollView()
+        messageScroll.hasVerticalScroller = true
+        messageView.frame = NSRect(x: 0, y: 0, width: 600, height: 220)
+        messageView.isVerticallyResizable = true
+        messageView.isHorizontallyResizable = false
+        messageView.autoresizingMask = [.width]
+        messageView.textContainer?.widthTracksTextView = true
+        messageView.isEditable = false
+        messageView.isSelectable = true
+        messageView.font = .systemFont(ofSize: 13)
+        messageView.string = L10n.t(.detailSelectHint)
+        messageScroll.documentView = messageView
+        messageScroll.heightAnchor.constraint(equalToConstant: 220).isActive = true
+        detailStack.addArrangedSubview(messageScroll)
+        messageScroll.widthAnchor.constraint(equalTo: detailStack.widthAnchor).isActive = true
+        handoffButton.title = L10n.t(.actionHandoff)
+        handoffButton.isEnabled = false
+        handoffButton.toolTip = L10n.t(.handoffUnsupported)
+        detailStack.addArrangedSubview(handoffButton)
+        detailStack.addArrangedSubview(NSTextField(wrappingLabelWithString: L10n.t(.handoffUnsupported)))
+        moreMessages.title = L10n.t(.loadMore)
+        moreMessages.target = self
+        moreMessages.action = #selector(loadMoreMessages)
+        moreMessages.isHidden = true
+        detailStack.addArrangedSubview(moreMessages)
+        conversation.setContent(detailStack)
+        mainStack.addArrangedSubview(conversation)
+        conversation.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
 
         // 轮次追溯详情区域
-        provenanceBox.title = "对话轮次追溯 (Provenance)"
+        provenanceBox.title = L10n.t(.provenanceBox)
         provenanceBox.titleFont = NSFont.systemFont(ofSize: 13, weight: .bold)
 
         let provStack = NSStackView()
@@ -70,7 +155,7 @@ public final class SessionsPageController: NSViewController {
         provStack.spacing = 8
         provStack.translatesAutoresizingMaskIntoConstraints = false
 
-        turnSearchField.placeholderString = "输入 turn_id 查询详细追溯"
+        turnSearchField.placeholderString = L10n.t(.turnPlaceholder)
         turnSearchField.widthAnchor.constraint(equalToConstant: 260).isActive = true
         queryTurnButton.target = self
         queryTurnButton.action = #selector(handleQueryTurn)
@@ -82,12 +167,17 @@ public final class SessionsPageController: NSViewController {
 
         let textScroll = NSScrollView()
         textScroll.hasVerticalScroller = true
+        detailTextView.frame = NSRect(x: 0, y: 0, width: 600, height: 180)
+        detailTextView.isVerticallyResizable = true
+        detailTextView.isHorizontallyResizable = false
+        detailTextView.autoresizingMask = [.width]
+        detailTextView.textContainer?.widthTracksTextView = true
         detailTextView.isEditable = false
         detailTextView.font = NSFont.userFixedPitchFont(ofSize: 11)
-        detailTextView.string = "暂无选中轮次。请在上方输入框手动输入有效 turn_id 并点击查询，以查看详细快照、角色修订与发送状态。"
+        detailTextView.string = L10n.t(.provenanceHint)
         textScroll.documentView = detailTextView
         textScroll.heightAnchor.constraint(equalToConstant: 180).isActive = true
-        textScroll.widthAnchor.constraint(equalToConstant: 640).isActive = true
+        textScroll.widthAnchor.constraint(equalTo: provStack.widthAnchor).isActive = true
         provStack.addArrangedSubview(textScroll)
 
         provenanceBox.setContent(provStack)
@@ -111,32 +201,106 @@ public final class SessionsPageController: NSViewController {
         ])
     }
 
+    @objc private func reloadSessions() { refreshSessions() }
+    @objc private func loadMoreSessions() { if let offset = nextSessionOffset { fetchSessions(offset: offset) } }
+    @objc private func loadMoreMessages() {
+        if let id = selectedContact, let offset = nextMessageOffset { fetchMessages(id: id, offset: offset) }
+    }
+
     public func refreshSessions() {
-        let (_, input) = context.collectLatestStatus()
-        sessionsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        _ = context.collectLatestStatus()
+        renderBanner()
+        fetchSessions(offset: 0)
+    }
 
-        if input.sessions.isEmpty {
-            sessionsStack.addArrangedSubview(emptyLabel)
-            return
+    private func fetchSessions(offset: Int) {
+        guard !loading else { return }
+        loading = true
+        moreSessions.isEnabled = false
+        refreshButton.isEnabled = false
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let page = try? SessionDataClient().list(offset: offset)
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.loading = false
+                self.moreSessions.isEnabled = true
+                self.refreshButton.isEnabled = true
+                self.sessionsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+                guard let page = page else {
+                    self.hasAPIData = false
+                    self.moreSessions.isHidden = true
+                    self.sessionsStack.addArrangedSubview(NSTextField(wrappingLabelWithString: L10n.t(.sessionsApiUnavailable)))
+                    let (_, input) = self.context.collectLatestStatus()
+                    for (name, session) in input.sessions.sorted(by: { $0.key < $1.key }) {
+                        self.sessionsStack.addArrangedSubview(self.createSessionRow(name: name, session: session))
+                    }
+                    return
+                }
+                if offset == 0 { self.rows = page.sessions } else { self.rows += page.sessions }
+                self.nextSessionOffset = page.nextOffset
+                self.moreSessions.isHidden = page.nextOffset == nil
+                self.hasAPIData = true
+                self.renderRecordedRows()
+            }
         }
+    }
 
-        for (name, session) in input.sessions.sorted(by: { $0.key < $1.key }) {
-            let row = createSessionRow(name: name, session: session)
-            sessionsStack.addArrangedSubview(row)
+    private func renderRecordedRows() {
+        sessionsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        if rows.isEmpty { sessionsStack.addArrangedSubview(emptyLabel) }
+        for session in rows {
+            let button = NSButton(title: session.title(paused: context.statusSummary?.autoReplyPaused ?? true), target: self, action: #selector(selectConversation(_:)))
+            button.identifier = NSUserInterfaceItemIdentifier(session.contactID)
+            button.bezelStyle = .inline
+            sessionsStack.addArrangedSubview(button)
+            if session.handoff == true {
+                let resume = NSButton(title: L10n.t(.actionResumeAutoReply), target: self, action: #selector(handleResumeHandoff(_:)))
+                resume.identifier = NSUserInterfaceItemIdentifier(session.displayName)
+                sessionsStack.addArrangedSubview(resume)
+            }
+        }
+    }
+
+    @objc private func selectConversation(_ sender: NSButton) {
+        guard let id = sender.identifier?.rawValue else { return }
+        selectedContact = id
+        detailGeneration += 1
+        messages = []
+        nextMessageOffset = nil
+        moreMessages.isHidden = true
+        messageTitle.stringValue = rows.first(where: { $0.contactID == id })?.displayName ?? ""
+        messageView.string = L10n.t(.loading)
+        fetchMessages(id: id, offset: 0)
+    }
+
+    private func fetchMessages(id: String, offset: Int) {
+        let generation = detailGeneration
+        moreMessages.isEnabled = false
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let page = try? SessionDataClient().detail(contactID: id, offset: offset)
+            DispatchQueue.main.async {
+                guard let self = self, self.selectedContact == id, self.detailGeneration == generation else { return }
+                self.moreMessages.isEnabled = true
+                guard let page = page else { self.messageView.string = L10n.t(.detailUnavailable); return }
+                if offset == 0 { self.messages = page.messages } else { self.messages = page.messages + self.messages }
+                self.nextMessageOffset = page.nextOffset
+                self.moreMessages.isHidden = page.nextOffset == nil
+                self.messageView.string = self.messages.isEmpty ? L10n.t(.detailEmpty) : self.messages.map { $0.displayText }.joined(separator: "\n\n")
+            }
         }
     }
 
     private func createSessionRow(name: String, session: SessionHealthInput) -> NSView {
         let rowStack = NSStackView()
-        rowStack.orientation = .horizontal
-        rowStack.alignment = .centerY
+        rowStack.orientation = .vertical
+        rowStack.alignment = .leading
         rowStack.spacing = 12
 
         let nameLbl = NSTextField(labelWithString: name)
         nameLbl.font = NSFont.systemFont(ofSize: 12, weight: .bold)
         nameLbl.widthAnchor.constraint(equalToConstant: 180).isActive = true
 
-        let humanState = sessionStateHumanReadable(
+        let humanState = context.statusSummary?.autoReplyPaused == true && ["watching", "listening", "replying"].contains(session.state) ? L10n.t(.modePaused) : sessionStateHumanReadable(
             state: session.state,
             reason: session.reason,
             code: session.code,
@@ -149,7 +313,7 @@ public final class SessionsPageController: NSViewController {
 
         if session.handoff == true || session.state == "handoff" {
             stateLbl.textColor = .systemOrange
-            let resumeBtn = NSButton(title: "恢复自动回复", target: self, action: #selector(handleResumeHandoff(_:)))
+            let resumeBtn = NSButton(title: L10n.t(.actionResumeAutoReply), target: self, action: #selector(handleResumeHandoff(_:)))
             resumeBtn.identifier = NSUserInterfaceItemIdentifier(name)
             rowStack.addArrangedSubview(nameLbl)
             rowStack.addArrangedSubview(stateLbl)
@@ -170,7 +334,7 @@ public final class SessionsPageController: NSViewController {
     @objc private func handleQueryTurn() {
         let query = turnSearchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return }
-        detailTextView.string = "正在查询轮次 [\(query)] 的追溯详情..."
+        detailTextView.string = L10n.t(.turnQuerying, query)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             do {
@@ -180,7 +344,7 @@ public final class SessionsPageController: NSViewController {
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.detailTextView.string = "未找到轮次追溯 (该轮次 ID 不存在或为旧版无追溯轮次): \(error.localizedDescription)"
+                    self.detailTextView.string = L10n.t(.turnNotFound)
                 }
             }
         }
@@ -205,22 +369,20 @@ public final class SessionsPageController: NSViewController {
     }
 
     public func displayTurnDetail(_ detail: BrainTurnDetail) {
-        var text = "【轮次追溯详情】\n"
+        var text = L10n.t(.turnDetailTitle) + "\n"
         text += "Turn ID: \(detail.turnId)\n"
-        text += "联系人: \(detail.contactId)\n"
-        text += "追溯记录状态: \(detail.provenanceDisplayText)\n"
-        text += "角色修订: \(detail.roleId ?? "未记录")\n"
-        if let model = detail.model {
-            let p = model["provider"]?.value as? String ?? "-"
-            let m = model["model"]?.value as? String ?? "-"
-            text += "模型引用: \(p) / \(m)\n"
-        }
-        text += "幂等键: \(detail.sendKey ?? "-")\n"
-        text += "执行状态阶段: \(detail.phaseLabels.joined(separator: " · "))\n"
-        if let dec = detail.decision {
-            let act = dec["action"]?.value as? String ?? "-"
-            let reply = dec["text"]?.value as? String ?? ""
-            text += "大脑决策: \(act) | 回复: \(reply)\n"
+        text += L10n.t(.turnContact) + ": \(detail.contactId)\n"
+        text += L10n.t(.turnRoleRevision) + ": " + (detail.roleId ?? L10n.t(.turnNotRecorded)) + "\n"
+        // Do not expose raw provider metadata, decisions or errors in the provenance panel.
+        text += L10n.t(.turnProvenanceStatus) + ": " + L10n.t(detail.hasProvenance ? .statusOK : .turnNotRecorded) + "\n"
+        text += L10n.t(.turnSendKey) + ": " + (detail.sendKey ?? L10n.t(.turnNotRecorded)) + "\n"
+        if let phase = detail.execution?["phase"]?.value as? String, ["sent", "triggered"].contains(phase) {
+            text += L10n.t(.termSent) + " · " + L10n.t(.deliveryUnknown)
+        } else { text += L10n.t(.turnPhases) + ": " + L10n.t(.modelStateUnknown) }
+        if let decision = detail.decision, let action = decision["action"]?.value as? String,
+           ["send", "skip", "handoff"].contains(action) {
+            let label = L10n.t(action == "handoff" ? .actionHandoff : action == "skip" ? .skipTurn : .termAutoReply)
+            text += "\n" + L10n.t(.turnDecision, label, decision["text"]?.value as? String ?? "")
         }
         detailTextView.string = text
     }
@@ -231,3 +393,99 @@ public final class SessionsPageController: NSViewController {
         refreshSessions()
     }
 }
+
+public struct RecordedSession: Decodable {
+    public let contactID: String
+    public let displayName: String
+    public let kind: String?
+    public let unread: Int?
+    public let autoReplying: Bool?
+    public let handoff: Bool?
+    enum CodingKeys: String, CodingKey {
+        case contactID = "contact_id", displayName = "display_name", kind, unread
+        case autoReplying = "auto_replying", handoff
+    }
+    public var displayTitle: String { title(paused: false) }
+    public func title(paused: Bool) -> String {
+        var parts = [displayName]
+        if kind == "group" { parts.append(L10n.t(.kindGroup)) }
+        if kind == "private" { parts.append(L10n.t(.kindPrivate)) }
+        if let unread = unread { parts.append(L10n.t(.unreadCount, unread)) }
+        if handoff == true { parts.append(L10n.t(.modeManual)) }
+        else if let active = autoReplying { parts.append(L10n.t(active && !paused ? .modeAuto : .modePaused)) }
+        return parts.joined(separator: " · ")
+    }
+}
+
+public struct RecordedMessage: Decodable {
+    public let text: String?
+    public let direction: String?
+    public let autoReply: Bool?
+    public let sendStatus: String?
+    enum CodingKeys: String, CodingKey {
+        case text, direction, autoReply = "auto_reply", sendStatus = "send_status"
+    }
+    public var displayText: String {
+        var marks: [String] = []
+        if direction == "inbound" { marks.append(L10n.t(.messageFromCustomer)) }
+        if direction == "outbound" { marks.append(L10n.t(.messageFromUs)) }
+        if autoReply == true { marks.append(L10n.t(.termAutoReply)) }
+        // Only the fixed, evidenced T2 status marks a send. Null never becomes "sent".
+        if sendStatus == L10n.text(.termSent, in: .zh) {
+            marks.append(L10n.t(.termSent))
+            marks.append(L10n.t(.deliveryUnknown))
+        }
+        return marks.joined(separator: " · ") + "\n" + (text ?? "")
+    }
+}
+
+public struct SessionListPage: Decodable {
+    public let sessions: [RecordedSession]
+    public let nextOffset: Int?
+    enum CodingKeys: String, CodingKey { case sessions, nextOffset = "next_offset" }
+}
+public struct SessionMessagePage: Decodable {
+    public let messages: [RecordedMessage]
+    public let nextOffset: Int?
+    enum CodingKeys: String, CodingKey { case messages, nextOffset = "next_offset" }
+}
+
+/// Uses T2's versioned JSON envelope and never includes command output in errors.
+public final class SessionDataClient {
+    public typealias Executor = (String, [String], Double) -> ControlRun
+    private let executor: Executor
+    private let configPath: String
+    public init(configPath: String? = nil, executor: @escaping Executor = runControlCommand) {
+        self.executor = executor
+        self.configPath = configPath ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".WeChatRPABot/config.json").path
+    }
+    private func run(_ action: String, request: [String: Any]? = nil) throws -> Data {
+        var args = ["control", action, "--config", configPath]
+        if let request = request {
+            let data = try JSONSerialization.data(withJSONObject: request, options: .sortedKeys)
+            args += ["--request-json", String(decoding: data, as: UTF8.self)]
+        }
+        let result = executor(controlBinaryPath(), args, 15)
+        guard result.status == 0 && !result.timedOut else { throw SessionDataError.unavailable }
+        return result.output
+    }
+    private struct Envelope<Value: Decodable>: Decodable { let ok: Bool; let data: Value? }
+    private func payload<T: Decodable>(_ action: String, request: [String: Any]) throws -> T {
+        let envelope = try JSONDecoder().decode(Envelope<T>.self, from: run(action, request: request))
+        guard envelope.ok, let value = envelope.data else { throw SessionDataError.unavailable }
+        return value
+    }
+    public func list(offset: Int = 0) throws -> SessionListPage {
+        try payload("sessions-list", request: ["limit": 50, "offset": offset])
+    }
+    public func detail(contactID: String, offset: Int = 0) throws -> SessionMessagePage {
+        try payload("session-detail", request: ["contact_id": contactID, "limit": 50, "offset": offset])
+    }
+    public func sentToday() throws -> Int? {
+        let object = try JSONSerialization.jsonObject(with: run("status")) as? [String: Any]
+        let stats = object?["stats"] as? [String: Any]
+        guard let count = stats?["sent_today"] as? Int, count >= 0 else { return nil }
+        return count
+    }
+}
+public enum SessionDataError: Error { case unavailable }

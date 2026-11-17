@@ -230,6 +230,9 @@ public struct StatusInput: Codable {
     public var layout: LayoutInput
     public var disk: DiskInput
     public var brain: BrainInput?
+    /// 模型配置状态，原样取自 ConfigFormLogic.maskConfig 的 model_state 字段；
+    /// 字段缺失（旧版本）时为 nil，按「状态未知」处理，不报「模型未配置」。
+    public var modelState: String?
 
     public init(
         permissions: PermissionsInput,
@@ -239,7 +242,8 @@ public struct StatusInput: Codable {
         wechat: WechatInput,
         layout: LayoutInput,
         disk: DiskInput,
-        brain: BrainInput? = nil
+        brain: BrainInput? = nil,
+        modelState: String? = nil
     ) {
         self.permissions = permissions
         self.desktopService = desktopService
@@ -249,6 +253,7 @@ public struct StatusInput: Codable {
         self.layout = layout
         self.disk = disk
         self.brain = brain
+        self.modelState = modelState
     }
 
     enum CodingKeys: String, CodingKey {
@@ -260,6 +265,7 @@ public struct StatusInput: Codable {
         case layout
         case disk
         case brain
+        case modelState = "model_state"
     }
 }
 
@@ -315,32 +321,29 @@ public func sessionStateHumanReadable(
     handoff: Bool? = nil
 ) -> String {
     if handoff == true || state == "handoff" {
-        return "已转人工"
+        return L10n.t(.stateHandoff)
     }
     if state == "needs_recalibration" {
-        return "需要重新校准"
+        return L10n.t(.stateNeedsRecalibration)
     }
     if state == "watching" || state == "listening" {
-        return "监听中"
+        return L10n.t(.stateListening)
     }
     if state == "replied" || state == "replying" {
-        return "正在回复"
+        return L10n.t(.stateReplying)
     }
     if state == "waiting_for_wechat_window" {
         let combined = "\(reason ?? "") \(code ?? "")"
         if combined.contains("session_row_not_unique_or_missing") {
-            return "等待对方新消息（会话不在列表可见范围）"
+            return L10n.t(.stateWaitRowMissing)
         } else if combined.contains("window_blocked") || combined.contains("blocking") {
-            return "等待中（有别的窗口挡住）"
+            return L10n.t(.stateWaitBlocked)
         } else {
-            let detail = code ?? reason ?? "窗口未就绪"
-            return "等待微信窗口中（\(detail)）"
+            let detail = L10n.t(.stateWindowNotReady)
+            return L10n.t(.stateWaitWindow, detail)
         }
     }
-    if let r = reason, !r.isEmpty {
-        return "\(state) (\(r))"
-    }
-    return state
+    return L10n.t(.modelStateUnknown)
 }
 
 public func formatBytes(_ bytes: Int64) -> String {
@@ -352,26 +355,46 @@ public func formatBytes(_ bytes: Int64) -> String {
     return String(format: "%.1f MB", mb)
 }
 
+/// 检查项的显示名（总览「系统检查与诊断」和诊断报告共用）。
+public func statusItemTitle(key: String) -> String {
+    switch key {
+    case "permissions": return L10n.t(.itemPermissions)
+    case "desktop_service": return L10n.t(.itemDesktopService)
+    case "bot": return L10n.t(.itemBot)
+    case "sessions": return L10n.t(.itemSessions)
+    case "wechat": return L10n.t(.itemWechat)
+    case "layout": return L10n.t(.itemLayout)
+    case "disk": return L10n.t(.itemDisk)
+    case "brain": return L10n.t(.itemReplyMode)
+    default: return key
+    }
+}
+
+private func pidSuffix(_ pid: Int32?) -> String {
+    guard let pid = pid else { return "" }
+    return " (PID: \(pid))"
+}
+
 public func evaluate(_ s: StatusInput) -> [StatusItem] {
     var items: [StatusItem] = []
 
     // 1. permissions
     let permItem: StatusItem
     if s.permissions.screenRecordingAuthorized && s.permissions.accessibilityTrusted {
-        permItem = StatusItem(key: "permissions", level: .green, reason: "屏幕录制与辅助功能已授权", fix: nil)
+        permItem = StatusItem(key: "permissions", level: .green, reason: L10n.t(.evPermOK), fix: nil)
     } else if !s.permissions.screenRecordingAuthorized && !s.permissions.accessibilityTrusted {
-        permItem = StatusItem(key: "permissions", level: .red, reason: "屏幕录制与辅助功能未授权", fix: "请在「系统设置 → 隐私与安全性」中授予屏幕录制和辅助功能权限")
+        permItem = StatusItem(key: "permissions", level: .red, reason: L10n.t(.evPermNone), fix: L10n.t(.evPermNoneFix))
     } else if !s.permissions.screenRecordingAuthorized {
-        permItem = StatusItem(key: "permissions", level: .red, reason: "屏幕录制未授权", fix: "请在「系统设置 → 隐私与安全性」中授予屏幕录制权限")
+        permItem = StatusItem(key: "permissions", level: .red, reason: L10n.t(.evPermScreen), fix: L10n.t(.evPermScreenFix))
     } else {
-        permItem = StatusItem(key: "permissions", level: .red, reason: "辅助功能未授权", fix: "请在「系统设置 → 隐私与安全性」中授予辅助功能权限")
+        permItem = StatusItem(key: "permissions", level: .red, reason: L10n.t(.evPermAccessibility), fix: L10n.t(.evPermAccessibilityFix))
     }
     if permItem.level == .green, let blocked = s.permissions.folderPermissionBlocked {
         // 附件保存在受保护文件夹而未授权：图片只能用缩略图，文件读不到
         items.append(StatusItem(
             key: "permissions", level: .red,
-            reason: "附件保存所在文件夹未授权（\(blocked)），图片和文件无法保存",
-            fix: "请在「系统设置 → 隐私与安全性 → 文件和文件夹」中为 微信客服助手 打开 桌面、文稿、下载 文件夹的访问"))
+            reason: L10n.t(.evFolderBlocked, blocked),
+            fix: L10n.t(.evFolderFix)))
     } else {
         items.append(permItem)
     }
@@ -379,15 +402,14 @@ public func evaluate(_ s: StatusInput) -> [StatusItem] {
     // 2. desktop_service
     let svcItem: StatusItem
     if s.desktopService.status == "running" && s.desktopService.socketExists {
-        let pidStr = s.desktopService.pid != nil ? " (PID: \(s.desktopService.pid!))" : ""
-        svcItem = StatusItem(key: "desktop_service", level: .green, reason: "桌面服务运行中\(pidStr)", fix: nil)
+        svcItem = StatusItem(key: "desktop_service", level: .green, reason: L10n.t(.evDesktopRunning, pidSuffix(s.desktopService.pid)), fix: nil)
     } else if s.desktopService.status == "idle" && s.desktopService.socketExists {
-        svcItem = StatusItem(key: "desktop_service", level: .green, reason: "桌面服务空闲，等待连接", fix: nil)
+        svcItem = StatusItem(key: "desktop_service", level: .green, reason: L10n.t(.evDesktopIdle), fix: nil)
     } else if s.desktopService.status == "restarting" {
-        svcItem = StatusItem(key: "desktop_service", level: .yellow, reason: "桌面服务正在退避重试", fix: "等待自动重试或点击重启服务")
+        svcItem = StatusItem(key: "desktop_service", level: .yellow, reason: L10n.t(.evDesktopRestarting), fix: L10n.t(.evDesktopRestartingFix))
     } else {
-        let reason = s.desktopService.stoppedReason ?? "桌面服务未运行"
-        svcItem = StatusItem(key: "desktop_service", level: .red, reason: reason, fix: "点击「重启桌面服务」")
+        let reason = L10n.t(.evDesktopStopped)
+        svcItem = StatusItem(key: "desktop_service", level: .red, reason: reason, fix: L10n.t(.evDesktopStoppedFix))
     }
     items.append(svcItem)
 
@@ -397,71 +419,46 @@ public func evaluate(_ s: StatusInput) -> [StatusItem] {
 
     if isCore {
         if s.bot.launchdLoaded {
-            botItem = StatusItem(
-                key: "bot",
-                level: .red,
-                reason: "互斥冲突：Rust 核心已启用，但检测到 Python 机器人任务已加载",
-                fix: "请先卸载 Python launchd 任务: launchctl bootout gui/$UID/local.wechat-rpa.bot"
-            )
+            botItem = StatusItem(key: "bot", level: .red, reason: L10n.t(.evBotConflict), fix: L10n.t(.evBotConflictFix))
         } else if s.bot.coreStatus == "stopping" {
-            botItem = StatusItem(
-                key: "bot",
-                level: .yellow,
-                reason: "正在停止 Rust 核心（等待当前一轮完成）",
-                fix: nil
-            )
+            botItem = StatusItem(key: "bot", level: .yellow, reason: L10n.t(.evBotStopping), fix: nil)
         } else if s.bot.coreStatus == "restarting" {
-            botItem = StatusItem(
-                key: "bot",
-                level: .yellow,
-                reason: "Rust 核心正在退避重试中",
-                fix: "等待自动重试或排查配置"
-            )
+            botItem = StatusItem(key: "bot", level: .yellow, reason: L10n.t(.evBotBackoff), fix: L10n.t(.evBotBackoffFix))
         } else if s.bot.coreStatus == "gave_up" {
-            botItem = StatusItem(
-                key: "bot",
-                level: .red,
-                reason: "Rust 核心连续崩溃达到上限，已停止自动重启",
-                fix: "排查错误后点击「重启机器人」"
-            )
+            botItem = StatusItem(key: "bot", level: .red, reason: L10n.t(.evBotGaveUp), fix: L10n.t(.evBotGaveUpFix))
         } else if s.bot.coreStatus == "config_error" {
-            botItem = StatusItem(
-                key: "bot",
-                level: .red,
-                reason: "Rust 核心配置错误 (退出码 2)，已停止自动重启",
-                fix: "检查配置文件 ~/.WeChatRPABot/config.json"
-            )
+            botItem = StatusItem(key: "bot", level: .red, reason: L10n.t(.evBotConfigError), fix: L10n.t(.evBotConfigErrorFix))
         } else if s.bot.coreStatus == "stopped" || (s.bot.coreStatus != "running" && s.bot.corePid == nil) {
-            let reason = s.bot.coreStoppedReason ?? "Rust 核心未运行"
-            botItem = StatusItem(key: "bot", level: .red, reason: reason, fix: "点击「重启机器人」")
+            let reason = L10n.t(.evBotNotRunning)
+            botItem = StatusItem(key: "bot", level: .red, reason: reason, fix: L10n.t(.evBotRestartFix))
         } else {
             // Rust 核心运行中
-            let pidStr = s.bot.corePid != nil ? " (PID: \(s.bot.corePid!))" : ""
+            let pidStr = pidSuffix(s.bot.corePid)
             if s.bot.healthUpdatedAt == nil || s.bot.healthState == nil {
-                botItem = StatusItem(key: "bot", level: .red, reason: "未检测到机器人健康状态 (health.json 缺失)\(pidStr)", fix: "等待核心写入状态或启动机器人服务")
+                botItem = StatusItem(key: "bot", level: .red, reason: L10n.t(.evBotNoHealth, pidStr), fix: L10n.t(.evBotNoHealthFixCore))
             } else if (s.bot.now - (s.bot.healthUpdatedAt ?? 0)) > 120.0 {
-                botItem = StatusItem(key: "bot", level: .red, reason: "机器人健康状态超过 120 秒未更新\(pidStr)", fix: "检查机器人进程或点击「重启机器人」")
+                botItem = StatusItem(key: "bot", level: .red, reason: L10n.t(.evBotStale, pidStr), fix: L10n.t(.evBotStaleFix))
             } else if s.bot.healthState == "needs_recalibration" || s.bot.needsRecalibration == true {
-                botItem = StatusItem(key: "bot", level: .red, reason: "机器人需要重新校准 (needs_recalibration)\(pidStr)", fix: "运行 control calibrate 重新定位")
+                botItem = StatusItem(key: "bot", level: .red, reason: L10n.t(.evBotRecalibrate, pidStr), fix: L10n.t(.evBotRecalibrateFix))
             } else if s.bot.healthState == "paused" {
-                botItem = StatusItem(key: "bot", level: .yellow, reason: "机器人已暂停\(pidStr)", fix: "点击「恢复机器人」")
+                botItem = StatusItem(key: "bot", level: .yellow, reason: L10n.t(.evBotPaused, pidStr), fix: L10n.t(.evBotPausedFix))
             } else {
-                botItem = StatusItem(key: "bot", level: .green, reason: "Rust 核心运行中\(pidStr) (\(s.bot.healthState ?? "running"))", fix: nil)
+                botItem = StatusItem(key: "bot", level: .green, reason: L10n.t(.evBotCoreRunning, pidStr, s.bot.healthState ?? "running"), fix: nil)
             }
         }
     } else {
         if !s.bot.launchdLoaded {
-            botItem = StatusItem(key: "bot", level: .red, reason: "Python 模式：机器人服务未加载 (launchd 缺失)", fix: "检查并加载 local.wechat-rpa.bot")
+            botItem = StatusItem(key: "bot", level: .red, reason: L10n.t(.evBotPythonNotLoaded), fix: L10n.t(.evBotPythonNotLoadedFix))
         } else if s.bot.healthUpdatedAt == nil || s.bot.healthState == nil {
-            botItem = StatusItem(key: "bot", level: .red, reason: "未检测到机器人健康状态 (health.json 缺失)", fix: "启动机器人服务")
+            botItem = StatusItem(key: "bot", level: .red, reason: L10n.t(.evBotNoHealth, ""), fix: L10n.t(.evBotNoHealthFixPython))
         } else if (s.bot.now - (s.bot.healthUpdatedAt ?? 0)) > 120.0 {
-            botItem = StatusItem(key: "bot", level: .red, reason: "机器人健康状态超过 120 秒未更新", fix: "检查机器人进程或点击「重启机器人」")
+            botItem = StatusItem(key: "bot", level: .red, reason: L10n.t(.evBotStale, ""), fix: L10n.t(.evBotStaleFix))
         } else if s.bot.healthState == "needs_recalibration" || s.bot.needsRecalibration == true {
-            botItem = StatusItem(key: "bot", level: .red, reason: "机器人需要重新校准 (needs_recalibration)", fix: "运行 control calibrate 重新定位")
+            botItem = StatusItem(key: "bot", level: .red, reason: L10n.t(.evBotRecalibrate, ""), fix: L10n.t(.evBotRecalibrateFix))
         } else if s.bot.healthState == "paused" {
-            botItem = StatusItem(key: "bot", level: .yellow, reason: "机器人已暂停", fix: "点击「恢复机器人」")
+            botItem = StatusItem(key: "bot", level: .yellow, reason: L10n.t(.evBotPaused, ""), fix: L10n.t(.evBotPausedFix))
         } else {
-            botItem = StatusItem(key: "bot", level: .green, reason: "Python 模式：机器人正常运行中 (\(s.bot.healthState ?? "running"))", fix: nil)
+            botItem = StatusItem(key: "bot", level: .green, reason: L10n.t(.evBotPythonRunning, s.bot.healthState ?? "running"), fix: nil)
         }
     }
     items.append(botItem)
@@ -482,21 +479,21 @@ public func evaluate(_ s: StatusInput) -> [StatusItem] {
         }
     }
     if !recalibrationSessions.isEmpty {
-        sessionsItem = StatusItem(key: "sessions", level: .red, reason: "会话【\(recalibrationSessions.joined(separator: ", "))】需要重新校准", fix: "运行校准生成新地图")
+        sessionsItem = StatusItem(key: "sessions", level: .red, reason: L10n.t(.evSessionsRecalibrate, recalibrationSessions.joined(separator: ", ")), fix: L10n.t(.evSessionsRecalibrateFix))
     } else if !handoffSessions.isEmpty {
-        sessionsItem = StatusItem(key: "sessions", level: .yellow, reason: "会话【\(handoffSessions.joined(separator: ", "))】已转人工", fix: "点击「恢复自动回复」或处理会话")
+        sessionsItem = StatusItem(key: "sessions", level: .yellow, reason: L10n.t(.evSessionsHandoff, handoffSessions.joined(separator: ", ")), fix: L10n.t(.evSessionsHandoffFix))
     } else if let firstWaiting = waitingSessions.first {
         let desc = sessionStateHumanReadable(state: "waiting_for_wechat_window", reason: firstWaiting.code, code: firstWaiting.code, handoff: false)
-        sessionsItem = StatusItem(key: "sessions", level: .yellow, reason: "会话【\(firstWaiting.name)】处于 \(desc)", fix: "检查微信窗口是否可见且未被遮挡")
+        sessionsItem = StatusItem(key: "sessions", level: .yellow, reason: L10n.t(.evSessionsWaiting, firstWaiting.name, desc), fix: L10n.t(.evSessionsWaitingFix))
     } else {
-        sessionsItem = StatusItem(key: "sessions", level: .green, reason: "所有会话状态正常 (\(s.sessions.count) 个)", fix: nil)
+        sessionsItem = StatusItem(key: "sessions", level: .green, reason: L10n.t(.evSessionsOK, s.sessions.count), fix: nil)
     }
     items.append(sessionsItem)
 
     // 5. wechat
     let wechatItem: StatusItem
     if !s.wechat.isRunning {
-        wechatItem = StatusItem(key: "wechat", level: .red, reason: "微信进程未运行", fix: "请打开微信客户端")
+        wechatItem = StatusItem(key: "wechat", level: .red, reason: L10n.t(.evWechatNotRunning), fix: L10n.t(.evWechatNotRunningFix))
     } else {
         // 解析窗口
         var windowDicts: [[String: Any]] = []
@@ -520,17 +517,17 @@ public func evaluate(_ s: StatusInput) -> [StatusItem] {
         )
 
         if let blockingKind = blocking {
-            wechatItem = StatusItem(key: "wechat", level: .red, reason: "有其他微信窗口挡在主窗口前面 (\(blockingKind.rawValue))", fix: "关闭遮挡窗口，或点击「微信窗口放回标准位置」")
+            wechatItem = StatusItem(key: "wechat", level: .red, reason: L10n.t(.evWechatBlocked, blockingKind.rawValue), fix: L10n.t(.evWechatBlockedFix))
         } else if let mb = s.wechat.mainBounds {
             let dw = abs(mb.width - 880.0)
             let dh = abs(mb.height - 640.0)
             if dw > 2.0 || dh > 2.0 {
-                wechatItem = StatusItem(key: "wechat", level: .yellow, reason: "微信主窗口尺寸 (\(Int(mb.width))x\(Int(mb.height))) 与标准 (880x640) 不符", fix: "点击「微信窗口放回标准位置」")
+                wechatItem = StatusItem(key: "wechat", level: .yellow, reason: L10n.t(.evWechatSize, Int(mb.width), Int(mb.height)), fix: L10n.t(.evWechatRepositionFix))
             } else {
-                wechatItem = StatusItem(key: "wechat", level: .green, reason: "微信主窗口就绪且无遮挡", fix: nil)
+                wechatItem = StatusItem(key: "wechat", level: .green, reason: L10n.t(.evWechatReady), fix: nil)
             }
         } else {
-            wechatItem = StatusItem(key: "wechat", level: .yellow, reason: "未检测到微信主窗口", fix: "打开微信主窗口并点击「微信窗口放回标准位置」")
+            wechatItem = StatusItem(key: "wechat", level: .yellow, reason: L10n.t(.evWechatNoWindow), fix: L10n.t(.evWechatNoWindowFix))
         }
     }
     items.append(wechatItem)
@@ -539,9 +536,9 @@ public func evaluate(_ s: StatusInput) -> [StatusItem] {
     let layoutItem: StatusItem
     if s.layout.layoutExists {
         let vStr = s.layout.version != nil ? " (\(s.layout.version!))" : ""
-        layoutItem = StatusItem(key: "layout", level: .green, reason: "当前版本布局地图就绪\(vStr)", fix: nil)
+        layoutItem = StatusItem(key: "layout", level: .green, reason: L10n.t(.evLayoutReady, vStr), fix: nil)
     } else {
-        layoutItem = StatusItem(key: "layout", level: .red, reason: "当前微信版本没有布局地图", fix: "运行校准以生成布局地图")
+        layoutItem = StatusItem(key: "layout", level: .red, reason: L10n.t(.evLayoutMissing), fix: L10n.t(.evLayoutMissingFix))
     }
     items.append(layoutItem)
 
@@ -549,13 +546,13 @@ public func evaluate(_ s: StatusInput) -> [StatusItem] {
     let diskItem: StatusItem
     let fiveGB: Int64 = 5 * 1024 * 1024 * 1024
     if s.disk.freeBytes < fiveGB {
-        diskItem = StatusItem(key: "disk", level: .yellow, reason: "磁盘剩余空间不足 5GB (剩余 \(formatBytes(s.disk.freeBytes)))", fix: "清理附件或日志以释放空间")
+        diskItem = StatusItem(key: "disk", level: .yellow, reason: L10n.t(.evDiskLow, formatBytes(s.disk.freeBytes)), fix: L10n.t(.evDiskLowFix))
     } else {
-        diskItem = StatusItem(key: "disk", level: .green, reason: "磁盘空间充足 (剩余 \(formatBytes(s.disk.freeBytes)))", fix: nil)
+        diskItem = StatusItem(key: "disk", level: .green, reason: L10n.t(.evDiskOK, formatBytes(s.disk.freeBytes)), fix: nil)
     }
     items.append(diskItem)
 
-    // 8. brain
+    // 8. 回复方式（配置键仍叫 brain：内置回复 / 外部回复（MCP 接管））
     let brainMode = s.brain?.mode ?? "builtin"
     let brainItem: StatusItem
     if brainMode == "external" {
@@ -563,53 +560,294 @@ public func evaluate(_ s: StatusInput) -> [StatusItem] {
         let lastPoll = s.brain?.lastPollAt
         let pending = s.brain?.pending ?? 0
         let isStale = (lastPoll == nil) || ((now - lastPoll!) > 60.0)
+        let pendingText = pending > 0 ? L10n.t(.evExternalPending, pending) : ""
 
         if isStale {
-            var reason = "外部大脑未连接"
-            if pending > 0 {
-                reason += " (待处理 \(pending) 轮)"
-            }
-            brainItem = StatusItem(key: "brain", level: .yellow, reason: reason, fix: "启动外部大脑客户端以恢复回复")
+            brainItem = StatusItem(key: "brain", level: .yellow, reason: L10n.t(.evExternalDisconnected, L10n.t(.replyModeExternal)) + pendingText, fix: L10n.t(.evExternalFix))
         } else {
-            var reason = "外部大脑已连接"
-            if pending > 0 {
-                reason += " (待处理 \(pending) 轮)"
-            }
-            brainItem = StatusItem(key: "brain", level: .green, reason: reason, fix: nil)
+            brainItem = StatusItem(key: "brain", level: .green, reason: L10n.t(.evExternalConnected, L10n.t(.replyModeExternal)) + pendingText, fix: nil)
         }
     } else {
-        brainItem = StatusItem(key: "brain", level: .green, reason: "内置大脑正常运行中", fix: nil)
+        brainItem = StatusItem(key: "brain", level: .green, reason: L10n.t(.evBuiltinRunning, L10n.t(.replyModeBuiltin)), fix: nil)
     }
     items.append(brainItem)
 
     return items
 }
 
+// MARK: - 统一状态汇总
+//
+// 侧栏「核心服务」卡片、总览「需要处理」、会话页横幅、设置页「权限与连接」都只读 summarizeStatus 的结果，
+// 不各自判断。优先级：离线 > 缺权限 > 模型未配置（> 手动暂停）。
+
+public enum CoreServiceState: String, Equatable {
+    case normal
+    case offline
+    case permissionMissing = "permission_missing"
+    case modelUnconfigured = "model_unconfigured"
+    case manuallyPaused = "manually_paused"
+}
+
+public enum ModelConfigState: String, Equatable {
+    case configured
+    case unconfigured
+    /// 没设兼容接口，使用默认接入方式（codex-exec），不算「未配置」。
+    case defaultBackend = "default"
+    /// 拿不到 model_state（旧版本没有这个字段，或值不认识）。
+    case unknown
+
+    /// 宽松解析 T1 给出的 model_state 取值；不认识的一律算 unknown，不猜。
+    public static func parse(_ raw: String?) -> ModelConfigState {
+        guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !value.isEmpty else {
+            return .unknown
+        }
+        switch value {
+        case "configured", "ready", "ok":
+            return .configured
+        case "unconfigured", "not_configured", "missing", "missing_key", "incomplete":
+            return .unconfigured
+        case "default_codex", "default", "codex-exec", "codex_exec":
+            return .defaultBackend
+        default:
+            return .unknown
+        }
+    }
+
+    public var label: String {
+        switch self {
+        case .configured: return L10n.t(.modelConfigured)
+        case .unconfigured: return L10n.t(.modelUnconfigured)
+        case .defaultBackend: return L10n.t(.modelDefault)
+        case .unknown: return L10n.t(.modelStateUnknown)
+        }
+    }
+
+    public var level: StatusLevel? {
+        switch self {
+        case .configured: return .green
+        case .unconfigured: return .yellow
+        case .defaultBackend, .unknown: return nil
+        }
+    }
+}
+
+public enum StatusIssueKind: String, Equatable {
+    case offline
+    case screenRecording = "screen_recording"
+    case accessibility
+    case folderAccess = "folder_access"
+    case modelUnconfigured = "model_unconfigured"
+}
+
+public enum StatusIssueAction: String, Equatable {
+    case restartCore = "restart_core"
+    case grantScreenRecording = "grant_screen_recording"
+    case grantAccessibility = "grant_accessibility"
+    case openFolderSettings = "open_folder_settings"
+    case gotoModel = "goto_model"
+}
+
+public struct StatusIssue: Equatable {
+    public let kind: StatusIssueKind
+    public let level: StatusLevel
+    /// 「需要处理」里的一行文字，例如「屏幕录制：缺失」。
+    public let text: String
+    public let action: StatusIssueAction
+    public let actionTitle: String
+}
+
+public struct StatusSummary: Equatable {
+    public let state: CoreServiceState
+    public let level: StatusLevel
+    /// 状态标签文字：正常 / 注意 / 异常。
+    public let tagText: String
+    /// 侧栏卡片上的一句话。
+    public let cardText: String
+    /// 会话页横幅文字；正常时为 nil（不显示横幅）。
+    public let bannerText: String?
+    /// 横幅 / 卡片对应的首要操作。
+    public let primaryAction: StatusIssueAction?
+    public let primaryActionTitle: String?
+    /// 自动回复此刻是否实际停着（离线、缺屏幕录制/辅助功能、模型未配置、手动暂停）。
+    public let autoReplyPaused: Bool
+    /// 全部待处理项，按优先级排序：离线 → 权限 → 模型。
+    public let issues: [StatusIssue]
+    public let coreOffline: Bool
+    /// 离线时的具体原因（取自检查项），其余情况为 nil。
+    public let offlineReason: String?
+    public let screenRecordingOK: Bool
+    public let accessibilityOK: Bool
+    public let folderBlockedDetail: String?
+    public let modelState: ModelConfigState
+}
+
+public func statusTagText(_ level: StatusLevel) -> String {
+    switch level {
+    case .green: return L10n.t(.tagNormal)
+    case .yellow: return L10n.t(.tagAttention)
+    case .red: return L10n.t(.tagError)
+    }
+}
+
+/// 核心服务是否离线：核心进程没在正常运行（未启动、停止中、崩溃退避、放弃重启、配置错误、
+/// 与旧 Python 任务冲突、健康状态缺失或超过 120 秒未更新），或者权限齐全但桌面服务没在运行。
+/// 缺权限导致桌面服务起不来不算离线——那是「缺权限」。
+public func coreServiceOfflineReason(_ s: StatusInput, items: [StatusItem]) -> String? {
+    let botReason = items.first(where: { $0.key == "bot" })?.reason
+    let coreEnabled = s.bot.coreEnabled ?? false
+    let healthMissing = s.bot.healthUpdatedAt == nil || s.bot.healthState == nil
+    let healthStale = (s.bot.now - (s.bot.healthUpdatedAt ?? 0)) > 120.0
+
+    var botOffline = false
+    if coreEnabled {
+        if s.bot.launchdLoaded {
+            botOffline = true
+        } else if let st = s.bot.coreStatus, ["stopping", "restarting", "gave_up", "config_error", "stopped"].contains(st) {
+            botOffline = true
+        } else if s.bot.coreStatus != "running" && s.bot.corePid == nil {
+            botOffline = true
+        } else if healthMissing || healthStale {
+            botOffline = true
+        }
+    } else if !s.bot.launchdLoaded || healthMissing || healthStale {
+        botOffline = true
+    }
+    if botOffline {
+        return botReason ?? L10n.t(.evBotNotRunning)
+    }
+
+    let permissionsOK = s.permissions.screenRecordingAuthorized && s.permissions.accessibilityTrusted
+    let desktopUp = s.desktopService.socketExists && (s.desktopService.status == "running" || s.desktopService.status == "idle")
+    if permissionsOK && !desktopUp {
+        return items.first(where: { $0.key == "desktop_service" })?.reason ?? L10n.t(.evDesktopStopped)
+    }
+    return nil
+}
+
+public func summarizeStatus(_ s: StatusInput, items: [StatusItem]? = nil) -> StatusSummary {
+    let evaluated = items ?? evaluate(s)
+    let offlineReason = coreServiceOfflineReason(s, items: evaluated)
+    let screenOK = s.permissions.screenRecordingAuthorized
+    let accessibilityOK = s.permissions.accessibilityTrusted
+    let folderBlocked = s.permissions.folderPermissionBlocked
+    let modelState = ModelConfigState.parse(s.modelState)
+    // 外部回复（MCP 接管）时回复不由内置模型生成，模型未配置不会让自动回复停下。
+    let modelBlocksReplies = modelState == .unconfigured && (s.brain?.mode ?? "builtin") != "external"
+    let manuallyPaused = s.bot.healthState == "paused"
+
+    var issues: [StatusIssue] = []
+    if offlineReason != nil {
+        issues.append(StatusIssue(kind: .offline, level: .red, text: L10n.t(.bannerOffline),
+                                  action: .restartCore, actionTitle: L10n.t(.actionRestartCore)))
+    }
+    if !screenOK {
+        issues.append(StatusIssue(kind: .screenRecording, level: .yellow,
+                                  text: L10n.t(.issuePermissionMissing, L10n.t(.permScreen)),
+                                  action: .grantScreenRecording, actionTitle: L10n.t(.actionGrant)))
+    }
+    if !accessibilityOK {
+        issues.append(StatusIssue(kind: .accessibility, level: .yellow,
+                                  text: L10n.t(.issuePermissionMissing, L10n.t(.permAccessibility)),
+                                  action: .grantAccessibility, actionTitle: L10n.t(.actionGrant)))
+    }
+    if folderBlocked != nil {
+        issues.append(StatusIssue(kind: .folderAccess, level: .yellow,
+                                  text: L10n.t(.issueFolderBlocked, L10n.t(.permFolders)),
+                                  action: .openFolderSettings, actionTitle: L10n.t(.actionGrant)))
+    }
+    if modelBlocksReplies {
+        issues.append(StatusIssue(kind: .modelUnconfigured, level: .yellow, text: L10n.t(.bannerModelUnconfigured),
+                                  action: .gotoModel, actionTitle: L10n.t(.actionGotoModel)))
+    }
+
+    let state: CoreServiceState
+    let level: StatusLevel
+    let cardText: String
+    let bannerText: String?
+    let primaryAction: StatusIssueAction?
+    let primaryActionTitle: String?
+    var paused = true
+
+    if offlineReason != nil {
+        state = .offline
+        level = .red
+        cardText = L10n.t(.cardOffline)
+        bannerText = L10n.t(.bannerOffline)
+        primaryAction = .restartCore
+        primaryActionTitle = L10n.t(.actionRestartCore)
+    } else if !screenOK || !accessibilityOK {
+        state = .permissionMissing
+        level = .yellow
+        let name = !screenOK ? L10n.t(.permScreen) : L10n.t(.permAccessibility)
+        cardText = L10n.t(.cardMissingPermission, name)
+        bannerText = L10n.t(.bannerMissingPermission, name)
+        primaryAction = !screenOK ? .grantScreenRecording : .grantAccessibility
+        primaryActionTitle = L10n.t(.actionGrant)
+    } else if let blocked = folderBlocked {
+        // 文件夹受阻只影响附件保存，自动回复本身没有停。
+        state = .permissionMissing
+        level = .yellow
+        cardText = L10n.t(.cardFolderBlocked)
+        bannerText = L10n.t(.bannerFolderBlocked, blocked)
+        primaryAction = .openFolderSettings
+        primaryActionTitle = L10n.t(.actionGrant)
+        paused = manuallyPaused || modelBlocksReplies
+    } else if modelBlocksReplies {
+        state = .modelUnconfigured
+        level = .yellow
+        cardText = L10n.t(.cardModelUnconfigured)
+        bannerText = L10n.t(.bannerModelUnconfigured)
+        primaryAction = .gotoModel
+        primaryActionTitle = L10n.t(.actionGotoModel)
+    } else if manuallyPaused {
+        state = .manuallyPaused
+        level = .yellow
+        cardText = L10n.t(.cardManuallyPaused)
+        bannerText = L10n.t(.bannerManuallyPaused)
+        primaryAction = nil
+        primaryActionTitle = nil
+    } else {
+        state = .normal
+        level = .green
+        cardText = L10n.t(.cardRunning)
+        bannerText = nil
+        primaryAction = nil
+        primaryActionTitle = nil
+        paused = false
+    }
+
+    return StatusSummary(
+        state: state,
+        level: level,
+        tagText: statusTagText(level),
+        cardText: cardText,
+        bannerText: bannerText,
+        primaryAction: primaryAction,
+        primaryActionTitle: primaryActionTitle,
+        autoReplyPaused: paused,
+        issues: issues,
+        coreOffline: offlineReason != nil,
+        offlineReason: offlineReason,
+        screenRecordingOK: screenOK,
+        accessibilityOK: accessibilityOK,
+        folderBlockedDetail: folderBlocked,
+        modelState: modelState
+    )
+}
+
 public func generateDiagnostics(items: [StatusItem], appVersion: String, hostInfo: String? = nil) -> String {
     var lines: [String] = []
-    lines.append("=== 微信客服助手 诊断报告 ===")
-    lines.append("版本: \(appVersion)")
+    lines.append(L10n.t(.diagTitle))
+    lines.append("\(L10n.t(.diagVersion)): \(appVersion)")
     if let host = hostInfo {
-        lines.append("宿主环境: \(host)")
+        lines.append("\(L10n.t(.diagHost)): \(host)")
     }
-    lines.append("生成时间: \(ISO8601DateFormatter().string(from: Date()))")
+    lines.append("\(L10n.t(.diagTime)): \(ISO8601DateFormatter().string(from: Date()))")
     lines.append("----------------------------")
     for item in items {
-        let name: String
-        switch item.key {
-        case "permissions": name = "权限"
-        case "desktop_service": name = "桌面服务"
-        case "bot": name = "机器人"
-        case "sessions": name = "各会话"
-        case "wechat": name = "微信"
-        case "layout": name = "布局地图"
-        case "disk": name = "磁盘"
-        case "brain": name = "大脑状态"
-        default: name = item.key
-        }
-        var line = "[\(name)] \(item.level.rawValue): \(item.reason)"
+        var line = "[\(statusItemTitle(key: item.key))] \(item.level.rawValue): \(item.reason)"
         if let fix = item.fix {
-            line += " (建议: \(fix))"
+            line += L10n.t(.suggestionSuffix, fix)
         }
         lines.append(line)
     }
@@ -622,5 +860,3 @@ public func selectMainWindowBounds(_ windows: [(bounds: CGRect, onScreen: Bool)]
     guard !visible.isEmpty else { return nil }
     return visible.max(by: { ($0.bounds.width * $0.bounds.height) < ($1.bounds.width * $1.bounds.height) })?.bounds
 }
-
-
