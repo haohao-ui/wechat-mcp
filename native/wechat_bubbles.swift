@@ -311,8 +311,17 @@ func themeProfiles(_ layout: WechatLayout) -> [ThemeProfile] {
 /// Picks the theme whose background fills most of the chat area; refuses light/unknown frames
 /// rather than interpreting arbitrary rectangles as messages.
 func detectTheme(_ pixels: [UInt8], count: Int, profiles: [ThemeProfile]) throws -> ThemeProfile {
-    let samples = stride(from:0,to:count,by:101).map { (Int(pixels[$0*4]),Int(pixels[$0*4+1]),Int(pixels[$0*4+2])) }
-    for profile in profiles where samples.filter({ profile.isBackground($0.0,$0.1,$0.2) }).count > samples.count/2 {
+    // Explicitly typed sampling loop: the one-line stride+map form below makes some
+    // swiftc versions give up with "unable to type-check this expression in reasonable
+    // time" on the CI runner, even though the expression is otherwise correct.
+    var samples: [(r: Int, g: Int, b: Int)] = []
+    samples.reserveCapacity(count / 101 + 1)
+    var i = 0
+    while i < count {
+        samples.append((Int(pixels[i*4]), Int(pixels[i*4+1]), Int(pixels[i*4+2])))
+        i += 101
+    }
+    for profile in profiles where samples.filter({ profile.isBackground($0.r,$0.g,$0.b) }).count > samples.count/2 {
         return profile
     }
     throw Failure.invalid("uncalibrated_theme")
