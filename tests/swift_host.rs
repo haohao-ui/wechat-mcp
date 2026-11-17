@@ -94,10 +94,14 @@ fn host_selftest_bin() -> Option<&'static PathBuf> {
                 .join("bootstrap")
                 .join("ConfigForm.swift"),
             root.join("native").join("bootstrap").join("Actions.swift"),
+            root.join("native").join("bootstrap").join("Shell.swift"),
             root.join("native").join("bootstrap").join("Theme.swift"),
             root.join("native")
                 .join("bootstrap")
                 .join("ComponentsPage.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("ModelPage.swift"),
             root.join("native").join("eyes").join("Screens.swift"),
             root.join("tests").join("host_selftest").join("main.swift"),
         ];
@@ -2148,6 +2152,9 @@ fn host_task5_selftest_bin() -> Option<&'static PathBuf> {
             root.join("native")
                 .join("bootstrap")
                 .join("ComponentsPage.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("ModelPage.swift"),
             root.join("native").join("eyes").join("Screens.swift"),
             root.join("tests")
                 .join("host_task5_selftest")
@@ -2493,6 +2500,9 @@ fn host_task6_selftest_bin() -> Option<&'static PathBuf> {
             root.join("native")
                 .join("bootstrap")
                 .join("ComponentsPage.swift"),
+            root.join("native")
+                .join("bootstrap")
+                .join("ModelPage.swift"),
             root.join("native").join("eyes").join("Screens.swift"),
             root.join("tests")
                 .join("host_task6_selftest")
@@ -3729,4 +3739,11 @@ exit(testTokens())
 
     let stdout = String::from_utf8_lossy(&run_res.stdout);
     assert!(stdout.contains("STATUS_AND_COLORS_MATCH_OK"));
+}
+
+#[test]
+fn test_model_page_contract_and_secrets() {
+    let res = run_host_cmd("model_page_test", &serde_json::json!({})).unwrap();
+    assert_eq!(res["ok"], true);
+    assert_eq!(res["status"], "MODEL_PAGE_CONTRACT_OK");
 }
