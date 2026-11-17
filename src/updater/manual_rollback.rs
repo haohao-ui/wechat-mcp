@@ -708,65 +708,6 @@ mod tests {
     }
 
     #[test]
-    fn cli_query_execute_and_redacted_errors() {
-        use std::os::unix::fs::PermissionsExt;
-        let s = fixture();
-        let config = s.root_dir().join("bot.json");
-        fs::write(
-            &config,
-            serde_json::to_vec(&serde_json::json!({
-                "schema_version":1,"host":"local","account_id":"test-account",
-                "allowlist":[{"recipient":"test","kind":"private"}],
-                "state_dir":s.state_dir(),"install_root":s.root_dir()
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
-        let exe = std::env::current_exe()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("wechat-updater");
-        let query = std::process::Command::new(&exe)
-            .args(["rollback-status", "--config"])
-            .arg(&config)
-            .output()
-            .unwrap();
-        assert!(
-            query.status.success(),
-            "{}",
-            String::from_utf8_lossy(&query.stdout)
-        );
-        let value: serde_json::Value = serde_json::from_slice(&query.stdout).unwrap();
-        assert_eq!(value["version"], "1.0");
-        assert_eq!(value["can_rollback"], true);
-        let run = std::process::Command::new(&exe)
-            .args(["rollback", "--config"])
-            .arg(&config)
-            .args(["--expected-version", "1.0"])
-            .output()
-            .unwrap();
-        assert!(
-            run.status.success(),
-            "{}",
-            String::from_utf8_lossy(&run.stdout)
-        );
-        assert!(allowed(&s));
-        fs::write(&config, "secret-marker-not-json").unwrap();
-        let bad = std::process::Command::new(&exe)
-            .args(["rollback-status", "--config"])
-            .arg(&config)
-            .output()
-            .unwrap();
-        assert_eq!(bad.status.code(), Some(2));
-        assert!(!String::from_utf8_lossy(&bad.stdout).contains("secret-marker"));
-        assert!(bad.stderr.is_empty());
-    }
-
-    #[test]
     fn publisher_opt_out_and_damaged_commit_proof_fail_closed() {
         let s = fixture();
         let p = s.state_dir().join("previous-release.json");

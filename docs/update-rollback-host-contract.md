@@ -1,115 +1,101 @@
-# T7 应用程序回滚宿主协议（Refs #2）
+# T7：整包 .app 回滚宿主契约
 
-本实现是离线程序版本回滚，不恢复业务数据库，不访问网络或发布渠道。
-未改动 UpdatePage.swift。UI 二次确认、停止/重新启动服务由 T6 接入。
+本次按 2026-11-17 的产品决定，沿用现有安装位置，整包替换上一份
+`微信客服助手.app`。不迁移为 releases/current 布局，不恢复数据库，不联网，
+不修改发布工作流。UpdatePage.swift 由 T6 接入，本任务没有修改界面。
 
-## 宿主命令
+## 宿主命令和 JSON
 
-以下命令调用随宿主打包的 `wechat-updater`，不要通过 shell 拼接参数。
-`--config` 使用实际 Bot 配置文件，需为现有 BotConfig 支持的私有配置。
-配置中的 `install_root` 必须是绝对路径，并有 releases/current/previous 布局。
-`state_dir` 使用配置值，不假设一定是 install_root/state。
+1. 查询：`wechat-updater rollback-status --config <config.json>`。
+2. `can_rollback=false` 时禁用按钮，直接展示中文 `reason`。
+3. 用户二次确认后执行：
+   `wechat-updater rollback --config <config.json> --expected-version <version>`。
+   后端关闭核心运行开关、等待退出并持有核心锁；宿主不要同时发起更新、启停或退出。
+4. 成功后按 `restart_required` 重启宿主应用，继续使用原有启动方式。
+5. 操作中断或存在维护标记时执行：
+   `wechat-updater rollback-recover --config <config.json>`。
+   未完成事务恢复回滚前的整包应用；已经提交的事务只完成清理，不撤销成功回滚。
 
-1. 查询：`wechat-updater rollback-status --config <config.json>`
-2. UI 展示 version 和 installed_at（二者可为 null），展示二次确认。
-3. 用户确认后停止核心服务，禁止 supervisor 在此期间自动重启；重新查询。
-4. 执行：`wechat-updater rollback --config <config.json> --expected-version <查询返回的version>`
-5. 成功后宿主重新启动核心服务，检查实际运行结果。
-6. 断电/进程被杀导致事务中断：保持停服，运行
-   `wechat-updater rollback-recover --config <config.json>`，恢复回滚前的当前程序。
-   该命令仅处理本协议的 RollbackStarted，不处理其他更新事务。
-
-查询是只读的，不创建锁、journal 或元数据。服务运行时 `can_rollback=false`，
-reason=stop_core_first，仍返回已知上一版本，UI 可先显示版本再走停服流程。
-执行会重检所有条件，并同时持有 update.lock/core.lock，拒绝陈旧确认。
-
-stdout 为单个 JSON 对象，stderr 不输出底层报错或配置内容。
-查询成功（包括没有可回滚版本）退出 0；参数/配置错误退出 2；执行失败退出 1。
-install_root 未配置返回下述查询结构，reason=install_root_unconfigured，退出 1。
+查询成功退出码 0，固定字段（无法确定时 version / installed_at 为 null）：
 
 ```json
-{"version":"1.0","installed_at":100,"can_rollback":true,"reason":null}
+{"version":"abc123-20261117103000","installed_at":null,"can_rollback":true,"reason":null}
 ```
 
-installed_at 是上一版本原安装时间，Unix 秒；version 是已提交 release_id，
-不从高水位推断营销版本，也不编造缺失的时间。
-
-成功执行：
+执行成功退出码 0：
 
 ```json
-{"status":"rolled_back","version":"1.0","transaction_id":"tx-UUID","restart_required":true}
+{"status":"rolled_back","version":"abc123-20261117103000","transaction_id":"UUID","restart_required":true}
 ```
 
-成功恢复：
+恢复成功退出码 0，同样保留四个字段。恢复旧当前包时 status 为
+`current_restored`、version 为回滚前版本；完成已提交事务清理时 status 为
+`rolled_back`、version 为回滚目标版本。重复恢复不会再次交换应用。
+
+执行失败退出码 1：
 
 ```json
-{"status":"current_restored","restart_required":true}
+{"error":"rollback_failed","details":{"version":null,"installed_at":null,"can_rollback":false,"reason":"没有找到上一版本的应用备份。"}}
 ```
 
-执行失败：
+`details` 是失败后的最新可用性查询，不能据此推断上次执行成功。
+恢复失败返回 `{"error":"rollback_recovery_failed"}`，退出码 1。
+缺少 `--expected-version`、参数错误、配置不可读取返回固定 error 类别，退出码 2。
+所有回滚输出均不包含底层原始报错、密钥或备份路径。
 
-```json
-{"error":"rollback_failed","details":{"version":"1.0","installed_at":100,"can_rollback":false,"reason":"backup_corrupt"}}
-```
+## 上一份应用的识别
 
-其他固定 error：invalid_arguments、invalid_config、expected_version_required、
-rollback_recovery_failed。reason 的固定类别有 no_previous_version、
-no_matching_completed_update、previous_release_corrupt、backup_corrupt、
-rollback_not_supported_by_release、
-database_schema_changed、database_checkpoint_required、stop_core_first、
-recovery_required、rollback_state_invalid。未知底层错误统一映射为最后一类。
-UI 应本地化固定类别，不能直接展示底层错误。
+实际部署规则来自 `scripts/deploy_host.sh`：
 
-## 版本与备份边界
+- 当前应用：`$HOME/Applications/微信客服助手.app`。
+- 备份：`$HOME/.wechat-rpa/backups/微信客服助手.app.before-<Unix秒>.bak`。
+- 只接受准确的前后缀和整数时间戳，选择时间戳最大的那份。
+  最新备份损坏时不悄悄跳过它去选择更早版本。
+- version 从备份 `Contents/Info.plist` 的 **CFBundleVersion** 读取。
+  部署脚本在这里写入 git revision 和构建时间；不是读取固定的
+  CFBundleShortVersionString，也不从目录名或外部 VERSION 文件猜测。
+- installed_at 为 null：现有备份没有旧版本的准确安装时间，不能把备份时间
+  冒充安装时间。备份名的 Unix 秒仅用于选择最近的一份；UI 按原契约处理未知时间。
+- 使用当前用户 HOME 下的现有整包布局；不依赖 install_root，不更改该配置。
 
-原有 rollback.rs 只切换软链接，previous 是最近一次切换前的程序目录；
-它不核验版本元数据/文件摘要，也不提交权威记录，旧 RolledBack 日志会被启动守卫阻止。
-原有 SQLite 在线备份包含一致数据库副本与 SHA-256；自动覆盖旧数据库仍被禁止。
+没有备份、版本读取失败、资源缺失、签名损坏、版本与当前一致，以及存在未完成
+维护/更新时均禁用。reason 是固定中文说明，不回显系统工具输出。
+核心运行本身不禁用按钮：执行入口负责停服；无法在 60 秒内获得核心锁则拒绝替换。
 
-新增 previous-release.json：在现有 executor 完成备份后、切换前保存上一版本
-权威记录、完整程序文件摘要/权限、数据库 schema 指纹、备份证明及所属更新事务。
-更新清单必须明确声明 in_place_rollback_supported=true。
-只有最近一次已提交更新对应的上一版本可回滚；不支持任意历史版本或反复来回切换。
-目录/软链接、摘要、备份完整性、当前提交及 journal 必须一致；缺证据就拒绝。
-若备份损坏、程序被修改、数据库新增/删除或 schema/user_version 变化则拒绝。
-存在未清空 WAL 时要求先由拥有该数据库的服务正常关闭/完成 checkpoint，查询不执行 checkpoint。
-所有新业务行保留。schema 相同不是对任意版本业务语义兼容的完整证明，跨语义不兼容升级
-仍需发布方兼容性约束和真实应用验收；本实现不声称自动迁移或逆向迁移数据库。
+## 前置检查、事务和失败恢复
 
-回滚前写 rollback-undo.json 和 RollbackStarted journal；失败恢复原指针、记录和
-原 journal，另写 last-rollback.json 保存失败结果。成功提交绑定新 tx_id 的旧版本
-记录和 Committed journal，使启动守卫可核验放行；独立回滚凭证的 highest_sequence
-明确保留发布序列高水位（不扩展旧程序严格解析的 journal schema），不能借回滚重放旧发布包。落盘失败无法承诺可启动时保持
-journal 的非终态，由 rollback-recover 恢复，绝不伪报成功。
+执行前持有 updater 锁并重新选择和验证备份，校验 expected-version，拒绝过期确认。
+校验应用标识、主可执行文件、三个部署资源文件、执行权限和
+`codesign --verify --deep --strict`。不重新签名，不调用网络签名服务。
 
-## 集成限制与待验收
+`state_dir/app-rollback-journal.json` 保存每一步和原应用目录的 device/inode、
+原核心开关状态、transaction_id。独立 journal 避免让既有启动 guard 把整包事务误认
+为需要 releases/current 的版本化事务。既有 update-journal.json 和发布序列不变。
 
-仓库目前真实 apply 入口仍禁用，SandboxUpdateExecutor 只由 fixture 驱动。
-该 executor 现在会自动产生回滚证据；真实安装器以后沿用本协议时必须调用
-manual_rollback::preserve_previous，不能手工伪造 previous-release.json。
-旧部署脚本保存整个 .app 到 backups，未产生版本化 releases/current 布局、
-权威版本记录和本协议凭证，因此这种安装查询会明确不可回滚；本任务没有
-把旧 .app 备份导入为可信发布，也没有修改安装/发布脚本。协调方需要明确是否
-另派安装器布局迁移/整包 .app 回滚任务。不能把版本化 fixture 成功称为已完成旧部署 .app 验收。
+顺序如下：先持久化意图，关闭 `$HOME/.wechat-rpa/core.enabled`，等待核心退出并
+取得核心维护锁，再写宿主已支持的 `core.maintenance` UUID 标记以阻止自动重启。
+将备份用 ditto 完整复制到当前应用同目录的 `.rollback-current-<UUID>.app`，再次
+校验副本，然后使用 macOS `renameatx_np(RENAME_SWAP)` 原子交换两个目录。
+交换后该隐藏目录保存**回滚前当前应用的完整副本**，不删除它；原始备份也不移动。
+交换不产生当前 .app 路径缺失的中间状态。副本的文件和目录在交换前完成 fsync。
 
-T6 仍需 UI 二次确认、停服/重启集成，以及在 MacBook 的真实 .app 上验收，附截图、录屏。
-本地只提交，不推送、不开 PR，不修改发布工作流，不生成 tag。
+交换后再次验证目标包并持久化提交；恢复原运行开关、移除本事务维护标记。
+清理完成标志也持久化，重复恢复不会覆盖用户之后主动关闭的运行开关。
+成功返回要求宿主重启。任何执行阶段失败都按 device/inode 判断是否交换过；如已
+交换，原子换回原包，写 RolledBack journal，再恢复开关和清理标记。
+恢复失败保持非成功状态和恢复证据，不声称当前包已恢复。
+断电后 recover 同样通过原目录身份识别交换前后，不依赖「交换后 journal 已写入」
+这个有中断窗口的假设。备份应用不能覆盖外部 `~/.wechat-rpa/bin` 辅助程序，也不改变
+历史数据库或其 schema；本功能保证的是宿主 .app 整包回滚，外部组件兼容性须实机验收。
 
-旧程序本身的启动守卫可读取原 journal schema；旧版 updater/control 的高水位读取器
-仍可能把显式回滚后的 sequence 差异显示为 recovery_required。宿主更新状态和后续
-更新必须调用本次更新的 updater，不能把旧版读取器的状态当作本协议的完成结果。
+## 保留代码与验收边界
 
-## 本地验证（2026-11-17）
+原 manual_rollback.rs 和版本化 sandbox updater 的 preserve_previous 接入保留，
+供旧有 sandbox 测试及 sequence guard 使用；生产三个 rollback CLI 子命令全部改为
+app_rollback.rs，没有版本化安装迁移，也不依赖 previous-release.json。
 
-- Cargo 默认 target 指向沙箱不可写的缓存，以下 Rust 检查使用 `CARGO_TARGET_DIR=target`。
-- `cargo fmt --all -- --check`：通过。
-- `cargo clippy --all-targets --locked`：通过，有仓库既有警告和一项测试断言风格警告。
-- `cargo test --locked --lib updater`：35 通过，1 忽略。
-- `cargo test --locked --test swift_update_ui`：通过（独立记录）。
-- `swiftc -target "$(uname -m)-apple-macos12" native/bootstrap/*.swift native/eyes/Screens.swift -o /tmp/host-t7`：通过。
-- `cargo test --locked`：1016 通过、3 失败、1 忽略，未到后续 integration suites。
-  两个 gateway 用例被 HOME 下桌面资源锁的沙箱权限阻止；对应源文件与 HEAD 相同。
-  control history maintenance CLI 用例全量并发运行时报告 core.lock 被占用，单独原样复测通过。
-  不把以上结果表述为全量测试通过。
-- Orca orchestration 报告受阻：`no_active_sender_terminal`，当前环境没有
-  `ORCA_TERMINAL_HANDLE`，没有冒用其他终端身份发送完成消息。
+Rust 测试使用临时 HOME、真实 plist、临时 ad-hoc 签名 .app，覆盖正常交换、无备份、
+损坏/版本不可读、最新备份不跳过、过期确认、互斥、交换中途失败恢复、交换前后中断
+恢复，以及真实 CLI JSON 和错误脱敏。这些不是完整产品 .app 的运行验收。
+T6/QA 仍需在 MacBook 的实际部署包上验证停服、回滚后宿主重启和外部组件兼容性，
+并附截图、录屏与 CI 结果。
