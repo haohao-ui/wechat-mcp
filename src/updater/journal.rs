@@ -1416,16 +1416,23 @@ pub fn load_highest_accepted_sequence(state_dir: &Path) -> Result<u64> {
 
     match (record_opt, old_seq_opt) {
         (Some(record), Some(old_seq)) => {
-            if record.sequence != old_seq {
+            let rollback_matches = record.sequence < old_seq
+                && super::manual_rollback::committed_high_watermark(state_dir, &record)?
+                    == Some(old_seq);
+            if record.sequence != old_seq && !rollback_matches {
                 bail!(
                     "sequence_conflict_detected: current_release.json sequence {} != highest_accepted_sequence file {}",
                     record.sequence,
                     old_seq
                 );
             }
-            Ok(record.sequence)
+            Ok(old_seq)
         }
-        (Some(record), None) => Ok(record.sequence),
+        (Some(record), None) => Ok(super::manual_rollback::committed_high_watermark(
+            state_dir, &record,
+        )?
+        .unwrap_or(record.sequence)
+        .max(record.sequence)),
         (None, Some(old_seq)) => Ok(old_seq),
         (None, None) => Ok(0),
     }

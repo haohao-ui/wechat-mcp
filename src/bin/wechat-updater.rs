@@ -5,7 +5,7 @@ use wechat_mcp::updater::manifest;
 
 fn print_usage() {
     eprintln!(
-        "Usage: wechat-updater <status|check|apply|rollback|recover> [--config <path>] [--manifest <path>]"
+        "Usage: wechat-updater <status|check|apply|rollback-status|rollback|rollback-recover|recover> [--config <path>] [--manifest <path>]"
     );
 }
 
@@ -143,7 +143,93 @@ fn main() {
             );
             std::process::exit(1);
         }
-        "apply" | "rollback" | "recover" => {
+        "rollback-status" | "rollback" | "rollback-recover" => {
+            let action = args[1].as_str();
+            let mut cfg_path = None;
+            let mut expected = None;
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--config" if i + 1 < args.len() => {
+                        cfg_path = Some(PathBuf::from(&args[i + 1]));
+                        i += 2;
+                    }
+                    "--expected-version" if i + 1 < args.len() && action == "rollback" => {
+                        expected = Some(args[i + 1].clone());
+                        i += 2;
+                    }
+                    _ => {
+                        println!("{}", serde_json::json!({"error":"invalid_arguments"}));
+                        std::process::exit(2);
+                    }
+                }
+            }
+            let cfg = cfg_path.and_then(|p| config::BotConfig::load(&p).ok());
+            let Some(cfg) = cfg else {
+                println!("{}", serde_json::json!({"error":"invalid_config"}));
+                std::process::exit(2);
+            };
+            let Some(root) = cfg.install_root else {
+                println!(
+                    "{}",
+                    serde_json::json!({"version":null,"installed_at":null,"can_rollback":false,"reason":"install_root_unconfigured"})
+                );
+                std::process::exit(1);
+            };
+            if action == "rollback-status" {
+                println!(
+                    "{}",
+                    serde_json::to_string(&wechat_mcp::updater::manual_rollback::status(
+                        &root,
+                        &cfg.state_dir
+                    ))
+                    .unwrap()
+                );
+            } else if action == "rollback-recover" {
+                if wechat_mcp::updater::manual_rollback::recover(&root, &cfg.state_dir).is_err() {
+                    println!(
+                        "{}",
+                        serde_json::json!({"error":"rollback_recovery_failed"})
+                    );
+                    std::process::exit(1);
+                }
+                println!(
+                    "{}",
+                    serde_json::json!({"status":"current_restored","restart_required":true})
+                );
+            } else {
+                let Some(expected) = expected else {
+                    println!(
+                        "{}",
+                        serde_json::json!({"error":"expected_version_required"})
+                    );
+                    std::process::exit(2);
+                };
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                match wechat_mcp::updater::manual_rollback::execute(
+                    &root,
+                    &cfg.state_dir,
+                    &expected,
+                    now,
+                ) {
+                    Ok(j) => println!(
+                        "{}",
+                        serde_json::json!({"status":"rolled_back","version":j.target_release_id,"transaction_id":j.transaction_id,"restart_required":true})
+                    ),
+                    Err(_) => {
+                        println!(
+                            "{}",
+                            serde_json::json!({"error":"rollback_failed","details":wechat_mcp::updater::manual_rollback::status(&root, &cfg.state_dir)})
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+        "apply" | "recover" => {
             // 检查是否有未知参数，若有未知参数报错退出码 2
             let action = &args[1];
             let mut i = 2;
