@@ -2,35 +2,35 @@
 import Foundation
 import AppKit
 
-// MARK: - Design Tokens (待换成 Theme)
+// MARK: - Shared Theme tokens
 private enum McpPageTokens {
-    static let brand = NSColor(red: 0x12/255.0, green: 0xA3/255.0, blue: 0x7A/255.0, alpha: 1.0)
-    static let brandDeep = NSColor(red: 0x0A/255.0, green: 0x5B/255.0, blue: 0x6B/255.0, alpha: 1.0)
-    static let statusOkText = NSColor(red: 0x12/255.0, green: 0x79/255.0, blue: 0x54/255.0, alpha: 1.0)
-    static let statusOkBg = NSColor(red: 0xE4/255.0, green: 0xF5/255.0, blue: 0xEF/255.0, alpha: 1.0)
-    static let statusWarnText = NSColor(red: 0x92/255.0, green: 0x5C/255.0, blue: 0x07/255.0, alpha: 1.0)
-    static let statusWarnBg = NSColor(red: 0xFB/255.0, green: 0xF1/255.0, blue: 0xE2/255.0, alpha: 1.0)
-    static let statusErrText = NSColor(red: 0xD3/255.0, green: 0x2F/255.0, blue: 0x2F/255.0, alpha: 1.0)
-    static let statusErrBg = NSColor(red: 0xFC/255.0, green: 0xEB/255.0, blue: 0xEB/255.0, alpha: 1.0)
-    static let statusOffText = NSColor(red: 0x6C/255.0, green: 0x70/255.0, blue: 0x74/255.0, alpha: 1.0)
-    static let statusOffBg = NSColor(red: 0xF0/255.0, green: 0xF1/255.0, blue: 0xF2/255.0, alpha: 1.0)
-    static let fieldBorder = NSColor(red: 0xC9/255.0, green: 0xCD/255.0, blue: 0xD4/255.0, alpha: 1.0)
+    static let brand = Theme.Colors.brand
+    static let brandDeep = Theme.Colors.primaryButtonDefault
+    static let statusOkText = Theme.Colors.statusNormalText
+    static let statusOkBg = Theme.Colors.statusNormalBg
+    static let statusWarnText = Theme.Colors.statusWarningText
+    static let statusWarnBg = Theme.Colors.statusWarningBg
+    static let statusErrText = Theme.Colors.statusErrorText
+    static let statusErrBg = Theme.Colors.statusErrorBg
+    static let statusOffText = Theme.Colors.statusInactiveText
+    static let statusOffBg = Theme.Colors.statusInactiveBg
+    static let fieldBorder = Theme.Colors.inputBorder
 }
 
-// MARK: - Strings (待迁入 L10n)
+// MARK: - Localized strings
 private enum McpPageStrings {
-    static let modeBuiltin = "内置回复 (调用配置好的大模型生成回复)"
-    static let modeExternal = "外部回复 (MCP 接管)"
-    static let sectionReplyMode = "回复方式与决策"
-    static let saveSettingsBtn = "保存回复设置"
-    static let saveSuccess = "回复设置已保存"
-    static let goToPersona = "前往客服角色页面"
-    static let pointerText = "角色定义、知识与话术请前往【客服角色】页面管理；本页面仅管理回复模式、外部超时与对外接口连接。"
-    static let rotateTokenTitle = "重新生成对外接口访问令牌？"
-    static let rotateTokenInfo = "重新生成后将立即生效，当前连接的外部服务将会断开。确定重新生成吗？"
-    static let openApiBusy = "已有客户端连接中"
-    static let emptyEndpoints = "暂无可用服务端点"
-    static let emptyTools = "暂无可用 MCP 工具"
+    static var modeBuiltin: String { L10n.t(.replyModeBuiltin) }
+    static var modeExternal: String { L10n.t(.replyModeExternal) }
+    static var sectionReplyMode: String { L10n.t(.mcpPageSectionReplyMode) }
+    static var saveSettingsBtn: String { L10n.t(.mcpPageSaveSettingsBtn) }
+    static var saveSuccess: String { L10n.t(.mcpPageSaveSuccess) }
+    static var goToPersona: String { L10n.t(.mcpPageGoToPersona) }
+    static var pointerText: String { L10n.t(.mcpPagePointerText) }
+    static var rotateTokenTitle: String { L10n.t(.mcpPageRotateTokenTitle) }
+    static var rotateTokenInfo: String { L10n.t(.mcpPageRotateTokenInfo) }
+    static var openApiBusy: String { L10n.t(.mcpPageOpenApiBusy) }
+    static var emptyEndpoints: String { L10n.t(.mcpPageEmptyEndpoints) }
+    static var emptyTools: String { L10n.t(.mcpPageEmptyTools) }
 }
 
 public struct McpExternalBrainInfo: Codable {

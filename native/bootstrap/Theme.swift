@@ -116,7 +116,14 @@ public enum ThemeStatus: String, CaseIterable {
     case error = "异常"
     case inactive = "未启用"
 
-    public var title: String { rawValue }
+    public var title: String {
+        switch self {
+        case .normal: return L10n.t(.tagNormal)
+        case .warning: return L10n.t(.tagAttention)
+        case .error: return L10n.t(.tagError)
+        case .inactive: return L10n.t(.tagOff)
+        }
+    }
 
     public var dotColor: NSColor {
         switch self {

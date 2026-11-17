@@ -8,97 +8,97 @@ import Darwin
 
 public enum ModelPageStrings {
     // 页面标题与导言
-    public static let pageTitle = "模型"
-    public static let scopeNote = "全局配置 · 所有客服角色共用"
-    public static let statusConfigured = "已配置"
-    public static let statusUnconfigured = "未配置"
-    public static let tagDefault = "默认"
+    public static var pageTitle: String { L10n.t(.navModel) }
+    public static var scopeNote: String { L10n.t(.modelPageScopeNote) }
+    public static var statusConfigured: String { L10n.t(.modelConfigured) }
+    public static var statusUnconfigured: String { L10n.t(.modelUnconfigured) }
+    public static var tagDefault: String { L10n.t(.modelDefault) }
 
     // 状态横幅
-    public static let bannerDefaultCodex = "未设置兼容接口，当前使用默认接入方式 codex-exec。"
-    public static let bannerUnset = "模型未配置：已选择 openai-compatible，但缺少接口地址、模型名或密钥。自动回复无法生成回复。"
-    public static let bannerPendingRestart = "已保存的连接设置尚未生效，重启核心服务后生效。"
-    public static let bannerErrorSummary = "有 %d 项配置需要修改，改好后才能测试连接或保存。"
+    public static var bannerDefaultCodex: String { L10n.t(.modelPageBannerDefaultCodex) }
+    public static var bannerUnset: String { L10n.t(.modelPageBannerUnset) }
+    public static var bannerPendingRestart: String { L10n.t(.modelPageBannerPendingRestart) }
+    public static var bannerErrorSummary: String { L10n.t(.modelPageBannerErrorSummary) }
 
     // 卡片 1: 接入方式
-    public static let sectionBackend = "接入方式"
+    public static var sectionBackend: String { L10n.t(.modelPageSectionBackend) }
     public static let backendCodex = "codex-exec"
     public static let backendOpenAI = "openai-compatible"
-    public static let backendCodexDesc = "使用本机 Codex 命令行调用模型，不需要填写接口地址、模型名和密钥。"
-    public static let backendOpenAIDesc = "调用兼容 OpenAI 接口的模型服务，需要填写接口地址、模型名和密钥来源。"
+    public static var backendCodexDesc: String { L10n.t(.modelPageBackendCodexDesc) }
+    public static var backendOpenAIDesc: String { L10n.t(.modelPageBackendOpenAIDesc) }
 
     // 卡片 2: 连接 (Connection) - 当 backend == "openai-compatible" 时展示
-    public static let sectionConnection = "连接"
-    public static let fieldBaseUrl = "接口地址"
+    public static var sectionConnection: String { L10n.t(.modelPageSectionConnection) }
+    public static var fieldBaseUrl: String { L10n.t(.modelPageFieldBaseUrl) }
     public static let fieldBaseUrlPlaceholder = "https://"
-    public static let fieldBaseUrlHelper = "需 HTTPS；本机地址（localhost / 127.0.0.1 / [::1]）可用 HTTP。不能含用户名、密码或 ? 参数。"
+    public static var fieldBaseUrlHelper: String { L10n.t(.modelPageFieldBaseUrlHelper) }
 
-    public static let fieldModel = "模型名"
-    public static let fieldModelPlaceholder = "例如 gpt-4o-mini"
+    public static var fieldModel: String { L10n.t(.modelPageFieldModel) }
+    public static var fieldModelPlaceholder: String { L10n.t(.modelPageFieldModelPlaceholder) }
 
-    public static let fieldKeySource = "密钥来源"
-    public static let keySourceEnv = "环境变量"
-    public static let keySourceFile = "密钥文件"
-    public static let keySourceEnvHelper = "填变量名，不填密钥本身。例如 OPENAI_API_KEY"
-    public static let keySourceFileHelper = "绝对路径；文件权限须为 0600，不能是符号链接。"
+    public static var fieldKeySource: String { L10n.t(.modelPageFieldKeySource) }
+    public static var keySourceEnv: String { L10n.t(.modelPageKeySourceEnv) }
+    public static var keySourceFile: String { L10n.t(.modelPageKeySourceFile) }
+    public static var keySourceEnvHelper: String { L10n.t(.modelPageKeySourceEnvHelper) }
+    public static var keySourceFileHelper: String { L10n.t(.modelPageKeySourceFileHelper) }
 
-    public static let fieldKeyStatus = "密钥状态"
-    public static let keyStatusConfigured = "已配置"
-    public static let keyStatusUnconfigured = "未配置"
-    public static let keyStatusEnvNotFound = "（当前环境中未检测到该变量）"
-    public static let keyNeverExposed = "密钥只显示配置状态或掩码，保存后永远不显示明文，也不写进可见日志。"
+    public static var fieldKeyStatus: String { L10n.t(.modelPageFieldKeyStatus) }
+    public static var keyStatusConfigured: String { L10n.t(.modelConfigured) }
+    public static var keyStatusUnconfigured: String { L10n.t(.modelUnconfigured) }
+    public static var keyStatusEnvNotFound: String { L10n.t(.modelPageKeyStatusEnvNotFound) }
+    public static var keyNeverExposed: String { L10n.t(.modelPageKeyNeverExposed) }
 
     // 卡片 3: 参数设置 (Model Parameters)
-    public static let sectionParameters = "参数设置"
-    public static let fieldTimeout = "超时时间"
-    public static let timeoutUnit = "秒"
-    public static let timeoutHelper = "1–180 秒，默认 60 秒"
+    public static var sectionParameters: String { L10n.t(.modelPageSectionParameters) }
+    public static var fieldTimeout: String { L10n.t(.modelPageFieldTimeout) }
+    public static var timeoutUnit: String { L10n.t(.unitSeconds) }
+    public static var timeoutHelper: String { L10n.t(.modelPageTimeoutHelper) }
 
-    public static let fieldSupportsImages = "支持图片输入"
-    public static let supportsImagesHelper = "模型能读取图片时开启；关闭后只发送文字。"
+    public static var fieldSupportsImages: String { L10n.t(.modelPageFieldSupportsImages) }
+    public static var supportsImagesHelper: String { L10n.t(.modelPageSupportsImagesHelper) }
 
-    public static let fieldImagesPerCall = "单次最多图片数"
-    public static let imagesPerCallHelper = "1–16 张，默认 4 张（仅在开启图片输入时生效）"
+    public static var fieldImagesPerCall: String { L10n.t(.modelPageFieldImagesPerCall) }
+    public static var imagesPerCallHelper: String { L10n.t(.modelPageImagesPerCallHelper) }
 
-    public static let fieldJsonOutput = "要求 JSON 格式输出"
-    public static let jsonOutputHelper = "要求模型只返回 JSON"
+    public static var fieldJsonOutput: String { L10n.t(.modelPageFieldJsonOutput) }
+    public static var jsonOutputHelper: String { L10n.t(.modelPageJsonOutputHelper) }
 
-    public static let fieldMaxTokens = "单次生成上限 (max_tokens)"
-    public static let maxTokensReadOnly = "1024（由系统固定分配，不可修改）"
+    public static var fieldMaxTokens: String { L10n.t(.modelPageFieldMaxTokens) }
+    public static var maxTokensReadOnly: String { L10n.t(.modelPageMaxTokensReadOnly) }
 
     // 卡片 4: 操作栏与按钮
-    public static let buttonTest = "测试连接"
-    public static let buttonSave = "保存配置"
-    public static let buttonDiscard = "放弃修改"
-    public static let buttonRestartCore = "重启核心服务"
+    public static var buttonTest: String { L10n.t(.modelPageButtonTest) }
+    public static var buttonSave: String { L10n.t(.actionSaveConfig) }
+    public static var buttonDiscard: String { L10n.t(.modelPageButtonDiscard) }
+    public static var buttonRestartCore: String { L10n.t(.actionRestartCore) }
 
     // 测试连接结果横幅
-    public static let testPassedTitle = "测试通过：接口与模型列表可用"
-    public static let testPassedNote = "测试通过只说明接口和模型列表可用，不代表对话一定能生成。"
-    public static let testFailedTitle = "连接测试失败"
-    public static let testFailedNote = "请检查接口地址、模型名或密钥权限是否正确。测试失败不显示密钥或供应商原始报错。"
+    public static var testPassedTitle: String { L10n.t(.modelPageTestPassedTitle) }
+    public static var testPassedNote: String { L10n.t(.modelPageTestPassedNote) }
+    public static var testFailedTitle: String { L10n.t(.modelPageTestFailedTitle) }
+    public static var testFailedNote: String { L10n.t(.modelPageTestFailedNote) }
 
     // 二次确认弹窗
-    public static let dialogConfirmTitle = "保存连接设置？"
-    public static let dialogConfirmBody = "自动回复正在运行。你修改了：%@。保存后，正在运行的服务仍使用旧设置，重启核心服务后才生效。"
-    public static let dialogConfirmCheckbox = "我知道重启核心服务后才会生效"
-    public static let dialogConfirmButton = "保存"
-    public static let dialogCancelButton = "取消"
+    public static var dialogConfirmTitle: String { L10n.t(.modelPageDialogConfirmTitle) }
+    public static var dialogConfirmBody: String { L10n.t(.modelPageDialogConfirmBody) }
+    public static var dialogConfirmCheckbox: String { L10n.t(.modelPageDialogConfirmCheckbox) }
+    public static var dialogConfirmButton: String { L10n.t(.modelPageDialogConfirmButton) }
+    public static var dialogCancelButton: String { L10n.t(.cancel) }
 
     // 字段错误提示
-    public static let errorUrlRequired = "请填写接口地址"
-    public static let errorUrlInvalid = "不是有效的网址"
-    public static let errorHttpsRequired = "必须使用 HTTPS（只有本机地址可用 HTTP）"
-    public static let errorUrlCredentials = "地址不能包含用户名、密码或 ? 参数"
-    public static let errorModelRequired = "请填写模型名"
-    public static let errorTimeoutRange = "请输入 1–180 之间的整数"
-    public static let errorImagesRange = "请输入 1–16 之间的整数"
-    public static let errorEnvRequired = "请填写环境变量名"
-    public static let errorEnvInvalid = "变量名只能包含字母、数字和下划线，且不能以数字开头"
-    public static let errorFileRequired = "请填写密钥文件路径"
-    public static let errorFileNotAbsolute = "必须是绝对路径（以 / 开头，不支持 ~）"
-    public static let errorFilePermission = "文件权限须为 0600，且不能是符号链接"
-    public static let errorFileNotFoundOrAccess = "密钥文件无法读取或不存在"
+    public static var errorUrlRequired: String { L10n.t(.modelPageErrorUrlRequired) }
+    public static var errorUrlInvalid: String { L10n.t(.modelPageErrorUrlInvalid) }
+    public static var errorHttpsRequired: String { L10n.t(.modelPageErrorHttpsRequired) }
+    public static var errorUrlCredentials: String { L10n.t(.modelPageErrorUrlCredentials) }
+    public static var errorModelRequired: String { L10n.t(.modelPageErrorModelRequired) }
+    public static var errorTimeoutRange: String { L10n.t(.modelPageErrorTimeoutRange) }
+    public static var errorImagesRange: String { L10n.t(.modelPageErrorImagesRange) }
+    public static var errorEnvRequired: String { L10n.t(.modelPageErrorEnvRequired) }
+    public static var errorEnvInvalid: String { L10n.t(.modelPageErrorEnvInvalid) }
+    public static var errorFileRequired: String { L10n.t(.modelPageErrorFileRequired) }
+    public static var errorFileNotAbsolute: String { L10n.t(.modelPageErrorFileNotAbsolute) }
+    public static var errorFilePermission: String { L10n.t(.modelPageErrorFilePermission) }
+    public static var errorFileNotFoundOrAccess: String { L10n.t(.modelPageErrorFileNotFoundOrAccess) }
 }
 
 // MARK: - Model Draft Model
@@ -367,7 +367,7 @@ public final class DefaultModelProbeRunner: ModelProbeRunnerProtocol {
                     if ok {
                         completion(.success)
                     } else {
-                        completion(.failure(reason: "未在 PATH 中找到可执行的 codex"))
+                        completion(.failure(reason: L10n.t(.modelCodexMissing)))
                     }
                 }
                 return
@@ -376,7 +376,7 @@ public final class DefaultModelProbeRunner: ModelProbeRunnerProtocol {
             // openai-compatible 探测
             guard let url = URL(string: config.baseUrl.trimmingCharacters(in: .whitespacesAndNewlines))?.appendingPathComponent("models") else {
                 DispatchQueue.main.async {
-                    completion(.failure(reason: "接口地址无效"))
+                    completion(.failure(reason: L10n.t(.modelPageErrorUrlInvalid)))
                 }
                 return
             }
@@ -395,7 +395,7 @@ public final class DefaultModelProbeRunner: ModelProbeRunnerProtocol {
 
             guard !key.isEmpty else {
                 DispatchQueue.main.async {
-                    completion(.failure(reason: "密钥缺失或读取失败"))
+                    completion(.failure(reason: L10n.t(.modelKeyMissing)))
                 }
                 return
             }
@@ -512,7 +512,7 @@ public final class ModelPageController: NSViewController {
         if let d = initialDraft {
             draft = d
         } else {
-            draft = ModelPageDraft()
+            draft = ModelPageDraft.fromConfig((context as? StatusPanelController)?.currentRawConfig ?? [:])
         }
         self.savedDraft = draft
         self.currentDraft = draft
@@ -949,7 +949,7 @@ public final class ModelPageController: NSViewController {
         if hasPendingRestartBanner {
             let banner = ThemeStatusBanner(
                 status: .warning,
-                title: "设置待生效",
+                title: L10n.t(.modelPendingTitle),
                 message: ModelPageStrings.bannerPendingRestart,
                 actionTitle: ModelPageStrings.buttonRestartCore,
                 actionTarget: self,
@@ -964,7 +964,7 @@ public final class ModelPageController: NSViewController {
         if isCodex {
             let banner = ThemeStatusBanner(
                 status: .normal,
-                title: "默认接入方式",
+                title: L10n.t(.modelDefaultTitle),
                 message: ModelPageStrings.bannerDefaultCodex
             )
             bannerContainer.addArrangedSubview(banner)
@@ -976,7 +976,7 @@ public final class ModelPageController: NSViewController {
         if isUnconfigured && !isCodex {
             let banner = ThemeStatusBanner(
                 status: .warning,
-                title: "模型未配置",
+                title: L10n.t(.modelMissingTitle),
                 message: ModelPageStrings.bannerUnset
             )
             bannerContainer.addArrangedSubview(banner)
@@ -988,7 +988,7 @@ public final class ModelPageController: NSViewController {
         if !errors.isEmpty {
             let banner = ThemeStatusBanner(
                 status: .error,
-                title: "连接校验异常",
+                title: L10n.t(.modelValidationTitle),
                 message: String(format: ModelPageStrings.bannerErrorSummary, errors.count)
             )
             bannerContainer.addArrangedSubview(banner)
@@ -1095,7 +1095,7 @@ public final class ModelPageController: NSViewController {
         if let handler = isCoreRunningHandler {
             isRunning = handler()
         } else {
-            isRunning = false
+            isRunning = (context as? StatusPanelController)?.isBotRunning ?? false
         }
 
         let isDirty = currentDraft != savedDraft
@@ -1126,8 +1126,8 @@ public final class ModelPageController: NSViewController {
         } catch {
             let alert = NSAlert()
             alert.alertStyle = .critical
-            alert.messageText = "保存失败"
-            alert.informativeText = error.localizedDescription
+            alert.messageText = L10n.t(.saveFailed)
+            alert.informativeText = L10n.t(.saveRejected)
             alert.runModal()
         }
     }
@@ -1136,12 +1136,23 @@ public final class ModelPageController: NSViewController {
         let formDict = currentDraft.toModelConfigForm()
         if let handler = saveHandler {
             try handler(formDict)
+        } else if let context = context as? StatusPanelController {
+            let updated = try ConfigFormLogic.buildUpdatedConfig(original: context.currentRawConfig, formInputs: ["model_config_form": formDict])
+            try context.persistConfig(updated)
+        } else {
+            throw ConfigFormError.writeFailed(L10n.t(.configUnavailable))
         }
     }
 
     @objc private func handleRestartCore() {
-        hasPendingRestartBanner = false
-        validateAndRefreshUI()
+        let alert = NSAlert()
+        alert.messageText = L10n.t(.confirmRestartBotTitle)
+        alert.informativeText = L10n.t(.confirmRestartBotBody)
+        alert.addButton(withTitle: L10n.t(.confirmRestart))
+        alert.addButton(withTitle: L10n.t(.cancel))
+        if alert.runModal() == .alertFirstButtonReturn {
+            (context as? StatusPanelController)?.restartBot()
+        }
     }
 
     private func changedFieldDescriptions() -> [String] {

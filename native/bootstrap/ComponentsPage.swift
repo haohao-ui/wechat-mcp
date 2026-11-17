@@ -8,100 +8,100 @@ import AppKit
 
 public enum ComponentsPageStrings {
     // 页面标题与导言
-    public static let pageTitle = "组件与配色"
-    public static let pageSubtitle = "设计规范、设计令牌与通用组件展示（供验收对照）"
+    public static var pageTitle: String { L10n.t(.navComponents) }
+    public static var pageSubtitle: String { L10n.t(.componentsPageSubtitle) }
 
     // 色彩规范板块
-    public static let sectionColorsTitle = "色彩规范 (Color Tokens)"
-    public static let subsectionButtonsAndBrand = "主按钮与品牌色"
-    public static let subsectionInputBorderAndStates = "输入框描边与状态色"
-    public static let subsectionStatusTokens = "四种服务状态色 (圆点 / 文字 / 底色)"
+    public static var sectionColorsTitle: String { L10n.t(.componentsSectionColorsTitle) }
+    public static var subsectionButtonsAndBrand: String { L10n.t(.componentsSubsectionButtonsAndBrand) }
+    public static var subsectionInputBorderAndStates: String { L10n.t(.componentsSubsectionInputBorderAndStates) }
+    public static var subsectionStatusTokens: String { L10n.t(.componentsSubsectionStatusTokens) }
 
     // 按钮与品牌色用途说明
-    public static let tokenPrimaryButtonDefault = "主按钮默认背景 (#0A5B6B)"
-    public static let tokenPrimaryButtonHover = "主按钮悬停背景 (#084B58)"
-    public static let tokenPrimaryButtonText = "主按钮文字/白字 (#FFFFFF)"
-    public static let tokenPrimaryButtonDisabledBg = "主按钮禁用背景 (#F4F5F7)"
-    public static let tokenPrimaryButtonDisabledText = "主按钮禁用文字 (#6B7280)"
-    public static let tokenBrand = "品牌主色 (#12A37A)"
-    public static let tokenBrandLight = "品牌浅色 (#E2F5EE)"
+    public static var tokenPrimaryButtonDefault: String { L10n.t(.componentsTokenPrimaryButtonDefault) }
+    public static var tokenPrimaryButtonHover: String { L10n.t(.componentsTokenPrimaryButtonHover) }
+    public static var tokenPrimaryButtonText: String { L10n.t(.componentsTokenPrimaryButtonText) }
+    public static var tokenPrimaryButtonDisabledBg: String { L10n.t(.componentsTokenPrimaryButtonDisabledBg) }
+    public static var tokenPrimaryButtonDisabledText: String { L10n.t(.componentsTokenPrimaryButtonDisabledText) }
+    public static var tokenBrand: String { L10n.t(.componentsTokenBrand) }
+    public static var tokenBrandLight: String { L10n.t(.componentsTokenBrandLight) }
 
     // 输入框状态用途说明
-    public static let tokenInputBorder = "输入框默认描边 (#C9CDD4)"
-    public static let tokenInputErrorBorder = "输入框错误态描边 (#E5484D)"
-    public static let tokenInputErrorText = "输入框错误态文字 (#B73A3E)"
-    public static let tokenInputDisabledBg = "输入框禁用态背景 (#F4F5F7)"
-    public static let tokenInputDisabledText = "输入框禁用态文字 (#6B7280)"
+    public static var tokenInputBorder: String { L10n.t(.componentsTokenInputBorder) }
+    public static var tokenInputErrorBorder: String { L10n.t(.componentsTokenInputErrorBorder) }
+    public static var tokenInputErrorText: String { L10n.t(.componentsTokenInputErrorText) }
+    public static var tokenInputDisabledBg: String { L10n.t(.componentsTokenInputDisabledBg) }
+    public static var tokenInputDisabledText: String { L10n.t(.componentsTokenInputDisabledText) }
 
     // 四状态用途说明
-    public static let tokenNormalDot = "正常状态圆点 (#1AAD78)"
-    public static let tokenNormalText = "正常状态文字 (#127954)"
-    public static let tokenNormalBg = "正常状态底色 (#E4F5EF)"
+    public static var tokenNormalDot: String { L10n.t(.componentsTokenNormalDot) }
+    public static var tokenNormalText: String { L10n.t(.componentsTokenNormalText) }
+    public static var tokenNormalBg: String { L10n.t(.componentsTokenNormalBg) }
 
-    public static let tokenWarningDot = "注意状态圆点 (#E08E0B)"
-    public static let tokenWarningText = "注意状态文字 (#925C07)"
-    public static let tokenWarningBg = "注意状态底色 (#FBF1E2)"
+    public static var tokenWarningDot: String { L10n.t(.componentsTokenWarningDot) }
+    public static var tokenWarningText: String { L10n.t(.componentsTokenWarningText) }
+    public static var tokenWarningBg: String { L10n.t(.componentsTokenWarningBg) }
 
-    public static let tokenErrorDot = "异常状态圆点 (#E5484D)"
-    public static let tokenErrorText = "异常状态文字 (#B73A3E)"
-    public static let tokenErrorBg = "异常状态底色 (#FCE9EA)"
+    public static var tokenErrorDot: String { L10n.t(.componentsTokenErrorDot) }
+    public static var tokenErrorText: String { L10n.t(.componentsTokenErrorText) }
+    public static var tokenErrorBg: String { L10n.t(.componentsTokenErrorBg) }
 
-    public static let tokenInactiveDot = "未启用圆点 (#9AA0A6)"
-    public static let tokenInactiveText = "未启用文字 (#6C7074)"
-    public static let tokenInactiveBg = "未启用底色 (#F3F4F4)"
+    public static var tokenInactiveDot: String { L10n.t(.componentsTokenInactiveDot) }
+    public static var tokenInactiveText: String { L10n.t(.componentsTokenInactiveText) }
+    public static var tokenInactiveBg: String { L10n.t(.componentsTokenInactiveBg) }
 
     // 通用组件板块
-    public static let sectionComponentsTitle = "通用组件 (Components)"
+    public static var sectionComponentsTitle: String { L10n.t(.componentsSectionComponentsTitle) }
 
     // 主按钮展示
-    public static let subsectionPrimaryButtons = "主按钮 (Primary Button)"
-    public static let buttonNormalTitle = "保存修改 (悬停体验)"
-    public static let buttonDisabledTitle = "保存修改 (禁用状态)"
-    public static let buttonDescription = "支持悬停 (#084B58) 变色、点击高亮与禁用态自动变灰。"
+    public static var subsectionPrimaryButtons: String { L10n.t(.componentsSubsectionPrimaryButtons) }
+    public static var buttonNormalTitle: String { L10n.t(.componentsButtonNormalTitle) }
+    public static var buttonDisabledTitle: String { L10n.t(.componentsButtonDisabledTitle) }
+    public static var buttonDescription: String { L10n.t(.componentsButtonDescription) }
 
     // 状态标签展示
-    public static let subsectionStatusTags = "状态标签 (Status Tag)"
-    public static let tagNormalTitle = "正常"
-    public static let tagWarningTitle = "注意"
-    public static let tagErrorTitle = "异常"
-    public static let tagInactiveTitle = "未启用"
+    public static var subsectionStatusTags: String { L10n.t(.componentsSubsectionStatusTags) }
+    public static var tagNormalTitle: String { L10n.t(.tagNormal) }
+    public static var tagWarningTitle: String { L10n.t(.tagAttention) }
+    public static var tagErrorTitle: String { L10n.t(.tagError) }
+    public static var tagInactiveTitle: String { L10n.t(.tagOff) }
 
     // 状态横幅展示
-    public static let subsectionStatusBanners = "状态横幅 (Status Banner)"
-    public static let bannerNormalTitle = "核心服务运行中"
-    public static let bannerNormalMsg = "微信客服助手正在后台持续监听消息并按规则自动回复。"
-    public static let bannerWarningTitle = "重启后生效提示"
-    public static let bannerWarningMsg = "已保存的连接设置尚未生效。正在运行的服务仍使用旧设置，重启核心服务后生效。"
-    public static let bannerWarningAction = "重启核心服务"
-    public static let bannerErrorTitle = "连接校验异常"
-    public static let bannerErrorMsg = "有 2 项配置需要修改，改好后才能测试连接或保存。"
+    public static var subsectionStatusBanners: String { L10n.t(.componentsSubsectionStatusBanners) }
+    public static var bannerNormalTitle: String { L10n.t(.componentsBannerNormalTitle) }
+    public static var bannerNormalMsg: String { L10n.t(.componentsBannerNormalMsg) }
+    public static var bannerWarningTitle: String { L10n.t(.componentsBannerWarningTitle) }
+    public static var bannerWarningMsg: String { L10n.t(.componentsBannerWarningMsg) }
+    public static var bannerWarningAction: String { L10n.t(.componentsBannerWarningAction) }
+    public static var bannerErrorTitle: String { L10n.t(.componentsBannerErrorTitle) }
+    public static var bannerErrorMsg: String { L10n.t(.componentsBannerErrorMsg) }
 
     // 二次确认弹窗展示
-    public static let subsectionConfirmDialog = "带勾选二次确认弹窗 (Confirm Dialog)"
-    public static let dialogTriggerButtonTitle = "打开带勾选二次确认弹窗..."
-    public static let dialogTitle = "确认修改连接设置？"
-    public static let dialogMessage = "自动回复正在运行。你修改了：接口地址、密钥来源。保存后，正在运行的服务仍使用旧设置，重启核心服务后才生效。"
-    public static let dialogCheckboxText = "我知道重启核心服务后才会生效"
-    public static let dialogConfirmButton = "保存并生效"
-    public static let dialogCancelButton = "取消"
-    public static let dialogResultPrefix = "最近一次交互结果："
-    public static let dialogResultInitial = "尚未打开弹窗"
-    public static let dialogResultConfirmed = "用户已勾选确认并点击保存"
-    public static let dialogResultCancelled = "用户取消或未勾选"
+    public static var subsectionConfirmDialog: String { L10n.t(.componentsSubsectionConfirmDialog) }
+    public static var dialogTriggerButtonTitle: String { L10n.t(.componentsDialogTriggerButtonTitle) }
+    public static var dialogTitle: String { L10n.t(.componentsDialogTitle) }
+    public static var dialogMessage: String { L10n.t(.componentsDialogMessage) }
+    public static var dialogCheckboxText: String { L10n.t(.componentsDialogCheckboxText) }
+    public static var dialogConfirmButton: String { L10n.t(.componentsDialogConfirmButton) }
+    public static var dialogCancelButton: String { L10n.t(.cancel) }
+    public static var dialogResultPrefix: String { L10n.t(.componentsDialogResultPrefix) }
+    public static var dialogResultInitial: String { L10n.t(.componentsDialogResultInitial) }
+    public static var dialogResultConfirmed: String { L10n.t(.componentsDialogResultConfirmed) }
+    public static var dialogResultCancelled: String { L10n.t(.componentsDialogResultCancelled) }
 
     // 表单字段展示
-    public static let subsectionFormFields = "表单字段 (Form Field - 自绘描边)"
-    public static let fieldNormalLabel = "模型接口地址 (正常态)"
+    public static var subsectionFormFields: String { L10n.t(.componentsSubsectionFormFields) }
+    public static var fieldNormalLabel: String { L10n.t(.componentsFieldNormalLabel) }
     public static let fieldNormalPlaceholder = "https://api.openai.com/v1"
-    public static let fieldNormalHelper = "支持 HTTPS 或本机地址 localhost / 127.0.0.1 / [::1]"
+    public static var fieldNormalHelper: String { L10n.t(.componentsFieldNormalHelper) }
 
-    public static let fieldErrorLabel = "API 密钥来源 (错误态)"
+    public static var fieldErrorLabel: String { L10n.t(.componentsFieldErrorLabel) }
     public static let fieldErrorInitial = "INVALID_ENV_VAR@NAME"
-    public static let fieldErrorMessage = "环境变量名不合法，仅允许字母、数字和下划线"
+    public static var fieldErrorMessage: String { L10n.t(.componentsFieldErrorMessage) }
 
-    public static let fieldDisabledLabel = "最大输出长度 (禁用态)"
+    public static var fieldDisabledLabel: String { L10n.t(.componentsFieldDisabledLabel) }
     public static let fieldDisabledValue = "1024 tokens"
-    public static let fieldDisabledHelper = "固定参数，由核心引擎严格限制，当前角色只读"
+    public static var fieldDisabledHelper: String { L10n.t(.componentsFieldDisabledHelper) }
 }
 
 // MARK: - ComponentsPageController
