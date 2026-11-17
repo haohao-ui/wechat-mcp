@@ -759,7 +759,7 @@ pub fn execute_control_full_with_paths<W1: std::io::Write, W2: std::io::Write>(
     if action == "-h" || action == "--help" {
         let _ = writeln!(
             stdout,
-            "Usage: wechat-mcp control <status|start|stop|pause|resume|resume-session|config-check|calibrate|migrate-history|history-status|merge-contact|unmerge-contact|history-backup|contacts-list|mcp-info|contacts-sync|open-api-check|open-api-token> [--config <path>]"
+            "Usage: wechat-mcp control <status|start|stop|pause|resume|resume-session|config-check|model-probe|calibrate|migrate-history|history-status|merge-contact|unmerge-contact|history-backup|contacts-list|mcp-info|contacts-sync|open-api-check|open-api-token> [--config <path>]"
         );
         return 0;
     }
@@ -939,6 +939,35 @@ pub fn execute_control_full_with_paths<W1: std::io::Write, W2: std::io::Write>(
                 })
             );
             0
+        }
+        "model-probe" => {
+            let mut target = None;
+            let mut idx = 1;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--config" if idx + 1 < args.len() => {
+                        target = Some(PathBuf::from(&args[idx + 1]));
+                        idx += 2;
+                    }
+                    "--json" => {
+                        idx += 1;
+                    }
+                    _ => {
+                        let _ = writeln!(
+                            stdout,
+                            "{}",
+                            json!({"ok": false, "category": "invalid_config"})
+                        );
+                        return 2;
+                    }
+                }
+            }
+            let output = block_on(crate::brain::model_probe::probe(
+                &target.unwrap_or(default_config_path),
+            ));
+            let code = if output["ok"] == true { 0 } else { 2 };
+            let _ = writeln!(stdout, "{output}");
+            code
         }
         "config-check" => {
             // 支持 config-check <path> 或 config-check --config <path>

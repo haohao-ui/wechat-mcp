@@ -1,5 +1,6 @@
 // ConfigForm.swift: Logic and UI model for bot configuration form and atomic save workflow.
 import Foundation
+import Darwin
 
 public struct ConfigMaskResult: Codable {
     public let accountId: String?
@@ -39,27 +40,28 @@ public struct ConfigFormLogic {
         var masked: [String: Any] = [:]
         masked["account_id"] = raw["account_id"] as? String ?? ""
 
-        var modelBackend = ""
-        var modelName = ""
-        var hasKey = false
-
-        if let mc = raw["model_config"] as? [String: Any] {
-            modelBackend = mc["backend"] as? String ?? ""
-            modelName = mc["model"] as? String ?? ""
-            if let key = mc["api_key"] as? String, !key.isEmpty {
-                hasKey = true
-            }
-            if let keyEnv = mc["api_key_env"] as? String, !keyEnv.isEmpty {
-                hasKey = true
-            }
-            if let keyFile = mc["api_key_file"] as? String, !keyFile.isEmpty {
-                hasKey = true
-            }
-        }
-
-        masked["model_backend"] = modelBackend
-        masked["model_name"] = modelName
+        let mc = raw["model_config"] as? [String: Any] ?? [:]
+        let backend = mc["backend"] as? String ?? "codex-exec"
+        let name = mc["model"] as? String ?? ""
+        let base = mc["base_url"] as? String ?? ""
+        let file = mc["api_key_file"] as? String ?? ""
+        let explicitEnv = mc["api_key_env"] as? String ?? ""
+        let defaultEnv = URLComponents(string: base)?.host == "api.deepseek.com" ? "DEEPSEEK_API_KEY" : "OPENAI_API_KEY"
+        let env = explicitEnv.isEmpty ? defaultEnv : explicitEnv
+        let source = backend == "codex-exec" ? "none" : (!file.isEmpty ? "file" : (!explicitEnv.isEmpty ? "env" : "default_env"))
+        let hasKey = source == "file" ? validKeyFile(file) : (source != "none" && validKey(ProcessInfo.processInfo.environment[env] ?? ""))
+        masked["model_backend"] = backend
+        masked["model_name"] = backend == "codex-exec" ? "" : name
+        masked["base_url"] = backend == "codex-exec" || !validModelURL(base) ? "" : base
+        masked["key_source"] = source
+        masked["key_env_name"] = source == "env" || source == "default_env" ? env : ""
+        masked["key_file_path"] = source == "file" ? file : ""
+        masked["model_state"] = backend == "codex-exec" ? "default_codex" : (hasKey && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && validModelURL(base) ? "configured" : "unconfigured")
         masked["api_key_status"] = hasKey ? "已配置" : "未配置"
+        masked["timeout_seconds"] = mc["timeout_seconds"] as? Int ?? 60
+        masked["supports_images"] = mc["supports_images"] as? Bool ?? false
+        masked["json_output"] = mc["json_output"] as? Bool ?? true
+        masked["images_per_model_call"] = raw["images_per_model_call"] as? Int ?? 4
 
         var editable: [String: Any] = [:]
         if let allowlist = raw["allowlist"] { editable["allowlist"] = allowlist }
@@ -75,6 +77,65 @@ public struct ConfigFormLogic {
 
         masked["editable"] = editable
         return masked
+    }
+
+    private static func validKey(_ value: String) -> Bool {
+        let key = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !key.isEmpty && key.utf8.count <= 4096 && !key.contains(where: { $0.isWhitespace })
+    }
+
+    private static func validKeyFile(_ path: String) -> Bool {
+        guard path.hasPrefix("/") else { return false }
+        let fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        guard fd >= 0 else { return false }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        defer { try? handle.close() }
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
+              info.st_mode & 0o777 == 0o600, info.st_uid == getuid(),
+              let data = try? handle.read(upToCount: 4097),
+              let key = String(data: data, encoding: .utf8) else { return false }
+        return validKey(key)
+    }
+
+    private static func validModelURL(_ value: String) -> Bool {
+        guard let url = URLComponents(string: value), let host = url.host, !host.isEmpty,
+              url.user == nil, url.password == nil, url.query == nil, url.fragment == nil else { return false }
+        return url.scheme == "https" || (url.scheme == "http" && ["localhost", "127.0.0.1", "::1", "[::1]"].contains(host))
+    }
+
+    private static func modelForm(_ form: [String: Any], original: [String: Any]) throws -> (model: [String: Any], images: Int) {
+        func fail(_ code: String, _ message: String) -> ConfigFormError { .validationFailed("\(code): \(message)") }
+        func integer(_ key: String, _ fallback: Int, _ range: ClosedRange<Int>) throws -> Int {
+            let text = form[key].map { String(describing: $0) } ?? String(fallback)
+            guard text.range(of: "^[0-9]+$", options: .regularExpression) != nil, let n = Int(text), range.contains(n) else {
+                throw fail(key == "timeout_seconds" ? "MODEL_TIMEOUT_INVALID" : "MODEL_IMAGES_INVALID", key == "timeout_seconds" ? "超时必须为 1–180 之间的整数" : "图片数必须为 1–16 之间的整数")
+            }
+            return n
+        }
+        let supports = form["supports_images"] as? Bool ?? false
+        let images = supports ? try integer("images_per_model_call", original["images_per_model_call"] as? Int ?? 4, 1...16) : original["images_per_model_call"] as? Int ?? 4
+        let backend = form["backend"] as? String ?? "codex-exec"
+        if backend == "codex-exec" { return (["backend": backend], images) }
+        guard backend == "openai-compatible" else { throw fail("MODEL_BACKEND_INVALID", "请选择有效的接入方式") }
+        let base = (form["base_url"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard validModelURL(base) else { throw fail("MODEL_URL_INVALID", "接口地址必须使用 HTTPS（本机可用 HTTP），且不能包含凭据、查询或片段") }
+        let model = (form["model"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !model.isEmpty else { throw fail("MODEL_NAME_REQUIRED", "请填写模型名") }
+        var result: [String: Any] = ["backend": backend, "base_url": base, "model": model,
+            "timeout_seconds": try integer("timeout_seconds", 60, 1...180), "supports_images": supports,
+            "json_output": form["json_output"] as? Bool ?? true]
+        let source = form["key_source"] as? String ?? "env"
+        if source == "env" {
+            let env = form["key_env_name"] as? String ?? form["api_key_env"] as? String ?? ""
+            guard env.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) != nil else { throw fail("MODEL_KEY_ENV_INVALID", "请填写有效的环境变量名") }
+            result["api_key_env"] = env
+        } else if source == "file" {
+            let path = form["key_file_path"] as? String ?? form["api_key_file"] as? String ?? ""
+            guard validKeyFile(path) else { throw fail("MODEL_KEY_FILE_INVALID", "密钥文件必须为当前用户所有的绝对路径普通文件、权限 0600、非符号链接且内容有效") }
+            result["api_key_file"] = path
+        } else if source != "default_env" { throw fail("MODEL_KEY_SOURCE_INVALID", "请选择有效的密钥来源") }
+        return (result, images)
     }
 
     /// 严格解析整数字段：不允许包含小数点、非数字字符，必须是有效 Int
@@ -333,6 +394,12 @@ public struct ConfigFormLogic {
             }
         }
 
+        if let input = formInputs["model_config_form"] {
+            guard let form = input as? [String: Any] else { throw ConfigFormError.validationFailed("MODEL_FORM_INVALID: 模型配置格式无效") }
+            let model = try modelForm(form, original: original)
+            updated["model_config"] = model.model
+            updated["images_per_model_call"] = model.images
+        }
         return updated
     }
 
@@ -415,7 +482,10 @@ public struct ConfigFormLogic {
         let result = runControlCommand(executable: controlBinaryPath(), arguments: [
             "control", "config-check", "--config", fileURL.path, "--json"
         ], timeout: 20)
-        return configCheckResult(result)
+        if result.timedOut { return (false, "CONFIG_CHECK_TIMEOUT: 配置校验超时") }
+        if result.status == 0,
+           let json = try? JSONSerialization.jsonObject(with: result.output) as? [String: Any], json["ok"] as? Bool == true { return (true, nil) }
+        return (false, "CONFIG_CHECK_FAILED: 配置校验失败，请检查配置")
     }
 
     static func configCheckResult(_ result: ControlRun) -> (ok: Bool, error: String?) {
