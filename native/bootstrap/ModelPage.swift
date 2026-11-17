@@ -796,7 +796,7 @@ public final class ModelPageController: NSViewController {
             keyInputField.input.stringValue = currentDraft.apiKeyEnv
         } else {
             keyInputField.label.stringValue = ModelPageStrings.fieldKeySource + " (" + ModelPageStrings.keySourceFile + ")"
-            keyInputField.input.placeholderString = "/Users/me/.wechat-mcp/model.key"
+            keyInputField.input.placeholderString = "~/.wechat-mcp/model.key"
             keyInputField.setNormal(helper: ModelPageStrings.keySourceFileHelper)
             keyInputField.input.stringValue = currentDraft.apiKeyFile
         }
