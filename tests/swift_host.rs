@@ -2308,7 +2308,10 @@ fn test_every_legacy_panel_control_has_new_home() {
     );
     // 5. 恢复自动回复
     assert!(
-        all_new_src.contains("恢复自动回复") || all_new_src.contains("resumeHandoff"),
+        all_new_src.contains("恢复自动回复")
+            || all_new_src.contains("resumeHandoff")
+            || (sessions_src.contains("actionResumeAutoReply")
+                && sessions_src.contains("session-handoff")),
         "必须包含恢复自动回复操作"
     );
     // 6. 打开附件文件夹

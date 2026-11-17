@@ -19,6 +19,7 @@ public final class SessionsPageController: NSViewController {
     private var selectedContact: String?
     private var rows: [RecordedSession] = []
     private var messages: [RecordedMessage] = []
+    private var handoffChanging = false
     private var loading = false
     private var hasAPIData = false
     private var detailGeneration = 0
@@ -133,9 +134,9 @@ public final class SessionsPageController: NSViewController {
         messageScroll.widthAnchor.constraint(equalTo: detailStack.widthAnchor).isActive = true
         handoffButton.title = L10n.t(.actionHandoff)
         handoffButton.isEnabled = false
-        handoffButton.toolTip = L10n.t(.handoffUnsupported)
+        handoffButton.target = self
+        handoffButton.action = #selector(changeSelectedHandoff)
         detailStack.addArrangedSubview(handoffButton)
-        detailStack.addArrangedSubview(NSTextField(wrappingLabelWithString: L10n.t(.handoffUnsupported)))
         moreMessages.title = L10n.t(.loadMore)
         moreMessages.target = self
         moreMessages.action = #selector(loadMoreMessages)
@@ -214,8 +215,9 @@ public final class SessionsPageController: NSViewController {
     }
 
     private func fetchSessions(offset: Int) {
-        guard !loading else { return }
+        guard !loading && !handoffChanging else { return }
         loading = true
+        updateHandoffButton()
         moreSessions.isEnabled = false
         refreshButton.isEnabled = false
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -228,6 +230,7 @@ public final class SessionsPageController: NSViewController {
                 self.sessionsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
                 guard let page = page else {
                     self.hasAPIData = false
+                    self.handoffButton.isEnabled = false
                     self.moreSessions.isHidden = true
                     self.sessionsStack.addArrangedSubview(NSTextField(wrappingLabelWithString: L10n.t(.sessionsApiUnavailable)))
                     let (_, input) = self.context.collectLatestStatus()
@@ -241,6 +244,7 @@ public final class SessionsPageController: NSViewController {
                 self.moreSessions.isHidden = page.nextOffset == nil
                 self.hasAPIData = true
                 self.renderRecordedRows()
+                self.updateHandoffButton()
             }
         }
     }
@@ -253,11 +257,6 @@ public final class SessionsPageController: NSViewController {
             button.identifier = NSUserInterfaceItemIdentifier(session.contactID)
             button.bezelStyle = .inline
             sessionsStack.addArrangedSubview(button)
-            if session.handoff == true {
-                let resume = NSButton(title: L10n.t(.actionResumeAutoReply), target: self, action: #selector(handleResumeHandoff(_:)))
-                resume.identifier = NSUserInterfaceItemIdentifier(session.displayName)
-                sessionsStack.addArrangedSubview(resume)
-            }
         }
     }
 
@@ -270,6 +269,7 @@ public final class SessionsPageController: NSViewController {
         moreMessages.isHidden = true
         messageTitle.stringValue = rows.first(where: { $0.contactID == id })?.displayName ?? ""
         messageView.string = L10n.t(.loading)
+        updateHandoffButton()
         fetchMessages(id: id, offset: 0)
     }
 
@@ -279,9 +279,14 @@ public final class SessionsPageController: NSViewController {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let page = try? SessionDataClient().detail(contactID: id, offset: offset)
             DispatchQueue.main.async {
-                guard let self = self, self.selectedContact == id, self.detailGeneration == generation else { return }
+                guard let self = self, self.selectedContact == id, self.detailGeneration == generation, !self.handoffChanging else { return }
                 self.moreMessages.isEnabled = true
                 guard let page = page else { self.messageView.string = L10n.t(.detailUnavailable); return }
+                if let session = page.session, let index = self.rows.firstIndex(where: { $0.contactID == id }) {
+                    self.rows[index] = session
+                    self.updateHandoffButton()
+                    self.renderRecordedRows()
+                }
                 if offset == 0 { self.messages = page.messages } else { self.messages = page.messages + self.messages }
                 self.nextMessageOffset = page.nextOffset
                 self.moreMessages.isHidden = page.nextOffset == nil
@@ -313,11 +318,8 @@ public final class SessionsPageController: NSViewController {
 
         if session.handoff == true || session.state == "handoff" {
             stateLbl.textColor = .systemOrange
-            let resumeBtn = NSButton(title: L10n.t(.actionResumeAutoReply), target: self, action: #selector(handleResumeHandoff(_:)))
-            resumeBtn.identifier = NSUserInterfaceItemIdentifier(name)
             rowStack.addArrangedSubview(nameLbl)
             rowStack.addArrangedSubview(stateLbl)
-            rowStack.addArrangedSubview(resumeBtn)
         } else if session.state == "watching" || session.state == "listening" {
             stateLbl.textColor = .systemGreen
             rowStack.addArrangedSubview(nameLbl)
@@ -387,11 +389,57 @@ public final class SessionsPageController: NSViewController {
         detailTextView.string = text
     }
 
-    @objc private func handleResumeHandoff(_ sender: NSButton) {
-        let sessionName = sender.identifier?.rawValue
-        context.resumeHandoff(sessionName: sessionName)
-        refreshSessions()
+    private func updateHandoffButton() {
+        let session = rows.first { $0.contactID == selectedContact }
+        handoffButton.title = L10n.t(session?.handoff == true ? .actionResumeAutoReply : .actionHandoff)
+        handoffButton.isEnabled = hasAPIData && session?.handoff != nil && !handoffChanging && !loading
     }
+
+    @objc private func changeSelectedHandoff() {
+        guard !handoffChanging, let id = selectedContact,
+              let session = rows.first(where: { $0.contactID == id }), let current = session.handoff else { return }
+        let human = !current
+        let alert = NSAlert()
+        alert.messageText = L10n.t(human ? .actionHandoff : .actionResumeAutoReply)
+        alert.informativeText = L10n.t(human ? .handoffConfirmBody : .resumeConfirmBody, session.displayName)
+        alert.addButton(withTitle: L10n.t(.continueAction))
+        alert.addButton(withTitle: L10n.t(.cancel))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        detailGeneration += 1 // Discard detail reads started before this mutation.
+        handoffChanging = true
+        updateHandoffButton()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                let state = try SessionDataClient().handoff(sessionID: id, toHuman: human)
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    self.handoffChanging = false
+                    self.detailGeneration += 1
+                    if let index = self.rows.firstIndex(where: { $0.contactID == id }) {
+                        let row = self.rows[index]
+                        self.rows[index] = RecordedSession(contactID: row.contactID, displayName: row.displayName,
+                            kind: row.kind, unread: row.unread, autoReplying: state.handoff ? false : nil, handoff: state.handoff)
+                    }
+                    self.renderRecordedRows()
+                    self.updateHandoffButton()
+                    self.refreshSessions()
+                    if let selected = self.selectedContact { self.fetchMessages(id: selected, offset: 0) }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    self.handoffChanging = false
+                    self.updateHandoffButton()
+                    let failure = NSAlert()
+                    failure.messageText = L10n.t(.actionFailed)
+                    failure.informativeText = L10n.t(.handoffChangeFailed)
+                    failure.runModal()
+                }
+            }
+        }
+    }
+
+
 }
 
 public struct RecordedSession: Decodable {
@@ -445,9 +493,10 @@ public struct SessionListPage: Decodable {
     enum CodingKeys: String, CodingKey { case sessions, nextOffset = "next_offset" }
 }
 public struct SessionMessagePage: Decodable {
+    public let session: RecordedSession?
     public let messages: [RecordedMessage]
     public let nextOffset: Int?
-    enum CodingKeys: String, CodingKey { case messages, nextOffset = "next_offset" }
+    enum CodingKeys: String, CodingKey { case session, messages, nextOffset = "next_offset" }
 }
 
 /// Uses T2's versioned JSON envelope and never includes command output in errors.
@@ -480,6 +529,14 @@ public final class SessionDataClient {
     }
     public func detail(contactID: String, offset: Int = 0) throws -> SessionMessagePage {
         try payload("session-detail", request: ["contact_id": contactID, "limit": 50, "offset": offset])
+    }
+    public struct HandoffState: Decodable { public let sessionID: String; public let handoff: Bool
+        enum CodingKeys: String, CodingKey { case sessionID = "session_id", handoff }
+    }
+    public func handoff(sessionID: String, toHuman: Bool) throws -> HandoffState {
+        let state: HandoffState = try payload("session-handoff", request: ["session_id": sessionID, "to": toHuman ? "human" : "bot"])
+        guard state.sessionID == sessionID, state.handoff == toHuman else { throw SessionDataError.unavailable }
+        return state
     }
     public func sentToday() throws -> Int? {
         let object = try JSONSerialization.jsonObject(with: run("status")) as? [String: Any]

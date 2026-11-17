@@ -84,6 +84,29 @@ do {
     })
     let detail = try detailClient.detail(contactID: "c1")
     require(detail.messages.isEmpty, "empty recorded messages")
+
+    for human in [true, false] {
+        let handoffClient = SessionDataClient(configPath: "/tmp/t8-config", executor: { _, args, _ in
+            captured = args
+            return ControlRun(status: 0, output: Data("{\"ok\":true,\"data\":{\"session_id\":\"c1\",\"handoff\":\(human)}}".utf8), timedOut: false)
+        })
+        let state = try handoffClient.handoff(sessionID: "c1", toHuman: human)
+        require(state.handoff == human, "handoff result")
+        require(captured.contains("session-handoff"), "session mutation command")
+        let requestIndex = captured.firstIndex(of: "--request-json")!
+        let request = try JSONSerialization.jsonObject(with: Data(captured[requestIndex + 1].utf8)) as! [String: String]
+        require(request["session_id"] == "c1" && request["to"] == (human ? "human" : "bot"), "handoff exact identity and target")
+    }
+    let rejected = SessionDataClient(executor: { _, _, _ in
+        ControlRun(status: 0, output: Data("{\"ok\":false,\"error\":{\"message\":\"PRIVATE_SENTINEL\"}}".utf8), timedOut: false)
+    })
+    do { _ = try rejected.handoff(sessionID: "c1", toHuman: true); require(false, "rejection fails") }
+    catch { require(!String(describing: error).contains("PRIVATE_SENTINEL"), "handoff error sanitized") }
+    let wrongSession = SessionDataClient(executor: { _, _, _ in
+        ControlRun(status: 0, output: Data("{\"ok\":true,\"data\":{\"session_id\":\"other\",\"handoff\":true}}".utf8), timedOut: false)
+    })
+    do { _ = try wrongSession.handoff(sessionID: "c1", toHuman: true); require(false, "wrong session rejected") }
+    catch { }
     let stats = SessionDataClient(executor: { _, _, _ in
         ControlRun(status: 0, output: Data("{\"stats\":{\"sent_today\":7}}".utf8), timedOut: false)
     })
