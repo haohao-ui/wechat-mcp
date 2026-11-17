@@ -180,7 +180,7 @@ public struct ContactsCategoryCounts {
 public struct ContactsPageLogic {
     public static func parseContactsPayload(json: String) throws -> (payload: ContactsListPayload, counts: ContactsCategoryCounts) {
         guard let data = json.data(using: .utf8) else {
-            throw NSError(domain: "ContactsPage", code: 1, userInfo: [NSLocalizedDescriptionKey: "无效 UTF8 数据"])
+            throw NSError(domain: "ContactsPage", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid UTF-8 data"])
         }
         let decoder = JSONDecoder()
         let payload = try decoder.decode(ContactsListPayload.self, from: data)
@@ -213,10 +213,10 @@ public struct ContactsPageLogic {
     /// 分组的中文名（同步状态里不显示 work/personal 这类内部代码）
     public static func categoryTitle(_ category: String) -> String {
         switch category {
-        case "personal": return "联系人"
-        case "work": return "企业微信"
-        case "group": return "群聊"
-        case "official": return "公众号"
+        case "personal": return L10n.t(.contactsCategoryPersonal)
+        case "work": return L10n.t(.contactsCategoryWork)
+        case "group": return L10n.t(.contactsCategoryGroup)
+        case "official": return L10n.t(.contactsCategoryOfficial)
         default: return category
         }
     }
@@ -231,8 +231,8 @@ public struct ContactsPageLogic {
     public static func detailWechatText(_ item: ContactProfileItem) -> String {
         if let w = item.wechatId, !w.isEmpty { return w }
         switch item.category {
-        case "work": return "—（企业微信无此项）"
-        case "personal" where item.identity != nil: return "—（未读到）"
+        case "work": return L10n.t(.contactsWechatWorkNone)
+        case "personal" where item.identity != nil: return L10n.t(.contactsWechatUnread)
         default: return "—"
         }
     }
@@ -245,7 +245,7 @@ public struct ContactsPageLogic {
         handling: Handling
     ) -> Result<[String: Any], PageError> {
         if handling == .autoReply && category == "official" {
-            return .failure(PageError("公众号、服务号不可加入自动回复"))
+            return .failure(PageError(L10n.t(.contactsErrorOfficialNoAutoReply)))
         }
 
         var formInputs: [String: Any] = [:]
@@ -303,7 +303,7 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
     private var selectedCategory: String = "personal" // personal, work, group, official, ignored
 
     // UI elements
-    private let syncInfoLabel = NSTextField(labelWithString: "正在加载通讯录...")
+    private let syncInfoLabel = NSTextField(labelWithString: L10n.t(.contactsSyncLoading))
     private let reviewNoticeBox = NSBox()
     private let reviewNoticeLabel = NSTextField(wrappingLabelWithString: "")
     private let categorySegment = NSSegmentedControl()
@@ -312,7 +312,7 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
 
     // Detail Panel
     private let detailBox = NSBox()
-    private let detailNameLabel = NSTextField(labelWithString: "未选择联系人")
+    private let detailNameLabel = NSTextField(labelWithString: L10n.t(.contactsNoSelected))
     private let detailWechatLabel = NSTextField(labelWithString: "-")
     private let detailRemarkLabel = NSTextField(labelWithString: "-")
     private let detailRegionLabel = NSTextField(labelWithString: "-")
@@ -321,7 +321,7 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
     private let detailTagsLabel = NSTextField(labelWithString: "-")
     private let detailEnterpriseLabel = NSTextField(labelWithString: "-")
     private let detailHandlingLabel = NSTextField(labelWithString: "-")
-    private let detailActionBtn = NSButton(title: "切换处理方式", target: nil, action: nil)
+    private let detailActionBtn = NSButton(title: L10n.t(.contactsChangeHandling), target: nil, action: nil)
 
     public init(context: StatusPanelController) {
         self.context = context
@@ -358,10 +358,10 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         topBar.spacing = 12
         topBar.alignment = .centerY
 
-        let initSyncBtn = NSButton(title: "初始化通讯录", target: self, action: #selector(handleInitSync))
+        let initSyncBtn = NSButton(title: L10n.t(.contactsInitSync), target: self, action: #selector(handleInitSync))
         initSyncBtn.bezelStyle = .rounded
-        let quickSyncBtn = NSButton(title: "立即同步", target: self, action: #selector(handleQuickSync))
-        let refreshBtn = NSButton(title: "刷新", target: self, action: #selector(handleRefresh))
+        let quickSyncBtn = NSButton(title: L10n.t(.contactsQuickSync), target: self, action: #selector(handleQuickSync))
+        let refreshBtn = NSButton(title: L10n.t(.actionRefresh), target: self, action: #selector(handleRefresh))
 
         syncInfoLabel.font = NSFont.systemFont(ofSize: 12)
         syncInfoLabel.textColor = .secondaryLabelColor
@@ -373,7 +373,7 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         mainStack.addArrangedSubview(topBar)
 
         // 2. 待确认项提示栏（默认隐藏）
-        reviewNoticeBox.title = "待确认项"
+        reviewNoticeBox.title = L10n.t(.contactsReviewNoticeTitle)
         reviewNoticeBox.boxType = .custom
         reviewNoticeBox.fillColor = NSColor.systemYellow.withAlphaComponent(0.15)
         reviewNoticeBox.borderColor = NSColor.systemOrange
@@ -387,11 +387,11 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
 
         // 3. 分类标签栏
         categorySegment.segmentCount = 5
-        categorySegment.setLabel("联系人", forSegment: 0)
-        categorySegment.setLabel("企业微信", forSegment: 1)
-        categorySegment.setLabel("群聊", forSegment: 2)
-        categorySegment.setLabel("公众号", forSegment: 3)
-        categorySegment.setLabel("已忽略", forSegment: 4)
+        categorySegment.setLabel(L10n.t(.contactsCategoryPersonal), forSegment: 0)
+        categorySegment.setLabel(L10n.t(.contactsCategoryWork), forSegment: 1)
+        categorySegment.setLabel(L10n.t(.contactsCategoryGroup), forSegment: 2)
+        categorySegment.setLabel(L10n.t(.contactsCategoryOfficial), forSegment: 3)
+        categorySegment.setLabel(L10n.t(.contactsCategoryIgnored), forSegment: 4)
         categorySegment.selectedSegment = 0
         categorySegment.target = self
         categorySegment.action = #selector(handleCategoryChanged)
@@ -412,25 +412,25 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         tableScroll.translatesAutoresizingMaskIntoConstraints = false
 
         let colName = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("NameCol"))
-        colName.title = "名字 / 备注"
+        colName.title = L10n.t(.contactsColName)
         colName.width = 160
         colName.minWidth = 150  // 详情面板打开时名字列最窄也要放下约 10 个字，再长显示"…"，悬停看全名
         contactsTable.addTableColumn(colName)
 
         let colWx = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("WxCol"))
-        colWx.title = "微信号"
+        colWx.title = L10n.t(.contactsColWechat)
         colWx.width = 110
         colWx.minWidth = 40
         contactsTable.addTableColumn(colWx)
 
         let colMsgs = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("MsgsCol"))
-        colMsgs.title = "消息数"
+        colMsgs.title = L10n.t(.contactsColMsgs)
         colMsgs.width = 60
         colMsgs.minWidth = 32
         contactsTable.addTableColumn(colMsgs)
 
         let colHandling = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("HandlingCol"))
-        colHandling.title = "处理方式"
+        colHandling.title = L10n.t(.contactsColHandling)
         colHandling.width = 140
         colHandling.minWidth = 130  // 放"自动回复"勾选框和"忽略"按钮，不能被压窄
         contactsTable.addTableColumn(colHandling)
@@ -485,7 +485,7 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
     }
 
     private func setupDetailBox() {
-        detailBox.title = "联系人详情"
+        detailBox.title = L10n.t(.contactsDetailBoxTitle)
         detailBox.boxType = .primary
         detailBox.translatesAutoresizingMaskIntoConstraints = false
 
@@ -499,14 +499,14 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         stack.addArrangedSubview(detailNameLabel)
 
         let grid = NSGridView(views: [
-            [NSTextField(labelWithString: "微信号:"), detailWechatLabel],
-            [NSTextField(labelWithString: "备注名:"), detailRemarkLabel],
-            [NSTextField(labelWithString: "地区:"), detailRegionLabel],
-            [NSTextField(labelWithString: "添加时间:"), detailAddedOnLabel],
-            [NSTextField(labelWithString: "来源:"), detailSourceLabel],
-            [NSTextField(labelWithString: "企业/实名:"), detailEnterpriseLabel],
-            [NSTextField(labelWithString: "标签:"), detailTagsLabel],
-            [NSTextField(labelWithString: "处理方式:"), detailHandlingLabel]
+            [NSTextField(labelWithString: L10n.t(.contactsDetailWechat)), detailWechatLabel],
+            [NSTextField(labelWithString: L10n.t(.contactsDetailRemark)), detailRemarkLabel],
+            [NSTextField(labelWithString: L10n.t(.contactsDetailRegion)), detailRegionLabel],
+            [NSTextField(labelWithString: L10n.t(.contactsDetailAddedOn)), detailAddedOnLabel],
+            [NSTextField(labelWithString: L10n.t(.contactsDetailSource)), detailSourceLabel],
+            [NSTextField(labelWithString: L10n.t(.contactsDetailEnterprise)), detailEnterpriseLabel],
+            [NSTextField(labelWithString: L10n.t(.contactsDetailTags)), detailTagsLabel],
+            [NSTextField(labelWithString: L10n.t(.contactsDetailHandling)), detailHandlingLabel]
         ])
         grid.rowSpacing = 6
         grid.columnSpacing = 10
@@ -521,11 +521,11 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
     }
 
     private func updateTabs(counts: ContactsCategoryCounts) {
-        categorySegment.setLabel("联系人 (\(counts.personal))", forSegment: 0)
-        categorySegment.setLabel("企业微信 (\(counts.work))", forSegment: 1)
-        categorySegment.setLabel("群聊 (\(counts.group))", forSegment: 2)
-        categorySegment.setLabel("公众号 (\(counts.official))", forSegment: 3)
-        categorySegment.setLabel("已忽略 (\(counts.ignored))", forSegment: 4)
+        categorySegment.setLabel(L10n.t(.contactsTabPersonalCount, counts.personal), forSegment: 0)
+        categorySegment.setLabel(L10n.t(.contactsTabWorkCount, counts.work), forSegment: 1)
+        categorySegment.setLabel(L10n.t(.contactsTabGroupCount, counts.group), forSegment: 2)
+        categorySegment.setLabel(L10n.t(.contactsTabOfficialCount, counts.official), forSegment: 3)
+        categorySegment.setLabel(L10n.t(.contactsTabIgnoredCount, counts.ignored), forSegment: 4)
     }
 
     public func loadContactsData() {
@@ -555,7 +555,7 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         updateTabs(counts: counts)
 
         if let sync = payload.sync {
-            var syncDesc = sync.complete ? "上次同步已完成" : "同步未完整"
+            var syncDesc = sync.complete ? L10n.t(.contactsSyncCompleted) : L10n.t(.contactsSyncIncomplete)
             if let per = sync.perCategory, !per.isEmpty {
                 let parts = per.map { "\(ContactsPageLogic.categoryTitle($0.category)) \($0.synced)/\($0.expected)" }
                 syncDesc += " (" + parts.joined(separator: ", ") + ")"
@@ -563,14 +563,14 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
             syncInfoLabel.stringValue = syncDesc
             syncInfoLabel.textColor = sync.complete ? .systemGreen : .systemOrange
         } else {
-            syncInfoLabel.stringValue = "尚未同步通讯录"
+            syncInfoLabel.stringValue = L10n.t(.contactsSyncNever)
             syncInfoLabel.textColor = .secondaryLabelColor
         }
 
         if !reviews.isEmpty {
             reviewNoticeBox.isHidden = false
             let names = reviews.map { $0.name }.joined(separator: "、")
-            reviewNoticeLabel.stringValue = "存在 \(reviews.count) 条重名待确认联系人（如：\(names)），请核对身份！"
+            reviewNoticeLabel.stringValue = L10n.t(.contactsReviewPrompt, reviews.count, names)
         } else {
             reviewNoticeBox.isHidden = true
         }
@@ -579,7 +579,7 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
     }
 
     private func handleLoadFallback() {
-        syncInfoLabel.stringValue = "控制命令不可用 (离线状态)"
+        syncInfoLabel.stringValue = L10n.t(.contactsOffline)
         syncInfoLabel.textColor = .secondaryLabelColor
         // 占位数据展示
         let counts = ContactsCategoryCounts(personal: 0, work: 0, group: 0, official: 0, ignored: 0)
@@ -613,7 +613,7 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
 
     private func clearDetail() {
         detailBox.isHidden = true
-        detailNameLabel.stringValue = "未选择联系人"
+        detailNameLabel.stringValue = L10n.t(.contactsNoSelected)
         detailWechatLabel.stringValue = "-"
         detailRemarkLabel.stringValue = "-"
         detailRegionLabel.stringValue = "-"
@@ -639,21 +639,21 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
 
         switch item.handling {
         case "auto_reply":
-            detailHandlingLabel.stringValue = "自动回复"
-            detailActionBtn.title = "设为忽略"
+            detailHandlingLabel.stringValue = L10n.t(.termAutoReply)
+            detailActionBtn.title = L10n.t(.contactsActionSetIgnore)
             detailActionBtn.isEnabled = true
         case "ignored":
-            detailHandlingLabel.stringValue = "已忽略"
-            detailActionBtn.title = "取消忽略"
+            detailHandlingLabel.stringValue = L10n.t(.contactsHandlingIgnored)
+            detailActionBtn.title = L10n.t(.contactsActionUnignore)
             detailActionBtn.isEnabled = true
         default:
             if item.category == "official" {
-                detailHandlingLabel.stringValue = "永不回复"
-                detailActionBtn.title = "不可修改"
+                detailHandlingLabel.stringValue = L10n.t(.contactsHandlingNeverReply)
+                detailActionBtn.title = L10n.t(.contactsActionImmutable)
                 detailActionBtn.isEnabled = false
             } else {
-                detailHandlingLabel.stringValue = "仅记录"
-                detailActionBtn.title = "加入自动回复"
+                detailHandlingLabel.stringValue = L10n.t(.contactsHandlingRecordOnly)
+                detailActionBtn.title = L10n.t(.contactsActionAddAutoReply)
                 detailActionBtn.isEnabled = true
             }
         }
@@ -674,10 +674,10 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
 
     @objc private func handleInitSync() {
         let alert = NSAlert()
-        alert.messageText = "初始化通讯录"
-        alert.informativeText = "将暂停自动回复并全量同步微信通讯录，预计耗时 2-3 分钟。是否继续？"
-        alert.addButton(withTitle: "开始初始化")
-        alert.addButton(withTitle: "取消")
+        alert.messageText = L10n.t(.contactsInitSyncDialogTitle)
+        alert.informativeText = L10n.t(.contactsInitSyncDialogMsg)
+        alert.addButton(withTitle: L10n.t(.contactsInitSyncDialogConfirm))
+        alert.addButton(withTitle: L10n.t(.cancel))
         if alert.runModal() == .alertFirstButtonReturn {
             triggerSync(full: true)
         }
@@ -692,7 +692,7 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
     }
 
     private func triggerSync(full: Bool) {
-        syncInfoLabel.stringValue = "正在启动通讯录同步..."
+        syncInfoLabel.stringValue = L10n.t(.contactsPageSyncStarted)
         syncInfoLabel.textColor = .systemBlue
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -740,7 +740,7 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
             }
         case .failure(let err):
             let alert = NSAlert()
-            alert.messageText = "操作失败"
+            alert.messageText = L10n.t(.actionFailedTitle)
             alert.informativeText = err.message
             alert.runModal()
         }
@@ -784,16 +784,16 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
             container.alignment = .centerY
 
             if item.category == "official" {
-                let lbl = NSTextField(labelWithString: "永不回复")
+                let lbl = NSTextField(labelWithString: L10n.t(.contactsHandlingNeverReply))
                 lbl.font = NSFont.systemFont(ofSize: 11)
                 lbl.textColor = .secondaryLabelColor
                 container.addArrangedSubview(lbl)
             } else if item.handling == "ignored" {
-                let lbl = NSTextField(labelWithString: "已忽略")
+                let lbl = NSTextField(labelWithString: L10n.t(.contactsHandlingIgnored))
                 lbl.font = NSFont.systemFont(ofSize: 11)
                 lbl.textColor = .systemRed
 
-                let unignoreBtn = NSButton(title: "取消忽略", target: self, action: #selector(handleTableAction(_:)))
+                let unignoreBtn = NSButton(title: L10n.t(.contactsActionUnignore), target: self, action: #selector(handleTableAction(_:)))
                 unignoreBtn.bezelStyle = .inline
                 unignoreBtn.tag = row
                 unignoreBtn.identifier = NSUserInterfaceItemIdentifier("unignore")
@@ -801,12 +801,12 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
                 container.addArrangedSubview(lbl)
                 container.addArrangedSubview(unignoreBtn)
             } else {
-                let chk = NSButton(checkboxWithTitle: "自动回复", target: self, action: #selector(handleTableAction(_:)))
+                let chk = NSButton(checkboxWithTitle: L10n.t(.termAutoReply), target: self, action: #selector(handleTableAction(_:)))
                 chk.state = (item.handling == "auto_reply") ? .on : .off
                 chk.tag = row
                 chk.identifier = NSUserInterfaceItemIdentifier("toggle_auto_reply")
 
-                let ignoreBtn = NSButton(title: "忽略", target: self, action: #selector(handleTableAction(_:)))
+                let ignoreBtn = NSButton(title: L10n.t(.contactsActionIgnore), target: self, action: #selector(handleTableAction(_:)))
                 ignoreBtn.bezelStyle = .inline
                 ignoreBtn.tag = row
                 ignoreBtn.identifier = NSUserInterfaceItemIdentifier("ignore")

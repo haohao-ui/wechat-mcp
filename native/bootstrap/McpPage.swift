@@ -91,7 +91,7 @@ public struct McpEndpointInfo: Codable {
         if let b = busy { return b }
         if id == "open_api" {
             let lower = detail.lowercased()
-            return detail.contains("已有") || detail.contains("连接中") || detail.contains("忙碌") || lower.contains("busy")
+            return detail.contains(L10n.text(.mcpPageOpenApiBusy, in: .zh)) || lower.contains("busy") || lower.contains("occupied")
         }
         return false
     }
@@ -181,7 +181,7 @@ public struct McpPageLogic {
 
     public static func parseMcpInfoPayload(json: String) throws -> McpInfoPayload {
         guard let data = json.data(using: .utf8) else {
-            throw NSError(domain: "McpPage", code: 1, userInfo: [NSLocalizedDescriptionKey: "无效 UTF8 数据"])
+            throw NSError(domain: "McpPage", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid UTF-8 data"])
         }
         let decoder = JSONDecoder()
         return try decoder.decode(McpInfoPayload.self, from: data)
@@ -189,14 +189,14 @@ public struct McpPageLogic {
 
     public static func parseTokenPayload(json: String) throws -> OpenApiTokenPayload {
         guard let data = json.data(using: .utf8) else {
-            throw NSError(domain: "McpPage", code: 1, userInfo: [NSLocalizedDescriptionKey: "无效 UTF8 数据"])
+            throw NSError(domain: "McpPage", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid UTF-8 data"])
         }
         return try JSONDecoder().decode(OpenApiTokenPayload.self, from: data)
     }
 
     public static func parseCheckPayload(json: String) throws -> OpenApiCheckPayload {
         guard let data = json.data(using: .utf8) else {
-            throw NSError(domain: "McpPage", code: 1, userInfo: [NSLocalizedDescriptionKey: "无效 UTF8 数据"])
+            throw NSError(domain: "McpPage", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid UTF-8 data"])
         }
         return try JSONDecoder().decode(OpenApiCheckPayload.self, from: data)
     }
@@ -248,21 +248,21 @@ public final class McpPageController: NSViewController {
     // UI - Open API Section
     private let openApiEnabledLabel = NSTextField(wrappingLabelWithString: "")
     private let openApiUrlLabel = NSTextField(labelWithString: "")
-    private let openApiTokenMaskedLabel = NSTextField(labelWithString: "令牌: ••••")
-    private let copyTokenButton = NSButton(title: "复制", target: nil, action: nil)
-    private let rotateTokenButton = NSButton(title: "重新生成", target: nil, action: nil)
-    private let testOpenApiButton = NSButton(title: "测试连接", target: nil, action: nil)
+    private let openApiTokenMaskedLabel = NSTextField(labelWithString: L10n.t(.mcpTokenMasked))
+    private let copyTokenButton = NSButton(title: L10n.t(.actionCopy), target: nil, action: nil)
+    private let rotateTokenButton = NSButton(title: L10n.t(.mcpRegenerate), target: nil, action: nil)
+    private let testOpenApiButton = NSButton(title: L10n.t(.mcpTestConnection), target: nil, action: nil)
     private let openApiStatusLabel = NSTextField(wrappingLabelWithString: "")
     private var currentToken: String?
 
     // UI - Endpoints
     private let endpointsStack = NSStackView()
-    private let testConnButton = NSButton(title: "测试连接", target: nil, action: nil)
+    private let testConnButton = NSButton(title: L10n.t(.mcpTestConnection), target: nil, action: nil)
     private let testConnStatusLabel = NSTextField(labelWithString: "")
 
     // UI - Copy Config
-    private let copyOpsSshButton = NSButton(title: "复制运维 SSH 配置", target: nil, action: nil)
-    private let copyOpenApiButton = NSButton(title: "复制对外接口配置", target: nil, action: nil)
+    private let copyOpsSshButton = NSButton(title: L10n.t(.mcpCopyOpsSshBtn), target: nil, action: nil)
+    private let copyOpenApiButton = NSButton(title: L10n.t(.mcpCopyOpenApiBtn), target: nil, action: nil)
     private let copyFeedbackLabel = NSTextField(wrappingLabelWithString: "")
 
     // UI - Tools
@@ -319,9 +319,9 @@ public final class McpPageController: NSViewController {
 
         // 外部回复参数
         let extParamsGrid = NSGridView(views: [
-            [NSTextField(labelWithString: "等待回复 (timeout_seconds):"), timeoutField, NSTextField(labelWithString: "1–3600 秒 (默认 120)")],
-            [NSTextField(labelWithString: "超时后动作 (timeout_action):"), timeoutActionPopup, NSTextField(labelWithString: "skip=跳过, handoff=转人工, builtin=改用内置")],
-            [NSTextField(labelWithString: "最长排队 (queue_minutes):"), queueMinutesField, NSTextField(labelWithString: "1–1440 分钟 (默认 30)")]
+            [NSTextField(labelWithString: L10n.t(.mcpFieldTimeoutSeconds)), timeoutField, NSTextField(labelWithString: L10n.t(.mcpFieldTimeoutHelper))],
+            [NSTextField(labelWithString: L10n.t(.mcpFieldTimeoutAction)), timeoutActionPopup, NSTextField(labelWithString: L10n.t(.mcpFieldTimeoutActionHelper))],
+            [NSTextField(labelWithString: L10n.t(.mcpFieldQueueMinutes)), queueMinutesField, NSTextField(labelWithString: L10n.t(.mcpFieldQueueMinutesHelper))]
         ])
         extParamsGrid.rowSpacing = 6
         extParamsGrid.columnSpacing = 10
@@ -354,7 +354,7 @@ public final class McpPageController: NSViewController {
         contentStack.addArrangedSubview(brainBox)
 
         // 2. 对外接口区
-        let openApiBox = createSectionBox(title: "对外接口")
+        let openApiBox = createSectionBox(title: L10n.t(.mcpSectionOpenApi))
         let openApiStack = NSStackView()
         openApiStack.orientation = .vertical
         openApiStack.alignment = .leading
@@ -395,7 +395,7 @@ public final class McpPageController: NSViewController {
         contentStack.addArrangedSubview(openApiBox)
 
         // 3. 连接端点与连通性
-        let endBox = createSectionBox(title: "连接信息与入口")
+        let endBox = createSectionBox(title: L10n.t(.mcpSectionEndpoints))
         let endStack = NSStackView()
         endStack.orientation = .vertical
         endStack.alignment = .leading
@@ -418,23 +418,26 @@ public final class McpPageController: NSViewController {
 
         // 配置示例说明
         let cfgBox = NSBox()
-        cfgBox.title = "客户端接入配置示例"
+        cfgBox.title = L10n.t(.mcpBoxConfigExample)
         cfgBox.boxType = .custom
         cfgBox.fillColor = NSColor.windowBackgroundColor
         cfgBox.cornerRadius = 4
         cfgBox.translatesAutoresizingMaskIntoConstraints = false
 
+        let uPlaceholder = L10n.t(.mcpPlaceholderUser)
+        let aPlaceholder = L10n.t(.mcpPlaceholderLocalAddress)
+        let tPlaceholder = L10n.t(.mcpPlaceholderToken)
         let cfgText = """
-        1. 运维 SSH 入口 (终端 / SSH 转发):
-        ssh <用户>@<本机地址> nc -U ~/.wechat-rpa/worker.sock
+        1. SSH (nc -U ~/.wechat-rpa/worker.sock):
+        ssh \(uPlaceholder)@\(aPlaceholder) nc -U ~/.wechat-rpa/worker.sock
 
-        2. 对外接口配置 (Claude Desktop / Cursor 等 HTTP MCP 客户端):
+        2. MCP Client (Claude Desktop / Cursor / HTTP):
         {
           "mcpServers": {
             "wechat-brain": {
               "url": "http://<bind>:<port>/mcp",
               "headers": {
-                "Authorization": "Bearer <令牌>"
+                "Authorization": "Bearer \(tPlaceholder)"
               }
             }
           }
@@ -465,7 +468,7 @@ public final class McpPageController: NSViewController {
         contentStack.addArrangedSubview(endBox)
 
         // 4. 可用工具按组列出
-        let toolsBox = createSectionBox(title: "可用 MCP 工具")
+        let toolsBox = createSectionBox(title: L10n.t(.mcpSectionTools))
         toolsStack.orientation = .vertical
         toolsStack.alignment = .leading
         toolsStack.spacing = 8
@@ -541,24 +544,24 @@ public final class McpPageController: NSViewController {
         let openApi = raw["open_api"] as? [String: Any]
         let isEnabled = (openApi?["enabled"] as? Bool) ?? false
         if isEnabled {
-            openApiEnabledLabel.stringValue = "开关状态: 已开启 (只读，请到「设置」页修改 open_api.enabled)"
+            openApiEnabledLabel.stringValue = L10n.t(.mcpOpenApiEnabled)
             openApiEnabledLabel.textColor = .systemGreen
         } else {
-            openApiEnabledLabel.stringValue = "开关状态: 已关闭 (只读，请到「设置」页修改 open_api.enabled)"
+            openApiEnabledLabel.stringValue = L10n.t(.mcpOpenApiDisabled)
             openApiEnabledLabel.textColor = .secondaryLabelColor
         }
 
         let (bind, port) = getOpenApiBindAndPort()
-        openApiUrlLabel.stringValue = "接口地址: http://\(bind):\(port)/mcp"
+        openApiUrlLabel.stringValue = L10n.t(.mcpOpenApiUrl, "http://\(bind):\(port)/mcp")
         updateTokenDisplay()
     }
 
     private func updateTokenDisplay() {
         if let token = currentToken, token.count >= 4 {
             let tail = String(token.suffix(4))
-            openApiTokenMaskedLabel.stringValue = "令牌: ••••\(tail)"
+            openApiTokenMaskedLabel.stringValue = L10n.t(.mcpTokenMaskedWithTail, tail)
         } else {
-            openApiTokenMaskedLabel.stringValue = "令牌: ••••"
+            openApiTokenMaskedLabel.stringValue = L10n.t(.mcpTokenMasked)
         }
     }
 
@@ -579,12 +582,12 @@ public final class McpPageController: NSViewController {
 
         if isExternal {
             guard let timeout = Int(timeoutField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-                brainStatusMessageLabel.stringValue = "等待回复必须为整数"
+                brainStatusMessageLabel.stringValue = L10n.t(.mcpErrorTimeoutInt)
                 brainStatusMessageLabel.textColor = .systemRed
                 return
             }
             guard let queue = Int(queueMinutesField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-                brainStatusMessageLabel.stringValue = "最长排队必须为整数"
+                brainStatusMessageLabel.stringValue = L10n.t(.mcpErrorQueueInt)
                 brainStatusMessageLabel.textColor = .systemRed
                 return
             }
@@ -606,11 +609,11 @@ public final class McpPageController: NSViewController {
                 brainStatusMessageLabel.stringValue = McpPageStrings.saveSuccess
                 brainStatusMessageLabel.textColor = .systemGreen
             } catch {
-                brainStatusMessageLabel.stringValue = "保存失败: \(error.localizedDescription)"
+                brainStatusMessageLabel.stringValue = L10n.t(.mcpSaveFailed, error.localizedDescription)
                 brainStatusMessageLabel.textColor = .systemRed
             }
         case .failure(let err):
-            brainStatusMessageLabel.stringValue = "校验错误: \(err.message)"
+            brainStatusMessageLabel.stringValue = L10n.t(.mcpValidationError, err.message)
             brainStatusMessageLabel.textColor = .systemRed
         }
     }
@@ -622,7 +625,7 @@ public final class McpPageController: NSViewController {
     }
 
     @objc private func handleTestConnection() {
-        testConnStatusLabel.stringValue = "正在测试连接..."
+        testConnStatusLabel.stringValue = L10n.t(.mcpTestingConnection)
         testConnStatusLabel.textColor = .systemBlue
         loadMcpInfo()
     }
@@ -658,20 +661,20 @@ public final class McpPageController: NSViewController {
             let pasteboard = NSPasteboard.general
             pasteboard.clearContents()
             pasteboard.setString(token, forType: .string)
-            openApiStatusLabel.stringValue = "令牌已复制到剪贴板"
+            openApiStatusLabel.stringValue = L10n.t(.mcpTokenCopied)
             openApiStatusLabel.textColor = .systemGreen
         } else {
-            openApiStatusLabel.stringValue = "正在读取令牌..."
+            openApiStatusLabel.stringValue = L10n.t(.mcpReadingToken)
             openApiStatusLabel.textColor = .systemBlue
             fetchToken(rotate: false) { [weak self] token in
                 if let t = token, !t.isEmpty {
                     let pasteboard = NSPasteboard.general
                     pasteboard.clearContents()
                     pasteboard.setString(t, forType: .string)
-                    self?.openApiStatusLabel.stringValue = "令牌已复制到剪贴板"
+                    self?.openApiStatusLabel.stringValue = L10n.t(.mcpTokenCopied)
                     self?.openApiStatusLabel.textColor = .systemGreen
                 } else {
-                    self?.openApiStatusLabel.stringValue = "获取令牌失败"
+                    self?.openApiStatusLabel.stringValue = L10n.t(.mcpFetchTokenFailed)
                     self?.openApiStatusLabel.textColor = .systemRed
                 }
             }
@@ -683,17 +686,17 @@ public final class McpPageController: NSViewController {
         alert.messageText = McpPageStrings.rotateTokenTitle
         alert.informativeText = McpPageStrings.rotateTokenInfo
         alert.alertStyle = .warning
-        alert.addButton(withTitle: "重新生成")
-        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: L10n.t(.mcpRegenerate))
+        alert.addButton(withTitle: L10n.t(.cancel))
         if alert.runModal() == .alertFirstButtonReturn {
-            openApiStatusLabel.stringValue = "正在重新生成令牌..."
+            openApiStatusLabel.stringValue = L10n.t(.mcpRegeneratingToken)
             openApiStatusLabel.textColor = .systemBlue
             fetchToken(rotate: true) { [weak self] token in
                 if token != nil {
-                    self?.openApiStatusLabel.stringValue = "令牌已重新生成并生效"
+                    self?.openApiStatusLabel.stringValue = L10n.t(.mcpTokenRegeneratedSuccess)
                     self?.openApiStatusLabel.textColor = .systemGreen
                 } else {
-                    self?.openApiStatusLabel.stringValue = "重新生成令牌失败"
+                    self?.openApiStatusLabel.stringValue = L10n.t(.mcpRegenerateTokenFailed)
                     self?.openApiStatusLabel.textColor = .systemRed
                 }
             }
@@ -701,7 +704,7 @@ public final class McpPageController: NSViewController {
     }
 
     @objc private func handleTestOpenApi() {
-        openApiStatusLabel.stringValue = "正在测试对外接口连接..."
+        openApiStatusLabel.stringValue = L10n.t(.mcpTestingOpenApi)
         openApiStatusLabel.textColor = .systemBlue
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let run = runControlCommand(executable: controlBinaryPath(), arguments: ["control", "open-api-check", "--json"], timeout: 10)
@@ -710,20 +713,20 @@ public final class McpPageController: NSViewController {
                 if run.status == 0, !run.timedOut, let jsonStr = String(data: run.output, encoding: .utf8),
                    let payload = try? McpPageLogic.parseCheckPayload(json: jsonStr) {
                     if payload.ok {
-                        self.openApiStatusLabel.stringValue = "连接正常 (可用工具: \(payload.tools.count) 个)"
+                        self.openApiStatusLabel.stringValue = L10n.t(.mcpOpenApiConnectedCount, payload.tools.count)
                         self.openApiStatusLabel.textColor = .systemGreen
                     } else if payload.busy {
                         self.openApiStatusLabel.stringValue = McpPageStrings.openApiBusy
                         self.openApiStatusLabel.textColor = .systemOrange
                     } else if payload.error == "disabled" {
-                        self.openApiStatusLabel.stringValue = "对外接口未开启 (open_api.enabled=false)"
+                        self.openApiStatusLabel.stringValue = L10n.t(.mcpOpenApiDisabledNotice)
                         self.openApiStatusLabel.textColor = .secondaryLabelColor
                     } else {
-                        self.openApiStatusLabel.stringValue = "测试失败: \(payload.error ?? "连接失败")"
+                        self.openApiStatusLabel.stringValue = L10n.t(.mcpTestFailed, payload.error ?? L10n.t(.actionFailedTitle))
                         self.openApiStatusLabel.textColor = .systemRed
                     }
                 } else {
-                    self.openApiStatusLabel.stringValue = "执行 open-api-check 失败"
+                    self.openApiStatusLabel.stringValue = L10n.t(.mcpOpenApiCheckFailed)
                     self.openApiStatusLabel.textColor = .systemRed
                 }
             }
@@ -732,7 +735,7 @@ public final class McpPageController: NSViewController {
 
     @objc private func handleCopyOpsSshConfig() {
         let ip = McpPageLogic.getPrimaryNonLoopbackIPv4()
-        let host = ip ?? "<本机地址>"
+        let host = ip ?? L10n.t(.mcpPlaceholderLocalAddress)
         let user = NSUserName()
         let home = NSHomeDirectory()
         let cmd = "ssh \(user)@\(host) nc -U \(home)/.wechat-rpa/worker.sock"
@@ -742,24 +745,24 @@ public final class McpPageController: NSViewController {
         pasteboard.setString(cmd, forType: .string)
 
         if ip == nil {
-            copyFeedbackLabel.stringValue = "已复制运维 SSH 命令（未检测到非回环 IPv4，已使用 <本机地址> 占位，请自行替换）"
+            copyFeedbackLabel.stringValue = L10n.t(.mcpCopiedSshPlaceholder)
             copyFeedbackLabel.textColor = .systemOrange
         } else {
-            copyFeedbackLabel.stringValue = "已复制运维 SSH 命令"
+            copyFeedbackLabel.stringValue = L10n.t(.mcpCopiedSsh)
             copyFeedbackLabel.textColor = .systemGreen
         }
     }
 
     @objc private func handleCopyOpenApiConfig() {
         let (bind, port) = getOpenApiBindAndPort()
-        let token = currentToken ?? "<令牌>"
+        let token = currentToken ?? L10n.t(.mcpPlaceholderToken)
         let jsonConfig = "{\"url\":\"http://\(bind):\(port)/mcp\",\"headers\":{\"Authorization\":\"Bearer \(token)\"}}"
 
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(jsonConfig, forType: .string)
 
-        copyFeedbackLabel.stringValue = "已复制对外接口配置"
+        copyFeedbackLabel.stringValue = L10n.t(.mcpCopiedOpenApiConfig)
         copyFeedbackLabel.textColor = .systemGreen
     }
 
@@ -771,7 +774,7 @@ public final class McpPageController: NSViewController {
                     let payload = try McpPageLogic.parseMcpInfoPayload(json: jsonStr)
                     DispatchQueue.main.async {
                         self?.applyMcpInfo(payload)
-                        self?.testConnStatusLabel.stringValue = "连接测试完成"
+                        self?.testConnStatusLabel.stringValue = L10n.t(.mcpTestConnComplete)
                         self?.testConnStatusLabel.textColor = .systemGreen
                     }
                     return
@@ -807,7 +810,7 @@ public final class McpPageController: NSViewController {
                     dot.textColor = .systemOrange
                 } else if ep.ok {
                     dot.textColor = .systemGreen
-                } else if ep.id == "open_api" && ep.detail == "已关闭" {
+                } else if ep.id == "open_api" && (ep.detail == L10n.text(.mcpStatusClosed, in: .zh) || ep.detail == "closed" || ep.detail == L10n.t(.mcpStatusClosed)) {
                     dot.textColor = .secondaryLabelColor
                 } else {
                     dot.textColor = .systemRed
@@ -862,10 +865,10 @@ public final class McpPageController: NSViewController {
         for v in endpointsStack.arrangedSubviews { v.removeFromSuperview() }
         let home = NSHomeDirectory()
         let defaultEndpoints: [(String, String, Bool, String)] = [
-            ("MCP 工具服务", "\(home)/.wechat-rpa/bin/wechat-mcp", FileManager.default.isExecutableFile(atPath: "\(home)/.wechat-rpa/bin/wechat-mcp"), ""),
-            ("外部服务接口", "\(home)/.wechat-rpa/core.sock", FileManager.default.fileExists(atPath: "\(home)/.wechat-rpa/core.sock"), ""),
-            ("聊天历史查询", "http://127.0.0.1:8765", false, ""),
-            ("对外接口", "http://127.0.0.1:8770/mcp", false, "未启动/未连接")
+            (L10n.t(.mcpEndpointToolService), "\(home)/.wechat-rpa/bin/wechat-mcp", FileManager.default.isExecutableFile(atPath: "\(home)/.wechat-rpa/bin/wechat-mcp"), ""),
+            (L10n.t(.mcpEndpointExternalService), "\(home)/.wechat-rpa/core.sock", FileManager.default.fileExists(atPath: "\(home)/.wechat-rpa/core.sock"), ""),
+            (L10n.t(.mcpEndpointChatHistory), "http://127.0.0.1:8765", false, ""),
+            (L10n.t(.mcpEndpointOpenApi), "http://127.0.0.1:8770/mcp", false, L10n.t(.mcpStatusNotStarted))
         ]
 
         for (label, path, ok, detail) in defaultEndpoints {
@@ -879,7 +882,7 @@ public final class McpPageController: NSViewController {
             title.font = NSFont.boldSystemFont(ofSize: 12)
             title.widthAnchor.constraint(equalToConstant: 120).isActive = true
 
-            let text = detail.isEmpty ? (ok ? "已就绪" : "未启动/未连接") : detail
+            let text = detail.isEmpty ? (ok ? L10n.t(.mcpStatusReady) : L10n.t(.mcpStatusNotStarted)) : detail
             let val = NSTextField(labelWithString: "\(path)  \(text)")
             val.font = NSFont.systemFont(ofSize: 11)
             val.textColor = .secondaryLabelColor
@@ -890,22 +893,22 @@ public final class McpPageController: NSViewController {
             endpointsStack.addArrangedSubview(row)
         }
 
-        testConnStatusLabel.stringValue = "控制命令不可用 (离线状态)"
+        testConnStatusLabel.stringValue = L10n.t(.mcpControlOffline)
         testConnStatusLabel.textColor = .secondaryLabelColor
 
         // 默认工具分组（按三组标题：对外接口、运维、通用桌面）
         for v in toolsStack.arrangedSubviews { v.removeFromSuperview() }
         let defaultGroups = [
-            ("对外接口", [
+            (L10n.t(.mcpGroupOpenApi), [
                 "next_turn", "reply", "get_turn_status", "resume_session",
                 "history_list_contacts", "history_get_contact", "history_get_recent_messages",
                 "history_get_history", "history_search_messages", "history_get_message", "history_get_media"
             ]),
-            ("运维", [
+            (L10n.t(.mcpGroupOps), [
                 "send_message", "send_file", "list_chats", "get_messages",
                 "wait_for_message", "list_accounts", "list_conversations"
             ]),
-            ("通用桌面", [
+            (L10n.t(.mcpGroupDesktop), [
                 "desktop_apps", "desktop_windows", "desktop_observe", "desktop_act", "desktop_stop"
             ])
         ]

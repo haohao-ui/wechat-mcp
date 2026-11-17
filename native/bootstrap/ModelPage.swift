@@ -4,7 +4,7 @@ import Foundation
 import AppKit
 import Darwin
 
-// MARK: - Localized Strings Constants (Centralized for future migration to L10n.swift by T4)
+// MARK: - Localized Strings (Integrated with L10n.swift)
 
 public enum ModelPageStrings {
     // 页面标题与导言

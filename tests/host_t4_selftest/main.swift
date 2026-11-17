@@ -95,7 +95,39 @@ do {
     let failure = SessionDataClient(executor: { _, _, _ in ControlRun(status: 1, output: Data("PRIVATE_SENTINEL".utf8), timedOut: false) })
     do { _ = try failure.list(); require(false, "failed request must fail") }
     catch { require(!String(describing: error).contains("PRIVATE_SENTINEL"), "raw command output hidden") }
-    print("T4 status, five-language, session decoding and read-only client checks passed")
+
+    // 检查 7 个目标 UI 页面里不再有写死的中文界面文案（注释除外）
+    let targetFiles = [
+        "native/bootstrap/BrainPage.swift",
+        "native/bootstrap/McpPage.swift",
+        "native/bootstrap/ContactsPage.swift",
+        "native/bootstrap/UpdatePage.swift",
+        "native/bootstrap/LogsPage.swift",
+        "native/bootstrap/ComponentsPage.swift",
+        "native/bootstrap/ModelPage.swift"
+    ]
+    let chineseRegex = try NSRegularExpression(pattern: "[\\u4e00-\\u9fff]")
+    for filePath in targetFiles {
+        var fileContent: String?
+        if let direct = try? String(contentsOfFile: filePath, encoding: .utf8) {
+            fileContent = direct
+        } else {
+            let cwd = FileManager.default.currentDirectoryPath
+            let candidate = URL(fileURLWithPath: cwd).appendingPathComponent(filePath).path
+            fileContent = try? String(contentsOfFile: candidate, encoding: .utf8)
+        }
+        if let content = fileContent {
+            let lines = content.components(separatedBy: "\n")
+            for (idx, line) in lines.enumerated() {
+                let code = line.components(separatedBy: "//")[0]
+                let range = NSRange(location: 0, length: code.utf16.count)
+                let matches = chineseRegex.matches(in: code, range: range)
+                require(matches.isEmpty, "Found hardcoded Chinese in \(filePath):\(idx + 1): \(code.trimmingCharacters(in: .whitespaces))")
+            }
+        }
+    }
+
+    print("T4 status, five-language, session decoding, zero hardcoded Chinese and read-only client checks passed")
 } catch {
     fputs("T4 fixture or decoding check failed\n", stderr)
     exit(1)
