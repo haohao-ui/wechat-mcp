@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 func run() -> Int32 {
     let args = CommandLine.arguments
@@ -276,6 +277,108 @@ func run() -> Int32 {
             let items = evaluate(statusInput)
             let text = generateDiagnostics(items: items, appVersion: version)
             let resp: [String: Any] = ["text": text]
+            let out = try JSONSerialization.data(withJSONObject: resp, options: [])
+            if let s = String(data: out, encoding: .utf8) {
+                print(s)
+                return 0
+            }
+        } else if command == "model_page_test" {
+            let secret = "sk-super-secret-key-987654321"
+            setenv("MODEL_TEST_SECRET_ENV", secret, 1)
+
+            // 1. codex-exec 隐藏三个字段
+            let codexDraft = ModelPageDraft(backend: "codex-exec")
+            let codexVC = ModelPageController(initialDraft: codexDraft)
+            codexVC.loadViewIfNeeded()
+            guard codexVC.isConnectionCardHidden else {
+                fputs("FAIL: connection card must be hidden for codex-exec\n", stderr)
+                return 1
+            }
+
+            // 2. 未配置判断
+            guard !ModelPageValidator.isUnconfigured(draft: codexDraft) else {
+                fputs("FAIL: codex-exec should not be unconfigured\n", stderr)
+                return 2
+            }
+            guard codexVC.isTopStatusConfigured else {
+                fputs("FAIL: codex-exec top status must be configured\n", stderr)
+                return 3
+            }
+
+            // 选了 openai-compatible 但缺地址、模型名或密钥 -> 未配置
+            let unsetDraft = ModelPageDraft(backend: "openai-compatible", baseUrl: "", model: "", apiKeyEnv: "")
+            guard ModelPageValidator.isUnconfigured(draft: unsetDraft) else {
+                fputs("FAIL: unset openai-compatible must be unconfigured\n", stderr)
+                return 4
+            }
+            let unsetVC = ModelPageController(initialDraft: unsetDraft)
+            unsetVC.loadViewIfNeeded()
+            guard !unsetVC.isConnectionCardHidden else {
+                fputs("FAIL: connection card must be visible for openai-compatible\n", stderr)
+                return 5
+            }
+            guard unsetVC.isTopStatusUnconfigured else {
+                fputs("FAIL: unsetVC top status must be unconfigured\n", stderr)
+                return 6
+            }
+            guard unsetVC.isKeyStatusUnconfigured else {
+                fputs("FAIL: unsetVC key status must be unconfigured\n", stderr)
+                return 7
+            }
+
+            // 选了 openai-compatible 且配置完整 -> 已配置
+            let configuredDraft = ModelPageDraft(
+                backend: "openai-compatible",
+                baseUrl: "https://api.example.com/v1",
+                model: "gpt-4o-mini",
+                keySource: "env",
+                apiKeyEnv: "MODEL_TEST_SECRET_ENV"
+            )
+            guard !ModelPageValidator.isUnconfigured(draft: configuredDraft) else {
+                fputs("FAIL: configuredDraft must be configured\n", stderr)
+                return 8
+            }
+            let configuredVC = ModelPageController(initialDraft: configuredDraft)
+            configuredVC.loadViewIfNeeded()
+            guard configuredVC.isTopStatusConfigured else {
+                fputs("FAIL: configuredVC top status must be configured\n", stderr)
+                return 9
+            }
+            guard configuredVC.isKeyStatusConfigured else {
+                fputs("FAIL: configuredVC key status must be configured\n", stderr)
+                return 10
+            }
+
+            // 3. 密钥不回显（秘密保护）
+            func dumpViewStrings(_ view: NSView) -> [String] {
+                var list: [String] = []
+                if let tf = view as? NSTextField {
+                    list.append(tf.stringValue)
+                    if let ph = tf.placeholderString { list.append(ph) }
+                } else if let btn = view as? NSButton {
+                    list.append(btn.title)
+                }
+                for sub in view.subviews {
+                    list.append(contentsOf: dumpViewStrings(sub))
+                }
+                return list
+            }
+            let strings = dumpViewStrings(configuredVC.view)
+            for s in strings {
+                if s.contains(secret) {
+                    fputs("FAIL: secret found in view string: \(s)\n", stderr)
+                    return 11
+                }
+            }
+            let formExport = configuredDraft.toModelConfigForm()
+            let formJson = try JSONSerialization.data(withJSONObject: formExport, options: [])
+            let formStr = String(data: formJson, encoding: .utf8) ?? ""
+            if formStr.contains(secret) {
+                fputs("FAIL: secret found in form export\n", stderr)
+                return 12
+            }
+
+            let resp: [String: Any] = ["ok": true, "status": "MODEL_PAGE_CONTRACT_OK"]
             let out = try JSONSerialization.data(withJSONObject: resp, options: [])
             if let s = String(data: out, encoding: .utf8) {
                 print(s)
