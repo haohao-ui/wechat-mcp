@@ -3,35 +3,35 @@
 import Foundation
 import AppKit
 
-// MARK: - Design Tokens (待换成 Theme)
+// MARK: - Shared Theme tokens
 private enum UpdatePageTokens {
-    static let brand = NSColor(red: 0x12/255.0, green: 0xA3/255.0, blue: 0x7A/255.0, alpha: 1.0)
-    static let brandDeep = NSColor(red: 0x0A/255.0, green: 0x5B/255.0, blue: 0x6B/255.0, alpha: 1.0)
-    static let statusOkText = NSColor(red: 0x12/255.0, green: 0x79/255.0, blue: 0x54/255.0, alpha: 1.0)
-    static let statusOkBg = NSColor(red: 0xE4/255.0, green: 0xF5/255.0, blue: 0xEF/255.0, alpha: 1.0)
-    static let statusWarnText = NSColor(red: 0x92/255.0, green: 0x5C/255.0, blue: 0x07/255.0, alpha: 1.0)
-    static let statusWarnBg = NSColor(red: 0xFB/255.0, green: 0xF1/255.0, blue: 0xE2/255.0, alpha: 1.0)
-    static let statusErrText = NSColor(red: 0xD3/255.0, green: 0x2F/255.0, blue: 0x2F/255.0, alpha: 1.0)
-    static let statusErrBg = NSColor(red: 0xFC/255.0, green: 0xEB/255.0, blue: 0xEB/255.0, alpha: 1.0)
-    static let statusOffText = NSColor(red: 0x6C/255.0, green: 0x70/255.0, blue: 0x74/255.0, alpha: 1.0)
-    static let statusOffBg = NSColor(red: 0xF0/255.0, green: 0xF1/255.0, blue: 0xF2/255.0, alpha: 1.0)
-    static let fieldBorder = NSColor(red: 0xC9/255.0, green: 0xCD/255.0, blue: 0xD4/255.0, alpha: 1.0)
+    static let brand = Theme.Colors.brand
+    static let brandDeep = Theme.Colors.primaryButtonDefault
+    static let statusOkText = Theme.Colors.statusNormalText
+    static let statusOkBg = Theme.Colors.statusNormalBg
+    static let statusWarnText = Theme.Colors.statusWarningText
+    static let statusWarnBg = Theme.Colors.statusWarningBg
+    static let statusErrText = Theme.Colors.statusErrorText
+    static let statusErrBg = Theme.Colors.statusErrorBg
+    static let statusOffText = Theme.Colors.statusInactiveText
+    static let statusOffBg = Theme.Colors.statusInactiveBg
+    static let fieldBorder = Theme.Colors.inputBorder
 }
 
-// MARK: - Strings (待迁入 L10n)
+// MARK: - Localized strings
 private enum UpdatePageStrings {
-    static let pageTitle = "应用版本更新"
-    static let sectionRollback = "回滚到上一版本"
-    static let sectionOperations = "操作与维护"
-    static let sectionRecovery = "故障恢复指引"
-    static let rollbackAppNotice = "换回上一个已安装的版本"
-    static let noPreviousVersion = "无可回滚的上一版本"
-    static let rollbackCheckboxPrompt = "我已知晓将换回上一个已安装的版本并覆盖当前程序"
-    static let rollbackConfirmButton = "确认回滚"
-    static let cancel = "取消"
-    static let rollbackSuccess = "已成功换回上一个已安装的版本，需要重启应用以完成替换"
-    static let rollbackUnavailable = "回滚功能暂不可用"
-    static let emptyCandidate = "当前已是最新版本，未检测到可用更新"
+    static var pageTitle: String { L10n.t(.updatePagePageTitle) }
+    static var sectionRollback: String { L10n.t(.updatePageSectionRollback) }
+    static var sectionOperations: String { L10n.t(.updatePageSectionOperations) }
+    static var sectionRecovery: String { L10n.t(.updatePageSectionRecovery) }
+    static var rollbackAppNotice: String { L10n.t(.updatePageRollbackAppNotice) }
+    static var noPreviousVersion: String { L10n.t(.updatePageNoPreviousVersion) }
+    static var rollbackCheckboxPrompt: String { L10n.t(.updatePageRollbackCheckboxPrompt) }
+    static var rollbackConfirmButton: String { L10n.t(.updatePageRollbackConfirmButton) }
+    static var cancel: String { L10n.t(.cancel) }
+    static var rollbackSuccess: String { L10n.t(.updatePageRollbackSuccess) }
+    static var rollbackUnavailable: String { L10n.t(.updatePageRollbackUnavailable) }
+    static var emptyCandidate: String { L10n.t(.updatePageEmptyCandidate) }
 }
 
 // MARK: - Update Data Models
@@ -616,7 +616,6 @@ public final class UpdatePageController: NSViewController {
 
     // UI - 回滚到上一版本卡片
     private let previousVersionLabel = NSTextField(wrappingLabelWithString: "查询中...")
-    private let previousInstalledAtLabel = NSTextField(wrappingLabelWithString: "-")
     private let rollbackEligibilityLabel = NSTextField(wrappingLabelWithString: "检查中...")
     private let rollbackButton = NSButton(title: "回滚到上一版本…", target: nil, action: nil)
     private let rollbackReasonSideLabel = NSTextField(wrappingLabelWithString: "")
@@ -844,13 +843,11 @@ public final class UpdatePageController: NSViewController {
 
         let rbGrid = NSGridView(views: [
             [NSTextField(labelWithString: "可回滚上一版本:"), previousVersionLabel],
-            [NSTextField(labelWithString: "原安装时间:"), previousInstalledAtLabel],
             [NSTextField(labelWithString: "回滚资格与原因:"), rollbackEligibilityLabel]
         ])
         rbGrid.rowSpacing = 6
         rbGrid.columnSpacing = 12
         previousVersionLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 440).isActive = true
-        previousInstalledAtLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 440).isActive = true
         rollbackEligibilityLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 440).isActive = true
         rbStack.addArrangedSubview(rbGrid)
 
@@ -994,7 +991,6 @@ public final class UpdatePageController: NSViewController {
                 self.previousVersionLabel.stringValue = UpdatePageStrings.noPreviousVersion
                 self.previousVersionLabel.textColor = .secondaryLabelColor
             }
-            self.previousInstalledAtLabel.stringValue = info.formattedInstalledAt
             let reasonText = info.localizedReason
             self.rollbackEligibilityLabel.stringValue = reasonText
             if info.canRollback {
@@ -1010,7 +1006,6 @@ public final class UpdatePageController: NSViewController {
         case .failure:
             self.currentRollbackStatus = nil
             self.previousVersionLabel.stringValue = "未知"
-            self.previousInstalledAtLabel.stringValue = "-"
             let reasonText = UpdatePageStrings.rollbackUnavailable
             self.rollbackEligibilityLabel.stringValue = reasonText
             self.rollbackEligibilityLabel.textColor = UpdatePageTokens.statusOffText

@@ -42,60 +42,21 @@ fn test_swift_update_ui_selftest() {
     std::fs::create_dir_all(&out_dir).expect("create out_dir");
     let bin_path = out_dir.join("update_ui_selftest");
 
-    let files_to_compile = [
-        root.join("native")
-            .join("bootstrap")
-            .join("Supervisor.swift"),
-        root.join("native")
-            .join("bootstrap")
-            .join("CoreSupervisor.swift"),
-        root.join("native")
-            .join("bootstrap")
-            .join("SocketWorker.swift"),
-        root.join("native").join("bootstrap").join("Probe.swift"),
-        root.join("native")
-            .join("bootstrap")
-            .join("StatusModel.swift"),
-        root.join("native")
-            .join("bootstrap")
-            .join("ConfigForm.swift"),
-        root.join("native").join("bootstrap").join("Actions.swift"),
-        root.join("native")
-            .join("bootstrap")
-            .join("Permissions.swift"),
-        root.join("native").join("bootstrap").join("LogTail.swift"),
-        root.join("native")
-            .join("bootstrap")
-            .join("StatusPanel.swift"),
-        root.join("native").join("bootstrap").join("Shell.swift"),
-        root.join("native")
-            .join("bootstrap")
-            .join("SettingsPage.swift"),
-        root.join("native")
-            .join("bootstrap")
-            .join("ContactsPage.swift"),
-        root.join("native").join("bootstrap").join("McpPage.swift"),
-        root.join("native")
-            .join("bootstrap")
-            .join("SessionsPage.swift"),
-        root.join("native")
-            .join("bootstrap")
-            .join("BrainPage.swift"),
-        root.join("native")
-            .join("bootstrap")
-            .join("UpdatePage.swift"),
-        root.join("native").join("bootstrap").join("Theme.swift"),
-        root.join("native")
-            .join("bootstrap")
-            .join("ComponentsPage.swift"),
-        root.join("native")
-            .join("bootstrap")
-            .join("ModelPage.swift"),
-        root.join("native").join("eyes").join("Screens.swift"),
+    let mut files_to_compile: Vec<_> = std::fs::read_dir(root.join("native/bootstrap"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension().is_some_and(|ext| ext == "swift")
+                && path.file_name().unwrap() != "main.swift"
+        })
+        .collect();
+    files_to_compile.sort();
+    files_to_compile.push(root.join("native/eyes/Screens.swift"));
+    files_to_compile.push(
         root.join("tests")
             .join("host_update_selftest")
             .join("main.swift"),
-    ];
+    );
 
     let mut cmd = Command::new("swiftc");
     cmd.arg("-O");

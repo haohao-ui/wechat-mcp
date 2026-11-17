@@ -728,7 +728,7 @@ func runTests() -> Int32 {
         func descendants(_ view: NSView) -> [NSView] {
             return [view] + view.subviews.flatMap { descendants($0) }
         }
-        check("unsaved_role_preview_blocked", descendants(brainController.view).compactMap { ($0 as? NSTextView)?.string }.contains { $0.contains("请先保存角色草稿") })
+        check("unsaved_role_preview_blocked", descendants(brainController.view).compactMap { ($0 as? NSTextView)?.string }.contains { $0.contains(L10n.t(.brainPageSaveDraftFirstNotice)) })
         _ = brainController.perform(NSSelectorFromString("handleActivate"))
         check("unsaved_role_activation_blocked", descendants(brainController.view).compactMap { ($0 as? NSTextField)?.stringValue }.contains { $0.contains("尚有未保存的修改") })
         let roleTables = descendants(brainController.view).compactMap { $0 as? NSTableView }.filter { $0.tableColumns.count == 1 }

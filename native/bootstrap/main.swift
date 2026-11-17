@@ -59,7 +59,7 @@ final class HostAppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "微信客服助手"
+        window.title = L10n.t(.appName)
         window.isReleasedWhenClosed = false
 
         let controller = StatusPanelController(worker: worker, coreSupervisor: coreSupervisor)
@@ -68,26 +68,11 @@ final class HostAppDelegate: NSObject, NSApplicationDelegate {
         // （定时器里 CoreSupervisor.checkAndReconcile 负责启动核心、崩溃后重启）：必须加载。
         _ = controller.view  // 触发 viewDidLoad（loadViewIfNeeded 需要 macOS 14，设备目标是 12）
 
-        let shell = ShellViewController()
-        let settingsPage = SettingsPageController(context: controller)
-        settingsPage.onNavigateToUpdate = { [weak shell] in
-            shell?.selectPage(id: "update")
-        }
-
-        shell.register(page: OverviewPageController(context: controller), id: "overview", title: "总览")
-        shell.register(page: SessionsPageController(context: controller), id: "sessions", title: "会话")
-        shell.register(page: ContactsPageController(context: controller), id: "contacts", title: "联系人")
-        shell.register(page: BrainPageController(context: controller), id: "brain", title: "大脑")
-        shell.register(page: McpPageController(context: controller), id: "mcp", title: "MCP")
-        shell.register(page: settingsPage, id: "settings", title: "设置")
-        shell.register(page: UpdatePageController(context: controller), id: "update", title: "应用更新")
-        shell.register(page: LogsPageController(context: controller), id: "logs", title: "日志")
-
-        window.contentViewController = shell
+        window.contentViewController = makeShell(context: controller)
 
         let menu = NSMenu()
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "退出微信客服助手", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: L10n.t(.quitApp), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         let item = NSMenuItem()
         item.submenu = appMenu
         menu.addItem(item)
@@ -103,6 +88,42 @@ final class HostAppDelegate: NSObject, NSApplicationDelegate {
         if probe.screen_recording_authorized && probe.accessibility_trusted {
             try? worker.start()
         }
+    }
+
+    private func makeShell(context controller: StatusPanelController) -> ShellViewController {
+        let shell = ShellViewController()
+        _ = shell.view
+        let settingsPage = SettingsPageController(context: controller)
+        settingsPage.onNavigateToUpdate = { [weak shell] in
+            shell?.selectPage(id: "update")
+        }
+
+        let overview = OverviewPageController(context: controller)
+        overview.onStatusAction = { [weak shell] in shell?.performStatusAction($0) }
+        shell.register(page: overview, id: "overview", title: L10n.t(.navOverview))
+        let sessions = SessionsPageController(context: controller)
+        sessions.onStatusAction = { [weak shell] in shell?.performStatusAction($0) }
+        shell.register(page: sessions, id: "sessions", title: L10n.t(.navSessions))
+        shell.register(page: ContactsPageController(context: controller), id: "contacts", title: L10n.t(.navContacts))
+        shell.register(page: BrainPageController(context: controller), id: "brain", title: L10n.t(.termPersona))
+        shell.register(page: ModelPageController(context: controller), id: "model", title: L10n.t(.navModel))
+        shell.register(page: McpPageController(context: controller), id: "mcp", title: L10n.t(.navMcp))
+        shell.register(page: settingsPage, id: "settings", title: L10n.t(.navSettings))
+        shell.register(page: ComponentsPageController(), id: "components", title: L10n.t(.navComponents))
+        shell.register(page: UpdatePageController(context: controller), id: "update", title: L10n.t(.navUpdate))
+        shell.register(page: LogsPageController(context: controller), id: "logs", title: L10n.t(.navLogs))
+
+        shell.bindStatus(controller)
+        shell.onLanguageChange = { [weak self, weak controller, weak shell] in
+            guard let self = self, let controller = controller else { return }
+            self.window?.title = L10n.t(.appName)
+            let selected = shell?.selectedPageID ?? "settings"
+            let replacement = self.makeShell(context: controller)
+            replacement.selectPage(id: selected)
+            self.window?.contentViewController = replacement
+            NSApplication.shared.mainMenu?.items.first?.submenu?.items.first?.title = L10n.t(.quitApp)
+        }
+        return shell
     }
 
     // Closing the window must not stop the desktop service: a clean exit is not restarted by the LaunchAgent.

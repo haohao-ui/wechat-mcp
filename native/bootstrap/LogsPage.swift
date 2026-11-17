@@ -2,32 +2,32 @@
 import Foundation
 import AppKit
 
-// MARK: - Design Tokens (待换成 Theme)
+// MARK: - Shared Theme tokens
 private enum LogsPageTokens {
-    static let brand = NSColor(red: 0x12/255.0, green: 0xA3/255.0, blue: 0x7A/255.0, alpha: 1.0)
-    static let brandDeep = NSColor(red: 0x0A/255.0, green: 0x5B/255.0, blue: 0x6B/255.0, alpha: 1.0)
-    static let statusOkText = NSColor(red: 0x12/255.0, green: 0x79/255.0, blue: 0x54/255.0, alpha: 1.0)
-    static let statusOkBg = NSColor(red: 0xE4/255.0, green: 0xF5/255.0, blue: 0xEF/255.0, alpha: 1.0)
-    static let statusWarnText = NSColor(red: 0x92/255.0, green: 0x5C/255.0, blue: 0x07/255.0, alpha: 1.0)
-    static let statusWarnBg = NSColor(red: 0xFB/255.0, green: 0xF1/255.0, blue: 0xE2/255.0, alpha: 1.0)
-    static let statusErrText = NSColor(red: 0xD3/255.0, green: 0x2F/255.0, blue: 0x2F/255.0, alpha: 1.0)
-    static let statusErrBg = NSColor(red: 0xFC/255.0, green: 0xEB/255.0, blue: 0xEB/255.0, alpha: 1.0)
-    static let statusOffText = NSColor(red: 0x6C/255.0, green: 0x70/255.0, blue: 0x74/255.0, alpha: 1.0)
-    static let statusOffBg = NSColor(red: 0xF0/255.0, green: 0xF1/255.0, blue: 0xF2/255.0, alpha: 1.0)
-    static let fieldBorder = NSColor(red: 0xC9/255.0, green: 0xCD/255.0, blue: 0xD4/255.0, alpha: 1.0)
+    static let brand = Theme.Colors.brand
+    static let brandDeep = Theme.Colors.primaryButtonDefault
+    static let statusOkText = Theme.Colors.statusNormalText
+    static let statusOkBg = Theme.Colors.statusNormalBg
+    static let statusWarnText = Theme.Colors.statusWarningText
+    static let statusWarnBg = Theme.Colors.statusWarningBg
+    static let statusErrText = Theme.Colors.statusErrorText
+    static let statusErrBg = Theme.Colors.statusErrorBg
+    static let statusOffText = Theme.Colors.statusInactiveText
+    static let statusOffBg = Theme.Colors.statusInactiveBg
+    static let fieldBorder = Theme.Colors.inputBorder
 }
 
-// MARK: - Strings (待迁入 L10n)
+// MARK: - Localized strings
 private enum LogsPageStrings {
-    static let openLogsTitle = "打开日志文件夹"
-    static let openAttachmentsTitle = "打开附件文件夹"
-    static let copyDiagnosticsTitle = "复制诊断信息"
-    static let exportLogsTitle = "导出日志..."
-    static let diagnosticsCopied = "诊断信息已复制到剪贴板"
-    static let emptyLogsTitle = "当前暂无日志记录"
-    static let emptyFilterTitle = "无匹配日志，请尝试更换筛选条件"
-    static let exportSuccess = "日志已导出"
-    static let exportFailed = "导出日志失败"
+    static var openLogsTitle: String { L10n.t(.openLogs) }
+    static var openAttachmentsTitle: String { L10n.t(.openAttachments) }
+    static var copyDiagnosticsTitle: String { L10n.t(.copyDiagnostics) }
+    static var exportLogsTitle: String { L10n.t(.logsPageExportLogsTitle) }
+    static var diagnosticsCopied: String { L10n.t(.copiedDiagnostics) }
+    static var emptyLogsTitle: String { L10n.t(.logsPageEmptyLogsTitle) }
+    static var emptyFilterTitle: String { L10n.t(.logsPageEmptyFilterTitle) }
+    static var exportSuccess: String { L10n.t(.logsPageExportSuccess) }
+    static var exportFailed: String { L10n.t(.logsPageExportFailed) }
 }
 
 public final class LogsPageController: NSViewController {

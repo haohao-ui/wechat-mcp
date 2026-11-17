@@ -2,46 +2,46 @@
 import Foundation
 import AppKit
 
-// MARK: - Design Tokens (待换成 Theme)
+// MARK: - Shared Theme tokens
 private enum BrainPageTokens {
-    static let brand = NSColor(red: 0x12/255.0, green: 0xA3/255.0, blue: 0x7A/255.0, alpha: 1.0)
-    static let brandDeep = NSColor(red: 0x0A/255.0, green: 0x5B/255.0, blue: 0x6B/255.0, alpha: 1.0)
-    static let statusOkText = NSColor(red: 0x12/255.0, green: 0x79/255.0, blue: 0x54/255.0, alpha: 1.0)
-    static let statusOkBg = NSColor(red: 0xE4/255.0, green: 0xF5/255.0, blue: 0xEF/255.0, alpha: 1.0)
-    static let statusWarnText = NSColor(red: 0x92/255.0, green: 0x5C/255.0, blue: 0x07/255.0, alpha: 1.0)
-    static let statusWarnBg = NSColor(red: 0xFB/255.0, green: 0xF1/255.0, blue: 0xE2/255.0, alpha: 1.0)
-    static let statusErrText = NSColor(red: 0xD3/255.0, green: 0x2F/255.0, blue: 0x2F/255.0, alpha: 1.0)
-    static let statusErrBg = NSColor(red: 0xFC/255.0, green: 0xEB/255.0, blue: 0xEB/255.0, alpha: 1.0)
-    static let statusOffText = NSColor(red: 0x6C/255.0, green: 0x70/255.0, blue: 0x74/255.0, alpha: 1.0)
-    static let statusOffBg = NSColor(red: 0xF0/255.0, green: 0xF1/255.0, blue: 0xF2/255.0, alpha: 1.0)
-    static let fieldBorder = NSColor(red: 0xC9/255.0, green: 0xCD/255.0, blue: 0xD4/255.0, alpha: 1.0)
+    static let brand = Theme.Colors.brand
+    static let brandDeep = Theme.Colors.primaryButtonDefault
+    static let statusOkText = Theme.Colors.statusNormalText
+    static let statusOkBg = Theme.Colors.statusNormalBg
+    static let statusWarnText = Theme.Colors.statusWarningText
+    static let statusWarnBg = Theme.Colors.statusWarningBg
+    static let statusErrText = Theme.Colors.statusErrorText
+    static let statusErrBg = Theme.Colors.statusErrorBg
+    static let statusOffText = Theme.Colors.statusInactiveText
+    static let statusOffBg = Theme.Colors.statusInactiveBg
+    static let fieldBorder = Theme.Colors.inputBorder
 }
 
-// MARK: - Strings (待迁入 L10n)
+// MARK: - Localized strings
 private enum BrainPageStrings {
-    static let tabRoleDefinition = "角色设定"
-    static let tabKnowledge = "知识"
-    static let tabTemplates = "异常回复"
-    static let tabBindings = "适用会话"
-    static let tabHistory = "历史版本"
-    static let tabPreview = "试一试"
+    static var tabRoleDefinition: String { L10n.t(.brainPageTabRoleDefinition) }
+    static var tabKnowledge: String { L10n.t(.brainPageTabKnowledge) }
+    static var tabTemplates: String { L10n.t(.brainPageTabTemplates) }
+    static var tabBindings: String { L10n.t(.brainPageTabBindings) }
+    static var tabHistory: String { L10n.t(.brainPageTabHistory) }
+    static var tabPreview: String { L10n.t(.brainPageTabPreview) }
 
-    static let modelConfigured = "模型：已配置"
-    static let modelUnconfigured = "模型：未配置"
-    static let gotoModelSettings = "配置模型…"
-    static let personaTitle = "客服角色"
-    static let rollbackTitle = "回滚到历史版本"
-    static let rollbackCheckboxPrompt = "我已知晓回滚将恢复至选定版本并覆盖当前运行配置"
-    static let rollbackConfirmButton = "确认回滚"
-    static let cancel = "取消"
-    static let historyUnavailable = "版本历史暂不可用"
-    static let legacyIncompleteDraftNotice = "此版本未保存完整草稿，仅显示已保存的内容"
-    static let legacyIncompleteDraftShort = "未保存完整草稿 (仅已存内容)"
-    static let missingFieldIndicator = "[缺失]"
-    static let diffSelectHint = "请选择两个版本进行对比"
-    static let tryItNotice = "合成测试仅执行确定性组装预览 (assemble_only)，标明【未调用模型】，不产生费用，绝不发送真实微信消息。"
-    static let saveDraftFirstNotice = "请先保存客服角色草稿。请先保存角色草稿，再执行「试一试」。"
-    static let emptyHistoryTitle = "暂无多版本历史记录"
+    static var modelConfigured: String { L10n.t(.brainPageModelConfigured) }
+    static var modelUnconfigured: String { L10n.t(.brainPageModelUnconfigured) }
+    static var gotoModelSettings: String { L10n.t(.brainPageGotoModelSettings) }
+    static var personaTitle: String { L10n.t(.termPersona) }
+    static var rollbackTitle: String { L10n.t(.brainPageRollbackTitle) }
+    static var rollbackCheckboxPrompt: String { L10n.t(.brainPageRollbackCheckboxPrompt) }
+    static var rollbackConfirmButton: String { L10n.t(.brainPageRollbackConfirmButton) }
+    static var cancel: String { L10n.t(.cancel) }
+    static var historyUnavailable: String { L10n.t(.brainPageHistoryUnavailable) }
+    static var legacyIncompleteDraftNotice: String { L10n.t(.brainPageLegacyIncompleteDraftNotice) }
+    static var legacyIncompleteDraftShort: String { L10n.t(.brainPageLegacyIncompleteDraftShort) }
+    static var missingFieldIndicator: String { L10n.t(.brainPageMissingFieldIndicator) }
+    static var diffSelectHint: String { L10n.t(.brainPageDiffSelectHint) }
+    static var tryItNotice: String { L10n.t(.brainPageTryItNotice) }
+    static var saveDraftFirstNotice: String { L10n.t(.brainPageSaveDraftFirstNotice) }
+    static var emptyHistoryTitle: String { L10n.t(.brainPageEmptyHistoryTitle) }
 }
 
 // MARK: - Brain Data Models
@@ -871,7 +871,7 @@ public struct BrainTurnDetail: Codable, Equatable {
                 if phase == "triggered" {
                     labels.append("发送已触发")
                 } else if phase == "sent" {
-                    labels.append("已发送")
+                    labels.append(L10n.t(.termSent))
                 }
             }
             if let delivery = exec["delivery"]?.value as? String {
@@ -2344,7 +2344,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             let isCfg = summary.isConfigured
             modelStatusLabel.stringValue = isCfg ? BrainPageStrings.modelConfigured : BrainPageStrings.modelUnconfigured
             modelStatusLabel.textColor = isCfg ? BrainPageTokens.statusOkText : BrainPageTokens.statusWarnText
-            modeLabel.stringValue = "回复方式：\(summary.mode == "builtin" ? "内置回复" : summary.mode)"
+            modeLabel.stringValue = "回复方式：\(summary.mode == "builtin" ? L10n.t(.replyModeBuiltin) : L10n.t(.replyModeExternal))"
         } else {
             modelStatusLabel.stringValue = BrainPageStrings.modelUnconfigured
             modelStatusLabel.textColor = BrainPageTokens.statusWarnText
@@ -2775,7 +2775,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             let isCfg = summary.isConfigured
             self.modelStatusLabel.stringValue = isCfg ? BrainPageStrings.modelConfigured : BrainPageStrings.modelUnconfigured
             self.modelStatusLabel.textColor = isCfg ? BrainPageTokens.statusOkText : BrainPageTokens.statusWarnText
-            self.modeLabel.stringValue = "回复方式：\(summary.mode == "builtin" ? "内置回复" : summary.mode)"
+            self.modeLabel.stringValue = "回复方式：\(summary.mode == "builtin" ? L10n.t(.replyModeBuiltin) : L10n.t(.replyModeExternal))"
         } else {
             self.modelStatusLabel.stringValue = BrainPageStrings.modelUnconfigured
             self.modelStatusLabel.textColor = BrainPageTokens.statusWarnText
