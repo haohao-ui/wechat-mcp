@@ -52,7 +52,7 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
         sidebarTable.rowHeight = 44
         sidebarTable.style = .sourceList
         sidebarTable.backgroundColor = .windowBackgroundColor
-        sidebarTable.setAccessibilityLabel("页面导航")
+        sidebarTable.setAccessibilityLabel(L10n.t(.uiShell047))
         sidebarTable.intercellSpacing = NSSize(width: 0, height: 4)
         sidebarScroll.documentView = sidebarTable
 
@@ -60,7 +60,7 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
         contentContainer.translatesAutoresizingMaskIntoConstraints = false
         pageTitle.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
         pageTitle.translatesAutoresizingMaskIntoConstraints = false
-        pageTitle.setAccessibilityLabel("当前页面")
+        pageTitle.setAccessibilityLabel(L10n.t(.uiShell048))
         pageHost.translatesAutoresizingMaskIntoConstraints = false
         contentContainer.addSubview(pageTitle)
         contentContainer.addSubview(pageHost)

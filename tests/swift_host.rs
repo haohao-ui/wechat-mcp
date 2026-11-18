@@ -2926,12 +2926,13 @@ fn test_contacts_and_mcp_pages_registered_in_shell_order() {
 fn test_settings_page_points_to_contacts_and_mcp() {
     let settings_src = fs::read_to_string("native/bootstrap/SettingsPage.swift")
         .expect("SettingsPage.swift exists");
-    // 设计版设置页用一条固定提示把「允许名单」和「外部大脑」指向联系人页与 MCP 页，
-    // 不在设置页里重复编辑这两组字段。
-    assert!(settings_src.contains("允许名单"), "设置页要指向联系人页的名单");
+    let l10n = fs::read_to_string("native/bootstrap/L10n.swift").expect("L10n.swift exists");
+    // 设置页用一条固定提示把「允许名单」和「外部大脑」指向联系人页与 MCP 页，文案集中在 L10n。
+    assert!(settings_src.contains("L10n.t("), "设置页文案必须走 L10n");
+    assert!(l10n.contains("允许名单"), "L10n 里要有名单提示文案");
     assert!(
-        settings_src.contains("「联系人」") && settings_src.contains("「MCP」"),
-        "设置页要分别指向联系人页与 MCP 页"
+        l10n.contains("「联系人」") && l10n.contains("「MCP」"),
+        "提示要分别指向联系人页与 MCP 页"
     );
 }
 
@@ -3814,7 +3815,6 @@ fn test_model_page_contract_and_secrets() {
 }
 
 #[test]
-#[ignore = "阶段 2：设计版页面尚未迁入 L10n（五语）与整包回滚入口（AC6）；届时恢复本契约测试"]
 fn test_t4_status_localization_and_session_contracts() {
     if !has_swiftc() {
         eprintln!("swiftc unavailable; T4 native checks skipped");

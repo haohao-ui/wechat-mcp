@@ -8,13 +8,13 @@ public final class OverviewPageController: NSViewController {
     private let sessionData = SessionDataClient()
 
     // Top metrics
-    private let totalRepliesLabel = NSTextField(labelWithString: "今日已发送: —")
-    private let activeSessionsLabel = NSTextField(labelWithString: "监听会话: -")
-    private let pendingHandoffLabel = NSTextField(labelWithString: "待人工: -")
+    private let totalRepliesLabel = NSTextField(labelWithString: L10n.t(.uiOverview001))
+    private let activeSessionsLabel = NSTextField(labelWithString: L10n.t(.uiOverview002))
+    private let pendingHandoffLabel = NSTextField(labelWithString: L10n.t(.uiOverview003))
 
     // Top action buttons
-    private let recheckButton = NSButton(title: "重新检查", target: nil, action: nil)
-    private let pauseResumeButton = NSButton(title: "暂停自动回复", target: nil, action: nil)
+    private let recheckButton = NSButton(title: L10n.t(.actionRecheck), target: nil, action: nil)
+    private let pauseResumeButton = NSButton(title: L10n.t(.actionPauseAutoReply), target: nil, action: nil)
 
     // Diagnose rows container
     private let itemsStack = NSStackView()
@@ -68,7 +68,7 @@ public final class OverviewPageController: NSViewController {
 
         // 1. Top Card: Metrics and Primary Actions
         let topCard = NSBox()
-        topCard.title = "运行概览"
+        topCard.title = L10n.t(.overviewRunBox)
         topCard.titleFont = NSFont.systemFont(ofSize: 13, weight: .bold)
 
         let topStack = NSStackView()
@@ -99,7 +99,7 @@ public final class OverviewPageController: NSViewController {
 
         // 2. Health check items list
         let itemsBox = NSBox()
-        itemsBox.title = "系统检查与诊断"
+        itemsBox.title = L10n.t(.checksBox)
         itemsBox.titleFont = NSFont.systemFont(ofSize: 13, weight: .bold)
 
         itemsStack.orientation = .vertical
@@ -142,7 +142,7 @@ public final class OverviewPageController: NSViewController {
             let count = (try? client.sentToday()) ?? nil
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                self.totalRepliesLabel.stringValue = "今日已发送: " + (count.map(String.init) ?? "—")
+                self.totalRepliesLabel.stringValue = L10n.t(.uiOverview004) + (count.map(String.init) ?? "—")
             }
         }
     }
@@ -151,11 +151,11 @@ public final class OverviewPageController: NSViewController {
         // 统计指标
         let activeCount = input.sessions.filter { $0.value.state == "watching" || $0.value.state == "listening" }.count
         let handoffCount = input.sessions.filter { $0.value.handoff == true || $0.value.state == "handoff" }.count
-        activeSessionsLabel.stringValue = "监听会话: \(activeCount)"
-        pendingHandoffLabel.stringValue = "待人工: \(handoffCount)"
+        activeSessionsLabel.stringValue = L10n.t(.uiOverview005, String(describing: activeCount))
+        pendingHandoffLabel.stringValue = L10n.t(.uiOverview006, String(describing: handoffCount))
 
         let isPaused = (input.bot.healthState == "paused")
-        pauseResumeButton.title = isPaused ? "恢复自动回复" : "暂停自动回复"
+        pauseResumeButton.title = isPaused ? L10n.t(.actionResumeAutoReply) : L10n.t(.actionPauseAutoReply)
 
         // 渲染各项检查
         itemsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
@@ -186,7 +186,7 @@ public final class OverviewPageController: NSViewController {
         titleLbl.font = NSFont.systemFont(ofSize: 12, weight: .bold)
         titleLbl.widthAnchor.constraint(equalToConstant: 80).isActive = true
 
-        let descText = item.fix != nil ? "\(item.reason) （建议: \(item.fix!)）" : item.reason
+        let descText = item.fix != nil ? L10n.t(.uiOverview007, String(describing: item.reason), String(describing: item.fix!)) : item.reason
         let descLbl = NSTextField(wrappingLabelWithString: descText)
         descLbl.font = NSFont.systemFont(ofSize: 12)
         descLbl.textColor = .secondaryLabelColor
@@ -196,13 +196,13 @@ public final class OverviewPageController: NSViewController {
 
         // 行内操作按钮
         if item.key == "desktop_service" {
-            let btn = NSButton(title: "重启桌面服务", target: self, action: #selector(confirmRestartDesktopService))
+            let btn = NSButton(title: L10n.t(.actionRestartDesktopService), target: self, action: #selector(confirmRestartDesktopService))
             rowStack.addArrangedSubview(btn)
         } else if item.key == "bot" {
-            let btn = NSButton(title: "重启机器人", target: self, action: #selector(confirmRestartBot))
+            let btn = NSButton(title: L10n.t(.actionRestartBot), target: self, action: #selector(confirmRestartBot))
             rowStack.addArrangedSubview(btn)
         } else if item.key == "wechat" {
-            let btn = NSButton(title: "放回标准位置", target: self, action: #selector(handleRepositionWechat))
+            let btn = NSButton(title: L10n.t(.actionRepositionWechat), target: self, action: #selector(handleRepositionWechat))
             rowStack.addArrangedSubview(btn)
         } else if item.key == "permissions" && item.level != .green {
             let scrBtn = NSButton(title: "请求屏幕录制权限", target: self, action: #selector(handleRequestScreen))
@@ -220,14 +220,14 @@ public final class OverviewPageController: NSViewController {
 
     private func itemTitle(key: String) -> String {
         switch key {
-        case "permissions": return "权限"
-        case "desktop_service": return "桌面服务"
-        case "bot": return "机器人"
-        case "sessions": return "会话"
-        case "wechat": return "微信"
-        case "layout": return "布局"
-        case "disk": return "磁盘"
-        case "brain": return "MCP/大脑"
+        case "permissions": return L10n.t(.itemPermissions)
+        case "desktop_service": return L10n.t(.itemDesktopService)
+        case "bot": return L10n.t(.itemBot)
+        case "sessions": return L10n.t(.navSessions)
+        case "wechat": return L10n.t(.itemWechat)
+        case "layout": return L10n.t(.itemLayout)
+        case "disk": return L10n.t(.itemDisk)
+        case "brain": return L10n.t(.uiOverview008)
         default: return key
         }
     }
@@ -244,10 +244,10 @@ public final class OverviewPageController: NSViewController {
 
     @objc private func confirmRestartDesktopService() {
         let alert = NSAlert()
-        alert.messageText = "确认重启桌面服务？"
-        alert.informativeText = "重启期间可能会短暂中断正在进行的屏幕与微信交互。"
-        alert.addButton(withTitle: "确认重启")
-        alert.addButton(withTitle: "取消")
+        alert.messageText = L10n.t(.confirmRestartDesktopTitle)
+        alert.informativeText = L10n.t(.confirmRestartDesktopBody)
+        alert.addButton(withTitle: L10n.t(.confirmRestart))
+        alert.addButton(withTitle: L10n.t(.cancel))
         if alert.runModal() == .alertFirstButtonReturn {
             context.restartDesktopService()
             refreshData()
@@ -256,10 +256,10 @@ public final class OverviewPageController: NSViewController {
 
     @objc private func confirmRestartBot() {
         let alert = NSAlert()
-        alert.messageText = "确认重启机器人？"
-        alert.informativeText = "重启机器人将重新初始化核心进程及所有监听任务。"
-        alert.addButton(withTitle: "确认重启")
-        alert.addButton(withTitle: "取消")
+        alert.messageText = L10n.t(.confirmRestartBotTitle)
+        alert.informativeText = L10n.t(.confirmRestartBotBody)
+        alert.addButton(withTitle: L10n.t(.confirmRestart))
+        alert.addButton(withTitle: L10n.t(.cancel))
         if alert.runModal() == .alertFirstButtonReturn {
             context.restartBot()
             refreshData()
