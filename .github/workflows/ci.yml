@@ -8,6 +8,10 @@ on:
 
 permissions:
   contents: read
+  # gitleaks-action 在 pull_request 事件里要列出 PR 的提交；
+  # 缺少该权限时它直接抛 "Resource not accessible by integration"（403），
+  # 会被误报成密钥泄露。push 事件不需要，但多给一个只读权限无副作用。
+  pull-requests: read
 
 concurrency:
   group: ci-${{ github.ref }}

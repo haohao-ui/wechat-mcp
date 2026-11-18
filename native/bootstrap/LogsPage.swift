@@ -2,21 +2,26 @@
 import Foundation
 import AppKit
 
+// Strip terminal control sequences only for display; preserve the original log files.
+func plainLogDisplayText(_ line: String) -> String {
+    line.replacingOccurrences(of: "\u{001B}\\[[0-?]*[ -/]*[@-~]", with: "", options: .regularExpression)
+}
+
 public final class LogsPageController: NSViewController {
     private let context: StatusPanelController
 
     // Top action bar
-    private let openLogsButton = NSButton(title: "打开日志文件夹", target: nil, action: nil)
-    private let openAttachmentsButton = NSButton(title: "打开附件文件夹", target: nil, action: nil)
-    private let copyDiagnosticsButton = NSButton(title: "复制诊断信息", target: nil, action: nil)
+    private let openLogsButton = NSButton(title: L10n.t(.openLogs), target: nil, action: nil)
+    private let openAttachmentsButton = NSButton(title: L10n.t(.openAttachments), target: nil, action: nil)
+    private let copyDiagnosticsButton = NSButton(title: L10n.t(.copyDiagnostics), target: nil, action: nil)
     private let copyMessageLabel = NSTextField(labelWithString: "")
 
     // Controls
     private let logSourcePopup = NSPopUpButton()
     private let logLevelPopup = NSPopUpButton()
     private let searchField = NSSearchField()
-    private let pauseTailButton = NSButton(title: "暂停", target: nil, action: nil)
-    private let clearButton = NSButton(title: "清屏", target: nil, action: nil)
+    private let pauseTailButton = NSButton(title: L10n.t(.actionPause), target: nil, action: nil)
+    private let clearButton = NSButton(title: L10n.t(.logsClear), target: nil, action: nil)
 
     // Log display
     private let textView = NSTextView()
@@ -86,12 +91,12 @@ public final class LogsPageController: NSViewController {
         logSourcePopup.target = self
         logSourcePopup.action = #selector(handleSourceChanged)
 
-        logLevelPopup.addItems(withTitles: ["全部", "警告及以上", "只看错误"])
+        logLevelPopup.addItems(withTitles: [L10n.t(.logsLevelAll), L10n.t(.logsLevelWarnAndAbove), L10n.t(.logsLevelErrorOnly)])
         logLevelPopup.target = self
         logLevelPopup.action = #selector(handleFilterChanged)
 
-        searchField.placeholderString = "搜索日志..."
-        searchField.widthAnchor.constraint(equalToConstant: 180).isActive = true
+        searchField.placeholderString = L10n.t(.logsSearchPlaceholder)
+        searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
         searchField.target = self
         searchField.action = #selector(handleFilterChanged)
 
@@ -100,9 +105,9 @@ public final class LogsPageController: NSViewController {
         clearButton.target = self
         clearButton.action = #selector(handleClear)
 
-        controlBar.addArrangedSubview(NSTextField(labelWithString: "来源:"))
+        controlBar.addArrangedSubview(NSTextField(labelWithString: L10n.t(.contactsDetailSource)))
         controlBar.addArrangedSubview(logSourcePopup)
-        controlBar.addArrangedSubview(NSTextField(labelWithString: "级别:"))
+        controlBar.addArrangedSubview(NSTextField(labelWithString: L10n.t(.logsLevelLabel)))
         controlBar.addArrangedSubview(logLevelPopup)
         controlBar.addArrangedSubview(searchField)
         controlBar.addArrangedSubview(pauseTailButton)
@@ -117,7 +122,7 @@ public final class LogsPageController: NSViewController {
         scrollView.autohidesScrollers = true
 
         textView.isEditable = false
-        textView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        textView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         textView.autoresizingMask = [.width]
         scrollView.documentView = textView
         mainStack.addArrangedSubview(scrollView)
@@ -128,7 +133,7 @@ public final class LogsPageController: NSViewController {
             mainStack.topAnchor.constraint(equalTo: view.topAnchor, constant: 16),
             mainStack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16),
             scrollView.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
-            scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 500)
+            scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 200)
         ])
     }
 
@@ -175,7 +180,7 @@ public final class LogsPageController: NSViewController {
             return true
         }
 
-        textView.string = filtered.joined(separator: "\n")
+        textView.string = filtered.map(plainLogDisplayText).joined(separator: "\n")
         textView.scrollToEndOfDocument(nil)
     }
 
@@ -189,7 +194,7 @@ public final class LogsPageController: NSViewController {
 
     @objc private func handlePauseResumeTail() {
         isPaused.toggle()
-        pauseTailButton.title = isPaused ? "继续" : "暂停"
+        pauseTailButton.title = isPaused ? L10n.t(.actionResume) : L10n.t(.actionPause)
     }
 
     @objc private func handleClear() {
@@ -207,7 +212,7 @@ public final class LogsPageController: NSViewController {
 
     @objc private func handleCopyDiagnostics() {
         context.copyDiagnostics()
-        copyMessageLabel.stringValue = "诊断信息已复制到剪贴板"
+        copyMessageLabel.stringValue = L10n.t(.copiedDiagnostics)
         copyMessageLabel.textColor = .systemGreen
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
             self?.copyMessageLabel.stringValue = ""

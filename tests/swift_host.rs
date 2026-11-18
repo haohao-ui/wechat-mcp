@@ -77,26 +77,17 @@ fn host_selftest_bin() -> Option<&'static PathBuf> {
         fs::create_dir_all(&out_dir).ok()?;
         let bin_path = out_dir.join("host_selftest");
 
-        let files_to_compile = [
-            root.join("native")
-                .join("bootstrap")
-                .join("Supervisor.swift"),
-            root.join("native")
-                .join("bootstrap")
-                .join("CoreSupervisor.swift"),
-            root.join("native")
-                .join("bootstrap")
-                .join("SocketWorker.swift"),
-            root.join("native")
-                .join("bootstrap")
-                .join("StatusModel.swift"),
-            root.join("native")
-                .join("bootstrap")
-                .join("ConfigForm.swift"),
-            root.join("native").join("bootstrap").join("Actions.swift"),
-            root.join("native").join("eyes").join("Screens.swift"),
-            root.join("tests").join("host_selftest").join("main.swift"),
-        ];
+        let mut files_to_compile: Vec<_> = fs::read_dir(root.join("native/bootstrap"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.extension().is_some_and(|ext| ext == "swift")
+                    && path.file_name().unwrap() != "main.swift"
+            })
+            .collect();
+        files_to_compile.sort();
+        files_to_compile.push(root.join("native/eyes/Screens.swift"));
+        files_to_compile.push(root.join("tests").join("host_selftest").join("main.swift"));
 
         for f in &files_to_compile {
             if !f.exists() {
@@ -316,7 +307,7 @@ fn test_status_recalibration_red() {
 }
 
 #[test]
-fn test_status_waiting_session_yellow_names_code() {
+fn test_status_waiting_session_yellow_localizes_reason() {
     if !has_swiftc() {
         eprintln!("swiftc not available, skipping test");
         return;
@@ -346,7 +337,7 @@ fn test_status_waiting_session_yellow_names_code() {
         item_map["sessions"]["reason"]
             .as_str()
             .unwrap()
-            .contains("screen_not_main:other_wechat_window")
+            .contains("窗口未就绪")
     );
 }
 
@@ -531,15 +522,16 @@ fn test_config_form_never_shows_key() {
         "config": {
             "account_id": "bot1",
             "model_config": {
-                "backend": "deepseek",
+                "backend": "openai-compatible",
                 "model": "chat",
+                "api_key_env": "WECHAT_TEST_INTENTIONALLY_MISSING_KEY",
                 "api_key": "mock_key"
             }
         }
     });
     let res1 = run_host_cmd("config", &payload_with_key).unwrap();
     assert!(!serde_json::to_string(&res1).unwrap().contains("mock_key"));
-    assert_eq!(res1["api_key_status"], "已配置");
+    assert_eq!(res1["api_key_status"], "未配置");
 
     // 2. 未配置 key
     let payload_no_key = serde_json::json!({
@@ -547,13 +539,59 @@ fn test_config_form_never_shows_key() {
         "config": {
             "account_id": "bot1",
             "model_config": {
-                "backend": "deepseek",
-                "model": "chat"
+                "backend": "openai-compatible",
+                "model": "chat",
+                "api_key_env": "WECHAT_TEST_INTENTIONALLY_MISSING_KEY"
             }
         }
     });
     let res2 = run_host_cmd("config", &payload_no_key).unwrap();
     assert_eq!(res2["api_key_status"], "未配置");
+}
+
+#[test]
+fn test_model_form_replaces_backend_and_validates() {
+    if !has_swiftc() {
+        return;
+    }
+    let td = TempDir::new("model_form");
+    let path = td.path.join("config.json");
+    let original = serde_json::json!({"schema_version":1,"model_config":{"backend":"openai-compatible","base_url":"https://example.com/v1","model":"chat","api_key_env":"TEST_KEY"}});
+    for (form, valid) in [
+        (
+            serde_json::json!({"backend":"codex-exec","model":"stale","supports_images":true,"images_per_model_call":16}),
+            true,
+        ),
+        (
+            serde_json::json!({"backend":"openai-compatible","base_url":"https://example.com/v1","model":"chat","key_source":"env","key_env_name":"TEST_KEY","timeout_seconds":180}),
+            true,
+        ),
+        (
+            serde_json::json!({"backend":"openai-compatible","base_url":"http://example.com","model":"chat"}),
+            false,
+        ),
+        (
+            serde_json::json!({"backend":"openai-compatible","base_url":"https://example.com","model":"chat","timeout_seconds":181}),
+            false,
+        ),
+    ] {
+        fs::write(&path, original.to_string()).unwrap();
+        let res = run_host_cmd("config", &serde_json::json!({"op":"update_and_save_form","target_path":path,"original_config":original,"form_inputs":{"model_config_form":form},"simulated_check_result":{"ok":true}})).unwrap();
+        assert_eq!(res["ok"], valid);
+        if valid {
+            let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            if form["backend"] == "codex-exec" {
+                assert_eq!(
+                    saved["model_config"],
+                    serde_json::json!({"backend":"codex-exec"})
+                );
+                assert_eq!(saved["images_per_model_call"], 16);
+            } else {
+                assert_eq!(saved["model_config"]["api_key_env"], "TEST_KEY");
+                assert!(saved["model_config"].get("api_key_file").is_none());
+            }
+        }
+    }
 }
 
 #[test]
@@ -746,10 +784,9 @@ fn test_config_save_preserves_untouched_keys_deep_equal() {
         "state_dir": "/custom/state/dir",
         "account_id": "test_bot_99",
         "model_config": {
-            "backend": "deepseek",
+            "backend": "openai-compatible",
             "model": "deepseek-chat",
-            "api_key": "custom_key",
-            "temperature": 0.3
+            "api_key_env": "CUSTOM_KEY"
         },
         "capture_backend": "native",
         "poll_seconds": 3,
@@ -1167,7 +1204,7 @@ fn test_status_external_brain_unconnected_yellow_and_pending_count() {
         item_map["brain"]["reason"]
             .as_str()
             .unwrap()
-            .contains("外部大脑未连接")
+            .contains("外部回复（MCP 接管）未连接")
     );
     assert!(item_map["brain"]["reason"].as_str().unwrap().contains('3'));
 }
@@ -2065,40 +2102,21 @@ fn host_task5_selftest_bin() -> Option<&'static PathBuf> {
         fs::create_dir_all(&out_dir).ok()?;
         let bin_path = out_dir.join("host_task5_selftest");
 
-        let files_to_compile = [
-            root.join("native").join("bootstrap").join("Probe.swift"),
-            root.join("native")
-                .join("bootstrap")
-                .join("Supervisor.swift"),
-            root.join("native")
-                .join("bootstrap")
-                .join("CoreSupervisor.swift"),
-            root.join("native")
-                .join("bootstrap")
-                .join("SocketWorker.swift"),
-            root.join("native").join("bootstrap").join("Actions.swift"),
-            root.join("native")
-                .join("bootstrap")
-                .join("StatusModel.swift"),
-            root.join("native")
-                .join("bootstrap")
-                .join("ConfigForm.swift"),
-            root.join("native")
-                .join("bootstrap")
-                .join("StatusPanel.swift"),
-            root.join("native").join("bootstrap").join("LogTail.swift"),
-            root.join("native")
-                .join("bootstrap")
-                .join("Permissions.swift"),
-            root.join("native").join("bootstrap").join("Shell.swift"),
-            root.join("native")
-                .join("bootstrap")
-                .join("SettingsPage.swift"),
-            root.join("native").join("eyes").join("Screens.swift"),
+        let mut files_to_compile: Vec<_> = fs::read_dir(root.join("native/bootstrap"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.extension().is_some_and(|ext| ext == "swift")
+                    && path.file_name().unwrap() != "main.swift"
+            })
+            .collect();
+        files_to_compile.sort();
+        files_to_compile.push(root.join("native/eyes/Screens.swift"));
+        files_to_compile.push(
             root.join("tests")
                 .join("host_task5_selftest")
                 .join("main.swift"),
-        ];
+        );
 
         for f in &files_to_compile {
             if !f.exists() {
@@ -2268,9 +2286,11 @@ fn test_every_legacy_panel_control_has_new_home() {
         overview_src, sessions_src, settings_src, logs_src, perm_src, shell_src
     );
 
-    // 1. 保存配置
+    // 1. 保存配置（设计版页面用「保存配置」字面量，issue-2 版用 saveConfig 选择器）
     assert!(
-        all_new_src.contains("保存配置") || all_new_src.contains("saveConfig"),
+        all_new_src.contains("actionSaveConfig")
+            || all_new_src.contains("saveConfig")
+            || all_new_src.contains("保存配置"),
         "必须包含保存配置操作"
     );
     // 2. 重启桌面服务
@@ -2290,7 +2310,10 @@ fn test_every_legacy_panel_control_has_new_home() {
     );
     // 5. 恢复自动回复
     assert!(
-        all_new_src.contains("恢复自动回复") || all_new_src.contains("resumeHandoff"),
+        all_new_src.contains("恢复自动回复")
+            || all_new_src.contains("resumeHandoff")
+            || (sessions_src.contains("actionResumeAutoReply")
+                && sessions_src.contains("session-handoff")),
         "必须包含恢复自动回复操作"
     );
     // 6. 打开附件文件夹
@@ -2402,44 +2425,21 @@ fn host_task6_selftest_bin() -> Option<&'static PathBuf> {
         fs::create_dir_all(&out_dir).ok()?;
         let bin_path = out_dir.join("host_task6_selftest");
 
-        let files_to_compile = [
-            root.join("native").join("bootstrap").join("Probe.swift"),
-            root.join("native")
-                .join("bootstrap")
-                .join("Supervisor.swift"),
-            root.join("native")
-                .join("bootstrap")
-                .join("CoreSupervisor.swift"),
-            root.join("native")
-                .join("bootstrap")
-                .join("SocketWorker.swift"),
-            root.join("native").join("bootstrap").join("Actions.swift"),
-            root.join("native")
-                .join("bootstrap")
-                .join("StatusModel.swift"),
-            root.join("native")
-                .join("bootstrap")
-                .join("ConfigForm.swift"),
-            root.join("native")
-                .join("bootstrap")
-                .join("StatusPanel.swift"),
-            root.join("native").join("bootstrap").join("LogTail.swift"),
-            root.join("native")
-                .join("bootstrap")
-                .join("Permissions.swift"),
-            root.join("native").join("bootstrap").join("Shell.swift"),
-            root.join("native")
-                .join("bootstrap")
-                .join("SettingsPage.swift"),
-            root.join("native")
-                .join("bootstrap")
-                .join("ContactsPage.swift"),
-            root.join("native").join("bootstrap").join("McpPage.swift"),
-            root.join("native").join("eyes").join("Screens.swift"),
+        let mut files_to_compile: Vec<_> = fs::read_dir(root.join("native/bootstrap"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.extension().is_some_and(|ext| ext == "swift")
+                    && path.file_name().unwrap() != "main.swift"
+            })
+            .collect();
+        files_to_compile.sort();
+        files_to_compile.push(root.join("native/eyes/Screens.swift"));
+        files_to_compile.push(
             root.join("tests")
                 .join("host_task6_selftest")
                 .join("main.swift"),
-        ];
+        );
 
         for f in &files_to_compile {
             if !f.exists() {
@@ -2849,37 +2849,90 @@ fn test_mcp_page_brain_settings_round_trip() {
 }
 
 #[test]
+fn test_mcp_page_open_api_toggle_keeps_bind_and_port() {
+    let off = serde_json::json!({
+        "schema_version": 1,
+        "account_id": "test_acc",
+        "open_api": {"enabled": false, "bind": "192.168.3.81", "port": 9000}
+    });
+    let res = run_task6_cmd(
+        "mcp_open_api_enabled",
+        &serde_json::json!({"config": off, "enabled": true}),
+    )
+    .expect("mcp_open_api_enabled failed");
+    let api = &res["updated"]["open_api"];
+    assert_eq!(api["enabled"], true);
+    assert_eq!(api["bind"], "192.168.3.81");
+    assert_eq!(api["port"], 9000);
+    assert_eq!(res["updated"]["account_id"], "test_acc");
+
+    // Absent section: defaults are written so the core sees a complete open_api object.
+    let res = run_task6_cmd(
+        "mcp_open_api_enabled",
+        &serde_json::json!({"config": {"schema_version": 1}, "enabled": true}),
+    )
+    .expect("mcp_open_api_enabled failed");
+    let api = &res["updated"]["open_api"];
+    assert_eq!(api["enabled"], true);
+    assert_eq!(api["bind"], "127.0.0.1");
+    assert_eq!(api["port"], 8770);
+}
+
+#[test]
+fn test_saved_settings_restart_the_supervised_core_not_the_legacy_label() {
+    let src = fs::read_to_string("native/bootstrap/StatusPanel.swift").expect("StatusPanel.swift");
+    assert!(
+        !src.contains("reloader: ConfigFormLogic.defaultReloadBot"),
+        "saving must restart serve-core through CoreSupervisor"
+    );
+    assert!(src.contains("restartCoreForConfig"));
+    let contacts = fs::read_to_string("native/bootstrap/ContactsPage.swift").expect("ContactsPage");
+    assert!(contacts.contains("persistConfig(updated, restartCore: false)"));
+}
+
+#[test]
 fn test_contacts_and_mcp_pages_registered_in_shell_order() {
     let src = fs::read_to_string("native/bootstrap/main.swift").expect("main.swift exists");
-    let overview_idx = src.find("\"overview\"").expect("overview registered");
-    let sessions_idx = src.find("\"sessions\"").expect("sessions registered");
-    let contacts_idx = src.find("\"contacts\"").expect("contacts registered");
-    let mcp_idx = src.find("\"mcp\"").expect("mcp registered");
-    let settings_idx = src.find("\"settings\"").expect("settings registered");
-    let logs_idx = src.find("\"logs\"").expect("logs registered");
+    let overview_idx = src.find(", id: \"overview\"").expect("overview registered");
+    let sessions_idx = src.find(", id: \"sessions\"").expect("sessions registered");
+    let contacts_idx = src.find(", id: \"contacts\"").expect("contacts registered");
+    let persona_idx = src.find(", id: \"brain\"").expect("persona registered");
+    let model_idx = src.find(", id: \"model\"").expect("model slot registered");
+    let mcp_idx = src.find(", id: \"mcp\"").expect("mcp registered");
+    let settings_idx = src.find(", id: \"settings\"").expect("settings registered");
+    let update_idx = src.find(", id: \"update\"").expect("update registered");
+    let logs_idx = src.find(", id: \"logs\"").expect("logs registered");
+    assert!(src.contains("ModelPageController(context: controller)"));
+    assert!(!src.contains("ModelPagePlaceholderController"));
+    // 「组件与配色」是设计规范交付物，不是产品页面：不得注册进导航。
+    assert!(
+        !src.contains("id: \"components\""),
+        "components page must not be registered in the product shell"
+    );
+    // 设计版导航顺序：设置 → 日志 → 应用更新（docs/design/current-pages-v1）。
+    assert!(settings_idx < logs_idx && logs_idx < update_idx);
 
     assert!(overview_idx < sessions_idx, "总览在会话之前");
     assert!(sessions_idx < contacts_idx, "会话在联系人之前");
-    assert!(contacts_idx < mcp_idx, "联系人在MCP之前");
+    assert!(
+        contacts_idx < persona_idx && persona_idx < model_idx && model_idx < mcp_idx,
+        "联系人、客服角色、模型、MCP 顺序"
+    );
     assert!(mcp_idx < settings_idx, "MCP在设置之前");
     assert!(settings_idx < logs_idx, "设置在日志之前");
 }
 
 #[test]
-fn test_settings_page_brain_and_allowlist_pointers() {
+fn test_settings_page_points_to_contacts_and_mcp() {
     let settings_src = fs::read_to_string("native/bootstrap/SettingsPage.swift")
         .expect("SettingsPage.swift exists");
+    let l10n = fs::read_to_string("native/bootstrap/L10n.swift").expect("L10n.swift exists");
+    // 设置页用一条固定提示把「允许名单」和「外部大脑」指向联系人页与 MCP 页，文案集中在 L10n。
+    assert!(settings_src.contains("L10n.t("), "设置页文案必须走 L10n");
+    assert!(l10n.contains("允许名单"), "L10n 里要有名单提示文案");
     assert!(
-        settings_src.contains("联系人") && settings_src.contains("MCP"),
-        "SettingsPage 必须包含指向联系人页和 MCP 页的说明"
-    );
-    assert!(
-        settings_src.contains("允许名单") || settings_src.contains("忽略名单"),
-        "SettingsPage 说明中必须包含允许名单/忽略名单"
-    );
-    assert!(
-        settings_src.contains("外部大脑") || settings_src.contains("大脑配置"),
-        "SettingsPage 说明中必须包含大脑配置"
+        l10n.contains("「联系人」") && l10n.contains("「MCP」"),
+        "提示要分别指向联系人页与 MCP 页"
     );
 }
 
@@ -3283,6 +3336,86 @@ print(checkMode())
 
     assert_eq!(run_guard("INACTIVE"), "INACTIVE");
 
+    // Same v2 fixtures are exercised by the real Swift guard and Rust guard.
+    for (field, value, allowed) in [
+        ("highest_accepted_sequence", serde_json::json!(2000), true),
+        (
+            "highest_accepted_sequence",
+            serde_json::json!(u64::MAX),
+            true,
+        ),
+        ("highest_accepted_sequence", serde_json::json!(1001), false),
+        ("highest_accepted_sequence", serde_json::Value::Null, false),
+        (
+            "highest_accepted_sequence",
+            serde_json::json!(2000.5),
+            false,
+        ),
+        ("highest_accepted_sequence", serde_json::json!(true), false),
+        ("record_schema", serde_json::json!(3), false),
+        ("unknown", serde_json::json!(1), false),
+    ] {
+        let mut record = commit_record_correct.clone();
+        record["record_schema"] = serde_json::json!(2);
+        record["highest_accepted_sequence"] = serde_json::json!(2000);
+        record[field] = value;
+        fs::write(&record_path, record.to_string()).unwrap();
+        let expected = if allowed {
+            "INACTIVE"
+        } else {
+            "RECOVERY_REQUIRED"
+        };
+        assert_eq!(run_guard(expected), expected, "{record}");
+        let decision = wechat_mcp::updater::journal::check_startup_guard_readonly_with_root(
+            &state_dir,
+            Some(&releases_dir),
+            Some(&current_link),
+            releases_dir.parent(),
+            None,
+        );
+        assert_eq!(
+            decision == wechat_mcp::updater::journal::StartupDualCheckDecision::AllowStartup,
+            allowed,
+            "{decision:?}: {record}"
+        );
+    }
+    // A v2 rollback keeps its older legacy mirror readable, but never accepts a
+    // mirror above the authoritative high water mark or malformed bytes.
+    let mut record = commit_record_correct.clone();
+    record["record_schema"] = serde_json::json!(2);
+    record["highest_accepted_sequence"] = serde_json::json!(2000);
+    fs::write(&record_path, record.to_string()).unwrap();
+    let mirror_path = state_dir.join("highest_accepted_sequence");
+    for (mirror, allowed) in [
+        ("1002", true),
+        ("2000", true),
+        ("2001", false),
+        ("bad", false),
+    ] {
+        fs::write(&mirror_path, mirror).unwrap();
+        fs::set_permissions(&mirror_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let expected = if allowed {
+            "INACTIVE"
+        } else {
+            "RECOVERY_REQUIRED"
+        };
+        assert_eq!(run_guard(expected), expected, "legacy mirror: {mirror}");
+        let decision = wechat_mcp::updater::journal::check_startup_guard_readonly_with_root(
+            &state_dir,
+            Some(&releases_dir),
+            Some(&current_link),
+            releases_dir.parent(),
+            None,
+        );
+        assert_eq!(
+            decision == wechat_mcp::updater::journal::StartupDualCheckDecision::AllowStartup,
+            allowed,
+            "legacy mirror: {mirror}: {decision:?}"
+        );
+    }
+    fs::remove_file(mirror_path).unwrap();
+    fs::write(&record_path, commit_record_correct.to_string()).unwrap();
+
     // 场景 H: 篡改 current 软链接指向非预期目录 -> RECOVERY_REQUIRED
     fs::remove_file(&current_link).unwrap();
     let foreign_dir = releases_dir.join("0.9.9-foreign");
@@ -3540,4 +3673,190 @@ print(main())
 
     // 因为 install_root 已被移除，处于未配置状态，Committed 终态全要素检查必须严格拒绝（RECOVERY_REQUIRED）！
     assert_eq!(run_bin(), "RECOVERY_REQUIRED");
+}
+
+#[test]
+fn test_theme_status_tokens_and_colors() {
+    if !has_swiftc() {
+        eprintln!("swiftc not available, skipping test_theme_status_tokens_and_colors");
+        return;
+    }
+
+    let root = repo_root();
+    let temp = TempDir::new("theme_tokens_selftest");
+    let test_src = temp.path.join("main.swift");
+    let test_bin = temp.path.join("theme_tokens_test");
+
+    let swift_code = r##"
+import Foundation
+import AppKit
+
+func testTokens() -> Int32 {
+    let all = ThemeStatus.allCases
+    if all.count != 4 {
+        fputs("Expected 4 statuses, got \(all.count)\n", stderr)
+        return 1
+    }
+
+    // 1. 正常: #1AAD78 / #127954 / #E4F5EF
+    let normal = ThemeStatus.normal
+    if normal.rawValue != "正常" ||
+       normal.dotHex != "#1AAD78" ||
+       normal.textHex != "#127954" ||
+       normal.backgroundHex != "#E4F5EF" ||
+       normal.dotColor.hexString != "#1AAD78" ||
+       normal.textColor.hexString != "#127954" ||
+       normal.backgroundColor.hexString != "#E4F5EF" {
+        fputs("normal status mismatch\n", stderr)
+        return 2
+    }
+
+    // 2. 注意: #E08E0B / #925C07 / #FBF1E2
+    let warning = ThemeStatus.warning
+    if warning.rawValue != "注意" ||
+       warning.dotHex != "#E08E0B" ||
+       warning.textHex != "#925C07" ||
+       warning.backgroundHex != "#FBF1E2" ||
+       warning.dotColor.hexString != "#E08E0B" ||
+       warning.textColor.hexString != "#925C07" ||
+       warning.backgroundColor.hexString != "#FBF1E2" {
+        fputs("warning status mismatch\n", stderr)
+        return 3
+    }
+
+    // 3. 异常: #E5484D / #B73A3E / #FCE9EA
+    let error = ThemeStatus.error
+    if error.rawValue != "异常" ||
+       error.dotHex != "#E5484D" ||
+       error.textHex != "#B73A3E" ||
+       error.backgroundHex != "#FCE9EA" ||
+       error.dotColor.hexString != "#E5484D" ||
+       error.textColor.hexString != "#B73A3E" ||
+       error.backgroundColor.hexString != "#FCE9EA" {
+        fputs("error status mismatch\n", stderr)
+        return 4
+    }
+
+    // 4. 未启用: #9AA0A6 / #6C7074 / #F3F4F4
+    let inactive = ThemeStatus.inactive
+    if inactive.rawValue != "未启用" ||
+       inactive.dotHex != "#9AA0A6" ||
+       inactive.textHex != "#6C7074" ||
+       inactive.backgroundHex != "#F3F4F4" ||
+       inactive.dotColor.hexString != "#9AA0A6" ||
+       inactive.textColor.hexString != "#6C7074" ||
+       inactive.backgroundColor.hexString != "#F3F4F4" {
+        fputs("inactive status mismatch\n", stderr)
+        return 5
+    }
+
+    // 5. 校验主按钮与输入框以及品牌色常量
+    if Theme.Colors.primaryButtonDefaultHex != "#0A5B6B" ||
+       Theme.Colors.primaryButtonHoverHex != "#084B58" ||
+       Theme.Colors.primaryButtonTextHex != "#FFFFFF" ||
+       Theme.Colors.primaryButtonDisabledBgHex != "#F4F5F7" ||
+       Theme.Colors.primaryButtonDisabledTextHex != "#6B7280" ||
+       Theme.Colors.brandHex != "#12A37A" ||
+       Theme.Colors.brandLightHex != "#E2F5EE" ||
+       Theme.Colors.inputBorderHex != "#C9CDD4" ||
+       Theme.Colors.inputErrorBorderHex != "#E5484D" ||
+       Theme.Colors.inputErrorTextHex != "#B73A3E" ||
+       Theme.Colors.inputDisabledBgHex != "#F4F5F7" ||
+       Theme.Colors.inputDisabledTextHex != "#6B7280" {
+        fputs("theme constants mismatch\n", stderr)
+        return 6
+    }
+
+    print("STATUS_AND_COLORS_MATCH_OK")
+    return 0
+}
+
+exit(testTokens())
+"##;
+
+    fs::write(&test_src, swift_code).expect("write test script");
+
+    let files = [
+        root.join("native/bootstrap/L10n.swift"),
+        root.join("native").join("bootstrap").join("Theme.swift"),
+        test_src,
+    ];
+
+    let mut cmd = Command::new("swiftc");
+    cmd.arg("-O");
+    for f in &files {
+        cmd.arg(f);
+    }
+    cmd.arg("-o").arg(&test_bin);
+    let comp = cmd.output().expect("compile swiftc test_bin");
+    assert!(
+        comp.status.success(),
+        "swiftc failed: {}",
+        String::from_utf8_lossy(&comp.stderr)
+    );
+
+    let run_res = Command::new(&test_bin).output().expect("run test_bin");
+    assert!(
+        run_res.status.success(),
+        "test_bin failed with exit code {:?}: {}",
+        run_res.status.code(),
+        String::from_utf8_lossy(&run_res.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&run_res.stdout);
+    assert!(stdout.contains("STATUS_AND_COLORS_MATCH_OK"));
+}
+
+#[test]
+fn test_model_page_contract_and_secrets() {
+    let res = run_host_cmd("model_page_test", &serde_json::json!({})).unwrap();
+    assert_eq!(res["ok"], true);
+    assert_eq!(res["status"], "MODEL_PAGE_CONTRACT_OK");
+}
+
+#[test]
+fn test_t4_status_localization_and_session_contracts() {
+    if !has_swiftc() {
+        eprintln!("swiftc unavailable; T4 native checks skipped");
+        return;
+    }
+    let root = repo_root();
+    let out = root.join("target/swift_test_bin/host_t4_selftest");
+    fs::create_dir_all(out.parent().unwrap()).unwrap();
+    let mut sources: Vec<_> = fs::read_dir(root.join("native/bootstrap"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension().is_some_and(|ext| ext == "swift")
+                && path.file_name().unwrap() != "main.swift"
+        })
+        .collect();
+    sources.sort();
+    let compile = Command::new("swiftc")
+        .args(&sources)
+        .arg(root.join("native/eyes/Screens.swift"))
+        .arg(root.join("tests/host_t4_selftest/main.swift"))
+        .arg("-o")
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "T4 compile failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new(out).output().unwrap();
+    assert!(
+        run.status.success(),
+        "T4 behavior checks failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn test_rollback_ui_omits_installation_time() {
+    let source = fs::read_to_string("native/bootstrap/UpdatePage.swift").unwrap();
+    assert!(!source.contains("previousInstalledAtLabel"));
+    assert!(!source.contains("原安装时间:"));
+    assert!(!source.contains("info.formattedInstalledAt"));
 }

@@ -19,10 +19,14 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
     private let splitView = NSSplitView()
     private let sidebarTable = NSTableView()
     private let contentContainer = NSView()
+    private let pageHost = NSView()
+    private let pageTitle = NSTextField(labelWithString: "")
     private var activePageController: NSViewController?
+    /// 当前选中页面的 id：切换语言重建侧栏时用来保持原页面。
+    public private(set) var selectedPageID: String = ""
 
     public override func loadView() {
-        self.view = NSView(frame: NSRect(x: 0, y: 0, width: 860, height: 760))
+        self.view = NSView(frame: NSRect(x: 0, y: 0, width: 1180, height: 800))
     }
 
     public override func viewDidLoad() {
@@ -47,12 +51,29 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
         sidebarTable.headerView = nil
         sidebarTable.dataSource = self
         sidebarTable.delegate = self
-        sidebarTable.rowHeight = 36
+        sidebarTable.rowHeight = 44
+        sidebarTable.style = .sourceList
+        sidebarTable.backgroundColor = .windowBackgroundColor
+        sidebarTable.setAccessibilityLabel(L10n.t(.uiShell047))
         sidebarTable.intercellSpacing = NSSize(width: 0, height: 4)
         sidebarScroll.documentView = sidebarTable
 
         // 右侧内容区
         contentContainer.translatesAutoresizingMaskIntoConstraints = false
+        pageTitle.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
+        pageTitle.translatesAutoresizingMaskIntoConstraints = false
+        pageTitle.setAccessibilityLabel(L10n.t(.uiShell048))
+        pageHost.translatesAutoresizingMaskIntoConstraints = false
+        contentContainer.addSubview(pageTitle)
+        contentContainer.addSubview(pageHost)
+        NSLayoutConstraint.activate([
+            pageTitle.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor, constant: 24),
+            pageTitle.topAnchor.constraint(equalTo: contentContainer.topAnchor, constant: 20),
+            pageHost.topAnchor.constraint(equalTo: pageTitle.bottomAnchor, constant: 16),
+            pageHost.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
+            pageHost.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
+            pageHost.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor)
+        ])
 
         splitView.addArrangedSubview(sidebarScroll)
         splitView.addArrangedSubview(contentContainer)
@@ -62,8 +83,8 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
             splitView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             splitView.topAnchor.constraint(equalTo: view.topAnchor),
             splitView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            sidebarScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 140),
-            sidebarScroll.widthAnchor.constraint(lessThanOrEqualToConstant: 180)
+            sidebarScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 196),
+            sidebarScroll.widthAnchor.constraint(lessThanOrEqualToConstant: 196)
         ])
     }
 
@@ -83,9 +104,11 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
 
     public func selectPage(at index: Int) {
         guard index >= 0 && index < pages.count else { return }
+        selectedPageID = pages[index].id
         sidebarTable.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
 
         let target = pages[index].controller
+        pageTitle.stringValue = pages[index].title
         if activePageController === target { return }
 
         activePageController?.view.removeFromSuperview()
@@ -94,13 +117,13 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
         activePageController = target
         addChild(target)
         target.view.translatesAutoresizingMaskIntoConstraints = false
-        contentContainer.addSubview(target.view)
+        pageHost.addSubview(target.view)
 
         NSLayoutConstraint.activate([
-            target.view.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
-            target.view.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
-            target.view.topAnchor.constraint(equalTo: contentContainer.topAnchor),
-            target.view.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor)
+            target.view.leadingAnchor.constraint(equalTo: pageHost.leadingAnchor),
+            target.view.trailingAnchor.constraint(equalTo: pageHost.trailingAnchor),
+            target.view.topAnchor.constraint(equalTo: pageHost.topAnchor),
+            target.view.bottomAnchor.constraint(equalTo: pageHost.bottomAnchor)
         ])
     }
 
@@ -118,10 +141,24 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
 
     public func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let entry = pages[row]
-        let cell = NSTextField(labelWithString: "  \(entry.title)")
-        cell.font = NSFont.systemFont(ofSize: 13, weight: .medium)
-        cell.alignment = .left
-        return cell
+        let symbols = ["overview": "square.grid.2x2", "sessions": "bubble.left.and.bubble.right",
+                       "contacts": "person.2", "brain": "brain", "mcp": "link",
+                       "settings": "gearshape", "logs": "doc.text", "update": "arrow.down.circle"]
+        let icon = NSImageView(image: NSImage(systemSymbolName: symbols[entry.id] ?? "square", accessibilityDescription: nil) ?? NSImage())
+        icon.contentTintColor = .secondaryLabelColor
+        icon.widthAnchor.constraint(equalToConstant: 18).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 18).isActive = true
+        let label = NSTextField(labelWithString: entry.title)
+        label.font = NSFont.systemFont(ofSize: 14, weight: .medium)
+        let row = NSStackView(views: [icon, label])
+        row.spacing = 12
+        row.alignment = .centerY
+        row.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 0, right: 8)
+        return row
+    }
+
+    public func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        return NavigationRowView()
     }
 
     public func tableViewSelectionDidChange(_ notification: Notification) {
@@ -136,18 +173,49 @@ extension NSBox {
     /// 把内容放进分组框自带的 contentView 并四边约束，分组框才会随内容撑高。
     /// 不要直接 `box.contentView = stack`：那样框的高度不随内容变化，内容溢出、互相重叠（2026-11-08 设备上所有页面"挤在一起"）。
     public func setContent(_ content: NSView, inset: CGFloat = 8) {
+        let embedded: NSView
+        if boxType == .primary {
+            let stack = NSStackView()
+            if titlePosition != .noTitle && !title.isEmpty {
+                let heading = NSTextField(labelWithString: title)
+                heading.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
+                stack.addArrangedSubview(heading)
+            }
+            stack.addArrangedSubview(content)
+            stack.orientation = .vertical
+            stack.alignment = .leading
+            stack.spacing = 14
+            content.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+            embedded = stack
+            boxType = .custom
+            titlePosition = .noTitle
+            fillColor = .controlBackgroundColor
+            borderColor = .separatorColor
+            borderWidth = 1
+            cornerRadius = 8
+        } else {
+            embedded = content
+        }
         guard let host = self.contentView else {
             self.contentView = content
             return
         }
         host.subviews.forEach { $0.removeFromSuperview() }
-        content.translatesAutoresizingMaskIntoConstraints = false
-        host.addSubview(content)
+        embedded.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(embedded)
         NSLayoutConstraint.activate([
-            content.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: inset),
-            content.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -inset),
-            content.topAnchor.constraint(equalTo: host.topAnchor, constant: inset),
-            content.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -inset),
+            embedded.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: inset),
+            embedded.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -inset),
+            embedded.topAnchor.constraint(equalTo: host.topAnchor, constant: inset),
+            embedded.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -inset),
         ])
+    }
+}
+
+private final class NavigationRowView: NSTableRowView {
+    override func drawSelection(in dirtyRect: NSRect) {
+        guard selectionHighlightStyle != .none else { return }
+        NSColor.systemGreen.withAlphaComponent(0.14).setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 6, dy: 3), xRadius: 8, yRadius: 8).fill()
     }
 }

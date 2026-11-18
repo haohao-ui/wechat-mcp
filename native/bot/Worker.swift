@@ -550,7 +550,7 @@ final class CaptureWorker {
                   let item=(frame["bubbles"] as? [[String:Any]])?.first(where:{ $0["media_id"] as? String==id && $0["kind"] as? String=="file" }),
                   let name=item["filename"] as? String else { throw Failure.invalid("file_snapshot_changed") }
             let ext=URL(fileURLWithPath:name).pathExtension.lowercased()
-            guard ["pdf","txt","md","csv","json","docx","xlsx","png","jpg","jpeg"].contains(ext) else { throw Failure.invalid("unsupported_file_type") }
+            guard ["pdf","txt","md","csv","json","docx","xlsx","xls","png","jpg","jpeg"].contains(ext) else { throw Failure.invalid("unsupported_file_type") }
             let directory=media.appendingPathComponent(id)
             try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
             try checkPrivate(directory,type:.typeDirectory,mode:0o700)
@@ -559,6 +559,8 @@ final class CaptureWorker {
                 guard !fileAttempts.contains(id) else { throw Failure.invalid("previous_download_outcome_unknown") }
                 fileAttempts.insert(id)
                 try closingDialogsOnFailure { try saveAttachment(item,window:cachedWindow,destination:destination,maxBytes:maxBytes) }
+                try ensureWechatFrontmost()
+                if let app=wechatApplication() { closeDownloadWindows(app) }
             }
             try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:destination.path)
             try checkPrivate(destination,type:.typeRegular,mode:0o600)
@@ -651,10 +653,14 @@ final class CaptureWorker {
             let window=try readyWindow(manage:manage).window
             try screenGate(window)
             guard let id=params["media_id"] as? String,let snapshot=params["snapshot_id"] as? String else { throw Failure.invalid("missing_image_identity") }
+            // The caller's snapshot can legitimately move between the turn frame and this call (a tall
+            // consecutive image scrolls the viewport; device 2026-11-10 23:37). Bubble identity is the
+            // media id (the image's own pixel digest), so a fresh frame that still shows this image is
+            // enough; only a missing bubble is an error.
             let frame=try capture(recipient,accepted:accepted,manage:manage)
-            guard frame["snapshot_id"] as? String==snapshot,
-                  let item=(frame["bubbles"] as? [[String:Any]])?.first(where:{ $0["media_id"] as? String==id && $0["kind"] as? String=="image" })
+            guard let item=(frame["bubbles"] as? [[String:Any]])?.first(where:{ $0["media_id"] as? String==id && $0["kind"] as? String=="image" })
             else { throw Failure.invalid("image_snapshot_changed") }
+            _ = snapshot
             let directory=media.appendingPathComponent(id)
             try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
             try checkPrivate(directory,type:.typeDirectory,mode:0o700)
@@ -664,6 +670,8 @@ final class CaptureWorker {
                 guard !fileAttempts.contains(id) else { throw Failure.invalid("previous_download_outcome_unknown") }
                 fileAttempts.insert(id)
                 try closingDialogsOnFailure { try saveAttachment(item,window:cachedWindow,destination:saved,checkSize:false,maxBytes:maxBytes) }
+                try ensureWechatFrontmost()
+                if let app=wechatApplication() { closeDownloadWindows(app) }
             }
             let head=try Data(contentsOf:saved).prefix(8)
             let ext = head.starts(with:[0x89,0x50,0x4E,0x47]) ? "png" : head.starts(with:[0xFF,0xD8,0xFF]) ? "jpg" : ""
@@ -726,6 +734,45 @@ func closingDialogsOnFailure(_ body: () throws -> Void) throws {
     do { try body() } catch {
         try? key(53);pauseUI(0.2);try? key(53);pauseUI(0.2)
         throw error
+    }
+}
+
+/// A save sheet that outlives the save attempt blocks every later capture with screen_not_main
+/// (device 2026-11-10 23:51: a panel stayed two minutes after the images were saved). Bounded:
+/// press Escape a few times, then fail with a name the core can act on instead of staying stuck.
+func ensureWechatFrontmost() throws {
+    let ids = ["com.tencent.xinWeChat", "com.tencent.WeChat"]
+    func wechatFrontmost() -> Bool {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return false }
+        return ids.contains(app.bundleIdentifier ?? "")
+    }
+    if wechatFrontmost() { return }
+    for _ in 0..<3 {
+        try? key(53)
+        pauseUI(0.25)
+        if wechatFrontmost() { return }
+    }
+    throw Failure.invalid("save_panel_stuck")
+}
+
+func wechatApplication() -> NSRunningApplication? {
+    let ids = ["com.tencent.xinWeChat", "com.tencent.WeChat"]
+    return NSWorkspace.shared.runningApplications.first { ids.contains($0.bundleIdentifier ?? "") }
+}
+
+/// A file download leaves a small WeChat-owned window (about 360x124) that never closes itself and
+/// makes every later capture fail with screen_not_main:other_wechat_window (observed 2026-11-06 and
+/// again 2026-11-11). Close it by its own close button; the main window is much larger.
+func closeDownloadWindows(_ app: NSRunningApplication) {
+    let root = AXUIElementCreateApplication(app.processIdentifier)
+    let windows = attribute(root, kAXWindowsAttribute as String) as? [AXUIElement] ?? []
+    for window in windows {
+        guard let size = axValue(window, kAXSizeAttribute as String, .cgSize, CGSize.zero) else { continue }
+        guard size.width >= 200, size.width <= 460, size.height >= 80, size.height <= 200 else { continue }
+        if let close = axElement(window, kAXCloseButtonAttribute as String) {
+            AXUIElementPerformAction(close, kAXPressAction as CFString)
+            pauseUI(0.2)
+        }
     }
 }
 

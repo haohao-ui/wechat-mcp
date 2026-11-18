@@ -67,6 +67,10 @@ pub const MAX_MODEL_IMAGE_BYTES: u64 = 30 * 1024 * 1024;
 /// 找到衔接点就停，平时不会多滚。
 pub const GAP_SCROLL_PAGES: u32 = 24;
 
+/// Similarity needed to call two OCR readings of the same line the same bubble when the theme
+/// changed and pixels cannot be compared.
+const CONTENT_SIMILARITY: f64 = 0.85;
+
 fn to_hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -235,6 +239,92 @@ pub struct BotService {
     last_health_log_at: Arc<std::sync::Mutex<f64>>,
 }
 
+/// New bubbles after `previous` when pixels cannot be compared because the theme changed: both
+/// sequences are keyed by content, and the real bubbles of the arrival suffix are returned. `None`
+/// means the content did not anchor on what was already seen, so the caller must not guess.
+fn content_arrivals(previous: &[Bubble], current: &[Bubble]) -> Option<Vec<Bubble>> {
+    let mut anchor = 0usize;
+    for k in (1..=previous.len().min(current.len())).rev() {
+        if previous[previous.len() - k..]
+            .iter()
+            .zip(&current[..k])
+            .all(|(old, new)| same_content(old, new))
+        {
+            anchor = k;
+            break;
+        }
+    }
+    if anchor == 0 {
+        return None;
+    }
+    let visible: Vec<Bubble> = current
+        .iter()
+        .filter(|b| b.kind.as_deref() != Some("voice_transcript"))
+        .cloned()
+        .collect();
+    // Everything after the anchor is new; transcripts are evidence, never messages of their own.
+    let arrivals = current[anchor..]
+        .iter()
+        .filter(|b| b.kind.as_deref() != Some("voice_transcript"))
+        .count();
+    if arrivals == 0 {
+        return Some(Vec::new());
+    }
+    let start = visible.len().checked_sub(arrivals)?;
+    Some(visible[start..].to_vec())
+}
+
+/// Visual-layer errors (theme repaint, layout, window title, window capture) are states, not
+/// decisions: the next capture can succeed without the operator restarting anything.
+fn transient_visual_error(err: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "uncalibrated_theme",
+        "uncalibrated visual profile",
+        "layout_mismatch",
+        "allowlisted_title_mismatch",
+        "title_not_verified_after_click",
+        "wechat_not_visible",
+        "screen_not_main",
+        "window_capture_failed",
+        "unsupported_image_geometry",
+        "vision_timeout",
+        "private visual operation failed",
+        "transport closed",
+    ];
+    MARKERS.iter().any(|marker| err.contains(marker))
+}
+
+/// Whether two bubbles say the same thing. The theme only changes the pixels, and OCR reads the
+/// same line slightly differently from capture to capture ("抱歉" vs "抱歎" on device 2026-11-10),
+/// so words are compared with tolerance. Images and files keep their theme-independent digest.
+fn same_content(old: &Bubble, new: &Bubble) -> bool {
+    if old.direction != new.direction {
+        return false;
+    }
+    let visual = |b: &Bubble| matches!(b.kind.as_deref(), Some("image" | "file"));
+    if visual(old) != visual(new) {
+        return false;
+    }
+    if visual(old) {
+        return old.digest == new.digest;
+    }
+    if let (Some(a), Some(b)) = (
+        old.extra.get("time_label").and_then(Value::as_str),
+        new.extra.get("time_label").and_then(Value::as_str),
+    ) {
+        if a != b {
+            return false;
+        }
+    }
+    let compact = |text: &str| -> String { text.split_whitespace().collect::<Vec<_>>().join("") };
+    let (a, b) = (compact(&old.text), compact(&new.text));
+    // Short lines differ by one character the moment they mean something else; no fuzzy match there.
+    if a.chars().count() < 8 || b.chars().count() < 8 {
+        return a == b;
+    }
+    similar(&old.text, &new.text, CONTENT_SIMILARITY)
+}
+
 impl BotService {
     pub fn new(
         config: BotConfig,
@@ -344,7 +434,7 @@ impl BotService {
             to_hex(&hasher.finalize())
         });
 
-        Ok(Self {
+        let mut service = Self {
             config,
             root,
             recipient,
@@ -379,7 +469,9 @@ impl BotService {
             model_retries: None,
             last_health_log: Arc::new(std::sync::Mutex::new(None)),
             last_health_log_at: Arc::new(std::sync::Mutex::new(0.0)),
-        })
+        };
+        service.recover_pending()?;
+        Ok(service)
     }
 
     pub fn batch_key(&self, previous: &Frame, incoming: &[Bubble]) -> String {
@@ -620,6 +712,11 @@ impl BotService {
         map.insert("platform_message_verified".to_string(), json!(false));
         for (k, v) in &d_map {
             map.insert(k.clone(), v.clone());
+        }
+        if let (Some(history), Some(cid)) = (&self.history, &self.contact_id) {
+            if let Ok(summary) = history.pending_summary(Some(cid)) {
+                map.insert("pending_replies".to_string(), summary);
+            }
         }
 
         let now = (self.clock)();
@@ -910,6 +1007,11 @@ impl BotService {
         }
 
         let Some(ch) = changes else {
+            tracing::warn!(
+                recipient = %self.recipient,
+                pages = pages.len(),
+                "gap_recovery_exhausted"
+            );
             return Ok(None);
         };
 
@@ -978,6 +1080,143 @@ impl BotService {
 
     /// Identical messages: a time separator never seen before marks the newest bubble as new.
     /// A second capture must show the same bubbles and separators, otherwise nothing is new.
+    /// Persist the inbound bubbles of a turn before anything else can consume them, so a crash
+    /// between detection and send cannot drop the reply (P0 "no silent miss").
+    fn record_pending_arrivals(&self, arrivals: &[Bubble]) -> Result<()> {
+        let (Some(history), Some(cid)) = (&self.history, &self.contact_id) else {
+            return Ok(());
+        };
+        let inbound: Vec<Bubble> = arrivals
+            .iter()
+            .filter(|b| b.direction == "inbound_visual")
+            .cloned()
+            .collect();
+        if inbound.is_empty() {
+            return Ok(());
+        }
+        history.enqueue_pending(
+            cid,
+            &self.account,
+            &inbound,
+            crate::core::history::store::now_ms(),
+        )?;
+        Ok(())
+    }
+
+    fn resolve_pending_bubbles(
+        &self,
+        bubbles: &[Bubble],
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let (Some(history), Some(cid)) = (&self.history, &self.contact_id) else {
+            return Ok(());
+        };
+        let digests: Vec<String> = bubbles
+            .iter()
+            .filter(|b| b.direction == "inbound_visual")
+            .map(|b| b.digest.clone())
+            .collect();
+        if digests.is_empty() {
+            return Ok(());
+        }
+        let _ = history.resolve_pending(cid, &digests, status, error)?;
+        Ok(())
+    }
+
+    /// A rebaseline may forget pixels, never an unanswered message: keep the newest visible inbound
+    /// bubble as a pending reply unless history can prove it was already answered.
+    fn keep_unanswered_visible(&self, frame: &Frame) -> Result<()> {
+        let (Some(history), Some(cid)) = (&self.history, &self.contact_id) else {
+            return Ok(());
+        };
+        let Some(bubble) = frame.bubbles.iter().rev().find(|b| {
+            b.direction == "inbound_visual" && b.kind.as_deref() != Some("voice_transcript")
+        }) else {
+            return Ok(());
+        };
+        let ids = history.match_recent_inbound(cid, std::slice::from_ref(bubble))?;
+        if !ids.is_empty() && history.replied_after(cid, &ids, None)? {
+            return Ok(());
+        }
+        history.enqueue_pending(
+            cid,
+            &self.account,
+            std::slice::from_ref(bubble),
+            crate::core::history::store::now_ms(),
+        )?;
+        tracing::warn!(
+            recipient = %self.recipient,
+            digest = %bubble.digest,
+            "rebaseline_kept_unanswered_message"
+        );
+        Ok(())
+    }
+
+    /// Rebuild turns that were recorded but never answered before a restart. History is the
+    /// arbiter: a pending row is only dropped when history already shows a reply, so a crash
+    /// cannot leave a customer without an answer (P0).
+    fn recover_pending(&mut self) -> Result<()> {
+        if self.turn.is_some() {
+            return Ok(());
+        }
+        let (Some(history), Some(cid)) = (self.history.clone(), self.contact_id.clone()) else {
+            return Ok(());
+        };
+        let rows = history.open_pending(&cid, 50)?;
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut bubbles = Vec::new();
+        for row in &rows {
+            let Some(list) = row.get("bubbles").and_then(Value::as_array) else {
+                continue;
+            };
+            for item in list {
+                if let Ok(bubble) = serde_json::from_value::<Bubble>(item.clone()) {
+                    bubbles.push(bubble);
+                }
+            }
+        }
+        if bubbles.is_empty() {
+            return Ok(());
+        }
+        let ids = history
+            .match_recent_inbound(&cid, &bubbles)
+            .unwrap_or_default();
+        if !ids.is_empty() && history.replied_after(&cid, &ids, None).unwrap_or(false) {
+            let _ = self.resolve_pending_bubbles(&bubbles, "replied", None);
+            return Ok(());
+        }
+        let Some(frame) = self.cursor.clone() else {
+            tracing::warn!(
+                recipient = %self.recipient,
+                pending = rows.len(),
+                "pending_reply_has_no_baseline"
+            );
+            return Ok(());
+        };
+        let now = (self.clock)();
+        let quiet = self.config.turn_quiet_seconds as f64;
+        let turn = TurnData {
+            opened_at: now,
+            baseline: frame.clone(),
+            bubbles,
+            last_inbound_at: now - quiet - 1.0,
+            frame,
+            model_failures: 0,
+            retry_at: 0.0,
+            fixed_snapshot: None,
+        };
+        tracing::warn!(
+            recipient = %self.recipient,
+            pending = rows.len(),
+            "pending_reply_recovered"
+        );
+        self.keep_turn(turn)?;
+        Ok(())
+    }
+
     async fn separator_arrivals(
         &mut self,
         capture: &mut impl Capture,
@@ -1034,10 +1273,26 @@ impl BotService {
 
         if self.cursor.is_none() || self.cursor.as_ref().unwrap().bubbles.is_empty() || legacy {
             self.advance(frame)?;
+            // An empty chat has no bubbles to remember, so the cursor alone cannot tell later rounds
+            // that this chat was already opened once (device 2026-11-10: 爱咖啡 was reopened every
+            // sweep, interrupting replies to 午夜咖啡). The marker makes "once per chat ever" hold for
+            // empty chats too.
+            let _ = write_private(
+                &self.root.join("baseline-established.json"),
+                &json!({"at": (self.clock)()}),
+            );
             let mut d = Map::new();
             d.insert("historical_messages_ignored".to_string(), json!(true));
             self.health("watching", d)?;
             return Ok(());
+        }
+
+        // A rebaseline can keep a message as a pending reply without opening a turn, and a restart can
+        // recover one between cycles. Consume the queue here so a running session answers it without
+        // waiting for the operator to restart the bot (device 2026-11-10 23:12: the group image stayed
+        // pending until the manual restart, 4 minutes later).
+        if self.turn.is_none() {
+            let _ = self.recover_pending();
         }
 
         if frame.bubbles.is_empty() && self.turn.is_none() {
@@ -1051,55 +1306,103 @@ impl BotService {
         let cursor_bubbles = self.cursor.as_ref().unwrap().bubbles.clone();
         frame.bubbles = reconcile(&cursor_bubbles, &frame.bubbles);
 
-        let changes = match new_bubbles(&cursor_bubbles, &frame.bubbles) {
-            Ok(ch) => ch,
-            Err(ref err @ ContinuityError::AmbiguousAnchor { ref certain }) => {
-                ambiguous = Some(err.to_string());
-                if certain.is_empty() {
-                    self.separator_arrivals(capture, &cursor_bubbles, &frame)
-                        .await?
-                } else {
-                    certain.clone()
+        // A theme switch repaints every bubble, so pixel digests no longer identify messages that were
+        // already seen (device 2026-11-10: light -> dark left a stale cursor, every anchor missed, the
+        // new voice was rebaselined as history and never answered). Content is what survives a repaint:
+        // compare it, and never scroll for pixels that no longer exist under the current theme.
+        let theme_from = self
+            .cursor
+            .as_ref()
+            .and_then(|c| c.profile.clone())
+            .filter(|p| !p.is_empty());
+        let theme_to = frame.profile.clone().filter(|p| !p.is_empty());
+        let theme_changed = matches!(
+            (theme_from.as_deref(), theme_to.as_deref()),
+            (Some(from), Some(to)) if from != to
+        );
+
+        let changes = if theme_changed {
+            tracing::warn!(
+                recipient = %self.recipient,
+                from = theme_from.as_deref().unwrap_or("-"),
+                to = theme_to.as_deref().unwrap_or("-"),
+                visible = frame.bubbles.len(),
+                "visual_theme_changed"
+            );
+            match content_arrivals(&cursor_bubbles, &frame.bubbles) {
+                Some(arrivals) if !arrivals.is_empty() => arrivals,
+                _ => {
+                    // Nothing can be attributed to this arrival round: rebuild the baseline with an
+                    // explicit trace instead of scrolling, and never guess which bubbles were new.
+                    tracing::warn!(
+                        recipient = %self.recipient,
+                        from = theme_from.as_deref().unwrap_or("-"),
+                        to = theme_to.as_deref().unwrap_or("-"),
+                        visible = frame.bubbles.len(),
+                        "theme_changed_rebaseline"
+                    );
+                    self.keep_unanswered_visible(&frame)?;
+                    self.advance(frame.clone())?;
+                    let mut d = Map::new();
+                    d.insert(
+                        "reason".to_string(),
+                        json!("visual theme changed; baseline rebuilt without a reply"),
+                    );
+                    self.health("watching", d)?;
+                    return Ok(());
                 }
             }
-            Err(ContinuityError::ContinuityGap) => {
-                // Layout only (kind, direction, position): enough to explain a gap without content.
-                let layout = |bubbles: &[Bubble]| {
-                    bubbles
-                        .iter()
-                        .map(|b| {
-                            format!(
-                                "{}/{}@{}+{}",
-                                b.kind.as_deref().unwrap_or("-"),
-                                b.direction,
-                                b.y.unwrap_or(-1),
-                                b.height.unwrap_or(-1)
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",")
-                };
-                tracing::warn!(
-                    recipient = %self.recipient,
-                    snapshot = frame.snapshot_id.as_deref().unwrap_or("-"),
-                    frame = %layout(&frame.bubbles),
-                    cursor_tail = %layout(&cursor_bubbles[cursor_bubbles.len().saturating_sub(4)..]),
-                    "continuity_gap"
-                );
-                match self.recover_gap(capture, &frame, GAP_SCROLL_PAGES).await? {
-                    Some(recovered) => recovered,
-                    None => {
-                        if self.recovery_unconfirmed {
-                            let mut d = Map::new();
-                            d.insert(
-                                "reason".to_string(),
-                                json!("scrolled back but bottom frame changed"),
-                            );
-                            self.health("waiting_for_stable_frame", d)?;
-                            return Ok(());
+        } else {
+            match new_bubbles(&cursor_bubbles, &frame.bubbles) {
+                Ok(ch) => ch,
+                Err(ref err @ ContinuityError::AmbiguousAnchor { ref certain }) => {
+                    ambiguous = Some(err.to_string());
+                    if certain.is_empty() {
+                        self.separator_arrivals(capture, &cursor_bubbles, &frame)
+                            .await?
+                    } else {
+                        certain.clone()
+                    }
+                }
+                Err(ContinuityError::ContinuityGap) => {
+                    // Layout only (kind, direction, position): enough to explain a gap without content.
+                    let layout = |bubbles: &[Bubble]| {
+                        bubbles
+                            .iter()
+                            .map(|b| {
+                                format!(
+                                    "{}/{}@{}+{}",
+                                    b.kind.as_deref().unwrap_or("-"),
+                                    b.direction,
+                                    b.y.unwrap_or(-1),
+                                    b.height.unwrap_or(-1)
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    };
+                    tracing::warn!(
+                        recipient = %self.recipient,
+                        snapshot = frame.snapshot_id.as_deref().unwrap_or("-"),
+                        frame = %layout(&frame.bubbles),
+                        cursor_tail = %layout(&cursor_bubbles[cursor_bubbles.len().saturating_sub(4)..]),
+                        "continuity_gap"
+                    );
+                    match self.recover_gap(capture, &frame, GAP_SCROLL_PAGES).await? {
+                        Some(recovered) => recovered,
+                        None => {
+                            if self.recovery_unconfirmed {
+                                let mut d = Map::new();
+                                d.insert(
+                                    "reason".to_string(),
+                                    json!("scrolled back but bottom frame changed"),
+                                );
+                                self.health("waiting_for_stable_frame", d)?;
+                                return Ok(());
+                            }
+                            ambiguous = Some("visual continuity gap".to_string());
+                            Vec::new()
                         }
-                        ambiguous = Some("visual continuity gap".to_string());
-                        Vec::new()
                     }
                 }
             }
@@ -1127,6 +1430,7 @@ impl BotService {
                 reason = %reason_text,
                 "rebaselined_without_reply"
             );
+            self.keep_unanswered_visible(&confirmed)?;
             self.advance(confirmed)?;
             let mut d = Map::new();
             d.insert("reason".to_string(), json!(reason_text));
@@ -1172,6 +1476,7 @@ impl BotService {
                     fixed_snapshot: None,
                 });
             }
+            let persisted = arrivals.clone();
             if let Some(t) = &mut self.turn {
                 t.bubbles.extend(arrivals);
                 t.last_inbound_at = now;
@@ -1179,6 +1484,8 @@ impl BotService {
                 write_private(&self.turn_path, t)?;
             }
             self.advance(confirmed)?;
+            // Durable before the model or the send can fail: a crash from here on is recoverable.
+            self.record_pending_arrivals(&persisted)?;
         } else if self.turn.is_none() {
             self.advance(frame.clone())?;
         }
@@ -1231,6 +1538,9 @@ impl BotService {
         if self.stop.load(Ordering::SeqCst) {
             return Ok((Some("stopped_before_send"), f));
         }
+        if self.root.join("handoff.json").exists() {
+            return Ok((Some("handoff"), f));
+        }
         if !self.target_allowed() {
             return Ok((Some("skipped_by_rule"), f));
         }
@@ -1255,6 +1565,15 @@ impl BotService {
         d.insert("idempotency_key".to_string(), json!(key));
         let _ = self.health("sending", d);
 
+        // Recheck after all awaited generation/verification and journal work,
+        // including retries. A send already dispatched cannot be recalled.
+        if self.root.join("handoff.json").exists() {
+            if let Some(map) = record.as_object_mut() {
+                map.insert("status".into(), json!("handoff"));
+            }
+            self.write_journal(journal_path, record)?;
+            return Ok((None, json!({"status": "handoff"}), None));
+        }
         let res_result = client
             .tool(
                 "send_message",
@@ -1487,9 +1806,30 @@ impl BotService {
                     }
                 };
 
-                if let Some(un) = unseen {
-                    if !un.iter().any(|b| b.direction == "inbound_visual") {
-                        self.advance(after)?;
+                match unseen {
+                    Some(un) => {
+                        if !un.iter().any(|b| b.direction == "inbound_visual") {
+                            self.advance(after)?;
+                        }
+                    }
+                    None => {
+                        // Our own bubble and a transcript landing shifted the view so far that it no
+                        // longer reconciles. If the newest message is still our reply, nothing visible
+                        // can be waiting for an answer: adopt the view instead of leaving a stale
+                        // cursor, which made the next cycle scroll up to 24 history pages (device
+                        // 2026-11-10 22:17) and rebaseline whatever arrived meanwhile.
+                        let newest = after
+                            .bubbles
+                            .iter()
+                            .rev()
+                            .find(|b| b.kind.as_deref() != Some("voice_transcript"));
+                        if newest.is_some_and(|b| b.direction == "outbound_visual") {
+                            tracing::warn!(
+                                recipient = %self.recipient,
+                                "post_send_baseline_refreshed"
+                            );
+                            self.advance(after)?;
+                        }
                     }
                 }
                 let mut d = Map::new();
@@ -1514,6 +1854,42 @@ impl BotService {
                         "error".to_string(),
                         json!(err_str.chars().take(400).collect::<String>()),
                     );
+                }
+
+                // Once the reply reached WeChat, a later capture failure is not a reason to stop the
+                // contact (device 2026-11-10 23:13: status triggered + uncalibrated_theme paused
+                // 午夜咖啡, and every message after that went unseen until a manual restart).
+                if matches!(status_str.as_str(), "attempting" | "triggered" | "unknown") {
+                    self.write_journal(&journal_path, &record)?;
+                    tracing::warn!(
+                        recipient = %self.recipient,
+                        status = %status_str,
+                        error = %err_str,
+                        "post_send_error_ignored"
+                    );
+                    let mut d = Map::new();
+                    d.insert(
+                        "reason".to_string(),
+                        json!(format!(
+                            "post-send error ignored: {}",
+                            err_str.chars().take(160).collect::<String>()
+                        )),
+                    );
+                    self.health("watching", d)?;
+                    return Ok(());
+                }
+
+                // Visual states are transient by nature: retry the turn instead of pausing the chat.
+                if transient_visual_error(&err_str) {
+                    let _ = fs::remove_file(&journal_path);
+                    self.keep_turn(pending)?;
+                    let mut d = Map::new();
+                    d.insert(
+                        "reason".to_string(),
+                        json!(err_str.chars().take(200).collect::<String>()),
+                    );
+                    self.health("waiting_for_wechat_window", d)?;
+                    return Ok(());
                 }
 
                 let failures = pending.model_failures;
@@ -1926,6 +2302,7 @@ impl BotService {
                 map.insert("status".to_string(), json!("skipped_by_brain"));
             }
             self.write_journal(journal_path, record)?;
+            self.resolve_pending_bubbles(&pending.bubbles, "handoff", Some("skipped by brain"))?;
             return Ok(None);
         }
 
@@ -1953,6 +2330,7 @@ impl BotService {
                 map.insert("status".to_string(), json!("handoff"));
             }
             self.write_journal(journal_path, record)?;
+            self.resolve_pending_bubbles(&pending.bubbles, "handoff", None)?;
             let mut d = Map::new();
             d.insert("recipient".to_string(), json!(self.recipient));
             d.insert("turn_id".to_string(), json!(key));
@@ -2046,10 +2424,12 @@ impl BotService {
                 )?;
             }
         }
-
         let (mut result, mut receipt, mut send_err) = self
             .try_send_once(client, journal_path, record, confirmed, &reply, key)
             .await?;
+        if receipt["status"] == "handoff" {
+            return Ok(None);
+        }
 
         if let (Some(history), Some(_snap)) = (&self.history, &fixed_snapshot) {
             let phase = if receipt.get("status").and_then(|v| v.as_str()) == Some("triggered") {
@@ -2079,6 +2459,7 @@ impl BotService {
                 map.insert("durable_status".to_string(), receipt.clone());
                 map.insert("delivery".to_string(), json!("unknown"));
             }
+            self.resolve_pending_bubbles(&pending.bubbles, "replied", None)?;
             self.write_journal(journal_path, record)?;
         } else if is_not_sent(send_err.as_deref(), Some(&receipt)) {
             let mut succeeded = false;
@@ -2119,6 +2500,9 @@ impl BotService {
                 result = r;
                 receipt = rec;
                 send_err = err;
+                if receipt["status"] == "handoff" {
+                    return Ok(None);
+                }
                 if send_err.is_none()
                     && receipt.get("status").and_then(|v| v.as_str()) == Some("triggered")
                 {
@@ -2130,6 +2514,7 @@ impl BotService {
                         map.insert("durable_status".to_string(), receipt.clone());
                         map.insert("delivery".to_string(), json!("unknown"));
                     }
+                    self.resolve_pending_bubbles(&pending.bubbles, "replied", None)?;
                     self.write_journal(journal_path, record)?;
                     succeeded = true;
                     break;
@@ -2288,6 +2673,9 @@ impl BotService {
                     result = r;
                     receipt = rec;
                     send_err = err;
+                    if receipt["status"] == "handoff" {
+                        return Ok(None);
+                    }
 
                     if send_err.is_none()
                         && receipt.get("status").and_then(|v| v.as_str()) == Some("triggered")
@@ -2336,17 +2724,50 @@ impl BotService {
         d.insert("idempotency_key".to_string(), json!(key));
         self.health("verifying_send", d)?;
 
+        // After a triggered send this snapshot is a convenience, not a requirement. A theme repaint or
+        // layout wobble here used to bubble up as a turn error, and process_turn then paused the whole
+        // contact even though the reply had already been handed to WeChat (device 2026-11-10 23:13:
+        // status triggered + uncalibrated_theme paused 午夜咖啡; every later message went unseen).
         let final_frame = if let Some(f) = after_frame {
-            self.policy
-                .check_frame(&f)
-                .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-            f
+            if let Err(err) = self.policy.check_frame(&f) {
+                tracing::warn!(
+                    recipient = %self.recipient,
+                    error = %format!("{err:?}"),
+                    "post_send_frame_rejected"
+                );
+                confirmed.clone()
+            } else {
+                f
+            }
         } else {
-            let f = capture.frame().await?;
-            self.policy
-                .check_frame(&f)
-                .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-            f
+            let mut best = None;
+            for attempt in 0..3 {
+                match capture.frame().await {
+                    Ok(f) if self.policy.check_frame(&f).is_ok() => {
+                        best = Some(f);
+                        break;
+                    }
+                    Ok(f) => {
+                        let _ = f;
+                        if attempt < 2 {
+                            (self.sleep)(Duration::from_secs(1)).await;
+                        }
+                    }
+                    Err(err) => {
+                        let _ = err;
+                        if attempt < 2 {
+                            (self.sleep)(Duration::from_secs(1)).await;
+                        }
+                    }
+                }
+            }
+            match best {
+                Some(f) => f,
+                None => {
+                    tracing::warn!(recipient = %self.recipient, "post_send_frame_unavailable");
+                    confirmed.clone()
+                }
+            }
         };
 
         Ok(Some(final_frame))
@@ -2420,6 +2841,22 @@ mod tests {
         test_frame(visible, "午夜咖啡")
     }
 
+    fn test_voice(seconds: i64, digest: &str) -> Bubble {
+        let mut b = test_bubble(&format!("[语音{seconds}秒]"), "inbound_visual");
+        b.digest = digest.to_string();
+        b.kind = Some("voice".to_string());
+        b.media_id = Some(digest.to_string());
+        b.extra.insert("voice_seconds".to_string(), json!(seconds));
+        b
+    }
+
+    fn test_transcript(text: &str, digest: &str) -> Bubble {
+        let mut b = test_bubble(text, "inbound_visual");
+        b.digest = digest.to_string();
+        b.kind = Some("voice_transcript".to_string());
+        b
+    }
+
     fn test_frame(bubbles: Vec<Bubble>, title: &str) -> Frame {
         Frame {
             profile: Some("wechat-4-dark".to_string()),
@@ -2442,6 +2879,7 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
     enum MockFrameItem {
         Ok(Frame),
         Err(String),
@@ -2598,6 +3036,7 @@ mod tests {
             ignorelist: None,
             state_dir: state_dir.to_path_buf(),
             install_root: None,
+            updater: None,
             poll_seconds: 2,
             cooldown_seconds: 0,
             max_replies_per_hour: 20,
@@ -4813,6 +5252,629 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_service_empty_chat_marks_its_baseline_established() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        let empty = test_frame(Vec::new(), "午夜咖啡");
+        let mut cap = MockCapture::new(vec![empty; 2]);
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        assert!(svc.cursor.is_some());
+        assert!(
+            svc.cursor.as_ref().unwrap().bubbles.is_empty(),
+            "an empty chat has no bubbles to remember"
+        );
+        assert!(
+            svc.root.join("baseline-established.json").exists(),
+            "the marker is what records that this empty chat was opened once"
+        );
+    }
+
+    fn pending_history(td: &TestDir) -> (Arc<HistoryStore>, String) {
+        let history = Arc::new(HistoryStore::open(td.path().join("h")).unwrap());
+        history.migrate().unwrap();
+        let cid = history
+            .ensure_contact(
+                "fixture",
+                &json!({"recipient": "午夜咖啡", "kind": "private"}),
+                false,
+            )
+            .unwrap();
+        (history, cid)
+    }
+
+    #[tokio::test]
+    async fn test_service_send_closes_the_pending_reply() {
+        let td = TestDir::new();
+        let (history, cid) = pending_history(&td);
+        let mut svc = BotService::new(
+            fixture_config(td.path()),
+            None,
+            Some(history.clone()),
+            Some(cid.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        svc.brain = Some(default_brain("收到。"));
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "午夜咖啡");
+        svc.advance(old).unwrap();
+        let current = test_frame(
+            vec![
+                test_bubble("old", "inbound_visual"),
+                test_bubble("你好", "inbound_visual"),
+            ],
+            "午夜咖啡",
+        );
+        let after = test_frame(
+            vec![
+                test_bubble("old", "inbound_visual"),
+                test_bubble("你好", "inbound_visual"),
+                test_bubble("收到。", "outbound_visual"),
+            ],
+            "午夜咖啡",
+        );
+        let mut cap = MockCapture::new(vec![
+            current.clone(),
+            current.clone(),
+            current.clone(),
+            after,
+        ]);
+        cap.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        let open = history.open_pending(&cid, 10).unwrap();
+        assert!(
+            open.is_empty(),
+            "the send must close the queued reply: {open:?}"
+        );
+        let summary = history.pending_summary(Some(&cid)).unwrap();
+        assert_eq!(summary["open"], 0);
+        assert!(
+            summary["by_status"]["replied"].as_i64().unwrap() >= 1,
+            "{summary}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_service_restart_recovers_an_unanswered_pending_reply() {
+        let td = TestDir::new();
+        let (history, cid) = pending_history(&td);
+        let frame = test_frame(
+            vec![
+                test_bubble("old", "inbound_visual"),
+                test_bubble("语音没回", "inbound_visual"),
+            ],
+            "午夜咖啡",
+        );
+        // Detected before the crash: the cursor advanced and the reply was queued, no turn survived.
+        let mut first = BotService::new(
+            fixture_config(td.path()),
+            None,
+            Some(history.clone()),
+            Some(cid.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+        first.advance(frame.clone()).unwrap();
+        history
+            .enqueue_pending(
+                &cid,
+                "fixture",
+                &[test_bubble("语音没回", "inbound_visual")],
+                crate::core::history::store::now_ms(),
+            )
+            .unwrap();
+        drop(first);
+
+        let mut svc = BotService::new(
+            fixture_config(td.path()),
+            None,
+            Some(history.clone()),
+            Some(cid.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        svc.brain = Some(default_brain("收到。"));
+        assert!(svc.turn.is_some(), "a restart rebuilds the unfinished turn");
+
+        let mut cap = MockCapture::new(vec![frame.clone(); 6]);
+        cap.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        let sends: Vec<_> = client
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| name == "send_message")
+            .cloned()
+            .collect();
+        assert_eq!(sends.len(), 1, "the recovered message is answered");
+        assert!(
+            history.open_pending(&cid, 10).unwrap().is_empty(),
+            "the recovered reply closes the queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_service_rebaseline_pending_is_answered_without_restart() {
+        let td = TestDir::new();
+        let (history, cid) = pending_history(&td);
+        let mut svc = BotService::new(
+            fixture_config(td.path()),
+            None,
+            Some(history.clone()),
+            Some(cid.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        svc.brain = Some(default_brain("收到。"));
+
+        let mut old = test_frame(vec![test_bubble("旧消息", "inbound_visual")], "午夜咖啡");
+        old.profile = Some("wechat-4-light".to_string());
+        svc.advance(old).unwrap();
+
+        // Theme repaint that cannot be anchored: the baseline is rebuilt but the message is kept.
+        let frame = test_frame(
+            vec![test_bubble("完全不同的消息", "inbound_visual")],
+            "午夜咖啡",
+        );
+        let mut cap = MockCapture::new(vec![frame.clone()]);
+        cap.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+        assert_eq!(history.open_pending(&cid, 10).unwrap().len(), 1);
+
+        // The next cycle consumes the queue without a restart.
+        let mut cap2 = MockCapture::new(vec![frame.clone(); 6]);
+        cap2.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
+        svc.cycle(&client, &mut cap2).await.unwrap();
+
+        let sends: Vec<_> = client
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| name == "send_message")
+            .cloned()
+            .collect();
+        assert_eq!(
+            sends.len(),
+            1,
+            "the kept message is answered in the running session"
+        );
+        assert!(history.open_pending(&cid, 10).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_service_post_send_capture_error_does_not_pause() {
+        // Device 2026-11-10 23:13: the reply was triggered, then the convenience snapshot after it hit
+        // a theme repaint (uncalibrated_theme); the turn errored and process_turn paused 午夜咖啡, so
+        // every following message went unseen until the operator restarted the bot.
+        let td = TestDir::new();
+        let (history, cid) = pending_history(&td);
+        let mut svc = BotService::new(
+            fixture_config(td.path()),
+            None,
+            Some(history.clone()),
+            Some(cid.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        svc.brain = Some(default_brain("收到。"));
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "午夜咖啡");
+        svc.advance(old).unwrap();
+        let current = test_frame(
+            vec![
+                test_bubble("old", "inbound_visual"),
+                test_bubble("你好", "inbound_visual"),
+            ],
+            "午夜咖啡",
+        );
+        let mut cap = MockCapture::new(vec![current.clone(), current.clone(), current.clone()]);
+        cap.frame_sequence.push(MockFrameItem::Err(
+            "private visual operation failed: invalid(\"uncalibrated_theme\")".to_string(),
+        ));
+        cap.frame_sequence.push(MockFrameItem::Ok(current.clone()));
+        cap.frame_sequence
+            .extend(vec![MockFrameItem::Ok(current.clone()); 8]);
+        cap.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        assert!(
+            !svc.paused,
+            "a repaint after a triggered send must not pause the contact"
+        );
+        let health: Value = read_json(svc.root.join("health.json")).unwrap();
+        assert_eq!(health["state"], "watching", "{health}");
+        assert!(history.open_pending(&cid, 10).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_service_preparing_media_visual_error_retries_instead_of_pausing() {
+        let td = TestDir::new();
+        let (history, cid) = pending_history(&td);
+        let mut svc = BotService::new(
+            fixture_config(td.path()),
+            None,
+            Some(history.clone()),
+            Some(cid.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        svc.brain = Some(default_brain("收到。"));
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "午夜咖啡");
+        svc.advance(old).unwrap();
+        let mut picture = test_bubble("[图片]", "inbound_visual");
+        picture.kind = Some("image".to_string());
+        picture.digest = "image:50:40".to_string();
+        picture.phash = Some("0".repeat(16));
+        picture.media_id = Some("a".repeat(64));
+        let current = test_frame(
+            vec![test_bubble("old", "inbound_visual"), picture],
+            "午夜咖啡",
+        );
+        let mut cap = MockCapture::new(vec![current.clone(); 5]);
+        cap.attachments_fn = Some(Arc::new(|_, _| {
+            bail!("private visual operation failed: invalid(\"uncalibrated_theme\")")
+        }));
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        assert!(
+            !svc.paused,
+            "a transient visual error keeps the contact alive"
+        );
+        assert!(svc.turn.is_some(), "the turn is kept for the next capture");
+        let health: Value = read_json(svc.root.join("health.json")).unwrap();
+        assert_eq!(health["state"], "waiting_for_wechat_window", "{health}");
+    }
+
+    #[tokio::test]
+    async fn test_service_rebaseline_keeps_the_unanswered_message() {
+        let td = TestDir::new();
+        let (history, cid) = pending_history(&td);
+        let mut svc = BotService::new(
+            fixture_config(td.path()),
+            None,
+            Some(history.clone()),
+            Some(cid.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+        let mut old = test_frame(vec![test_bubble("旧消息", "inbound_visual")], "午夜咖啡");
+        old.profile = Some("wechat-4-light".to_string());
+        svc.advance(old).unwrap();
+
+        // The repaint cannot be anchored by content, so the baseline would swallow this message.
+        let frame = test_frame(
+            vec![test_bubble("完全不同的消息", "inbound_visual")],
+            "午夜咖啡",
+        );
+        let mut cap = MockCapture::new(vec![frame.clone(); 3]);
+        cap.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        let open = history.open_pending(&cid, 10).unwrap();
+        assert_eq!(
+            open.len(),
+            1,
+            "the rebaseline keeps the unanswered message: {open:?}"
+        );
+        assert_eq!(
+            open[0]["bubbles"][0]["text"].as_str(),
+            Some("完全不同的消息")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_service_theme_change_answers_the_voice_that_arrived() {
+        // Device 2026-11-10: the chat was last seen in the light theme, WeChat then switched to dark,
+        // and the first frame after clicking back in was repainted. Nothing matched the stale pixel
+        // digests, gap recovery scrolled 24 pages for an anchor that could not exist, and the new voice
+        // was rebaselined as history and never answered.
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        let seen_prompt = Arc::new(Mutex::new(String::new()));
+        let sp = seen_prompt.clone();
+        svc.brain = Some(Arc::new(move |turn| {
+            *sp.lock().unwrap() = turn.text.clone();
+            Box::pin(async {
+                Ok(BrainReply {
+                    reply: "收到语音了。".to_string(),
+                    metadata: HashMap::new(),
+                })
+            })
+        }));
+
+        let mut light_image = test_bubble("[图片]", "inbound_visual");
+        light_image.kind = Some("image".to_string());
+        light_image.digest = "image:50:40".to_string();
+        light_image.phash = Some("0".repeat(16));
+        light_image.media_id = Some("a".repeat(64));
+        let light_voice = test_voice(4, "light-voice");
+        let light_transcript = test_transcript("请认真理解这张图片。", "light-transcript");
+        let mut light_reply = test_bubble("我看清了，这是一页除法练习。", "outbound_visual");
+        light_reply.digest = "light-reply".to_string();
+
+        let mut cursor = test_frame(
+            vec![light_image, light_voice, light_transcript, light_reply],
+            "午夜咖啡",
+        );
+        cursor.profile = Some("wechat-4-light".to_string());
+        svc.advance(cursor).unwrap();
+
+        let dark_voice = test_voice(4, "dark-voice");
+        let dark_transcript = test_transcript("请认真理解这张图片。", "dark-transcript");
+        let mut dark_reply = test_bubble("我看清了，这是一页除法练习。", "outbound_visual");
+        dark_reply.digest = "dark-reply".to_string();
+        // The voice that arrived: same duration as the older one, so the same content identity.
+        let arrived = test_voice(4, "dark-voice");
+        let current = test_frame(
+            vec![dark_voice, dark_transcript, dark_reply, arrived],
+            "午夜咖啡",
+        );
+
+        let mut cap = MockCapture::new(vec![current.clone(); 6]);
+        cap.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
+
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        assert!(
+            cap.scroll_calls.lock().unwrap().is_empty(),
+            "a repainted frame must not scroll history looking for pixels that no longer exist"
+        );
+        assert_eq!(*seen_prompt.lock().unwrap(), "[语音4秒]");
+        let sends: Vec<_> = client
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| name == "send_message")
+            .cloned()
+            .collect();
+        assert_eq!(
+            sends.len(),
+            1,
+            "the voice that arrived during the repaint gets a reply"
+        );
+        assert_eq!(
+            svc.cursor.as_ref().and_then(|c| c.profile.as_deref()),
+            Some("wechat-4-dark"),
+            "the advanced baseline carries the new theme"
+        );
+        let health: Value = read_json(svc.root.join("health.json")).unwrap();
+        assert_eq!(health["state"], "watching");
+    }
+
+    #[tokio::test]
+    async fn test_service_theme_change_tolerates_ocr_drift_in_the_baseline() {
+        // Device 2026-11-10 22:16: the same apology line was read as 抱歉 in the dark cursor and as
+        // 抱歎 after the light repaint; exact content equality missed the anchor, the repaint was
+        // rebaselined, and the voice that had just arrived was never answered.
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        let seen_prompt = Arc::new(Mutex::new(String::new()));
+        let sp = seen_prompt.clone();
+        svc.brain = Some(Arc::new(move |turn| {
+            *sp.lock().unwrap() = turn.text.clone();
+            Box::pin(async {
+                Ok(BrainReply {
+                    reply: "收到语音了。".to_string(),
+                    metadata: HashMap::new(),
+                })
+            })
+        }));
+
+        let mut cursor = test_frame(
+            vec![
+                test_bubble(
+                    "抱歉，我这边没有收到之前那条语音的文字转写，也不能凭猜测编内容。",
+                    "inbound_visual",
+                ),
+                test_bubble("重新看我发的语音", "inbound_visual"),
+                test_bubble(
+                    "抱歉，我这边没有收到之前那条语音的文字转写，也不能凭猜测编内容。",
+                    "outbound_visual",
+                ),
+            ],
+            "午夜咖啡",
+        );
+        cursor.profile = Some("wechat-4-light".to_string());
+        svc.advance(cursor).unwrap();
+
+        let current = test_frame(
+            vec![
+                test_bubble(
+                    "抱歎，我这边没有收到之前那条语音的文字转写，也不能凭猜测编内容。",
+                    "inbound_visual",
+                ),
+                test_bubble("重新看我发的语音", "inbound_visual"),
+                test_bubble(
+                    "抱歎，我这边没有收到之前那条语音的文字转写，也不能凭猜测编内容。",
+                    "outbound_visual",
+                ),
+                test_voice(3, "dark-voice-3s"),
+            ],
+            "午夜咖啡",
+        );
+
+        let mut cap = MockCapture::new(vec![current.clone(); 6]);
+        cap.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
+
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        assert!(cap.scroll_calls.lock().unwrap().is_empty());
+        assert_eq!(*seen_prompt.lock().unwrap(), "[语音3秒]");
+        let sends: Vec<_> = client
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| name == "send_message")
+            .cloned()
+            .collect();
+        assert_eq!(
+            sends.len(),
+            1,
+            "OCR drift must not turn the arrival into history"
+        );
+        let health: Value = read_json(svc.root.join("health.json")).unwrap();
+        assert_eq!(health["state"], "watching");
+    }
+
+    #[tokio::test]
+    async fn test_service_post_send_unreconciled_view_refreshes_the_baseline() {
+        // Our own reply and a transcript can shift the view past what `confirmed` showed. The old
+        // cursor then made the next cycle scroll 24 history pages; when the newest message is still our
+        // own reply, the view cannot hold an unanswered message, so it becomes the baseline.
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        svc.brain = Some(default_brain("收到。"));
+
+        let old = test_frame(vec![test_bubble("old", "inbound_visual")], "午夜咖啡");
+        svc.advance(old).unwrap();
+
+        let current = test_frame(
+            vec![
+                test_bubble("old", "inbound_visual"),
+                test_bubble("在吗", "inbound_visual"),
+            ],
+            "午夜咖啡",
+        );
+        let after = test_frame(vec![test_bubble("收到。", "outbound_visual")], "午夜咖啡");
+
+        let mut cap = MockCapture::new(vec![
+            current.clone(),
+            current.clone(),
+            current.clone(),
+            current.clone(),
+            after.clone(),
+        ]);
+        cap.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
+
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        assert!(cap.scroll_calls.lock().unwrap().is_empty());
+        assert_eq!(
+            svc.cursor.as_ref().map(|c| c.bubbles.clone()),
+            Some(after.bubbles.clone()),
+            "the unreconciled view ending on our reply becomes the baseline"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_service_theme_change_without_new_messages_rebaselines_without_reply() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        svc.brain = Some(default_brain("不应该回复"));
+
+        let mut light = test_bubble("你好", "inbound_visual");
+        light.digest = "light-hello".to_string();
+        let mut cursor = test_frame(vec![light], "午夜咖啡");
+        cursor.profile = Some("wechat-4-light".to_string());
+        svc.advance(cursor).unwrap();
+
+        let mut dark = test_bubble("你好", "inbound_visual");
+        dark.digest = "dark-hello".to_string();
+        let current = test_frame(vec![dark], "午夜咖啡");
+
+        let mut cap = MockCapture::new(vec![current.clone(); 3]);
+        cap.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
+
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        assert!(cap.scroll_calls.lock().unwrap().is_empty());
+        assert!(
+            client.calls.lock().unwrap().is_empty(),
+            "a repaint with nothing new must not call the model or send"
+        );
+        assert_eq!(
+            svc.cursor.as_ref().map(|c| c.bubbles.clone()),
+            Some(current.bubbles.clone())
+        );
+        let health: Value = read_json(svc.root.join("health.json")).unwrap();
+        assert_eq!(health["state"], "watching");
+        assert!(
+            health["reason"].as_str().unwrap_or("").contains("theme"),
+            "{health}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_service_theme_change_with_unrelated_content_rebaselines_without_guessing() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg, None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        svc.brain = Some(default_brain("不应该回复"));
+
+        let mut light = test_bubble("旧消息", "inbound_visual");
+        light.digest = "light-old".to_string();
+        let mut cursor = test_frame(vec![light], "午夜咖啡");
+        cursor.profile = Some("wechat-4-light".to_string());
+        svc.advance(cursor).unwrap();
+
+        let mut dark = test_bubble("完全不同的消息", "inbound_visual");
+        dark.digest = "dark-new".to_string();
+        let current = test_frame(vec![dark], "午夜咖啡");
+
+        let mut cap = MockCapture::new(vec![current.clone(); 3]);
+        cap.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
+
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        assert!(cap.scroll_calls.lock().unwrap().is_empty());
+        assert!(
+            client.calls.lock().unwrap().is_empty(),
+            "content that does not anchor on the baseline is not guessed into a reply"
+        );
+        assert_eq!(
+            svc.cursor.as_ref().map(|c| c.bubbles.clone()),
+            Some(current.bubbles.clone())
+        );
+        let health: Value = read_json(svc.root.join("health.json")).unwrap();
+        assert!(
+            health["reason"].as_str().unwrap_or("").contains("theme"),
+            "{health}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_service_unrecoverable_gap_scrolls_at_most_gap_scroll_pages() {
         let td = TestDir::new();
         let cfg = fixture_config(td.path());
@@ -6764,6 +7826,60 @@ mod tests {
             brain_called.load(Ordering::SeqCst),
             "brain should be called after resume_session"
         );
+    }
+
+    #[tokio::test]
+    async fn test_operator_handoff_during_generation_blocks_send_and_survives_restart() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg.clone(), None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        let marker = td.path().join("handoff.json");
+        let mark = marker.clone();
+        svc.brain = Some(Arc::new(move |_| {
+            let mark = mark.clone();
+            Box::pin(async move {
+                write_private(mark, &json!({"source":"operator"})).unwrap();
+                Ok(BrainReply {
+                    reply: "您好".into(),
+                    metadata: HashMap::new(),
+                })
+            })
+        }));
+        svc.advance(test_frame(
+            vec![test_bubble("old", "inbound_visual")],
+            "午夜咖啡",
+        ))
+        .unwrap();
+        let next = test_frame(
+            vec![
+                test_bubble("old", "inbound_visual"),
+                test_bubble("new", "inbound_visual"),
+            ],
+            "午夜咖啡",
+        );
+        let client = MockToolClient::new_default();
+        let mut capture = MockCapture::new(vec![next.clone(), next.clone(), next.clone()]);
+        svc.cycle(&client, &mut capture).await.unwrap();
+        assert!(marker.exists());
+        assert!(
+            !client
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(n, _)| n == "send_message")
+        );
+        drop(svc);
+        let mut restarted = BotService::new(cfg, None, None, None, None, None).unwrap();
+        let mut capture = MockCapture::new(vec![next]);
+        restarted.process_turn(&client, &mut capture).await.unwrap();
+        assert_eq!(
+            read_json::<Value>(td.path().join("health.json")).unwrap()["state"],
+            "handoff"
+        );
+        restarted.resume_session().unwrap();
+        assert!(!marker.exists());
     }
 
     #[test]

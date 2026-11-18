@@ -374,6 +374,10 @@ pub fn extract(
         }));
     }
 
+    if ext == "xls" {
+        return extract_xls(path);
+    }
+
     if ext != "docx" && ext != "xlsx" {
         bail!("unsupported document type");
     }
@@ -442,6 +446,66 @@ pub fn extract(
         "truncated": total_sheets > 3,
         "formulas_executed": false
     }))
+}
+
+/// Legacy Excel (.xls, BIFF8 in an OLE2 container). The OOXML reader below cannot see it, and the
+/// format is what many older spreadsheets still ship as (device 2026-11-11: 耳机报价参数.xls was
+/// rejected before it ever reached the model). Same shape as the xlsx extraction so the prompt and
+/// the model see one schema: {sheets:[{name, rows, truncated}], truncated, formulas_executed:false}.
+fn extract_xls(path: &Path) -> Result<Value> {
+    use calamine::Reader;
+
+    let mut workbook = calamine::open_workbook_auto(path).context("xls unreadable")?;
+    let names = workbook.sheet_names().to_vec();
+    if names.is_empty() {
+        bail!("xls has no sheets");
+    }
+    let mut sheets = Vec::new();
+    for name in names.iter().take(3) {
+        let range = match workbook.worksheet_range(name) {
+            Ok(range) => range,
+            Err(_) => continue,
+        };
+        let total_rows = range.height();
+        let mut rows = Vec::new();
+        for row in range.rows().take(100) {
+            let cells: Vec<Value> = row.iter().take(30).map(xls_cell).collect();
+            rows.push(Value::Array(cells));
+        }
+        sheets.push(json!({
+            "name": name,
+            "rows": rows,
+            "truncated": total_rows > 100
+        }));
+    }
+    if sheets.is_empty() {
+        bail!("xls sheets unreadable");
+    }
+    Ok(json!({
+        "sheets": sheets,
+        "truncated": names.len() > 3,
+        "formulas_executed": false
+    }))
+}
+
+fn xls_cell(data: &calamine::Data) -> Value {
+    use calamine::Data;
+    match data {
+        Data::Empty => Value::Null,
+        Data::String(text) => json!(text),
+        Data::Int(value) => json!(value),
+        Data::Float(value) => json!(value),
+        Data::Bool(value) => json!(value),
+        Data::Error(err) => json!(format!("#ERR:{err:?}")),
+        Data::DateTime(dt) => {
+            let (year, month, day, hour, minute, second, _milli) = dt.to_ymd_hms_milli();
+            json!(format!(
+                "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}"
+            ))
+        }
+        // ISO-shaped values cannot occur in the BIFF path; keep them verbatim if a reader yields them.
+        Data::DateTimeIso(text) | Data::DurationIso(text) => json!(text),
+    }
 }
 
 fn extract_docx_paragraphs(xml: &str) -> Vec<String> {
@@ -661,6 +725,24 @@ fn extract_tag_text(content: &str, open: &str, close: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn legacy_xls_workbook_is_extracted_like_xlsx() {
+        // Device 2026-11-11: a customer's 耳机报价参数.xls was rejected before the model saw it.
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample.xls");
+        let value = super::extract(&path, "xls", None, None).unwrap();
+        let sheets = value["sheets"].as_array().unwrap();
+        assert_eq!(sheets.len(), 1);
+        assert_eq!(sheets[0]["name"], "报价");
+        let rows = sheets[0]["rows"].as_array().unwrap();
+        assert_eq!(rows[0][0], "型号");
+        assert_eq!(rows[0][1], "单价");
+        assert_eq!(rows[1][0], "LED项圈");
+        assert_eq!(rows[1][1], 29.99);
+        assert_eq!(rows[2][0], "爆闪灯");
+        assert_eq!(sheets[0]["truncated"], false);
+    }
+
     use super::*;
     use std::fs;
     use std::path::PathBuf;
