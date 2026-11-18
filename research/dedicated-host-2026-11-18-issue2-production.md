@@ -67,9 +67,59 @@
 
 PR #15 已合并进 main（merge commit `fd4fd15`），**main 的 CI 全绿**（敏感信息扫描 / shellcheck / 构建与测试 macOS）——这是 10-19 之后 main 第一次绿。
 
-## 六、仍然没有执行的部分（不构成验收通过）
 
-1. **仍未执行**：真实微信收发（需要先启动并登录微信）、真实模型试探（会调用外部模型）、群聊/私聊区分与未读数采集（T10–T12 无可靠数据源）。整包回滚与会话转人工已在第五节实测通过。
+## 六、真实微信收发（2026-11-18 16:15-16:30 SGT，测试号已登录）
+
+### 6.1 登录与运行状态
+
+微信主窗口（880×640）登录成功，账号 `wxid_example_account`，白名单：示例群 / 示例联系人甲 / 示例联系人乙。核心进入 `watching`，对白名单会话自动回复。
+
+登录确认这一步需要手机点「Confirm on Phone」，由产品负责人完成；界面里的「Enter Weixin」是用产品自带的签名点击工具 `wechat_click` 点的（桌面帮助器的 `act` 被宿主窗口遮挡拦住，报 `window_occluded`）。
+
+### 6.2 外发路径（受控发送）
+
+MCP 对外接口是 `wechat-mcp` 的 **stdio** 模式（`worker.sock` 是核心与宿主之间的内部通道，不是对外端口；核心运行后它会拒绝新的外部连接，这不是故障）。用 stdio 调 51 个工具全部可用：
+
+```
+send_wechat_message(recipient="示例联系人乙", message="微信 RPA 测试消息（设计基线验收），请忽略。",
+                    idempotency_key="acceptance-20261118-issue2-single-01")
+→ status: triggered, delivery: unknown, recipient_verified: true,
+  recipient_verification: chat_title_ocr,
+  recipient_verification_note: 标题 OCR 已匹配显示名称，仍不是微信 ID 级核验,
+  send_id: 26ae4b67-f320-4315-abdc-3406749533af
+```
+
+`get_send_status`（同幂等键）回放同一条记录，没有重复发送。
+微信窗口 OCR 回显：标题 `示例联系人乙`，消息正文「微信 RPA测试消息（设计基…」。
+**没有声称送达**：`delivery: unknown`，`identity_verified: false`。
+
+### 6.3 收发闭环（机器人自动回复实录）
+
+同一天 16:14 / 16:19，联系人「示例联系人甲」发来「你好」和「在吗」，机器人各回了一条（读回的消息流）：
+
+```
+16:14  你好                      ← 对方
+16:14  （关于日期与耳机报价的说明） ← 自动回复
+16:19  在吗                      ← 对方
+16:19  在的～请问有什么可以帮您？… ← 自动回复
+```
+
+读取工具的诚实标注：`coverage: visible_only`、`source: desktop_ocr`、`direction: unknown`、`identity_verified: false`——只读可见区域，不冒充完整历史。
+
+### 6.4 统计口径（AC4 真实数字）
+
+`control status`：`triggered 72→73`、`sent_today 0→1`、`client_echo_observed 70→71`（发出的消息在界面里被回显观察到）。
+App 界面 OCR：`监听会话：1`、`待人工：0`、**`今日已发送：1`**、`桌面服务运行中 (PID 60024)`、`Rust 核心运行中 (PID 60002) (watching)`。
+
+### 6.5 仍然不算验收通过
+
+- 送达（delivery）没有确认：产品只承诺「已触发」，微信没有回执接口。
+- 接收方核验只到「聊天标题 OCR 匹配显示名」，不是微信 ID 级核验。
+- 群聊/私聊区分、未读数（T10–T12）仍无可靠数据源。
+
+## 七、仍然没有执行的部分（不构成验收通过）
+
+1. **仍未执行**：真实模型试探（会调用外部模型）、群聊/私聊区分与未读数采集（T10–T12 无可靠数据源）。整包回滚与会话转人工已在第五节实测通过。
 2. 微信客户端未运行，机器人处于暂停：真实收发、群聊/私聊区分、未读数、送达状态都没有新的实机证据（T10–T12 仍缺可靠数据源）。
 3. 视觉保真度只做到文本层（OCR + AX 控件树 + 设计说明逐条对齐），间距、字号、图标需要人眼确认。
 4. 安装时间（`installed_at`）按决定不展示，回滚卡片只显示上一版本号。
