@@ -5,8 +5,11 @@ import AppKit
 public final class SessionsPageController: NSViewController {
     private let context: StatusPanelController
     private let brainClient = BrainClient()
+    /// 会话级转人工（issue #2 AC5 / T8）：走只读/受控的 control session-handoff。
+    private let handoffClient = SessionDataClient()
     private let sessionsStack = NSStackView()
     private let emptyLabel = NSTextField(labelWithString: "暂无活跃会话")
+    private let handoffFeedback = NSTextField(labelWithString: "")
 
     // Provenance Detail Area
     private let provenanceBox = NSBox()
@@ -74,6 +77,11 @@ public final class SessionsPageController: NSViewController {
 
         box.setContent(sessionsStack)
         mainStack.addArrangedSubview(box)
+
+        // 转人工/恢复的即时反馈（失败原因直接写在界面上，不弹系统错误框）
+        handoffFeedback.textColor = .secondaryLabelColor
+        handoffFeedback.font = NSFont.systemFont(ofSize: 11)
+        mainStack.addArrangedSubview(handoffFeedback)
 
         // 轮次追溯详情区域
         provenanceBox.title = "对话轮次追溯 (Provenance)"
@@ -176,8 +184,12 @@ public final class SessionsPageController: NSViewController {
             rowStack.addArrangedSubview(resumeBtn)
         } else if session.state == "watching" || session.state == "listening" {
             stateLbl.textColor = .systemGreen
+            let handoffBtn = NSButton(title: "转人工", target: self, action: #selector(handleHandoffToHuman(_:)))
+            handoffBtn.identifier = NSUserInterfaceItemIdentifier(name)
+            handoffBtn.toolTip = "停止自动回复，把这个会话交给人工处理"
             rowStack.addArrangedSubview(nameLbl)
             rowStack.addArrangedSubview(stateLbl)
+            rowStack.addArrangedSubview(handoffBtn)
         } else {
             stateLbl.textColor = .systemYellow
             rowStack.addArrangedSubview(nameLbl)
@@ -249,5 +261,47 @@ public final class SessionsPageController: NSViewController {
         let sessionName = sender.identifier?.rawValue
         context.resumeHandoff(sessionName: sessionName)
         refreshSessions()
+    }
+
+    /// 转人工：会话列表按显示名分组，而 control session-handoff 要的是历史库里的稳定 session_id，
+    /// 所以先按显示名在只读列表里唯一定位，找不到或不唯一就明确报错，绝不猜。
+    @objc private func handleHandoffToHuman(_ sender: NSButton) {
+        guard let name = sender.identifier?.rawValue, !name.isEmpty else { return }
+        sender.isEnabled = false
+        handoffFeedback.textColor = .secondaryLabelColor
+        handoffFeedback.stringValue = "正在把「\(name)」转人工…"
+        let client = handoffClient
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let outcome: Result<Void, Error> = {
+                do {
+                    let page = try client.list()
+                    let matches = page.sessions.filter { $0.displayName == name }
+                    guard matches.count == 1, let target = matches.first else {
+                        let message = matches.isEmpty
+                            ? "历史库里找不到会话「\(name)」，无法定位稳定会话 ID"
+                            : "存在 \(matches.count) 个同名会话「\(name)」，不能按名字转人工"
+                        return .failure(NSError(domain: "session-handoff", code: 1,
+                                                userInfo: [NSLocalizedDescriptionKey: message]))
+                    }
+                    _ = try client.handoff(sessionID: target.contactID, toHuman: true)
+                    return .success(())
+                } catch {
+                    return .failure(error)
+                }
+            }()
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                switch outcome {
+                case .success:
+                    self.handoffFeedback.textColor = .systemGreen
+                    self.handoffFeedback.stringValue = "已把「\(name)」转人工，自动回复已停止"
+                case .failure(let error):
+                    sender.isEnabled = true
+                    self.handoffFeedback.textColor = .systemRed
+                    self.handoffFeedback.stringValue = "转人工失败：\(error.localizedDescription)"
+                }
+                self.refreshSessions()
+            }
+        }
     }
 }
