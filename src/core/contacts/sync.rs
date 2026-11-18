@@ -1,6 +1,7 @@
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,7 @@ use crate::core::contacts::parse::{OcrLine, parse_group_headers, parse_profile};
 use crate::core::history::store::{HistoryStore, ProfileInput, UpsertOutcome};
 use crate::core::scheduler::CoordinatorCapture;
 use crate::core::state::write_private;
+use crate::core::worker_client::{action_interrupted, worker_code};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -28,19 +30,122 @@ pub struct SyncReport {
     pub complete: bool,
 }
 
+/// 同步时微信桌面被别的操作抢占（用户正在操作电脑、别的自动化任务在点微信）会收到
+/// user_input_detected / target_not_reached（见 worker_client::ACTION_INTERRUPTED）。
+/// 这类冲突是瞬时的，整趟同步共用一份重试预算：0.5s → 1s → 2s → 4s 退避重试，
+/// 所有重试等待合计不超过 15s；预算或次数用尽才把错误按原样返回。
+#[derive(Debug, Clone)]
+struct RetryBudget {
+    backoff_ms: Vec<u64>,
+    remaining_ms: u64,
+    /// 本趟同步实际重试了多少次（只用于日志）
+    retries: u32,
+}
+
+impl Default for RetryBudget {
+    fn default() -> Self {
+        Self {
+            backoff_ms: vec![500, 1000, 2000, 4000],
+            remaining_ms: 15_000,
+            retries: 0,
+        }
+    }
+}
+
+impl RetryBudget {
+    /// 单测用：退避为 0（不拖慢测试），重试次数与总预算与线上一致
+    #[cfg(test)]
+    fn instant() -> Self {
+        Self {
+            backoff_ms: vec![0, 0, 0, 0],
+            remaining_ms: 15_000,
+            retries: 0,
+        }
+    }
+
+    /// 下一次重试要等多久：次数或总预算耗尽返回 None。
+    /// 单次等待不超过剩余预算，因此总等待时长严格不超过 remaining_ms 初值。
+    fn take_delay(&mut self, attempt: usize) -> Option<u64> {
+        let base = *self.backoff_ms.get(attempt)?;
+        if self.remaining_ms == 0 {
+            return None;
+        }
+        let delay = base.min(self.remaining_ms);
+        self.remaining_ms -= delay;
+        self.retries += 1;
+        Some(delay)
+    }
+}
+
+/// 点分组标题这种「切换展开/收起」的操作：点了可能已经生效，也可能没生效，
+/// 中断时错误里看不出来。所以不盲目重试（重试会把分组又切回去），
+/// 而是让调用方重新读屏、按实际状态再决定（实机 2026-11-18：重试点击把分组切回收起，整组 0 人）。
+/// 非瞬时错误照旧往上抛。
+fn click_outcome_unknown(error: &str) -> bool {
+    action_interrupted(error)
+}
+
+/// 一次桌面操作；只有瞬时中断（ACTION_INTERRUPTED）按预算退避重试，
+/// 其它错误（版式不符、找不到行等）立刻返回，重试用尽也返回最后一次错误。
+async fn call_resilient(
+    capture: &mut dyn CoordinatorCapture,
+    budget: &mut RetryBudget,
+    op: &str,
+    params: Value,
+) -> Result<Value> {
+    let mut attempt = 0usize;
+    loop {
+        match capture.call(op, params.clone()).await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if !action_interrupted(&msg) {
+                    return Err(e);
+                }
+                match budget.take_delay(attempt) {
+                    Some(delay_ms) => {
+                        info!(
+                            op,
+                            attempt = attempt + 1,
+                            delay_ms,
+                            code = worker_code(&msg).as_str(),
+                            "contacts_sync_retry_after_interrupt"
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        attempt += 1;
+                    }
+                    None => {
+                        info!(
+                            op,
+                            attempts = attempt,
+                            code = worker_code(&msg).as_str(),
+                            "contacts_sync_interrupt_retries_exhausted"
+                        );
+                        return Err(e);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// 把所有展开的分组收起，让各分组标题都回到列表顶部一屏（实机：遗留的展开分组会把后面的标题挤出屏幕、
 /// 还会让上一个分组一路滚进下一个分组，把别的分组的人记错分类）。
 /// 判断展开：标题右侧没有人数，并且标题正下方紧跟着字母索引或联系人行。
-async fn collapse_all_groups(capture: &mut dyn CoordinatorCapture) -> Result<Vec<OcrLine>> {
+async fn collapse_all_groups(
+    capture: &mut dyn CoordinatorCapture,
+    budget: &mut RetryBudget,
+) -> Result<Vec<OcrLine>> {
     let mut lines: Vec<OcrLine> = Vec::new();
     for _ in 0..5 {
-        let _ = capture
-            .call(
-                "contacts_scroll_list",
-                json!({"direction": "up", "ticks": 20}),
-            )
-            .await;
-        let v = capture.call("contacts_headers", json!({})).await?;
+        let _ = call_resilient(
+            capture,
+            budget,
+            "contacts_scroll_list",
+            json!({"direction": "up", "ticks": 20}),
+        )
+        .await;
+        let v = call_resilient(capture, budget, "contacts_headers", json!({})).await?;
         lines = v
             .get("lines")
             .and_then(|l| serde_json::from_value(l.clone()).ok())
@@ -56,9 +161,21 @@ async fn collapse_all_groups(capture: &mut dyn CoordinatorCapture) -> Result<Vec
             .find(|hy| group_expanded(&lines, *hy));
         match expanded {
             Some(hy) => {
-                let _ = capture
+                // 收起/展开是切换操作，点了之后状态可能已经变了：不重试、重新读屏再判断
+                if let Err(e) = capture
                     .call("contacts_click_list", json!({"x": 180.0, "y": hy}))
-                    .await?;
+                    .await
+                {
+                    let msg = format!("{e:#}");
+                    if !click_outcome_unknown(&msg) {
+                        return Err(e);
+                    }
+                    info!(
+                        op = "contacts_click_list",
+                        code = worker_code(&msg).as_str(),
+                        "contacts_sync_toggle_outcome_unknown"
+                    );
+                }
             }
             None => return Ok(lines),
         }
@@ -153,6 +270,11 @@ pub fn account_state_path(state_dir: &Path, account_id: &str, kind: &str) -> Pat
 pub fn write_sync_result(state_dir: &Path, account_id: &str, result: &Value) -> Result<()> {
     let mut result = result.clone();
     result["account_id"] = json!(account_id);
+    // 未完成原因统一在这里补：协调器和命令行各自拼结果 JSON，其它调用点不用改。
+    // 已经带该字段时保留（调用方可能知道更多上下文）。
+    if result.get("incomplete_reasons").is_none() {
+        result["incomplete_reasons"] = json!(incomplete_reasons(&result));
+    }
     write_private(
         &account_state_path(state_dir, account_id, "result"),
         &result,
@@ -165,6 +287,128 @@ pub fn write_sync_result(state_dir: &Path, account_id: &str, result: &Value) -> 
     }
     // 保留已有控制命令的响应位置，但消费者必须校验账号和请求 ID。
     write_private(&state_dir.join("contacts-sync-result.json"), &result)
+}
+
+/// 分类的中文名（只用于给人看的未完成原因）。
+fn category_label(category: &str) -> &'static str {
+    match category {
+        "personal" => "联系人",
+        "work" => "企业微信联系人",
+        "group" => "群聊",
+        "official" => "公众号/服务号",
+        _ => "",
+    }
+}
+
+/// 一条机器错误码翻成人话（UI 直接展示，不再只显示「同步未完整」）。
+fn describe_sync_error(error: &str) -> String {
+    let raw = error.trim();
+    let text = match raw {
+        "expired" => "同步请求已过期（超过 10 分钟没被处理），请重新点「立即同步」".to_string(),
+        "worker_not_connected" => "机器人没有连上微信窗口，无法同步".to_string(),
+        "account_mismatch" => {
+            "当前登录的微信账号和同步请求不一致（刚换过号），请重新同步".to_string()
+        }
+        _ if raw.contains("user_input_detected") => {
+            "同步时桌面被别的操作占用（你正在操作电脑或机器人正在操作微信），自动重试后仍然被打断"
+                .to_string()
+        }
+        _ if raw.contains("target_not_reached") => {
+            "微信窗口中途被切走（target_not_reached），自动重试后仍然打不到通讯录".to_string()
+        }
+        _ if raw.contains("layout_mismatch") => {
+            "微信通讯录界面版式和预期不一致（layout_mismatch），可能微信界面变了".to_string()
+        }
+        _ if raw.contains("desktop_busy") => {
+            "微信桌面正被别的操作独占（desktop_busy），本次同步没有开始".to_string()
+        }
+        _ if raw.contains("contacts_sync_interrupted") => {
+            "同步被中途打断（收到暂停/停止，或检测到切换了微信号）".to_string()
+        }
+        _ => format!("同步失败：{}", raw.chars().take(300).collect::<String>()),
+    };
+    text
+}
+
+/// 结果里可读的未完成原因；complete=true 时为空。
+/// 只读结果 JSON 里已有的字段（complete / error / per_category / unreadable_rows /
+/// needs_review / stopped|yielded），所以协调器和命令行先后写结果都能补上。
+fn incomplete_reasons(result: &Value) -> Vec<String> {
+    if result.get("complete").and_then(Value::as_bool) == Some(true) {
+        return Vec::new();
+    }
+    let mut reasons: Vec<String> = Vec::new();
+    if let Some(error) = result.get("error").and_then(Value::as_str) {
+        reasons.push(describe_sync_error(error));
+    }
+
+    let per_category: Vec<(String, u32, u32)> = result
+        .get("per_category")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| {
+                    let category = r.get("category")?.as_str()?.to_string();
+                    let expected = r.get("expected")?.as_u64()? as u32;
+                    let synced = r.get("synced")?.as_u64()? as u32;
+                    Some((category, expected, synced))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut shortfall = 0u32;
+    for (category, expected, synced) in &per_category {
+        if synced >= expected {
+            continue;
+        }
+        let missing = expected - synced;
+        shortfall = shortfall.saturating_add(missing);
+        let label = category_label(category);
+        let head = if label.is_empty() {
+            category.clone()
+        } else {
+            format!("{label}({category})")
+        };
+        reasons.push(format!("{head} {synced}/{expected}，{missing} 行读不到"));
+    }
+
+    // 资料卡读失败但该分类人数已经对上的部分（重复读、点到字母行等）也要说清楚
+    let unreadable = result
+        .get("unreadable_rows")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32;
+    if unreadable > shortfall {
+        reasons.push(format!(
+            "{} 行资料卡读取失败（未计入同步）",
+            unreadable - shortfall
+        ));
+    }
+
+    let needs_review = result
+        .get("needs_review")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if needs_review > 0 {
+        reasons.push(format!(
+            "{needs_review} 条资料无法确认是否同一个人，已转人工确认"
+        ));
+    }
+
+    // 协调器写 stopped，命令行/旧结果写 yielded：两个都认
+    let stopped = result
+        .get("stopped")
+        .and_then(Value::as_bool)
+        .or_else(|| result.get("yielded").and_then(Value::as_bool))
+        .unwrap_or(false);
+    if stopped {
+        reasons.push("同步被中途打断（收到暂停/停止，或检测到切换了微信号）".to_string());
+    }
+
+    if per_category.is_empty() && result.get("error").is_none() {
+        reasons.push("没有读到通讯录分组（微信可能不在通讯录页，或界面版式变了）".to_string());
+    }
+    reasons
 }
 
 /// 只有分类、名字精确一致且唯一的有效强身份才可免开资料卡。
@@ -254,6 +498,30 @@ pub async fn run_sync(
     should_yield: &(dyn Fn() -> bool + Send + Sync),
     now_ms: i64,
 ) -> Result<SyncReport> {
+    run_sync_with(
+        capture,
+        store,
+        account_id,
+        mode,
+        checkpoint,
+        should_yield,
+        now_ms,
+        RetryBudget::default(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_sync_with(
+    capture: &mut dyn CoordinatorCapture,
+    store: &HistoryStore,
+    account_id: &str,
+    mode: SyncMode,
+    checkpoint: &Path,
+    should_yield: &(dyn Fn() -> bool + Send + Sync),
+    now_ms: i64,
+    mut retry: RetryBudget,
+) -> Result<SyncReport> {
     // 先独占微信（对话监控已停、网关等其他进程也不能在两次操作之间插进来），整个同步结束再释放
     if let Err(e) = capture.call("contacts_lease_begin", json!({})).await {
         let _ = capture.call("contacts_lease_end", json!({})).await;
@@ -274,6 +542,7 @@ pub async fn run_sync(
         checkpoint,
         should_yield,
         now_ms,
+        &mut retry,
     )
     .await;
     if let Err(e) = &result {
@@ -289,7 +558,8 @@ pub async fn run_sync(
     }
     if result.is_err() {
         // 进过通讯录后任何一步失败，都必须切回聊天页：否则微信停在通讯录页，机器人看不到聊天（2026-11-08 实机）
-        if let Err(e) = capture.call("contacts_leave", json!({})).await {
+        // 切回聊天页同样可能被瞬时中断，这里按剩余预算再试一次，避免机器人一直停在通讯录页
+        if let Err(e) = call_resilient(capture, &mut retry, "contacts_leave", json!({})).await {
             tracing::warn!("contacts_leave after failed sync also failed: {e:#}");
         }
     }
@@ -300,6 +570,7 @@ pub async fn run_sync(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_sync_inner(
     capture: &mut dyn CoordinatorCapture,
     store: &HistoryStore,
@@ -308,6 +579,7 @@ async fn run_sync_inner(
     checkpoint: &Path,
     should_yield: &(dyn Fn() -> bool + Send + Sync),
     now_ms: i64,
+    retry: &mut RetryBudget,
 ) -> Result<SyncReport> {
     let state_dir = checkpoint.parent().unwrap_or_else(|| Path::new("."));
     // 不再断点续做：中途停下就下次从头来（按微信号更新，重复跑不会重复记录）
@@ -339,8 +611,8 @@ async fn run_sync_inner(
     };
 
     anyhow::ensure!(!should_yield(), "contacts_sync_interrupted");
-    capture.call("contacts_enter", json!({})).await?;
-    let top = collapse_all_groups(capture).await?;
+    call_resilient(capture, retry, "contacts_enter", json!({})).await?;
+    let top = collapse_all_groups(capture, retry).await?;
     let groups = parse_group_headers(&top);
     info!(
         lines = top.len(),
@@ -371,6 +643,7 @@ async fn run_sync_inner(
             &existing,
             should_yield,
             now_ms,
+            retry,
         )
         .await?;
         r.stopped |= should_yield();
@@ -392,7 +665,7 @@ async fn run_sync_inner(
         }
     }
 
-    capture.call("contacts_leave", json!({})).await?;
+    call_resilient(capture, retry, "contacts_leave", json!({})).await?;
 
     let complete = !stopped
         && !per_category.is_empty()
@@ -747,6 +1020,7 @@ async fn sync_group(
     existing: &[serde_json::Value],
     should_yield: &(dyn Fn() -> bool + Send + Sync),
     now_ms: i64,
+    retry: &mut RetryBudget,
 ) -> Result<GroupResult> {
     // 每格滚多少点事先不知道（实机 5 格就超过一屏、把人跳过去了）：先滚 1 格量出来，之后按实测算格数
     let mut px_per_tick: Option<f64> = None;
@@ -758,7 +1032,7 @@ async fn sync_group(
     };
 
     // 1. 收起所有分组、回到顶部，找到本分组标题并展开（按标题下方内容确认，最多点两次）
-    let top = collapse_all_groups(capture).await?;
+    let top = collapse_all_groups(capture, retry).await?;
     let Some(hy) = top
         .iter()
         .find(|l| l.x < 115.0 && cjk_only(&l.text) == group_title_cjk(category))
@@ -771,19 +1045,37 @@ async fn sync_group(
         lines: top,
         avatars: Vec::new(),
     };
-    for _ in 0..2 {
+    // 展开也是切换操作：被打断时不补点（补点会把已经展开的分组又切回收起），
+    // 而是重新读屏，下一轮按实际状态决定还要不要点
+    for _ in 0..3 {
         if group_expanded(&screen.lines, hy) {
             break;
         }
-        screen = screen_of(
-            &capture
-                .call("contacts_click_list", json!({"x": 180.0, "y": hy}))
-                .await?,
-        );
+        match capture
+            .call("contacts_click_list", json!({"x": 180.0, "y": hy}))
+            .await
+        {
+            Ok(v) => screen = screen_of(&v),
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if !click_outcome_unknown(&msg) {
+                    return Err(e);
+                }
+                info!(
+                    category,
+                    op = "contacts_click_list",
+                    code = worker_code(&msg).as_str(),
+                    "contacts_sync_toggle_outcome_unknown"
+                );
+                screen = screen_of(
+                    &call_resilient(capture, retry, "contacts_headers", json!({})).await?,
+                );
+            }
+        }
     }
     if screen.avatars.is_empty() {
         // 已展开但还没有头像数据（例如展开前就是展开状态）：重新取一次本屏
-        screen = screen_of(&capture.call("contacts_headers", json!({})).await?);
+        screen = screen_of(&call_resilient(capture, retry, "contacts_headers", json!({})).await?);
     }
 
     // 2. 逐屏处理。done_until：本屏上已处理到的位置（这个 y 及以上的行都处理过）
@@ -828,10 +1120,20 @@ async fn sync_group(
                 }
             }
 
-            let resp = capture
-                .call("contacts_open_row", json!({"y": y}))
-                .await
-                .unwrap_or_default();
+            // 点资料卡也可能被瞬时打断：按预算重试；重试用尽仍失败就按原来的“这一行读不到”处理
+            let resp =
+                match call_resilient(capture, retry, "contacts_open_row", json!({"y": y})).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        info!(
+                            category,
+                            row_y = *y,
+                            error = format!("{e:#}").as_str(),
+                            "contacts_sync_open_row_failed"
+                        );
+                        Value::default()
+                    }
+                };
             if should_yield() {
                 r.stopped = true;
                 return Ok(r);
@@ -981,12 +1283,13 @@ async fn sync_group(
             _ => 1,
         };
         let next = screen_of(
-            &capture
-                .call(
-                    "contacts_scroll_list",
-                    json!({"direction": "down", "ticks": ticks}),
-                )
-                .await?,
+            &call_resilient(
+                capture,
+                retry,
+                "contacts_scroll_list",
+                json!({"direction": "down", "ticks": ticks}),
+            )
+            .await?,
         );
         let expect = px_per_tick.map_or(100.0, |px| px * ticks as f64);
         let shift = measure_shift(&rows, &screen, &next, expect);
@@ -1099,6 +1402,9 @@ mod tests {
         pub header_open_clicks: usize,
         /// 模拟某个操作失败（如真机上的 layout_mismatch）
         pub fail_op: Option<String>,
+        /// 模拟瞬时中断（真机上的 user_input_detected）：该操作前 interrupt_left 次失败，之后恢复正常
+        pub interrupt_op: Option<String>,
+        pub interrupt_left: usize,
         /// 真机：分组展开后标题旁的人数仍然显示（不能用人数判断是否展开）
         pub counts_always: bool,
         /// 真机：字母行常识别不出来
@@ -1126,6 +1432,8 @@ mod tests {
                 header_arrows: false,
                 header_open_clicks: 0,
                 fail_op: None,
+                interrupt_op: None,
+                interrupt_left: 0,
                 counts_always: false,
                 letters_unread: false,
                 shown_profile: None,
@@ -1310,6 +1618,12 @@ mod tests {
             let calls = self.calls.clone();
             calls.lock().unwrap().push((op.to_string(), params.clone()));
 
+            if self.interrupt_op.as_deref() == Some(op) && self.interrupt_left > 0 {
+                self.interrupt_left -= 1;
+                return Box::pin(async {
+                    bail!("private visual operation failed: invalid(\"user_input_detected\")")
+                });
+            }
             if self.fail_op.as_deref() == Some(op) {
                 return Box::pin(async {
                     bail!(
@@ -3421,5 +3735,338 @@ mod tests {
         assert_eq!(b.len(), 1);
         assert_eq!(b[0]["last_synced_at"], 2000);
         assert_ne!(a[0]["contact_id"], b[0]["contact_id"]);
+    }
+
+    // ==== 瞬时中断（user_input_detected）的有界退避重试 ====
+
+    /// 预算算术：0.5/1/2/4 秒四档，用尽后不再重试；总等待不超过预算初值
+    #[test]
+    fn test_retry_budget_backoff_and_cap() {
+        let mut budget = RetryBudget::default();
+        assert_eq!(budget.take_delay(0), Some(500));
+        assert_eq!(budget.take_delay(1), Some(1000));
+        assert_eq!(budget.take_delay(2), Some(2000));
+        assert_eq!(budget.take_delay(3), Some(4000));
+        // 次数用尽（同一操作最多 4 次重试）
+        assert_eq!(budget.take_delay(4), None);
+        assert_eq!(budget.retries, 4);
+
+        // 预算小于一档退避时时被截断，之后不再重试
+        let mut small = RetryBudget {
+            backoff_ms: vec![500, 1000, 2000, 4000],
+            remaining_ms: 1200,
+            retries: 0,
+        };
+        assert_eq!(small.take_delay(0), Some(500));
+        assert_eq!(small.take_delay(1), Some(700));
+        assert_eq!(small.take_delay(2), None);
+        assert_eq!(small.remaining_ms, 0);
+    }
+
+    /// 机器人并发操作微信时（user_input_detected）同步不能一次就失败：
+    /// 进入通讯录、读屏、滚动被打断后会退避重试并最终完成
+    #[tokio::test]
+    async fn test_sync_retries_transient_interrupts_and_completes() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        let store = HistoryStore::open(&state_dir).unwrap();
+        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
+        let personal = letter_group("personal", "联系人", "人", &[("A", 3), ("B", 2)]);
+        let mut ui = VirtualContactsUi::new(vec![personal]);
+
+        // 进入通讯录被打断 2 次、读屏被打断 1 次、滚动被打断 1 次，之后恢复正常
+        ui.interrupt_op = Some("contacts_enter".to_string());
+        ui.interrupt_left = 2;
+        let report = run_sync_with(
+            &mut ui,
+            &store,
+            "acct",
+            SyncMode::Full,
+            &checkpoint,
+            &|| false,
+            1000,
+            RetryBudget::instant(),
+        )
+        .await
+        .unwrap();
+        assert!(report.complete, "{report:?}");
+        let enter_calls = ui
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(op, _)| op == "contacts_enter")
+            .count();
+        assert_eq!(enter_calls, 3, "两次中断 + 一次成功");
+
+        // 同一趟同步里读屏（联系人分组展开）被打断也能恢复
+        let mut ui =
+            VirtualContactsUi::new(vec![letter_group("personal", "联系人", "人", &[("A", 2)])]);
+        ui.interrupt_op = Some("contacts_headers".to_string());
+        ui.interrupt_left = 1;
+        let report = run_sync_with(
+            &mut ui,
+            &store,
+            "acct2",
+            SyncMode::Full,
+            &checkpoint,
+            &|| false,
+            2000,
+            RetryBudget::instant(),
+        )
+        .await
+        .unwrap();
+        assert!(report.complete, "{report:?}");
+        assert!(!state_dir.join("admin-pause.json").exists());
+    }
+
+    /// 重试用尽后仍按原来的错误返回，并把可读原因写进结果
+    #[tokio::test]
+    async fn test_sync_gives_up_after_interrupt_retries_exhausted() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        let store = HistoryStore::open(&state_dir).unwrap();
+        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
+        let mut ui =
+            VirtualContactsUi::new(vec![letter_group("personal", "联系人", "人", &[("A", 2)])]);
+        ui.interrupt_op = Some("contacts_enter".to_string());
+        ui.interrupt_left = 100; // 一直被打断
+
+        let res = run_sync_with(
+            &mut ui,
+            &store,
+            "acct",
+            SyncMode::Full,
+            &checkpoint,
+            &|| false,
+            1000,
+            RetryBudget::instant(),
+        )
+        .await;
+        let err = res.expect_err("重试用尽必须失败");
+        assert!(
+            format!("{err:#}").contains("user_input_detected"),
+            "{err:#}"
+        );
+        let enter_calls = ui
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(op, _)| op == "contacts_enter")
+            .count();
+        assert_eq!(enter_calls, 5, "1 次 + 4 次重试");
+
+        let result: Value = serde_json::from_str(
+            &fs::read_to_string(state_dir.join("contacts-sync-result.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["complete"], false);
+        let reasons = result["incomplete_reasons"].as_array().expect("reasons");
+        let text = serde_json::to_string(reasons).unwrap();
+        assert!(text.contains("桌面被别的操作占用"), "{text}");
+        // 旧字段全在
+        assert!(result.get("error").is_some(), "{result}");
+        assert!(result.get("finished_at_ms").is_some(), "{result}");
+        assert!(result.get("account_id").is_some(), "{result}");
+    }
+
+    /// 版式不符之类不是瞬时冲突，不得重试（否则白等 7.5 秒）
+    #[tokio::test]
+    async fn test_sync_does_not_retry_non_interrupt_errors() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        let store = HistoryStore::open(&state_dir).unwrap();
+        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
+        let mut ui =
+            VirtualContactsUi::new(vec![letter_group("personal", "联系人", "人", &[("A", 2)])]);
+        ui.fail_op = Some("contacts_headers".to_string());
+        let res = run_sync_with(
+            &mut ui,
+            &store,
+            "acct",
+            SyncMode::Full,
+            &checkpoint,
+            &|| false,
+            1000,
+            RetryBudget::instant(),
+        )
+        .await;
+        assert!(res.is_err());
+        let headers_calls = ui
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(op, _)| op == "contacts_headers")
+            .count();
+        assert_eq!(headers_calls, 1, "非瞬时错误只尝试一次");
+    }
+
+    // ==== 未完成原因（incomplete_reasons） ====
+
+    /// 分类人数不足时给出可读原因，并且旧字段全部保留
+    #[tokio::test]
+    async fn test_incomplete_reasons_report_category_shortfall() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        let store = HistoryStore::open(&state_dir).unwrap();
+        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
+        let mut group = letter_group("personal", "联系人", "人", &[("A", 2)]);
+        // 第二行点开资料卡是空的（实机：被并发操作打断后资料卡没读出来）
+        group.letter_sections[0].1[1].misaligned_profile = Some(vec![]);
+        let mut ui = VirtualContactsUi::new(vec![group]);
+        let report = run_sync_with(
+            &mut ui,
+            &store,
+            "acct",
+            SyncMode::Full,
+            &checkpoint,
+            &|| false,
+            1000,
+            RetryBudget::instant(),
+        )
+        .await
+        .unwrap();
+        assert!(!report.complete);
+
+        let result: Value = serde_json::from_str(
+            &fs::read_to_string(state_dir.join("contacts-sync-result.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["complete"], false);
+        assert_eq!(result["unreadable_rows"], 1);
+        assert_eq!(result["per_category"][0]["category"], "personal");
+        assert_eq!(result["per_category"][0]["expected"], 2);
+        assert_eq!(result["per_category"][0]["synced"], 1);
+        let reasons: Vec<String> = result["incomplete_reasons"]
+            .as_array()
+            .expect("reasons")
+            .iter()
+            .map(|r| r.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r.contains("联系人(personal) 1/2") && r.contains("1 行读不到")),
+            "{reasons:?}"
+        );
+    }
+
+    /// 协调器和命令行写结果的路径不同：写结果时统一补 incomplete_reasons，旧字段不动
+    #[test]
+    fn test_write_sync_result_adds_incomplete_reasons() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+
+        // 命令行（scheduler）写的形状：yielded 而不是 stopped
+        let result = json!({
+            "id": "req_1",
+            "finished_at_ms": 1000,
+            "complete": false,
+            "per_category": [{"category": "work", "expected": 17, "synced": 16}],
+            "unreadable_rows": 1,
+            "needs_review": 0,
+            "yielded": false,
+        });
+        write_sync_result(&state_dir, "acct", &result).unwrap();
+        let written: Value = serde_json::from_str(
+            &fs::read_to_string(state_dir.join("contacts-sync-result.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(written["id"], "req_1");
+        assert_eq!(written["complete"], false);
+        assert_eq!(written["per_category"][0]["expected"], 17);
+        assert_eq!(written["yielded"], false);
+        assert_eq!(written["account_id"], "acct");
+        let reasons: Vec<&str> = written["incomplete_reasons"]
+            .as_array()
+            .expect("reasons")
+            .iter()
+            .map(|r| r.as_str().unwrap())
+            .collect();
+        assert!(
+            reasons
+                .iter()
+                .any(|r| *r == "企业微信联系人(work) 16/17，1 行读不到"),
+            "{reasons:?}"
+        );
+
+        // 机器错误码翻成人话
+        write_sync_result(
+            &state_dir,
+            "acct",
+            &json!({
+                "complete": false,
+                "error": "private visual operation failed: invalid(\"user_input_detected\")"
+            }),
+        )
+        .unwrap();
+        let written: Value = serde_json::from_str(
+            &fs::read_to_string(state_dir.join("contacts-sync-result.json")).unwrap(),
+        )
+        .unwrap();
+        let text = serde_json::to_string(&written["incomplete_reasons"]).unwrap();
+        assert!(text.contains("桌面被别的操作占用"), "{text}");
+
+        // 成功结果不带原因
+        write_sync_result(
+            &state_dir,
+            "acct",
+            &json!({"complete": true, "per_category": [{"category": "personal", "expected": 2, "synced": 2}]}),
+        )
+        .unwrap();
+        let written: Value = serde_json::from_str(
+            &fs::read_to_string(state_dir.join("contacts-sync-result.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(written["incomplete_reasons"], json!([]));
+    }
+
+    /// 展开分组是「切换」操作：被瞬时中断时不能补点（补点会把已展开的分组切回收起，
+    /// 实机 2026-11-18 重试点击导致 work 0/17、personal 0/737），应重新读屏后按实际状态继续
+    #[tokio::test]
+    async fn test_interrupted_toggle_click_is_not_retried() {
+        let temp = TestTempDir::new();
+        let state_dir = temp.path().join("state");
+        let store = HistoryStore::open(&state_dir).unwrap();
+        let checkpoint = state_dir.join("contacts-sync-checkpoint.json");
+        let personal = letter_group("personal", "联系人", "人", &[("A", 2)]);
+        let mut ui = VirtualContactsUi::new(vec![personal]);
+        ui.interrupt_op = Some("contacts_click_list".to_string());
+        ui.interrupt_left = 1;
+
+        let report = run_sync_with(
+            &mut ui,
+            &store,
+            "acct",
+            SyncMode::Full,
+            &checkpoint,
+            &|| false,
+            1000,
+            RetryBudget::instant(),
+        )
+        .await
+        .unwrap();
+        assert!(report.complete, "{report:?}");
+        assert_eq!(report.per_category, vec![("personal".to_string(), 2, 2)]);
+        let clicks = ui
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(op, _)| op == "contacts_click_list")
+            .count();
+        assert_eq!(clicks, 2, "被打断的那次不重试，只补一次真正的展开点击");
+        // 读屏被重试过（中断后重新读一次状态），证明走的是「重读状态」而不是「补点」
+        let headers = ui
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(op, _)| op == "contacts_headers")
+            .count();
+        assert!(headers >= 2, "{headers}");
     }
 }

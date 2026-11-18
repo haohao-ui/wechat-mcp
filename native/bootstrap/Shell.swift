@@ -14,6 +14,13 @@ public struct ShellPageEntry {
     }
 }
 
+/// 页面把「页标题行右侧」的操作视图（按钮、状态标签等）交给 Shell 统一摆放。
+/// Shell 负责标题行布局；页面不再在内容区自绘这一行（无 Shell 的单页测试仍保留页面内动作行）。
+public protocol ShellPageActionProviding: AnyObject {
+    /// 页标题行右侧要展示的操作视图（按钮等）；Shell 负责布局与悬停区域。
+    func shellPageActionViews() -> [NSView]
+}
+
 public final class ShellViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     private var pages: [ShellPageEntry] = []
     private let splitView = NSSplitView()
@@ -21,6 +28,9 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
     private let contentContainer = NSView()
     private let pageHost = NSView()
     private let pageTitle = NSTextField(labelWithString: "")
+    private let titleRow = NSStackView()
+    private let titleSpacer = NSView()
+    private let actionsStack = NSStackView()
     private var activePageController: NSViewController?
     /// 当前选中页面的 id：切换语言重建侧栏时用来保持原页面。
     public private(set) var selectedPageID: String = ""
@@ -64,15 +74,34 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
         contentContainer.layer?.backgroundColor = Theme.Colors.pageBackground.cgColor
         pageTitle.font = NSFont.systemFont(ofSize: 28, weight: .semibold)
         pageTitle.textColor = Theme.Colors.textPrimary
-        pageTitle.translatesAutoresizingMaskIntoConstraints = false
         pageTitle.setAccessibilityLabel(L10n.t(.uiShell048))
+        pageTitle.setContentHuggingPriority(.required, for: .horizontal)
+        pageTitle.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        titleSpacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        titleSpacer.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+
+        actionsStack.orientation = .horizontal
+        actionsStack.alignment = .centerY
+        actionsStack.spacing = 8
+
+        titleRow.orientation = .horizontal
+        titleRow.alignment = .centerY
+        titleRow.spacing = 12
+        titleRow.translatesAutoresizingMaskIntoConstraints = false
+        titleRow.addArrangedSubview(pageTitle)
+        titleRow.addArrangedSubview(titleSpacer)
+        titleRow.addArrangedSubview(actionsStack)
+
         pageHost.translatesAutoresizingMaskIntoConstraints = false
-        contentContainer.addSubview(pageTitle)
+        contentContainer.addSubview(titleRow)
         contentContainer.addSubview(pageHost)
         NSLayoutConstraint.activate([
-            pageTitle.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor, constant: 24),
-            pageTitle.topAnchor.constraint(equalTo: contentContainer.topAnchor, constant: 20),
-            pageHost.topAnchor.constraint(equalTo: pageTitle.bottomAnchor, constant: 16),
+            titleRow.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor, constant: 24),
+            titleRow.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor, constant: -24),
+            titleRow.topAnchor.constraint(equalTo: contentContainer.topAnchor, constant: 20),
+            titleRow.heightAnchor.constraint(greaterThanOrEqualToConstant: 36),
+            pageHost.topAnchor.constraint(equalTo: titleRow.bottomAnchor, constant: 16),
             pageHost.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
             pageHost.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
             pageHost.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor)
@@ -128,6 +157,22 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
             target.view.topAnchor.constraint(equalTo: pageHost.topAnchor),
             target.view.bottomAnchor.constraint(equalTo: pageHost.bottomAnchor)
         ])
+
+        // 页面视图加载完成后再取它在标题行右侧要展示的操作视图（按钮由页面持有，Shell 只负责摆放）。
+        refreshPageActions(for: target)
+    }
+
+    /// 清空上一页的动作视图，换成新页面提供的按钮/状态标签；未实现协议的页面标题行右侧留空。
+    private func refreshPageActions(for controller: NSViewController) {
+        for actionView in actionsStack.arrangedSubviews {
+            actionsStack.removeArrangedSubview(actionView)
+            actionView.removeFromSuperview()
+        }
+        guard let provider = controller as? ShellPageActionProviding else { return }
+        for actionView in provider.shellPageActionViews() {
+            actionView.translatesAutoresizingMaskIntoConstraints = false
+            actionsStack.addArrangedSubview(actionView)
+        }
     }
 
     public func selectPage(id: String) {

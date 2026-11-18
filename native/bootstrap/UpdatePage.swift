@@ -787,7 +787,7 @@ public final class UpdateClient {
 
 // MARK: - Update Page View Controller
 
-public final class UpdatePageController: NSViewController {
+public final class UpdatePageController: NSViewController, ShellPageActionProviding {
     private let context: StatusPanelController
     private var client: UpdateClient
 
@@ -841,6 +841,8 @@ public final class UpdatePageController: NSViewController {
     // UI - 操作按钮 (只读阶段全部禁用写操作，分行排布)
     private let checkButton = NSButton(title: L10n.t(.uiUpdate160), target: nil, action: nil)
     private let refreshStatusButton = NSButton(title: L10n.t(.uiUpdate161), target: nil, action: nil)
+    /// 顶部操作行：无 Shell 时右对齐显示；接入 Shell 时两个按钮移到页标题行。
+    private var topActionRow: NSStackView?
     private let downloadButton = ThemePrimaryButton(title: L10n.t(.uiUpdate162), target: nil, action: nil)
     private let installButton = NSButton(title: L10n.t(.uiUpdate163), target: nil, action: nil)
     private let deferButton = NSButton(title: L10n.t(.uiUpdate164), target: nil, action: nil)
@@ -990,7 +992,9 @@ public final class UpdatePageController: NSViewController {
         refreshStatusButton.action = #selector(handleRefreshStatus)
         styleSecondaryButton(checkButton)
         styleSecondaryButton(refreshStatusButton)
-        addFullWidthRow(makeRow([makeSpacer(), refreshStatusButton, checkButton]), to: contentStack)
+        let actionRow = makeRow([makeSpacer(), refreshStatusButton, checkButton])
+        topActionRow = actionRow
+        addFullWidthRow(actionRow, to: contentStack)
 
         // 1. 当前版本
         let currentCard = createSectionBox(title: L10n.t(.uiUpdate168))
@@ -1713,6 +1717,23 @@ public final class UpdatePageController: NSViewController {
     @objc public func handleDisabledWriteAction() {
         actionFeedbackLabel.stringValue = L10n.t(.uiUpdate219)
         actionFeedbackLabel.textColor = Theme.Colors.statusWarningText
+    }
+
+    // MARK: - ShellPageActionProviding
+
+    /// 「刷新状态 / 检查更新」交给 Shell 标题行右侧；页面内动作行保留空容器，
+    /// 无 Shell 的单页测试仍能遍历到这两个按钮（内容区不再有空白行）。
+    public func shellPageActionViews() -> [NSView] {
+        guard let topActionRow else { return [] }
+        let actionViews: [NSView] = [refreshStatusButton, checkButton]
+        for actionView in actionViews {
+            if topActionRow.arrangedSubviews.contains(actionView) {
+                topActionRow.removeArrangedSubview(actionView)
+            }
+            actionView.removeFromSuperview()
+        }
+        contentStack.setCustomSpacing(0, after: topActionRow)
+        return actionViews
     }
 
     @objc private func handleRefreshStatus() {

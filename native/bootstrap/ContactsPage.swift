@@ -132,6 +132,8 @@ public struct ContactsSyncInfo: Codable {
     public let error: String?
     /// 同步被中途暂停（检测到用户操作电脑或服务关闭）。
     public let stopped: Bool?
+    /// 后端给出的可读未完成原因（例如「企业微信联系人(work) 16/17，1 行读不到」）。
+    public let incompleteReasons: [String]?
 
     enum CodingKeys: String, CodingKey {
         case finishedAtMs = "finished_at_ms"
@@ -141,6 +143,7 @@ public struct ContactsSyncInfo: Codable {
         case needsReview = "needs_review"
         case error
         case stopped
+        case incompleteReasons = "incomplete_reasons"
     }
 }
 
@@ -292,6 +295,10 @@ public struct ContactsPageLogic {
     /// 同步未完成时列出人能看懂的原因（不再只写"同步未完整"）。
     public static func incompleteSyncReasons(_ sync: ContactsSyncInfo) -> String {
         var parts: [String] = []
+        // 后端已给可读原因时优先用它（含分类与计数，最贴近实情）。
+        if let readable = sync.incompleteReasons, !readable.isEmpty {
+            return readable.joined(separator: " ")
+        }
         if sync.stopped == true {
             parts.append(L10n.t(.contactsSyncReasonStopped))
         }
@@ -591,7 +598,7 @@ private final class ContactsTableHeaderView: NSTableHeaderView {
 
 // MARK: - Page Controller
 
-public final class ContactsPageController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+public final class ContactsPageController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, ShellPageActionProviding {
     private let context: StatusPanelController
 
     // Data state
@@ -616,6 +623,11 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
     private var syncBanner: ThemeStatusBanner!
     private var presetBanner: ThemeStatusBanner!
     private var segmentBar: ContactsSegmentBar!
+    /// 顶部操作行：无 Shell 时右对齐显示；接入 Shell 时按钮与同步状态被移到页标题行。
+    private var actionRow: NSStackView!
+    private var initSyncButton: ThemePrimaryButton!
+    private var quickSyncButton: ThemePrimaryButton!
+    private var refreshButton: ContactsSecondaryButton!
     private let contactsTable = NSTableView()
     private let emptyLabel = NSTextField(wrappingLabelWithString: "")
 
@@ -731,8 +743,8 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         fillViewport.priority = .defaultLow
         fillViewport.isActive = true
 
-        // 1. 顶部操作行：右上角主按钮 / 次要按钮 + 同步状态
-        let actionRow = makeActionRow()
+        // 1. 顶部操作行：无 Shell 时右上角显示；接入 Shell 时按钮与同步状态移到页标题行。
+        actionRow = makeActionRow()
         mainStack.addArrangedSubview(actionRow)
         actionRow.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
 
@@ -805,7 +817,7 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         detailBox.setContentHuggingPriority(.required, for: .horizontal)
     }
 
-    private func makeActionRow() -> NSView {
+    private func makeActionRow() -> NSStackView {
         let row = NSStackView()
         row.orientation = .horizontal
         row.alignment = .centerY
@@ -817,11 +829,11 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         spacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
         spacer.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
 
-        let initSyncBtn = ThemePrimaryButton(title: L10n.t(.contactsInitSync), target: self, action: #selector(handleInitSync))
-        initSyncBtn.heightAnchor.constraint(equalToConstant: 36).isActive = true
-        let quickSyncBtn = ThemePrimaryButton(title: L10n.t(.contactsQuickSync), target: self, action: #selector(handleQuickSync))
-        quickSyncBtn.heightAnchor.constraint(equalToConstant: 36).isActive = true
-        let refreshBtn = ContactsSecondaryButton(title: L10n.t(.actionRefresh), target: self, action: #selector(handleRefresh))
+        initSyncButton = ThemePrimaryButton(title: L10n.t(.contactsInitSync), target: self, action: #selector(handleInitSync))
+        initSyncButton.heightAnchor.constraint(equalToConstant: 36).isActive = true
+        quickSyncButton = ThemePrimaryButton(title: L10n.t(.contactsQuickSync), target: self, action: #selector(handleQuickSync))
+        quickSyncButton.heightAnchor.constraint(equalToConstant: 36).isActive = true
+        refreshButton = ContactsSecondaryButton(title: L10n.t(.actionRefresh), target: self, action: #selector(handleRefresh))
 
         syncInfoIcon.translatesAutoresizingMaskIntoConstraints = false
         syncInfoIcon.imageScaling = .scaleProportionallyDown
@@ -836,9 +848,9 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         syncInfoLabel.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
 
         row.addArrangedSubview(spacer)
-        row.addArrangedSubview(initSyncBtn)
-        row.addArrangedSubview(quickSyncBtn)
-        row.addArrangedSubview(refreshBtn)
+        row.addArrangedSubview(initSyncButton)
+        row.addArrangedSubview(quickSyncButton)
+        row.addArrangedSubview(refreshButton)
         row.addArrangedSubview(syncInfoIcon)
         row.addArrangedSubview(syncInfoLabel)
         return row
@@ -1465,5 +1477,24 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         } else {
             clearDetail()
         }
+    }
+
+    // MARK: - ShellPageActionProviding
+
+    /// 「初始化通讯录 / 立即同步 / 刷新 + 同步状态」交给 Shell 标题行右侧；
+    /// 页面内动作行保留空容器（无 Shell 的单页测试仍能遍历到这些控件）。
+    public func shellPageActionViews() -> [NSView] {
+        guard actionRow != nil else { return [] }
+        let actionViews: [NSView] = [initSyncButton, quickSyncButton, refreshButton, syncInfoIcon, syncInfoLabel]
+        for actionView in actionViews {
+            if actionRow.arrangedSubviews.contains(actionView) {
+                actionRow.removeArrangedSubview(actionView)
+            }
+            actionView.removeFromSuperview()
+        }
+        if let mainStack = actionRow.superview as? NSStackView {
+            mainStack.setCustomSpacing(0, after: actionRow)
+        }
+        return actionViews
     }
 }

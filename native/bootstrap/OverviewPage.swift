@@ -4,7 +4,7 @@
 import Foundation
 import AppKit
 
-public final class OverviewPageController: NSViewController {
+public final class OverviewPageController: NSViewController, ShellPageActionProviding {
     private let context: StatusPanelController
     /// 只读「今日已发送」统计（issue #2 AC4 / T2）。底层拿不到时保持「—」，不编造数字。
     private let sessionData = SessionDataClient()
@@ -31,6 +31,8 @@ public final class OverviewPageController: NSViewController {
 
     // 诊断行容器（行间用 1px 分隔线，行内边距 14）。
     private let itemsStack = NSStackView()
+    /// 顶部操作行容器：无 Shell 的单页测试仍保留；接入 Shell 时按钮交给标题行，容器塌陷为 0 高。
+    private let headerRow = NSStackView()
     /// 窄窗口下隐藏「建议」列，避免被压成一字一行（900pt 最小窗口仍可读）。
     private var suggestionLabels: [NSTextField] = []
 
@@ -90,8 +92,7 @@ public final class OverviewPageController: NSViewController {
         mainStack.spacing = 20
         mainStack.translatesAutoresizingMaskIntoConstraints = false
 
-        // 1. 顶部一行：右侧两个次要操作按钮（页标题由 Shell 渲染）。
-        let headerRow = NSStackView()
+        // 1. 顶部操作行：无 Shell 时右对齐显示；接入 Shell 时按钮被移到页标题行（见 shellPageActionViews）。
         headerRow.orientation = .horizontal
         headerRow.alignment = .centerY
         headerRow.spacing = 12
@@ -432,6 +433,24 @@ public final class OverviewPageController: NSViewController {
 
     @objc private func handleRequestAccessibility() {
         requestPermission(.accessibility)
+    }
+
+    // MARK: - ShellPageActionProviding
+
+    /// 把「重新检查 / 暂停自动回复」交给 Shell 标题行右侧；页面内的动作行保留空容器
+    /// （无 Shell 的单页测试仍能遍历到这两个按钮，标题行接入后容器高度为 0，不再占内容区）。
+    public func shellPageActionViews() -> [NSView] {
+        let actionViews: [NSView] = [recheckButton, pauseResumeButton]
+        for actionView in actionViews {
+            if headerRow.arrangedSubviews.contains(actionView) {
+                headerRow.removeArrangedSubview(actionView)
+            }
+            actionView.removeFromSuperview()
+        }
+        if let mainStack = headerRow.superview as? NSStackView {
+            mainStack.setCustomSpacing(0, after: headerRow)
+        }
+        return actionViews
     }
 }
 

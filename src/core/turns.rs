@@ -71,6 +71,12 @@ pub const GAP_SCROLL_PAGES: u32 = 24;
 /// changed and pixels cannot be compared.
 const CONTENT_SIMILARITY: f64 = 0.85;
 
+/// Delay before the pending-reply recovery path may try the same queue again. A queue that cannot
+/// be answered (handoff, paused, no baseline) must not be rebuilt on every coordinator tick: the
+/// device spammed `pending_reply_recovered` ~52 times a minute for 13 minutes on 2026-11-18 while
+/// 示例联系人乙 sat in handoff. Capped at 30s; the retry resets as soon as the queue is closed.
+const PENDING_RETRY_DELAYS: [f64; 3] = [1.0, 5.0, 30.0];
+
 fn to_hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -227,6 +233,13 @@ pub struct BotService {
     pub had_incoming: bool,
     pub turn_path: PathBuf,
     pub turn: Option<TurnData>,
+    /// Coordinator-level pause flag (`admin-pause.json`). A session runs in `<state>/sessions/<id>`
+    /// so it cannot find the coordinator's marker on its own.
+    pub pause_marker: Option<PathBuf>,
+    /// Consecutive pending-reply recovery attempts that did not close the queue, and the earliest
+    /// time the next attempt may run. Together they keep a stuck queue from logging every tick.
+    pending_recovery_attempts: u32,
+    pending_recovery_at: f64,
     pub clock: Arc<dyn Fn() -> f64 + Send + Sync>,
     pub sleep: Arc<dyn Fn(Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>,
     pub ownership: String,
@@ -454,6 +467,9 @@ impl BotService {
             had_incoming: false,
             turn_path,
             turn,
+            pause_marker: None,
+            pending_recovery_attempts: 0,
+            pending_recovery_at: 0.0,
             clock: Arc::new(|| {
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -746,6 +762,56 @@ impl BotService {
             let _ = fs::remove_file(&handoff_path);
         }
         Ok(())
+    }
+
+    /// A human owns this conversation (`handoff.json`): the bot must not answer on its own.
+    fn handoff_active(&self) -> bool {
+        self.root.join("handoff.json").exists()
+    }
+
+    /// The operator paused automatic replies (`admin-pause.json`). Pause only stops automatic
+    /// replies, so queued messages stay queued — but they must not be retried on every tick either.
+    fn admin_paused(&self) -> bool {
+        self.pause_marker.as_ref().is_some_and(|path| path.exists())
+            || self.root.join("admin-pause.json").exists()
+    }
+
+    /// Arm the retry gate (1s → 5s → 30s) and report whether this is the first attempt since the
+    /// queue was cleared. Callers report a stuck queue once, then stay quiet: a WARN per attempt
+    /// was the per-second spam on the device.
+    fn arm_pending_retry(&mut self) -> bool {
+        self.pending_recovery_attempts = self.pending_recovery_attempts.saturating_add(1);
+        let idx = (self.pending_recovery_attempts as usize - 1).min(PENDING_RETRY_DELAYS.len() - 1);
+        self.pending_recovery_at = (self.clock)() + PENDING_RETRY_DELAYS[idx];
+        self.pending_recovery_attempts == 1
+    }
+
+    fn clear_pending_retry(&mut self) {
+        self.pending_recovery_attempts = 0;
+        self.pending_recovery_at = 0.0;
+    }
+
+    /// The queue is still open and this attempt could not close it: report the first attempt, then
+    /// log at info level only when the retry gate actually opens again.
+    fn note_pending_retry(&self, event: &'static str, pending: usize) {
+        if self.pending_recovery_attempts <= 1 {
+            tracing::warn!(
+                recipient = %self.recipient,
+                pending,
+                retry_in = self.pending_recovery_at - (self.clock)(),
+                event,
+                "pending_reply_deferred"
+            );
+        } else {
+            tracing::info!(
+                recipient = %self.recipient,
+                pending,
+                attempts = self.pending_recovery_attempts,
+                retry_in = self.pending_recovery_at - (self.clock)(),
+                event,
+                "pending_reply_retry_scheduled"
+            );
+        }
     }
 
     pub fn turn_due(&self) -> bool {
@@ -1108,9 +1174,9 @@ impl BotService {
         bubbles: &[Bubble],
         status: &str,
         error: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         let (Some(history), Some(cid)) = (&self.history, &self.contact_id) else {
-            return Ok(());
+            return Ok(0);
         };
         let digests: Vec<String> = bubbles
             .iter()
@@ -1118,10 +1184,9 @@ impl BotService {
             .map(|b| b.digest.clone())
             .collect();
         if digests.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
-        let _ = history.resolve_pending(cid, &digests, status, error)?;
-        Ok(())
+        Ok(history.resolve_pending(cid, &digests, status, error)?)
     }
 
     /// A rebaseline may forget pixels, never an unanswered message: keep the newest visible inbound
@@ -1163,8 +1228,14 @@ impl BotService {
         let (Some(history), Some(cid)) = (self.history.clone(), self.contact_id.clone()) else {
             return Ok(());
         };
+        // Observation is cheap and keeps the backoff self-healing: an empty queue clears the gate
+        // even while the delay is still running. Only rebuilding a turn is deferred.
         let rows = history.open_pending(&cid, 50)?;
         if rows.is_empty() {
+            self.clear_pending_retry();
+            return Ok(());
+        }
+        if (self.clock)() < self.pending_recovery_at {
             return Ok(());
         }
         let mut bubbles = Vec::new();
@@ -1179,6 +1250,10 @@ impl BotService {
             }
         }
         if bubbles.is_empty() {
+            // Nothing usable to rebuild a turn from: wait for the queue to change instead of
+            // rebuilding (and warning) on every tick.
+            self.arm_pending_retry();
+            self.note_pending_retry("no_bubbles", rows.len());
             return Ok(());
         }
         let ids = history
@@ -1186,14 +1261,38 @@ impl BotService {
             .unwrap_or_default();
         if !ids.is_empty() && history.replied_after(&cid, &ids, None).unwrap_or(false) {
             let _ = self.resolve_pending_bubbles(&bubbles, "replied", None);
+            self.clear_pending_retry();
             return Ok(());
         }
-        let Some(frame) = self.cursor.clone() else {
+        // A human owns the conversation and the bot must not answer, so the queue is closed as
+        // handoff instead of being rebuilt on every tick and dropped again by `process_turn`
+        // (device 2026-11-18: 示例联系人乙 sat in handoff with open=1 for 13 minutes, ~52 warnings a
+        // minute while the coordinator kept re-opening and dropping the same turn).
+        if self.handoff_active() {
+            let resolved = self.resolve_pending_bubbles(
+                &bubbles,
+                "handoff",
+                Some("session in handoff (human takeover)"),
+            )?;
+            self.clear_pending_retry();
             tracing::warn!(
                 recipient = %self.recipient,
                 pending = rows.len(),
-                "pending_reply_has_no_baseline"
+                resolved,
+                "pending_reply_closed_by_handoff"
             );
+            return Ok(());
+        }
+        // Admin pause only stops automatic replies for a while, so the messages stay queued for
+        // after the resume; the retry gate keeps that from becoming a log per tick.
+        if self.admin_paused() {
+            self.arm_pending_retry();
+            self.note_pending_retry("admin_pause", rows.len());
+            return Ok(());
+        }
+        let Some(frame) = self.cursor.clone() else {
+            self.arm_pending_retry();
+            self.note_pending_retry("no_baseline", rows.len());
             return Ok(());
         };
         let now = (self.clock)();
@@ -1208,11 +1307,18 @@ impl BotService {
             retry_at: 0.0,
             fixed_snapshot: None,
         };
-        tracing::warn!(
-            recipient = %self.recipient,
-            pending = rows.len(),
-            "pending_reply_recovered"
-        );
+        // The queue is still open after this attempt, so arm the gate before the turn exists: if
+        // the turn is dropped without closing the queue (handoff mid-turn, failure), the next tick
+        // waits instead of logging the same recovery again.
+        if self.arm_pending_retry() {
+            tracing::warn!(
+                recipient = %self.recipient,
+                pending = rows.len(),
+                "pending_reply_recovered"
+            );
+        } else {
+            self.note_pending_retry("recovered", rows.len());
+        }
         self.keep_turn(turn)?;
         Ok(())
     }
@@ -1602,8 +1708,29 @@ impl BotService {
     ) -> Result<()> {
         let handoff_path = self.root.join("handoff.json");
         if handoff_path.exists() {
+            // The human owns this conversation: close what was queued for the bot, otherwise the
+            // row stays open=1 and every tick rebuilds the same turn only to drop it here.
+            let bubbles = self
+                .turn
+                .as_ref()
+                .map(|turn| turn.bubbles.clone())
+                .unwrap_or_default();
+            if !bubbles.is_empty() {
+                let resolved = self.resolve_pending_bubbles(
+                    &bubbles,
+                    "handoff",
+                    Some("session in handoff (human takeover)"),
+                )?;
+                tracing::info!(
+                    recipient = %self.recipient,
+                    pending = bubbles.len(),
+                    resolved,
+                    "pending_reply_closed_by_handoff"
+                );
+            }
             self.turn = None;
             let _ = fs::remove_file(&self.turn_path);
+            self.clear_pending_retry();
             let mut d = Map::new();
             d.insert("recipient".to_string(), json!(self.recipient));
             self.health("handoff", d)?;
@@ -5283,6 +5410,335 @@ mod tests {
             )
             .unwrap();
         (history, cid)
+    }
+
+    /// A clock the test moves by hand, so backoff windows can be asserted without sleeping.
+    fn settable_clock(start: f64) -> (Arc<Mutex<f64>>, Arc<dyn Fn() -> f64 + Send + Sync>) {
+        let now = Arc::new(Mutex::new(start));
+        let handle = now.clone();
+        let clock: Arc<dyn Fn() -> f64 + Send + Sync> = Arc::new(move || *handle.lock().unwrap());
+        (now, clock)
+    }
+
+    fn set_clock(now: &Arc<Mutex<f64>>, at: f64) {
+        *now.lock().unwrap() = at;
+    }
+
+    /// 实机 2026-11-18：示例联系人乙 在 handoff 状态下 pending_replies.open=1，协调器每秒重建 turn、
+    /// process_turn 又直接丢弃，日志每分钟约 52 条 pending_reply_recovered，持续 13 分钟。
+    #[tokio::test]
+    async fn test_handoff_closes_pending_reply_and_stops_the_recovery_loop() {
+        let td = TestDir::new();
+        let (history, cid) = pending_history(&td);
+        let queued = test_bubble("在吗", "inbound_visual");
+        history
+            .enqueue_pending(
+                &cid,
+                "fixture",
+                std::slice::from_ref(&queued),
+                crate::core::history::store::now_ms(),
+            )
+            .unwrap();
+        // 人工接管：不得再自动回复。
+        write_private(
+            &td.path().join("handoff.json"),
+            &json!({"source": "operator"}),
+        )
+        .unwrap();
+
+        let mut svc = BotService::new(
+            fixture_config(td.path()),
+            None,
+            Some(history.clone()),
+            Some(cid.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        svc.brain = Some(default_brain("收到。"));
+
+        assert!(svc.turn.is_none(), "handoff 时不得重建 turn");
+        assert!(
+            history.open_pending(&cid, 10).unwrap().is_empty(),
+            "handoff 时排队消息必须关闭，否则 open=1 永远挂着"
+        );
+        let summary = history.pending_summary(Some(&cid)).unwrap();
+        assert_eq!(summary["open"], 0);
+        assert!(
+            summary["by_status"]["handoff"].as_i64().unwrap() >= 1,
+            "排队消息应以 handoff 终结: {summary}"
+        );
+        assert_eq!(
+            svc.pending_recovery_attempts, 0,
+            "handoff 是终结状态，不是失败重试"
+        );
+
+        let frame = test_frame(
+            vec![test_bubble("old", "inbound_visual"), queued.clone()],
+            "示例联系人甲",
+        );
+        let mut cap = MockCapture::new(vec![frame; 8]);
+        cap.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
+        let client = MockToolClient::new_default();
+        for _ in 0..3 {
+            svc.cycle(&client, &mut cap).await.unwrap();
+        }
+
+        assert!(svc.turn.is_none());
+        assert!(history.open_pending(&cid, 10).unwrap().is_empty());
+        assert_eq!(
+            svc.pending_recovery_attempts, 0,
+            "handoff 下每个 tick 都不得再进入恢复路径"
+        );
+        assert!(
+            !client
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(name, _)| name == "send_message"),
+            "handoff 时一条都不能发"
+        );
+    }
+
+    /// handoff 出现在 turn 已经打开之后（brain 生成期间人工接管）：队列同样要关闭。
+    #[tokio::test]
+    async fn test_handoff_closes_pending_reply_of_an_open_turn() {
+        let td = TestDir::new();
+        let (history, cid) = pending_history(&td);
+        let queued = test_bubble("转人工", "inbound_visual");
+        history
+            .enqueue_pending(
+                &cid,
+                "fixture",
+                std::slice::from_ref(&queued),
+                crate::core::history::store::now_ms(),
+            )
+            .unwrap();
+        let frame = test_frame(
+            vec![test_bubble("old", "inbound_visual"), queued.clone()],
+            "示例联系人甲",
+        );
+        let mut svc = BotService::new(
+            fixture_config(td.path()),
+            None,
+            Some(history.clone()),
+            Some(cid.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        svc.brain = Some(default_brain("收到。"));
+        svc.advance(frame.clone()).unwrap();
+        svc.keep_turn(TurnData {
+            opened_at: 10.0,
+            baseline: frame.clone(),
+            bubbles: vec![queued.clone()],
+            last_inbound_at: 10.0,
+            frame: frame.clone(),
+            model_failures: 0,
+            retry_at: 0.0,
+            fixed_snapshot: None,
+        })
+        .unwrap();
+        write_private(
+            &td.path().join("handoff.json"),
+            &json!({"source": "operator"}),
+        )
+        .unwrap();
+
+        let mut cap = MockCapture::new(vec![frame; 4]);
+        cap.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
+        let client = MockToolClient::new_default();
+        svc.cycle(&client, &mut cap).await.unwrap();
+
+        assert!(svc.turn.is_none(), "handoff 时 turn 要被丢弃");
+        assert!(
+            history.open_pending(&cid, 10).unwrap().is_empty(),
+            "turn 里的排队消息也要以 handoff 终结"
+        );
+        assert_eq!(
+            read_json::<Value>(td.path().join("health.json")).unwrap()["state"],
+            "handoff"
+        );
+        assert!(
+            !client
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(name, _)| name == "send_message")
+        );
+    }
+
+    /// admin 暂停只停自动回复：排队消息要留到 resume 之后回掉，但暂停期间不得每次 tick 重试。
+    #[tokio::test]
+    async fn test_admin_pause_skips_pending_recovery_until_resume() {
+        let td = TestDir::new();
+        let (history, cid) = pending_history(&td);
+        let (now, clock) = settable_clock(1_000.0);
+        let mut svc = BotService::new(
+            fixture_config(td.path()),
+            None,
+            Some(history.clone()),
+            Some(cid.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        svc.brain = Some(default_brain("收到。"));
+        svc.clock = clock;
+
+        let queued = test_bubble("在吗", "inbound_visual");
+        history
+            .enqueue_pending(
+                &cid,
+                "fixture",
+                std::slice::from_ref(&queued),
+                crate::core::history::store::now_ms(),
+            )
+            .unwrap();
+        let frame = test_frame(
+            vec![test_bubble("old", "inbound_visual"), queued.clone()],
+            "示例联系人甲",
+        );
+        svc.advance(frame.clone()).unwrap();
+        let pause = td.path().join("admin-pause.json");
+        write_private(&pause, &json!({"paused": true})).unwrap();
+
+        let mut cap = MockCapture::new(vec![frame.clone(); 12]);
+        cap.attachments_fn = Some(Arc::new(|_, _| Ok((Vec::new(), Vec::new(), Vec::new()))));
+        let client = MockToolClient::new_default();
+
+        svc.cycle(&client, &mut cap).await.unwrap();
+        assert!(svc.turn.is_none(), "暂停时不得重建 turn");
+        assert_eq!(
+            history.open_pending(&cid, 10).unwrap().len(),
+            1,
+            "暂停只是暂时停自动回复，排队消息要留着"
+        );
+        assert_eq!(svc.pending_recovery_attempts, 1);
+        assert_eq!(svc.pending_recovery_at, 1_001.0, "第一次退避 1s");
+
+        // 同一个 tick 再来两次：退避窗口内直接跳过，不能再建 turn / 再打日志。
+        svc.cycle(&client, &mut cap).await.unwrap();
+        svc.cycle(&client, &mut cap).await.unwrap();
+        assert_eq!(
+            svc.pending_recovery_attempts, 1,
+            "退避期内每秒重试就是实机日志刷屏的原因"
+        );
+        assert!(
+            !client
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(name, _)| name == "send_message")
+        );
+
+        // 恢复：删掉暂停标记，退避到期后队列必须被正常消费。
+        fs::remove_file(&pause).unwrap();
+        set_clock(&now, 1_010.0);
+        svc.cycle(&client, &mut cap).await.unwrap();
+        let sends: Vec<_> = client
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| name == "send_message")
+            .cloned()
+            .collect();
+        assert_eq!(sends.len(), 1, "resume 之后要把排队消息回掉");
+        assert!(history.open_pending(&cid, 10).unwrap().is_empty());
+        // 发送成功后 turn 会留到回显确认；队列已空，下一次恢复检查把退避归零。
+        svc.drop_turn("fixture").unwrap();
+        svc.cycle(&client, &mut cap).await.unwrap();
+        assert_eq!(svc.pending_recovery_attempts, 0, "队列关闭后退避归零");
+    }
+
+    /// 连续恢复失败按 1s → 5s → 30s 退避，不能每秒 warn。
+    #[tokio::test]
+    async fn test_pending_recovery_backs_off_one_five_thirty_seconds() {
+        let td = TestDir::new();
+        let (history, cid) = pending_history(&td);
+        let (now, clock) = settable_clock(1_000.0);
+        let mut svc = BotService::new(
+            fixture_config(td.path()),
+            None,
+            Some(history.clone()),
+            Some(cid.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        svc.clock = clock;
+        let queued = test_bubble("在吗", "inbound_visual");
+        history
+            .enqueue_pending(
+                &cid,
+                "fixture",
+                std::slice::from_ref(&queued),
+                crate::core::history::store::now_ms(),
+            )
+            .unwrap();
+        let frame = test_frame(
+            vec![test_bubble("old", "inbound_visual"), queued.clone()],
+            "示例联系人甲",
+        );
+        svc.advance(frame.clone()).unwrap();
+        // 暂停只为了让恢复永远无法成功，从而观察退避阶梯。
+        write_private(
+            &td.path().join("admin-pause.json"),
+            &json!({"paused": true}),
+        )
+        .unwrap();
+
+        let mut cap = MockCapture::new(vec![frame; 24]);
+        let client = MockToolClient::new_default();
+
+        // t=1000：第一次尝试，退避 1s
+        svc.cycle(&client, &mut cap).await.unwrap();
+        assert_eq!(svc.pending_recovery_attempts, 1);
+        assert_eq!(svc.pending_recovery_at, 1_001.0);
+
+        // 同一时刻：闸门关着，不重试
+        svc.cycle(&client, &mut cap).await.unwrap();
+        assert_eq!(svc.pending_recovery_attempts, 1);
+
+        // t=1001：第二次尝试，退避 5s
+        set_clock(&now, 1_001.0);
+        svc.cycle(&client, &mut cap).await.unwrap();
+        assert_eq!(svc.pending_recovery_attempts, 2);
+        assert_eq!(svc.pending_recovery_at, 1_006.0);
+
+        set_clock(&now, 1_005.0);
+        svc.cycle(&client, &mut cap).await.unwrap();
+        assert_eq!(svc.pending_recovery_attempts, 2, "5s 窗口内不重试");
+
+        // t=1006：第三次尝试，退避 30s
+        set_clock(&now, 1_006.0);
+        svc.cycle(&client, &mut cap).await.unwrap();
+        assert_eq!(svc.pending_recovery_attempts, 3);
+        assert_eq!(svc.pending_recovery_at, 1_036.0);
+
+        set_clock(&now, 1_030.0);
+        svc.cycle(&client, &mut cap).await.unwrap();
+        assert_eq!(svc.pending_recovery_attempts, 3, "30s 窗口内不重试");
+
+        // 30s 封顶
+        set_clock(&now, 1_036.0);
+        svc.cycle(&client, &mut cap).await.unwrap();
+        assert_eq!(svc.pending_recovery_attempts, 4);
+        assert_eq!(svc.pending_recovery_at, 1_066.0);
+        assert_eq!(
+            history.open_pending(&cid, 10).unwrap().len(),
+            1,
+            "暂停期间排队消息仍然留着"
+        );
     }
 
     #[tokio::test]

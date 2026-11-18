@@ -740,6 +740,8 @@ impl BotCoordinator {
             child.stop = self.stop.clone();
             child.brain = self.default_brain.clone();
             child.had_incoming = false;
+            // 暂停标记在协调器根目录，会话自己的 root 是 sessions/<id>，必须显式告诉它。
+            child.pause_marker = Some(self.root.join("admin-pause.json"));
             self.sessions.insert(name.clone(), child);
         }
         Ok(self.sessions.get_mut(&name).unwrap())

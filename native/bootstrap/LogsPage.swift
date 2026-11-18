@@ -7,13 +7,15 @@ func plainLogDisplayText(_ line: String) -> String {
     line.replacingOccurrences(of: "\u{001B}\\[[0-?]*[ -/]*[@-~]", with: "", options: .regularExpression)
 }
 
-public final class LogsPageController: NSViewController {
+public final class LogsPageController: NSViewController, ShellPageActionProviding {
     private let context: StatusPanelController
 
     private static let pageMargin: CGFloat = 24
     private static let labelColumnWidth: CGFloat = 70
 
-    // Top action bar
+    // Top action bar（无 Shell 时在本页顶部；接入 Shell 时移到页标题行右侧）
+    private var topBar: NSStackView!
+    private var topBarCollapsed = false
     private let openLogsButton = NSButton(title: L10n.t(.openLogs), target: nil, action: nil)
     private let openAttachmentsButton = NSButton(title: L10n.t(.openAttachments), target: nil, action: nil)
     private let copyDiagnosticsButton = NSButton(title: L10n.t(.copyDiagnostics), target: nil, action: nil)
@@ -124,7 +126,7 @@ public final class LogsPageController: NSViewController {
         }
         copyStatusTag.isHidden = true
         copyStatusTag.setContentHuggingPriority(.required, for: .horizontal)
-        let topBar = makeRow([openLogsButton, openAttachmentsButton, copyDiagnosticsButton, copyStatusTag, makeSpacer()])
+        topBar = makeRow([openLogsButton, openAttachmentsButton, copyDiagnosticsButton, copyStatusTag, makeSpacer()])
         view.addSubview(topBar)
 
         let divider = makeDivider()
@@ -366,5 +368,26 @@ public final class LogsPageController: NSViewController {
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
             self?.copyStatusTag.isHidden = true
         }
+    }
+
+    // MARK: - ShellPageActionProviding
+
+    /// 三个入口按钮 + 复制成功状态交给 Shell 标题行右侧；页面内 topBar 保留空容器，
+    /// 无 Shell 的单页测试仍能遍历到这些按钮（容器高度塌陷为 0，下面的分隔线随之上移）。
+    public func shellPageActionViews() -> [NSView] {
+        guard topBar != nil else { return [] }
+        let actionViews: [NSView] = [openLogsButton, openAttachmentsButton, copyDiagnosticsButton, copyStatusTag]
+        for actionView in actionViews {
+            if topBar.arrangedSubviews.contains(actionView) {
+                topBar.removeArrangedSubview(actionView)
+            }
+            actionView.removeFromSuperview()
+        }
+        // 空 stack 的高度在手动约束下会变成不确定值，显式钉成 0，分隔线与筛选行随之上移。
+        if !topBarCollapsed {
+            topBarCollapsed = true
+            topBar.heightAnchor.constraint(equalToConstant: 0).isActive = true
+        }
+        return actionViews
     }
 }
