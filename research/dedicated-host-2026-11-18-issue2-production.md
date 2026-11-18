@@ -37,9 +37,39 @@
 - `wechat_not_logged_in` → 「机器人已暂停：微信未登录或未运行（PID: …）」+「先启动并登录微信，再点恢复自动回复」
 - 其它原因 → 原来的「已暂停」+ 恢复建议
 
-## 四、没有执行的部分（不构成验收通过）
 
-1. **破坏性动作未跑**：整包回滚（会替换 `.app`）、真实模型试探、真实会话转人工都只验证到数据源与二次确认路径，没有在真机执行。
+## 五、破坏性但可回滚的真机验证（2026-11-18 14:00 SGT）
+
+### 5.1 整包回滚（AC6）
+
+| 步骤 | 证据 |
+|---|---|
+| 回滚前 | 磁盘 app `5590e04-20261118131512`；`rollback-status` → `{"version":"9c20bad-20261118131146","can_rollback":true}` |
+| 错误 expected-version 试一次 | `{"error":"rollback_failed"}`，**没有发生替换**（expected 校验生效，失败安全） |
+| 正确执行 | `wechat-updater rollback --config … --expected-version 9c20bad-20261118131146` → `{"status":"rolled_back","version":"9c20bad-20261118131146","restart_required":true}` |
+| 回滚后磁盘 | `CFBundleVersion = 9c20bad-20261118131146` |
+| 回滚后启动 | `launchctl kickstart -k` 后 host.log：`微信客服助手启动，版本: 0.1.0 (9c20bad-20261118131146)`，进程在线，无新增 `.ips` |
+| 恢复生产版本 | `deploy_host.sh --app --yes` → 版本 `56bc98d-20261118141315`，宿主在线 |
+
+结论：整包回滚在真机上确实能把 `.app` 换回上一版本，换回后能正常启动；生产版本可一键恢复。
+
+### 5.2 会话转人工（AC5）
+
+| 步骤 | 证据 |
+|---|---|
+| 初始 | 午夜咖啡 / 测试群 / 爱咖啡 均 `handoff=false, handling=auto_reply` |
+| 转人工 | `control session-handoff --request-json {"session_id":"c_f1bb88779f584fa2","to":"human"}` → `{"handoff":true,"reply_mode":"human"}`；列表变为 `handoff=True, handling=handoff` |
+| 转回机器人 | `to":"bot"` → `{"handoff":false,"reply_mode":"bot"}`；列表恢复 `handoff=False` |
+
+用的是 0 条消息的「爱咖啡」，机器人当时处于暂停，验证后已转回自动回复。
+
+### 5.3 main 分支状态
+
+PR #15 已合并进 main（merge commit `fd4fd15`），**main 的 CI 全绿**（敏感信息扫描 / shellcheck / 构建与测试 macOS）——这是 10-19 之后 main 第一次绿。
+
+## 六、仍然没有执行的部分（不构成验收通过）
+
+1. **仍未执行**：真实微信收发（需要先启动并登录微信）、真实模型试探（会调用外部模型）、群聊/私聊区分与未读数采集（T10–T12 无可靠数据源）。整包回滚与会话转人工已在第五节实测通过。
 2. 微信客户端未运行，机器人处于暂停：真实收发、群聊/私聊区分、未读数、送达状态都没有新的实机证据（T10–T12 仍缺可靠数据源）。
 3. 视觉保真度只做到文本层（OCR + AX 控件树 + 设计说明逐条对齐），间距、字号、图标需要人眼确认。
 4. 安装时间（`installed_at`）按决定不展示，回滚卡片只显示上一版本号。
