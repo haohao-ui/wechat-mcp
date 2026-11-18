@@ -9,6 +9,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::core::config::BotConfig;
 use crate::core::state::write_private;
 
+#[path = "control_handoff.rs"]
+mod handoff;
+#[path = "control_readonly.rs"]
+mod readonly;
+
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         tokio::task::block_in_place(|| handle.block_on(f))
@@ -665,12 +670,18 @@ fn collect_json_files(dir: &Path, prefix: &str, out: &mut Vec<PathBuf>) {
 }
 
 pub fn gather_stats(journal_root: &Path) -> Value {
+    gather_stats_at(journal_root, now_secs())
+}
+
+fn gather_stats_at(journal_root: &Path, now: f64) -> Value {
     let mut files = Vec::new();
     if journal_root.exists() {
         collect_json_files(journal_root, "send-", &mut files);
     }
 
     let mut triggered = 0;
+    let mut sent_today = 0;
+    let today = readonly::local_date(now);
     let mut client_echo_observed = 0;
     let mut needs_review = 0;
     let total = files.len();
@@ -681,6 +692,15 @@ pub fn gather_stats(journal_root: &Path) -> Value {
                 let status = val.get("status").and_then(|v| v.as_str()).unwrap_or("");
                 if status == "triggered" {
                     triggered += 1;
+                    if today.is_some()
+                        && val
+                            .get("attempted_at")
+                            .and_then(Value::as_f64)
+                            .and_then(readonly::local_date)
+                            == today
+                    {
+                        sent_today += 1;
+                    }
                 }
                 if val.get("client_echo_observed").and_then(|v| v.as_bool()) == Some(true) {
                     client_echo_observed += 1;
@@ -698,6 +718,7 @@ pub fn gather_stats(journal_root: &Path) -> Value {
     json!({
         "recorded_batches": total,
         "triggered": triggered,
+        "sent_today": sent_today,
         "client_echo_observed": client_echo_observed,
         "needs_review": needs_review,
     })
@@ -759,7 +780,7 @@ pub fn execute_control_full_with_paths<W1: std::io::Write, W2: std::io::Write>(
     if action == "-h" || action == "--help" {
         let _ = writeln!(
             stdout,
-            "Usage: wechat-mcp control <status|start|stop|pause|resume|resume-session|config-check|calibrate|migrate-history|history-status|merge-contact|unmerge-contact|history-backup|contacts-list|mcp-info|contacts-sync|open-api-check|open-api-token> [--config <path>]"
+            "Usage: wechat-mcp control <status|start|stop|pause|resume|resume-session|session-handoff|sessions-list|session-detail|config-check|model-probe|calibrate|migrate-history|history-status|merge-contact|unmerge-contact|history-backup|contacts-list|mcp-info|contacts-sync|open-api-check|open-api-token> [--config <path>]"
         );
         return 0;
     }
@@ -939,6 +960,35 @@ pub fn execute_control_full_with_paths<W1: std::io::Write, W2: std::io::Write>(
                 })
             );
             0
+        }
+        "model-probe" => {
+            let mut target = None;
+            let mut idx = 1;
+            while idx < args.len() {
+                match args[idx].as_str() {
+                    "--config" if idx + 1 < args.len() => {
+                        target = Some(PathBuf::from(&args[idx + 1]));
+                        idx += 2;
+                    }
+                    "--json" => {
+                        idx += 1;
+                    }
+                    _ => {
+                        let _ = writeln!(
+                            stdout,
+                            "{}",
+                            json!({"ok": false, "category": "invalid_config"})
+                        );
+                        return 2;
+                    }
+                }
+            }
+            let output = block_on(crate::brain::model_probe::probe(
+                &target.unwrap_or(default_config_path),
+            ));
+            let code = if output["ok"] == true { 0 } else { 2 };
+            let _ = writeln!(stdout, "{output}");
+            code
         }
         "config-check" => {
             // 支持 config-check <path> 或 config-check --config <path>
@@ -1928,12 +1978,8 @@ pub fn execute_control_full_with_paths<W1: std::io::Write, W2: std::io::Write>(
             let config_path = config_file.unwrap_or(default_config_path);
             let cfg = match BotConfig::load(&config_path) {
                 Ok(c) => c,
-                Err(e) => {
-                    let _ = writeln!(
-                        stderr,
-                        "failed to load config ({}): {e:#}",
-                        config_path.display()
-                    );
+                Err(_) => {
+                    let _ = writeln!(stderr, "mcp-info: config unavailable or invalid");
                     return 2;
                 }
             };
@@ -1966,8 +2012,8 @@ pub fn execute_control_full_with_paths<W1: std::io::Write, W2: std::io::Write>(
 
             let open_api_val_str =
                 format!("http://{}:{}/mcp", cfg.open_api.bind, cfg.open_api.port);
-            let (open_api_ok, open_api_detail) = if !cfg.open_api.enabled {
-                (false, "已关闭".to_string())
+            let (open_api_ok, open_api_detail, open_api_busy) = if !cfg.open_api.enabled {
+                (false, "已关闭".to_string(), false)
             } else {
                 let check = block_on(crate::core::open_api::http::self_check(
                     &cfg.open_api,
@@ -1979,9 +2025,9 @@ pub fn execute_control_full_with_paths<W1: std::io::Write, W2: std::io::Write>(
                 } else if ok {
                     "可连接".to_string()
                 } else {
-                    check["error"].as_str().unwrap_or("连接失败").to_string()
+                    "连接失败".to_string()
                 };
-                (ok, detail)
+                (ok, detail, check["busy"].as_bool().unwrap_or(false))
             };
 
             let endpoints = json!([
@@ -2011,6 +2057,7 @@ pub fn execute_control_full_with_paths<W1: std::io::Write, W2: std::io::Write>(
                     "label": "对外接口",
                     "value": open_api_val_str,
                     "ok": open_api_ok,
+                    "busy": open_api_busy,
                     "detail": open_api_detail
                 }
             ]);
@@ -2056,6 +2103,7 @@ pub fn execute_control_full_with_paths<W1: std::io::Write, W2: std::io::Write>(
 
             let out_obj = json!({
                 "brain": brain_val,
+                "busy": open_api_busy,
                 "endpoints": endpoints,
                 "tool_groups": tool_groups,
             });
@@ -2268,8 +2316,14 @@ pub fn execute_control_full_with_paths<W1: std::io::Write, W2: std::io::Write>(
                 0
             }
         }
-        action if action.starts_with("brain-") => {
-            execute_brain_control(action, args, stdout, stderr, default_config_path)
+        action
+            if action.starts_with("brain-")
+                || matches!(
+                    action,
+                    "sessions-list" | "session-detail" | "session-handoff"
+                ) =>
+        {
+            execute_brain_control(action, args, stdout, stderr, default_config_path, paths)
         }
         "update-status" => {
             let mut config_file: Option<PathBuf> = None;
@@ -2628,8 +2682,13 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
     stdout: &mut W1,
     _stderr: &mut W2,
     default_config_path: PathBuf,
+    paths: &ControlPaths,
 ) -> i32 {
     use crate::core::brain_profiles::*;
+    let session_action = matches!(
+        action,
+        "sessions-list" | "session-detail" | "session-handoff"
+    );
     let mut config_file: Option<PathBuf> = None;
     let mut request_json: Option<String> = None;
     let mut idx = 1;
@@ -2645,13 +2704,28 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
         }
     }
     let config_path = config_file.unwrap_or(default_config_path);
+    let readonly_action = matches!(action, "brain-history" | "sessions-list" | "session-detail");
     let cfg = match BotConfig::load(&config_path) {
         Ok(c) => c,
         Err(e) => {
+            if readonly_action {
+                return emit_brain_error(
+                    stdout,
+                    "invalid_arguments",
+                    "config unavailable or invalid",
+                    false,
+                    None,
+                    2,
+                );
+            }
             return emit_brain_error(
                 stdout,
                 "invalid_arguments",
-                &format!("config error: {e:#}"),
+                &if session_action {
+                    "config unavailable or invalid".into()
+                } else {
+                    format!("config error: {e:#}")
+                },
                 false,
                 None,
                 2,
@@ -2669,10 +2743,24 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
         match serde_json::from_str(&s) {
             Ok(v) => v,
             Err(e) => {
+                if readonly_action {
+                    return emit_brain_error(
+                        stdout,
+                        "invalid_arguments",
+                        "invalid request json",
+                        false,
+                        None,
+                        2,
+                    );
+                }
                 return emit_brain_error(
                     stdout,
                     "invalid_arguments",
-                    &format!("invalid request json: {e:#}"),
+                    &if session_action {
+                        "invalid request json".into()
+                    } else {
+                        format!("invalid request json: {e:#}")
+                    },
                     false,
                     None,
                     2,
@@ -2687,6 +2775,35 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
         if req_acc != cfg.account_id {
             return emit_brain_error(stdout, "not_found", "account mismatch", false, None, 2);
         }
+    }
+
+    if (readonly_action || session_action) && !req_val.is_null() && !req_val.is_object() {
+        return emit_brain_error(
+            stdout,
+            "invalid_arguments",
+            "request must be an object",
+            false,
+            None,
+            2,
+        );
+    }
+    if req_val.get("account_id").is_some_and(|v| !v.is_string())
+        && (readonly_action || session_action)
+    {
+        return emit_brain_error(
+            stdout,
+            "invalid_arguments",
+            "invalid account_id",
+            false,
+            None,
+            2,
+        );
+    }
+    if session_action {
+        if action == "session-handoff" {
+            return handoff::execute(&cfg, &req_val, stdout);
+        }
+        return readonly::emit_sessions(action, &cfg, &req_val, paths, stdout);
     }
 
     let store = match Store::open(&cfg.state_dir) {
@@ -3333,6 +3450,29 @@ fn execute_brain_control<W1: std::io::Write, W2: std::io::Write>(
                     };
                     emit_brain_error(stdout, code, &msg, false, None, 2)
                 }
+            }
+        }
+        "brain-history" => {
+            let role_id = match req_val.get("role_id") {
+                None => None,
+                Some(Value::String(id)) => Some(id.as_str()),
+                _ => {
+                    return emit_brain_error(
+                        stdout,
+                        "invalid_arguments",
+                        "invalid role_id",
+                        false,
+                        None,
+                        2,
+                    );
+                }
+            };
+            match store.history(&ctx, role_id) {
+                Ok(data) => {
+                    let _ = writeln!(stdout, "{}", json!({"ok": true, "data": data}));
+                    0
+                }
+                Err(e) => handle_store_error(stdout, e, &store, &ctx),
             }
         }
         "brain-turn-detail" => {
@@ -6299,6 +6439,8 @@ mod tests {
         assert_eq!(open_ep["value"], "http://127.0.0.1:8770/mcp");
         assert_eq!(open_ep["ok"], false);
         assert_eq!(open_ep["detail"], "已关闭");
+        assert_eq!(open_ep["busy"], false);
+        assert_eq!(out_val["busy"], false);
 
         let tool_groups = out_val["tool_groups"]
             .as_array()

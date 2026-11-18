@@ -1538,6 +1538,9 @@ impl BotService {
         if self.stop.load(Ordering::SeqCst) {
             return Ok((Some("stopped_before_send"), f));
         }
+        if self.root.join("handoff.json").exists() {
+            return Ok((Some("handoff"), f));
+        }
         if !self.target_allowed() {
             return Ok((Some("skipped_by_rule"), f));
         }
@@ -1562,6 +1565,15 @@ impl BotService {
         d.insert("idempotency_key".to_string(), json!(key));
         let _ = self.health("sending", d);
 
+        // Recheck after all awaited generation/verification and journal work,
+        // including retries. A send already dispatched cannot be recalled.
+        if self.root.join("handoff.json").exists() {
+            if let Some(map) = record.as_object_mut() {
+                map.insert("status".into(), json!("handoff"));
+            }
+            self.write_journal(journal_path, record)?;
+            return Ok((None, json!({"status": "handoff"}), None));
+        }
         let res_result = client
             .tool(
                 "send_message",
@@ -2415,6 +2427,9 @@ impl BotService {
         let (mut result, mut receipt, mut send_err) = self
             .try_send_once(client, journal_path, record, confirmed, &reply, key)
             .await?;
+        if receipt["status"] == "handoff" {
+            return Ok(None);
+        }
 
         if let (Some(history), Some(_snap)) = (&self.history, &fixed_snapshot) {
             let phase = if receipt.get("status").and_then(|v| v.as_str()) == Some("triggered") {
@@ -2485,6 +2500,9 @@ impl BotService {
                 result = r;
                 receipt = rec;
                 send_err = err;
+                if receipt["status"] == "handoff" {
+                    return Ok(None);
+                }
                 if send_err.is_none()
                     && receipt.get("status").and_then(|v| v.as_str()) == Some("triggered")
                 {
@@ -2655,6 +2673,9 @@ impl BotService {
                     result = r;
                     receipt = rec;
                     send_err = err;
+                    if receipt["status"] == "handoff" {
+                        return Ok(None);
+                    }
 
                     if send_err.is_none()
                         && receipt.get("status").and_then(|v| v.as_str()) == Some("triggered")
@@ -7805,6 +7826,60 @@ mod tests {
             brain_called.load(Ordering::SeqCst),
             "brain should be called after resume_session"
         );
+    }
+
+    #[tokio::test]
+    async fn test_operator_handoff_during_generation_blocks_send_and_survives_restart() {
+        let td = TestDir::new();
+        let cfg = fixture_config(td.path());
+        let mut svc = BotService::new(cfg.clone(), None, None, None, None, None).unwrap();
+        svc.sleep = Arc::new(|_| Box::pin(async {}));
+        let marker = td.path().join("handoff.json");
+        let mark = marker.clone();
+        svc.brain = Some(Arc::new(move |_| {
+            let mark = mark.clone();
+            Box::pin(async move {
+                write_private(mark, &json!({"source":"operator"})).unwrap();
+                Ok(BrainReply {
+                    reply: "您好".into(),
+                    metadata: HashMap::new(),
+                })
+            })
+        }));
+        svc.advance(test_frame(
+            vec![test_bubble("old", "inbound_visual")],
+            "示例联系人甲",
+        ))
+        .unwrap();
+        let next = test_frame(
+            vec![
+                test_bubble("old", "inbound_visual"),
+                test_bubble("new", "inbound_visual"),
+            ],
+            "示例联系人甲",
+        );
+        let client = MockToolClient::new_default();
+        let mut capture = MockCapture::new(vec![next.clone(), next.clone(), next.clone()]);
+        svc.cycle(&client, &mut capture).await.unwrap();
+        assert!(marker.exists());
+        assert!(
+            !client
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(n, _)| n == "send_message")
+        );
+        drop(svc);
+        let mut restarted = BotService::new(cfg, None, None, None, None, None).unwrap();
+        let mut capture = MockCapture::new(vec![next]);
+        restarted.process_turn(&client, &mut capture).await.unwrap();
+        assert_eq!(
+            read_json::<Value>(td.path().join("health.json")).unwrap()["state"],
+            "handoff"
+        );
+        restarted.resume_session().unwrap();
+        assert!(!marker.exists());
     }
 
     #[test]
