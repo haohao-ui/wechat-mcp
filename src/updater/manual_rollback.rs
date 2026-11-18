@@ -523,6 +523,7 @@ mod tests {
             tx_id: format!("tx-{}", uuid::Uuid::new_v4()),
             release_id: "1.0".into(),
             sequence: 1,
+            highest_accepted_sequence: None,
             channel: "stable".into(),
             manifest_digest: "a".repeat(64),
             installed_at: 100,

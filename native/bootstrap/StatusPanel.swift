@@ -60,6 +60,11 @@ public final class StatusPanelController: NSViewController {
     private var latestBotState: String?
 
     public var currentRawConfig: [String: Any] { rawConfigDict }
+    /// 模型页（issue #2 AC10）保存时用来判断是否需要二次确认「重启后生效」。
+    public var isBotRunning: Bool {
+        if case .running = coreSupervisor.currentStatus { return true }
+        return coreSupervisor.pythonLoadedChecker()
+    }
     public var logDirectoryURL: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".wechat-rpa/logs", isDirectory: true)
     }
