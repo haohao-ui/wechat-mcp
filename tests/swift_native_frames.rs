@@ -709,12 +709,18 @@ fn test_frames_parse_to_expected_bubbles() {
             bubbles.len(),
             case.bubbles.len()
         );
+        // OCR 的空白不可信：不同 macOS 的 Vision 会在中文与数字之间多插空格，
+        // macos-26 runner 上就出现过「岗位信息更新 2.13.pdf」。比较时忽略空白，
+        // 但仍要求同一个字符序列，真实识别错误不会被放过。
+        fn ocr_normalize(s: &str) -> String {
+            s.chars().filter(|c| !c.is_whitespace()).collect()
+        }
         for (b, exp) in bubbles.iter().zip(case.bubbles.iter()) {
             assert_eq!(b["direction"], exp.direction);
             assert_eq!(b["kind"], exp.kind);
-            let text = b["text"].as_str().unwrap().replace('\n', "");
+            let text = ocr_normalize(b["text"].as_str().unwrap());
             assert!(
-                text.contains(exp.text),
+                text.contains(&ocr_normalize(exp.text)),
                 "{} text '{}' does not contain expected '{}'",
                 name,
                 text,
