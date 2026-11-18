@@ -1,6 +1,7 @@
 pub mod builtin;
 pub mod documents;
 pub mod model_api;
+pub mod model_probe;
 pub mod snapshot;
 pub mod understanding;
 

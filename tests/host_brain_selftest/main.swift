@@ -393,7 +393,7 @@ func runTests() -> Int32 {
     // 10. McpPage Navigation Pointer Check
     do {
         let pointerText = McpPageLogic.brainPagePointerText()
-        check("mcp_page_has_brain_pointer", pointerText.contains("大脑"))
+        check("mcp_page_has_brain_pointer", pointerText.contains("客服角色"))
     }
 
     // 11. Isolated UI Fixture View Loading & Controller Hierarchy Verification
@@ -728,7 +728,7 @@ func runTests() -> Int32 {
         func descendants(_ view: NSView) -> [NSView] {
             return [view] + view.subviews.flatMap { descendants($0) }
         }
-        check("unsaved_role_preview_blocked", descendants(brainController.view).compactMap { ($0 as? NSTextView)?.string }.contains { $0.contains("请先保存角色草稿") })
+        check("unsaved_role_preview_blocked", descendants(brainController.view).compactMap { ($0 as? NSTextView)?.string }.contains { $0.contains(L10n.t(.brainPageSaveDraftFirstNotice)) })
         _ = brainController.perform(NSSelectorFromString("handleActivate"))
         check("unsaved_role_activation_blocked", descendants(brainController.view).compactMap { ($0 as? NSTextField)?.stringValue }.contains { $0.contains("尚有未保存的修改") })
         let roleTables = descendants(brainController.view).compactMap { $0 as? NSTableView }.filter { $0.tableColumns.count == 1 }
@@ -918,6 +918,82 @@ func runTests() -> Int32 {
         } catch {
             check("real_control_pipeline_success", false, "Pipeline failed with error: \(error)")
         }
+    }
+
+    // 14. AC7 历史版本：旧版本未保存完整草稿、如实展示已存内容、对比与回滚缺的部分标明缺失
+    do {
+        let legacyHistoryJson = """
+        {
+            "generation": 3,
+            "generations": [
+                {
+                    "generation": 1,
+                    "at": 1690000000,
+                    "active": {
+                        "default": { "role_id": "role_legacy", "revision_id": "rev_old_1" },
+                        "overrides": []
+                    },
+                    "draft": null
+                },
+                {
+                    "generation": 2,
+                    "at": 1690003600,
+                    "active": {
+                        "default": { "role_id": "role_sales", "revision_id": "rev_sales_1" },
+                        "overrides": []
+                    },
+                    "draft": {
+                        "default": { "role_id": "role_sales", "revision_id": "rev_sales_2" },
+                        "overrides": []
+                    }
+                }
+            ],
+            "versions": [
+                {
+                    "revision_id": "rev_old_1",
+                    "role_id": "role_legacy",
+                    "is_draft": false,
+                    "content": {
+                        "name": "旧版简单客服",
+                        "persona": null,
+                        "tone": "正式",
+                        "goals": null,
+                        "rules": null
+                    }
+                },
+                {
+                    "revision_id": "rev_sales_2",
+                    "role_id": "role_sales",
+                    "is_draft": true,
+                    "content": {
+                        "name": "销售助手新版",
+                        "persona": "热情专业的导购",
+                        "tone": "热情",
+                        "goals": ["引导购买"],
+                        "rules": ["不能虚假宣传"]
+                    }
+                }
+            ]
+        }
+        """
+        guard let hist = try? BrainPageLogic.parseHistoryPayload(jsonString: legacyHistoryJson) else {
+            check("ac7_parse_history_payload", false, "Failed to parse legacy history payload")
+            return 1
+        }
+        check("ac7_parse_generations_count", hist.generations?.count == 2)
+        let gen1 = hist.generations![0]
+        check("ac7_legacy_gen1_draft_is_nil", gen1.draft == nil)
+        check("ac7_legacy_gen1_active_exists", gen1.active?.defaultRef?.roleId == "role_legacy")
+
+        // 验证两版本对比：旧版本缺失 persona, goals, rules 时，标明「此版本未保存完整草稿，仅显示已保存的内容」且缺失字段标注 [缺失]
+        let v1 = hist.versions![0]
+        let v2 = hist.versions![1]
+        let diff = BrainPageLogic.compareVersions(v1: v1, v2: v2)
+        check("ac7_diff_contains_incomplete_draft_notice", diff.contains("此版本未保存完整草稿，仅显示已保存的内容"))
+        check("ac7_diff_marks_missing_persona", diff.contains("[- 左]: [缺失]"))
+        check("ac7_diff_marks_missing_goals", diff.contains("[缺失] -> [引导购买]"))
+        check("ac7_diff_marks_missing_rules", diff.contains("[缺失] -> [不能虚假宣传]"))
+        check("ac7_diff_displays_existing_name", diff.contains("• 角色名称: [旧版简单客服] -> [销售助手新版]"))
     }
 
     print("\nTotal passed: \(passed), failed: \(failed)")

@@ -1102,8 +1102,8 @@ fn test_cli_rejects_test_pubkey_and_mutations_without_side_effects() {
     let stderr_check = String::from_utf8_lossy(&output_check.stderr);
     assert!(stderr_check.contains("trust_root_unconfigured"));
 
-    // 3. 验证 apply / rollback / recover 返回 unsupported 且不产生副作用
-    for action in &["apply", "rollback", "recover"] {
+    // 3. apply / recover 仍禁用；真实 rollback 由独立测试验证
+    for action in &["apply", "recover"] {
         let entries_before: Vec<_> = fs::read_dir(&temp.0).unwrap().collect();
         let output_act = std::process::Command::new(&exe)
             .args([

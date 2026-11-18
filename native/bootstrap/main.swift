@@ -79,6 +79,8 @@ final class HostAppDelegate: NSObject, NSApplicationDelegate {
         shell.register(page: SessionsPageController(context: controller), id: "sessions", title: "会话")
         shell.register(page: ContactsPageController(context: controller), id: "contacts", title: "联系人")
         shell.register(page: BrainPageController(context: controller), id: "brain", title: "大脑")
+        // 模型页（issue #2 AC10）：全局模型参数配置，侧栏独立入口。
+        shell.register(page: ModelPageController(context: controller), id: "model", title: "模型")
         shell.register(page: McpPageController(context: controller), id: "mcp", title: "MCP")
         shell.register(page: settingsPage, id: "settings", title: "设置")
         shell.register(page: LogsPageController(context: controller), id: "logs", title: "日志")

@@ -1645,3 +1645,102 @@ fn execution_initialization_root_faults_and_unknown_schema() {
         "schema_unsupported"
     );
 }
+
+#[test]
+fn readonly_history_versions_generations_drafts_and_rollback() {
+    let f = Fixture::new();
+    let original = seed(&f);
+    f.store
+        .write(
+            &f.ctx,
+            &req(0, Mutation::SaveRole(original.clone())),
+            &Access,
+            10,
+        )
+        .unwrap();
+    f.store
+        .write(
+            &f.ctx,
+            &req(
+                1,
+                Mutation::SaveBindings(BindingSet {
+                    default: Some(original.reference()),
+                    overrides: vec![],
+                }),
+            ),
+            &Access,
+            11,
+        )
+        .unwrap();
+    f.store
+        .write(&f.ctx, &req(2, Mutation::Activate), &Access, 12)
+        .unwrap();
+    let mut draft = original.clone();
+    draft.revision_id = "revision_two".into();
+    draft.parent_revision_id = Some(original.revision_id.clone());
+    draft.persona = "new persona for comparison".into();
+    draft.created_at = 13;
+    let draft = draft.seal().unwrap();
+    f.store
+        .write(
+            &f.ctx,
+            &req(3, Mutation::SaveRole(draft.clone())),
+            &Access,
+            13,
+        )
+        .unwrap();
+    let before = fs::read(f.path.join("brain-bindings.json")).unwrap();
+    let h = f.store.history(&f.ctx, Some(&original.role_id)).unwrap();
+    assert_eq!(h["generation"], 4);
+    assert_eq!(h["generations"].as_array().unwrap().len(), 4);
+    assert_eq!(h["generations"][0]["generation"], 1);
+    assert_eq!(h["generations"][0]["at"], 10);
+    assert!(h["generations"][0]["draft"].is_null());
+    assert_eq!(h["generations"][2]["at"], 12);
+    assert_eq!(
+        h["generations"][2]["active"]["default"]["revision_id"],
+        original.revision_id
+    );
+    let versions = h["versions"].as_array().unwrap();
+    assert_eq!(versions.len(), 2);
+    assert_eq!(versions[0]["content"]["persona"], draft.persona);
+    assert_eq!(versions[0]["is_draft"], true);
+    assert_eq!(versions[0]["is_active"], false);
+    assert_eq!(versions[1]["is_active"], true);
+    assert_eq!(
+        fs::read(f.path.join("brain-bindings.json")).unwrap(),
+        before
+    );
+    f.store
+        .write(
+            &f.ctx,
+            &req(4, Mutation::Rollback { generation: 3 }),
+            &Access,
+            14,
+        )
+        .unwrap();
+    let h = f.store.history(&f.ctx, None).unwrap();
+    assert_eq!(h["generations"].as_array().unwrap().len(), 5);
+    assert_eq!(h["versions"].as_array().unwrap().len(), 2);
+    let other = AccountContext::new("other_account".into()).unwrap();
+    let hidden = f.store.history(&other, None).unwrap();
+    assert!(hidden["versions"].as_array().unwrap().is_empty());
+    assert!(hidden["generations"].as_array().unwrap().is_empty());
+    assert_eq!(
+        f.store
+            .history(&other, Some(&original.role_id))
+            .unwrap_err()
+            .0,
+        "not_found"
+    );
+    assert_eq!(
+        f.store.history(&f.ctx, Some("../escape")).unwrap_err().0,
+        "invalid_arguments"
+    );
+    // Tampering is rejected rather than emitted as comparison content.
+    let object = f
+        .path
+        .join(Store::object_path("roles", &original.role_id, &draft.revision_id).unwrap());
+    fs::write(object, b"{}").unwrap();
+    assert_eq!(f.store.history(&f.ctx, None).unwrap_err().0, "not_found");
+}
