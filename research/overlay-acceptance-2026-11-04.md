@@ -32,7 +32,7 @@
 `tests/native_overlay_acceptance.swift`在测试机编译为私有bin目录下的`overlay-acceptance`。执行前需要微信已处于前台、窗口可见且达到最小尺寸，GUI宿主已授权；程序检查失败即停止。
 
 ```bash
-python3 tests/manual_overlay_acceptance.py --host work@192.0.2.10 --run-live
+python3 tests/manual_overlay_acceptance.py --host ops@192.0.2.10 --run-live
 ```
 
 这个入口会临时替换专用机外部worker，禁止已有worker活动时运行，finally恢复原文件并比较SHA256。不能在生产机或并发使用的桌面中自动执行；仅用于本次获授权专用测试机。GUI应用bundle保持原样。

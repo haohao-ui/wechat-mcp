@@ -5,7 +5,7 @@
 ## 实测环境
 
 - 通过用户指定的SSH连接测试机，认证成功。
-- Intel Mac mini，Intel x86_64，macOS12.7.6。
+- Intel Mac mini（专用机），Intel x86_64，macOS12.7.6。
 - 控制台登录用户为work；微信4.1.15进程已运行。
 - CoreGraphics返回一块1280×1024显示面，微信窗口在可见区域。
 - Swift5.7.2及Command Line Tools可用；未发现cargo/rustc命令。

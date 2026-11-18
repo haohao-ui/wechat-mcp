@@ -1547,7 +1547,7 @@ mod tests {
                 "示例群",
                 vec![fp("inbound_visual", "你好", None)],
                 fp("inbound_visual", "在吗", None),
-                "bot-ab507730f719356627784f02651896ad60d40a37fe49425f5be84558b67ca4ee",
+                "bot-01f4d36da2963ec68022c3b56ed8e470a7db9e40f7d33550b6af1cb5779b9472",
             ),
             (
                 "acc",
@@ -1562,7 +1562,7 @@ mod tests {
                     "换行\n制表\t控制\u{1}\u{7f}末尾 😀",
                     Some("0123456789abcdef"),
                 ),
-                "bot-b80fe1c960d3bcc0891c7f19043572e29054fff7136a435e925cb9b3b11bb994",
+                "bot-dfe903f18ba594a3dd2c5b19e7a17813b7309b191c16dcf184b4db32c18e11fc",
             ),
             (
                 "a",

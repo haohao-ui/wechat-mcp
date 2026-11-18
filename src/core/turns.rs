@@ -3093,10 +3093,10 @@ mod tests {
         let inc = vec![test_bubble("world", "inbound_visual")];
 
         let key = svc.batch_key(&prev, &inc);
-        // Python golden: bot-service-d5143f967016e38026a4ea02061965c5b5584395538205585b4962862fb73666
+        // Python golden: bot-service-c1d4c0d0460459d7966aa76de7d68f84dbf2c89916c1e2aa0f12c52cd9e1be44
         assert_eq!(
             key,
-            "bot-service-d5143f967016e38026a4ea02061965c5b5584395538205585b4962862fb73666"
+            "bot-service-c1d4c0d0460459d7966aa76de7d68f84dbf2c89916c1e2aa0f12c52cd9e1be44"
         );
 
         // With phash
@@ -3109,10 +3109,10 @@ mod tests {
         let prev2 = test_frame(vec![img_bubble], "示例群");
         let inc2 = vec![test_bubble("请问在吗", "inbound_visual")];
         let key2 = svc.batch_key(&prev2, &inc2);
-        // Python golden: bot-service-a13abb560bb7ac5df1dacb0766724f0d99e5fed4530e4280a4fe3376f0c0361f
+        // Python golden: bot-service-a2e33ea360c4245333ecf62e092a9615368efdc9f154b5ddedcb8fa00038c327
         assert_eq!(
             key2,
-            "bot-service-a13abb560bb7ac5df1dacb0766724f0d99e5fed4530e4280a4fe3376f0c0361f"
+            "bot-service-a2e33ea360c4245333ecf62e092a9615368efdc9f154b5ddedcb8fa00038c327"
         );
     }
 

@@ -1,6 +1,6 @@
 # 设计基线合并版在专用机的部署与只读验收记录
 
-日期：2026-11-18，Asia/Singapore。专用机：Intel Mac mini，Intel x86_64，macOS 12.7.6，控制台用户 `work`。
+日期：2026-11-18，Asia/Singapore。专用机：Intel Mac mini（专用机），Intel x86_64，macOS 12.7.6，控制台用户 `work`。
 
 ## 一、这次部署的是什么
 
@@ -8,7 +8,7 @@
 - 这次装机的是产品代码 `5590e04`（之后 `9bd1aa4` 只改了测试里的 OCR 比较，不影响 App 二进制）。部署命令：
 
   ```bash
-  scripts/deploy_host.sh work@192.0.2.10 --app --worker --mcp --yes
+  scripts/deploy_host.sh ops@192.0.2.10 --app --worker --mcp --yes
   ```
 
 - 部署脚本这次修了两处（属于部署链路缺陷，不是产品功能）：

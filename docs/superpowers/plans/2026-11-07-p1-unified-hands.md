@@ -214,7 +214,7 @@ git commit -m "refactor: Rust 发送与导航全部改走 wechat_click（input-t
 
 ### Task 3: 真机验收（由协调者执行，不派给 worker）
 
-- [ ] `scripts/deploy_host.sh work@192.0.2.10 --worker --mcp --yes`，然后重启机器人。
+- [ ] `scripts/deploy_host.sh ops@192.0.2.10 --worker --mcp --yes`，然后重启机器人。
 - [ ] 示例群：
   - [ ] 发文字，验证带换行、带表情两种回复都能正常发出；
   - [ ] 录屏确认：输入框里先放一段草稿，机器人回复时草稿被**替换**掉，没有残留；

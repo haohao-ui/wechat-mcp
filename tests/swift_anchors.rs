@@ -116,6 +116,11 @@ fn run_anchors(frame_name: &str, extra_args: Option<&[&str]>) -> Option<Value> {
     } else {
         frames.join(frame_name)
     };
+    // 真实微信截图夹具已从仓库移除（隐私），缺夹具时跳过而不是断言失败。
+    if !png_path.exists() {
+        eprintln!("SKIPPED: private fixture {} removed", frame_name);
+        return None;
+    }
 
     let mut cmd = Command::new(bin);
     cmd.arg(png_path.to_str().unwrap());
@@ -170,6 +175,11 @@ fn test_measure_finds_real_edges_far_from_a_wrong_map() {
         serde_json::json!(layout["regions"]["input"]["h"].as_i64().unwrap() + 30);
     layout["regions"]["session_list"]["w"] =
         serde_json::json!(layout["regions"]["session_list"]["w"].as_i64().unwrap() - 40);
+
+    if !frames_dir().join("r1-dark-top.png").exists() {
+        eprintln!("SKIPPED: private fixtures removed");
+        return;
+    }
 
     let temp = TempDir::new("wrong_layout");
     let wrong_path = temp.path.join("wrong.json");

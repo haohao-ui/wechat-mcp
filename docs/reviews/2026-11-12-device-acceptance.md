@@ -7,7 +7,7 @@ The user requested real-machine acceptance. Checks below were read-only; no depl
 ## Observed devices
 
 - Local development machine: macOS 27.3, arm64. WeChat 4.1.15 is installed and its signature verifies; neither WeChat nor the customer-service host was running. Orca Accessibility and Screen Recording permissions are granted; these do not prove the target application's permissions.
-- Dedicated machine from repository deployment records: `work@192.0.2.10`, reachable over SSH, macOS 12.7.6, x86_64.
+- Dedicated machine from repository deployment records: `ops@192.0.2.10`, reachable over SSH, macOS 12.7.6, x86_64.
 - Installed host build: `be0ef5f-20261110123505`. Its installed application passes `codesign --verify --deep --strict`.
 - Installed core SHA-256: `dea93b323c5d383ff3ec4f159a4a0e1a7762e3c196121aa7ecc1b5bd1bb05ed8`.
 - Host PID 657 has core PID 660 running `serve-core --config $TARGET_HOME/.WeChatRPABot/config.json` and MCP process PID 675. These are different roles, not evidence of duplicate schedulers.
