@@ -459,6 +459,7 @@ public final class StatusPanelController: NSViewController {
 
         let healthFile = stateDir.appendingPathComponent("health.json")
         var healthState: String? = nil
+        var healthReason: String? = nil
         var healthUpdated: Double? = nil
         var sessionsInput: [String: SessionHealthInput] = [:]
 
@@ -466,6 +467,7 @@ public final class StatusPanelController: NSViewController {
            let hData = try? Data(contentsOf: healthFile),
            let hObj = try? JSONSerialization.jsonObject(with: hData, options: []) as? [String: Any] {
             healthState = hObj["state"] as? String
+            healthReason = hObj["reason"] as? String
             healthUpdated = hObj["updated_at"] as? Double
             if let sessObj = hObj["sessions"] as? [String: [String: Any]] {
                 for (name, sDict) in sessObj {
@@ -506,6 +508,7 @@ public final class StatusPanelController: NSViewController {
         let botInput = BotInput(
             launchdLoaded: pyLoaded,
             healthState: healthState,
+            healthReason: healthReason,
             healthUpdatedAt: healthUpdated,
             now: Date().timeIntervalSince1970,
             coreEnabled: coreEnabled,

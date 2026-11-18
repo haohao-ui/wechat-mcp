@@ -68,6 +68,8 @@ public struct DesktopServiceInput: Codable {
 public struct BotInput: Codable {
     public var launchdLoaded: Bool
     public var healthState: String?
+    /// 核心报告的健康原因（例如 wechat_not_logged_in），用来区分「手动暂停」和「微信没登录」。
+    public var healthReason: String?
     public var healthUpdatedAt: Double?
     public var now: Double
     public var needsRecalibration: Bool?
@@ -79,6 +81,7 @@ public struct BotInput: Codable {
     public init(
         launchdLoaded: Bool,
         healthState: String? = nil,
+        healthReason: String? = nil,
         healthUpdatedAt: Double? = nil,
         now: Double = Date().timeIntervalSince1970,
         needsRecalibration: Bool? = nil,
@@ -89,6 +92,7 @@ public struct BotInput: Codable {
     ) {
         self.launchdLoaded = launchdLoaded
         self.healthState = healthState
+        self.healthReason = healthReason
         self.healthUpdatedAt = healthUpdatedAt
         self.now = now
         self.needsRecalibration = needsRecalibration
@@ -101,6 +105,7 @@ public struct BotInput: Codable {
     enum CodingKeys: String, CodingKey {
         case launchdLoaded = "launchd_loaded"
         case healthState = "health_state"
+        case healthReason = "health_reason"
         case healthUpdatedAt = "health_updated_at"
         case now
         case needsRecalibration = "needs_recalibration"
@@ -441,7 +446,11 @@ public func evaluate(_ s: StatusInput) -> [StatusItem] {
             } else if s.bot.healthState == "needs_recalibration" || s.bot.needsRecalibration == true {
                 botItem = StatusItem(key: "bot", level: .red, reason: L10n.t(.evBotRecalibrate, pidStr), fix: L10n.t(.evBotRecalibrateFix))
             } else if s.bot.healthState == "paused" {
-                botItem = StatusItem(key: "bot", level: .yellow, reason: L10n.t(.evBotPaused, pidStr), fix: L10n.t(.evBotPausedFix))
+                if s.bot.healthReason == "wechat_not_logged_in" {
+                    botItem = StatusItem(key: "bot", level: .yellow, reason: L10n.t(.evBotWechatNotLoggedIn, pidStr), fix: L10n.t(.evBotWechatNotLoggedInFix))
+                } else {
+                    botItem = StatusItem(key: "bot", level: .yellow, reason: L10n.t(.evBotPaused, pidStr), fix: L10n.t(.evBotPausedFix))
+                }
             } else {
                 botItem = StatusItem(key: "bot", level: .green, reason: L10n.t(.evBotCoreRunning, pidStr, s.bot.healthState ?? "running"), fix: nil)
             }
@@ -456,7 +465,11 @@ public func evaluate(_ s: StatusInput) -> [StatusItem] {
         } else if s.bot.healthState == "needs_recalibration" || s.bot.needsRecalibration == true {
             botItem = StatusItem(key: "bot", level: .red, reason: L10n.t(.evBotRecalibrate, ""), fix: L10n.t(.evBotRecalibrateFix))
         } else if s.bot.healthState == "paused" {
-            botItem = StatusItem(key: "bot", level: .yellow, reason: L10n.t(.evBotPaused, ""), fix: L10n.t(.evBotPausedFix))
+            if s.bot.healthReason == "wechat_not_logged_in" {
+                botItem = StatusItem(key: "bot", level: .yellow, reason: L10n.t(.evBotWechatNotLoggedIn, ""), fix: L10n.t(.evBotWechatNotLoggedInFix))
+            } else {
+                botItem = StatusItem(key: "bot", level: .yellow, reason: L10n.t(.evBotPaused, ""), fix: L10n.t(.evBotPausedFix))
+            }
         } else {
             botItem = StatusItem(key: "bot", level: .green, reason: L10n.t(.evBotPythonRunning, s.bot.healthState ?? "running"), fix: nil)
         }
