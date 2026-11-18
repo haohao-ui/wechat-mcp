@@ -181,6 +181,13 @@ fn run_bubbles(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
+    // 真实微信截图夹具已从仓库移除（含联系人昵称/头像/聊天内容），没夹具时跳过而不是失败。
+    if !frames_dir().join(format!("{}.png", name)).exists() {
+        return RunResult::Skipped(
+            "private fixtures removed (see tests/fixtures/frames/README.md)".into(),
+        );
+    }
+
     let bin = match wechat_bubbles_bin() {
         Some(b) => b,
         None => return RunResult::Skipped("swiftc not available".into()),
@@ -913,6 +920,10 @@ fn test_cli_rejects_invalid_engine() {
     let no_ocr = temp.path.join("no-ocr.json");
     let ocr_tmp = temp.path.join("ocr-tmp");
     let frame_png = frames_dir().join("r1-dark-top.png");
+    if !frame_png.exists() {
+        skip_note("SKIPPED: test_cli_rejects_invalid_engine private fixtures removed");
+        return;
+    }
 
     // The OCR CLI warms Vision too: serialize with the other Vision tests (parallel runs made the Neural
     // Engine fail with e5rtError, 2026-11-08).
