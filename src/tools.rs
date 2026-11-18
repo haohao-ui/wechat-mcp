@@ -80,7 +80,7 @@ fn legacy_tools() -> Vec<Value> {
                 "properties": {
                     "recipient": {
                         "type": "string",
-                        "description": "接收人昵称、备注名或群名称（例如：文件传输助手、午夜咖啡）。若留空则读取当前激活的会话"
+                        "description": "接收人昵称、备注名或群名称（例如：文件传输助手、张三）。若留空则读取当前激活的会话"
                     }
                 }
             }
