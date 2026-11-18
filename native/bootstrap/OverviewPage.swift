@@ -4,9 +4,11 @@ import AppKit
 
 public final class OverviewPageController: NSViewController {
     private let context: StatusPanelController
+    /// 只读「今日已发送」统计（issue #2 AC4 / T2）。底层拿不到时保持「—」，不编造数字。
+    private let sessionData = SessionDataClient()
 
     // Top metrics
-    private let totalRepliesLabel = NSTextField(labelWithString: "今日回复: —")
+    private let totalRepliesLabel = NSTextField(labelWithString: "今日已发送: —")
     private let activeSessionsLabel = NSTextField(labelWithString: "监听会话: -")
     private let pendingHandoffLabel = NSTextField(labelWithString: "待人工: -")
 
@@ -130,6 +132,19 @@ public final class OverviewPageController: NSViewController {
     public func refreshData() {
         let (items, input) = context.collectLatestStatus()
         applyStatus(items: items, input: input)
+        refreshSentToday()
+    }
+
+    /// 发送统计走只读 control status：读不到就显示「—」，不把「已触发」当成送达。
+    private func refreshSentToday() {
+        let client = sessionData
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let count = (try? client.sentToday()) ?? nil
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.totalRepliesLabel.stringValue = "今日已发送: " + (count.map(String.init) ?? "—")
+            }
+        }
     }
 
     private func applyStatus(items: [StatusItem], input: StatusInput) {

@@ -37,22 +37,18 @@ struct RollbackCommit {
     journal: UpdateJournal,
 }
 
-pub(super) fn committed_high_watermark(
+/// 回滚把旧记录写回 current_release.json 时，必须把发布方的反重放水位带在记录里
+/// （journal schema 2）。否则启动守卫会看到「记录序号 1 + 水位文件 2」并判成
+/// sequence_conflict_detected —— 水位不变、记录序号回退，本来就是回滚的语义。
+fn with_preserved_watermark(
     state: &Path,
     record: &CurrentReleaseCommitRecord,
-) -> Result<Option<u64>> {
-    let path = state.join("last-rollback.json");
-    if !path.exists() {
-        return Ok(None);
-    }
-    let proof: RollbackCommit = serde_json::from_slice(&fs::read(path)?)?;
-    let current = UpdateJournal::load_from_state(state)?;
-    Ok((proof.journal.stage == TransactionStage::Committed
-        && proof.journal.transaction_id == record.tx_id
-        && proof.journal.target_release_id == record.release_id
-        && proof.journal.target_sequence == record.sequence
-        && current.as_ref() == Some(&proof.journal))
-    .then_some(proof.highest_sequence))
+) -> Result<CurrentReleaseCommitRecord> {
+    let highest = load_highest_accepted_sequence(state)?;
+    let mut upgraded = record.clone();
+    upgraded.record_schema = 2;
+    upgraded.highest_accepted_sequence = Some(highest.max(record.sequence));
+    Ok(upgraded)
 }
 
 #[derive(Debug, Serialize)]
@@ -415,7 +411,11 @@ fn execute_inner(
         let mut record = previous.record.clone();
         record.tx_id.clone_from(&j.transaction_id);
         // Keep the publisher anti-replay high watermark unchanged.
-        write_json(state, "current_release.json", &record)?;
+        write_json(
+            state,
+            "current_release.json",
+            &with_preserved_watermark(state, &record)?,
+        )?;
         j.stage = TransactionStage::Committed;
         write_json(
             state,
@@ -430,7 +430,11 @@ fn execute_inner(
     })();
     if operation.is_err() {
         replace_link(root, &old_link)?;
-        write_json(state, "current_release.json", &old_record)?;
+        write_json(
+            state,
+            "current_release.json",
+            &with_preserved_watermark(state, &old_record)?,
+        )?;
         old_j.persist_atomic(state)?;
         j.stage = TransactionStage::RolledBack;
         j.error = Some("rollback_failed_current_restored".into());
@@ -488,7 +492,11 @@ pub fn recover(root: &Path, state: &Path) -> Result<()> {
         bail!("invalid_undo_release");
     }
     replace_link(root, &old_link)?;
-    write_json(state, "current_release.json", &old_record)?;
+    write_json(
+            state,
+            "current_release.json",
+            &with_preserved_watermark(state, &old_record)?,
+        )?;
     old_j.persist_atomic(state)?;
     let mut failed = active;
     failed.stage = TransactionStage::RolledBack;
@@ -722,9 +730,14 @@ mod tests {
         receipt.in_place_rollback_supported = true;
         write_json(&s.state_dir(), "previous-release.json", &receipt).unwrap();
         execute(s.root_dir(), &s.state_dir(), "1.0", 300).unwrap();
+        // 合并后水位由 current_release.json 自己携带（journal schema 2），不再依赖
+        // last-rollback.json 的提交证据，所以坏证据不影响启动水位核对。
         fs::remove_file(s.state_dir().join("highest_accepted_sequence")).unwrap();
         assert_eq!(load_highest_accepted_sequence(&s.state_dir()).unwrap(), 2);
         fs::write(s.state_dir().join("last-rollback.json"), "bad proof").unwrap();
+        assert_eq!(load_highest_accepted_sequence(&s.state_dir()).unwrap(), 2);
+        // 真正损坏的提交记录仍然 fail closed。
+        fs::write(s.state_dir().join("current_release.json"), "{}").unwrap();
         assert!(load_highest_accepted_sequence(&s.state_dir()).is_err());
     }
 }

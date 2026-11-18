@@ -2907,7 +2907,8 @@ fn test_contacts_and_mcp_pages_registered_in_shell_order() {
         !src.contains("id: \"components\""),
         "components page must not be registered in the product shell"
     );
-    assert!(settings_idx < update_idx && update_idx < logs_idx);
+    // 设计版导航顺序：设置 → 日志 → 应用更新（docs/design/current-pages-v1）。
+    assert!(settings_idx < logs_idx && logs_idx < update_idx);
 
     assert!(overview_idx < sessions_idx, "总览在会话之前");
     assert!(sessions_idx < contacts_idx, "会话在联系人之前");
