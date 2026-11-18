@@ -5,7 +5,7 @@
 ## 一、这次部署的是什么
 
 - 分支 `integrate/design-base`（PR #15），基线是 11-14 的设计实现分支，并入 issue #2 的功能。
-- 版本：`180cf89` 之后的提交；部署命令：
+- 这次装机的是产品代码 `5590e04`（之后 `9bd1aa4` 只改了测试里的 OCR 比较，不影响 App 二进制）。部署命令：
 
   ```bash
   scripts/deploy_host.sh work@192.0.2.10 --app --worker --mcp --yes
