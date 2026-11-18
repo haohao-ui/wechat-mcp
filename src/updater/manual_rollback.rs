@@ -493,10 +493,10 @@ pub fn recover(root: &Path, state: &Path) -> Result<()> {
     }
     replace_link(root, &old_link)?;
     write_json(
-            state,
-            "current_release.json",
-            &with_preserved_watermark(state, &old_record)?,
-        )?;
+        state,
+        "current_release.json",
+        &with_preserved_watermark(state, &old_record)?,
+    )?;
     old_j.persist_atomic(state)?;
     let mut failed = active;
     failed.stage = TransactionStage::RolledBack;

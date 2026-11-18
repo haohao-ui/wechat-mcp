@@ -22,9 +22,14 @@ fn session_handoff_ui_requires_confirmation_and_truthful_result() {
     assert!(handler.contains("self.refreshSessions()"));
 
     // 3. 结果与失败都要走集中文案（L10n），且不得把错误对象或命令原始输出直接抛给界面。
-    assert!(handler.contains("L10n.t(.uiSessions019"), "成功提示必须走 L10n");
-    assert!(handler.contains("L10n.t(.uiSessions020, String(describing: error.localizedDescription))"),
-        "失败提示必须带原因且只回固定文案");
+    assert!(
+        handler.contains("L10n.t(.uiSessions019"),
+        "成功提示必须走 L10n"
+    );
+    assert!(
+        handler.contains("L10n.t(.uiSessions020, String(describing: error.localizedDescription))"),
+        "失败提示必须带原因且只回固定文案"
+    );
     assert!(!handler.contains("String(describing: error)"));
 
     // 4. 会话显示名不是稳定 ID：必须先唯一定位，找不到/不唯一就报错，不能猜。

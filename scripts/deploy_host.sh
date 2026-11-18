@@ -105,8 +105,9 @@ if [ $MCP -eq 1 ]; then
   TARGET_DIR=$(cargo metadata --format-version 1 --no-deps 2>/dev/null | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
   [ -n "$TARGET_DIR" ] || TARGET_DIR="$(pwd)/target"
   MCP_BIN="$TARGET_DIR/x86_64-apple-darwin/release/wechat-mcp"
-  if [ $YES -eq 1 ] && [ ! -x "$MCP_BIN" ]; then
-    echo "ERROR: cross-built wechat-mcp not found at $MCP_BIN" >&2
+  UPDATER_BIN="$TARGET_DIR/x86_64-apple-darwin/release/wechat-updater"
+  if [ $YES -eq 1 ] && { [ ! -x "$MCP_BIN" ] || [ ! -x "$UPDATER_BIN" ]; }; then
+    echo "ERROR: cross-built binaries missing: $MCP_BIN / $UPDATER_BIN" >&2
     exit 1
   fi
   remote "back up wechat-mcp" '
@@ -117,6 +118,16 @@ if [ $MCP -eq 1 ]; then
   else echo "[dry-run] ssh $HOST 'cat > ~/.wechat-rpa/bin/wechat-mcp' < $MCP_BIN"; fi
   remote "sign wechat-mcp" '
     sign_file "$HOME/.wechat-rpa/bin/wechat-mcp"'
+  # 应用更新页的回滚依赖 wechat-updater；它一直在 bin 目录里但以前没被部署，
+  # 结果机器上留着旧版（没有 rollback-status），回滚卡片只能显示「暂不可用」。
+  remote "back up wechat-updater" '
+    dst="$HOME/.wechat-rpa/bin/wechat-updater"; [ -f "$dst" ] && cp -p "$dst" "$dst.before-$TS"; true'
+  echo "--- upload wechat-updater ($UPDATER_BIN)"
+  if [ $YES -eq 1 ]; then
+    ssh -o BatchMode=yes -o LogLevel=ERROR "$HOST" 'mkdir -p "$HOME/.wechat-rpa/bin" && cat > "$HOME/.wechat-rpa/bin/wechat-updater.new" && chmod 0755 "$HOME/.wechat-rpa/bin/wechat-updater.new" && mv "$HOME/.wechat-rpa/bin/wechat-updater.new" "$HOME/.wechat-rpa/bin/wechat-updater"' < "$UPDATER_BIN"
+  else echo "[dry-run] ssh $HOST 'cat > ~/.wechat-rpa/bin/wechat-updater' < $UPDATER_BIN"; fi
+  remote "sign wechat-updater" '
+    sign_file "$HOME/.wechat-rpa/bin/wechat-updater"'
   # 正在运行的 serve-core 仍是旧二进制：优雅停止，由宿主 CoreSupervisor 用新二进制拉起。
   remote "restart serve-core on the new binary" '
     old=$(pgrep -f "wechat-rpa/bin/wechat-mcp serve-core" || true)
