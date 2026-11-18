@@ -22,6 +22,8 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
     private let pageHost = NSView()
     private let pageTitle = NSTextField(labelWithString: "")
     private var activePageController: NSViewController?
+    /// 当前选中页面的 id：切换语言重建侧栏时用来保持原页面。
+    public private(set) var selectedPageID: String = ""
 
     public override func loadView() {
         self.view = NSView(frame: NSRect(x: 0, y: 0, width: 1180, height: 800))
@@ -102,6 +104,7 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
 
     public func selectPage(at index: Int) {
         guard index >= 0 && index < pages.count else { return }
+        selectedPageID = pages[index].id
         sidebarTable.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
 
         let target = pages[index].controller
