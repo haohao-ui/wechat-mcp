@@ -191,12 +191,21 @@ mod tests {
                     assert!(Instant::now() < deadline, "probe did not connect");
                     std::thread::sleep(Duration::from_millis(10));
                 };
+                // 这个线程只是假服务端：客户端提前断开（例如 302 后立刻关闭连接）不是被测行为，
+                // 不能因为读写错误让整个测试失败。真正的断言仍在下面针对 probe() 的输出。
                 let mut request = [0u8; 8192];
-                let n = stream.read(&mut request).unwrap();
+                let n = match stream.read(&mut request) {
+                    Ok(n) => n,
+                    Err(_) => return,
+                };
                 assert!(
                     String::from_utf8_lossy(&request[..n]).starts_with("GET /v1/models HTTP/1.1")
                 );
-                write!(stream, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
             });
             let path = fixture(
                 &dir,
