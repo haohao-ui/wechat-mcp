@@ -60,6 +60,8 @@ public enum L10nKey: String, CaseIterable {
     case uiResidualUnknownReason, uiResidualUnknown, uiResidualBuiltinBrain, uiResidualYes, uiResidualNo, uiResidualHistoryUnavailableFmt, uiResidualAccountFmt, uiResidualReplyModeFmt, uiResidualModelCalledFmt, uiResidualBudgetFmt, uiResidualNoCompiled, uiResidualMcpTestFailedFmt, uiResidualConnectFailed, uiResidualMcpConfigExample, uiResidualUpdateRecoveryGuide
     // 设计版页面迁移（自动生成，勿手改 key 名）
     case uiOverview001, uiOverview002, uiOverview003, uiOverview004, uiOverview005, uiOverview006, uiOverview007, uiOverview008, uiSessions009, uiSessions010, uiSessions011, uiSessions012, uiSessions013, uiSessions014, uiSessions015, uiSessions016, uiSessions017, uiSessions018, uiSessions019, uiSessions020, uiSettings021, uiSettings022, uiSettings023, uiSettings024, uiSettings025, uiSettings026, uiSettings027, uiSettings028, uiSettings029, uiSettings030, uiSettings031, uiSettings032, uiSettings033, uiSettings034, uiSettings035, uiSettings036, uiSettings037, uiSettings038, uiSettings039, uiSettings040, uiSettings041, uiSettings042, uiSettings043, uiSettings044, uiSettings045, uiSettings046, uiShell047, uiShell048, uiStatusPanel049, uiStatusPanel050, uiStatusPanel051, uiStatusPanel052, uiStatusPanel053, uiStatusPanel054, uiStatusPanel055, uiStatusPanel056, uiStatusPanel057, uiStatusPanel058, uiStatusPanel059, uiStatusPanel060, uiStatusPanel061, uiStatusPanel062, uiStatusPanel063, uiStatusPanel064, uiStatusPanel065, uiStatusPanel066, uiStatusPanel067, uiStatusPanel068, uiStatusPanel069, uiStatusPanel070, uiStatusPanel071, uiStatusPanel072, uiStatusPanel073, uiStatusPanel074, uiStatusPanel075, uiStatusPanel076, uiStatusPanel077, uiStatusPanel078, uiStatusPanel079, uiStatusPanel080, uiStatusPanel081, uiStatusPanel082, uiStatusPanel083, uiStatusPanel084, uiStatusPanel085, uiStatusPanel086, uiStatusPanel087, uiStatusPanel088, uiStatusPanel089, uiStatusPanel090, uiStatusPanel091, uiStatusPanel092, uiStatusPanel093, uiStatusPanel094, uiStatusPanel095, uiStatusPanel096, uiStatusPanel097, uiConfigForm098, uiConfigForm099, uiConfigForm100, uiConfigForm101, uiConfigForm102, uiConfigForm103, uiConfigForm104, uiConfigForm105, uiConfigForm106, uiConfigForm107, uiConfigForm108, uiConfigForm109, uiConfigForm110, uiConfigForm111, uiConfigForm112, uiConfigForm113, uiConfigForm114, uiConfigForm115, uiConfigForm116, uiConfigForm117, uiConfigForm118, uiConfigForm119, uiConfigForm120, uiConfigForm121, uiConfigForm122, uiConfigForm123, uiConfigForm124, uiConfigForm125
+    // 机器人暂停原因
+    case evBotWechatNotLoggedIn, evBotWechatNotLoggedInFix
     // 通用
     case loadMore, unreadCount, recordedOnlyNote
     case appName, quitApp, cancel, loading, valueUnavailable
@@ -1930,6 +1932,12 @@ public enum L10n {
             return e("config-check 校验失败 (exit %@)", "config-check validation failed (exit %@)", "Échec de la validation config-check (exit %@)", "Validazione config-check non riuscita (exit %@)", "Walidacja config-check nie powiodła się (exit %@)")
         case .uiConfigForm125:
             return e("无法执行 config-check (exit %@)", "Could not run config-check (exit %@)", "Impossible d'exécuter config-check (exit %@)", "Impossibile eseguire config-check (exit %@)", "Nie można uruchomić config-check (exit %@)")
+
+        // MARK: 机器人暂停原因
+        case .evBotWechatNotLoggedIn:
+            return e("机器人已暂停：微信未登录或未运行（PID: %@）", "Bot paused: WeChat is not signed in or not running (PID: %@)", "Bot en pause : WeChat n’est pas connecté ou n’est pas lancé (PID : %@)", "Bot in pausa: WeChat non ha effettuato l’accesso o non è in esecuzione (PID: %@)", "Bot wstrzymany: WeChat nie jest zalogowany lub nie działa (PID: %@)")
+        case .evBotWechatNotLoggedInFix:
+            return e("先启动并登录微信，再点「恢复自动回复」", "Start and sign in to WeChat first, then click “Resume auto-reply”", "Lancez WeChat et connectez-vous, puis cliquez sur « Reprendre la réponse automatique »", "Avvia WeChat e accedi, poi fai clic su «Riprendi risposta automatica»", "Najpierw uruchom i zaloguj się do WeChat, potem kliknij „Wznów automatyczne odpowiedzi”")
 
         // MARK: 通用
         case .appName:
