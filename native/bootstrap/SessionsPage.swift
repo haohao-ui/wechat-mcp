@@ -8,13 +8,13 @@ public final class SessionsPageController: NSViewController {
     /// 会话级转人工（issue #2 AC5 / T8）：走只读/受控的 control session-handoff。
     private let handoffClient = SessionDataClient()
     private let sessionsStack = NSStackView()
-    private let emptyLabel = NSTextField(labelWithString: "暂无活跃会话")
+    private let emptyLabel = NSTextField(labelWithString: L10n.t(.sessionsEmpty))
     private let handoffFeedback = NSTextField(labelWithString: "")
 
     // Provenance Detail Area
     private let provenanceBox = NSBox()
     private let turnSearchField = NSTextField()
-    private let queryTurnButton = NSButton(title: "查询轮次", target: nil, action: nil)
+    private let queryTurnButton = NSButton(title: L10n.t(.actionQueryTurn), target: nil, action: nil)
     private let detailTextView = NSTextView()
 
     public init(context: StatusPanelController) {
@@ -64,7 +64,7 @@ public final class SessionsPageController: NSViewController {
         mainStack.translatesAutoresizingMaskIntoConstraints = false
 
         let box = NSBox()
-        box.title = "会话监听列表"
+        box.title = L10n.t(.uiSessions009)
         box.titleFont = NSFont.systemFont(ofSize: 13, weight: .bold)
 
         sessionsStack.orientation = .vertical
@@ -84,7 +84,7 @@ public final class SessionsPageController: NSViewController {
         mainStack.addArrangedSubview(handoffFeedback)
 
         // 轮次追溯详情区域
-        provenanceBox.title = "对话轮次追溯 (Provenance)"
+        provenanceBox.title = L10n.t(.uiSessions010)
         provenanceBox.titleFont = NSFont.systemFont(ofSize: 13, weight: .bold)
 
         let provStack = NSStackView()
@@ -93,7 +93,7 @@ public final class SessionsPageController: NSViewController {
         provStack.spacing = 8
         provStack.translatesAutoresizingMaskIntoConstraints = false
 
-        turnSearchField.placeholderString = "输入 turn_id 查询详细追溯"
+        turnSearchField.placeholderString = L10n.t(.turnPlaceholder)
         turnSearchField.widthAnchor.constraint(equalToConstant: 260).isActive = true
         queryTurnButton.target = self
         queryTurnButton.action = #selector(handleQueryTurn)
@@ -107,7 +107,7 @@ public final class SessionsPageController: NSViewController {
         textScroll.hasVerticalScroller = true
         detailTextView.isEditable = false
         detailTextView.font = NSFont.userFixedPitchFont(ofSize: 11)
-        detailTextView.string = "暂无选中轮次。请在上方输入框手动输入有效 turn_id 并点击查询，以查看详细快照、角色修订与发送状态。"
+        detailTextView.string = L10n.t(.provenanceHint)
         textScroll.documentView = detailTextView
         textScroll.heightAnchor.constraint(equalToConstant: 180).isActive = true
         provStack.addArrangedSubview(textScroll)
@@ -177,16 +177,16 @@ public final class SessionsPageController: NSViewController {
 
         if session.handoff == true || session.state == "handoff" {
             stateLbl.textColor = .systemOrange
-            let resumeBtn = NSButton(title: "恢复自动回复", target: self, action: #selector(handleResumeHandoff(_:)))
+            let resumeBtn = NSButton(title: L10n.t(.actionResumeAutoReply), target: self, action: #selector(handleResumeHandoff(_:)))
             resumeBtn.identifier = NSUserInterfaceItemIdentifier(name)
             rowStack.addArrangedSubview(nameLbl)
             rowStack.addArrangedSubview(stateLbl)
             rowStack.addArrangedSubview(resumeBtn)
         } else if session.state == "watching" || session.state == "listening" {
             stateLbl.textColor = .systemGreen
-            let handoffBtn = NSButton(title: "转人工", target: self, action: #selector(handleHandoffToHuman(_:)))
+            let handoffBtn = NSButton(title: L10n.t(.actionHandoff), target: self, action: #selector(handleHandoffToHuman(_:)))
             handoffBtn.identifier = NSUserInterfaceItemIdentifier(name)
-            handoffBtn.toolTip = "停止自动回复，把这个会话交给人工处理"
+            handoffBtn.toolTip = L10n.t(.uiSessions011)
             rowStack.addArrangedSubview(nameLbl)
             rowStack.addArrangedSubview(stateLbl)
             rowStack.addArrangedSubview(handoffBtn)
@@ -202,7 +202,7 @@ public final class SessionsPageController: NSViewController {
     @objc private func handleQueryTurn() {
         let query = turnSearchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return }
-        detailTextView.string = "正在查询轮次 [\(query)] 的追溯详情..."
+        detailTextView.string = L10n.t(.turnQuerying, String(describing: query))
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             do {
@@ -212,7 +212,7 @@ public final class SessionsPageController: NSViewController {
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.detailTextView.string = "未找到轮次追溯 (该轮次 ID 不存在或为旧版无追溯轮次): \(error.localizedDescription)"
+                    self.detailTextView.string = L10n.t(.uiSessions012, String(describing: error.localizedDescription))
                 }
             }
         }
@@ -237,7 +237,7 @@ public final class SessionsPageController: NSViewController {
     }
 
     public func displayTurnDetail(_ detail: BrainTurnDetail) {
-        var text = "【轮次追溯详情】\n"
+        var text = L10n.t(.uiSessions013)
         text += "Turn ID: \(detail.turnId)\n"
         text += "联系人: \(detail.contactId)\n"
         text += "追溯记录状态: \(detail.provenanceDisplayText)\n"
@@ -267,9 +267,16 @@ public final class SessionsPageController: NSViewController {
     /// 所以先按显示名在只读列表里唯一定位，找不到或不唯一就明确报错，绝不猜。
     @objc private func handleHandoffToHuman(_ sender: NSButton) {
         guard let name = sender.identifier?.rawValue, !name.isEmpty else { return }
+        // 转人工会停止该会话的自动回复，必须先二次确认。
+        let alert = NSAlert()
+        alert.messageText = L10n.t(.uiSessions014)
+        alert.informativeText = L10n.t(.uiSessions015, String(describing: name))
+        alert.addButton(withTitle: L10n.t(.actionHandoff))
+        alert.addButton(withTitle: L10n.t(.cancel))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
         sender.isEnabled = false
         handoffFeedback.textColor = .secondaryLabelColor
-        handoffFeedback.stringValue = "正在把「\(name)」转人工…"
+        handoffFeedback.stringValue = L10n.t(.uiSessions016, String(describing: name))
         let client = handoffClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let outcome: Result<Void, Error> = {
@@ -278,8 +285,8 @@ public final class SessionsPageController: NSViewController {
                     let matches = page.sessions.filter { $0.displayName == name }
                     guard matches.count == 1, let target = matches.first else {
                         let message = matches.isEmpty
-                            ? "历史库里找不到会话「\(name)」，无法定位稳定会话 ID"
-                            : "存在 \(matches.count) 个同名会话「\(name)」，不能按名字转人工"
+                            ? L10n.t(.uiSessions017, String(describing: name))
+                            : L10n.t(.uiSessions018, String(describing: matches.count), String(describing: name))
                         return .failure(NSError(domain: "session-handoff", code: 1,
                                                 userInfo: [NSLocalizedDescriptionKey: message]))
                     }
@@ -294,11 +301,11 @@ public final class SessionsPageController: NSViewController {
                 switch outcome {
                 case .success:
                     self.handoffFeedback.textColor = .systemGreen
-                    self.handoffFeedback.stringValue = "已把「\(name)」转人工，自动回复已停止"
+                    self.handoffFeedback.stringValue = L10n.t(.uiSessions019, String(describing: name))
                 case .failure(let error):
                     sender.isEnabled = true
                     self.handoffFeedback.textColor = .systemRed
-                    self.handoffFeedback.stringValue = "转人工失败：\(error.localizedDescription)"
+                    self.handoffFeedback.stringValue = L10n.t(.uiSessions020, String(describing: error.localizedDescription))
                 }
                 self.refreshSessions()
             }

@@ -54,6 +54,12 @@ public enum L10nKey: String, CaseIterable {
     case componentsPageSubtitle, componentsSectionColorsTitle, componentsSubsectionButtonsAndBrand, componentsSubsectionInputBorderAndStates, componentsSubsectionStatusTokens, componentsTokenPrimaryButtonDefault, componentsTokenPrimaryButtonHover, componentsTokenPrimaryButtonText, componentsTokenPrimaryButtonDisabledBg, componentsTokenPrimaryButtonDisabledText, componentsTokenBrand, componentsTokenBrandLight, componentsTokenInputBorder, componentsTokenInputErrorBorder, componentsTokenInputErrorText, componentsTokenInputDisabledBg, componentsTokenInputDisabledText, componentsTokenNormalDot, componentsTokenNormalText, componentsTokenNormalBg, componentsTokenWarningDot, componentsTokenWarningText, componentsTokenWarningBg, componentsTokenErrorDot, componentsTokenErrorText, componentsTokenErrorBg, componentsTokenInactiveDot, componentsTokenInactiveText, componentsTokenInactiveBg, componentsSectionComponentsTitle, componentsSubsectionPrimaryButtons, componentsButtonNormalTitle, componentsButtonDisabledTitle, componentsButtonDescription, componentsSubsectionStatusTags, componentsSubsectionStatusBanners, componentsBannerNormalTitle, componentsBannerNormalMsg, componentsBannerWarningTitle, componentsBannerWarningMsg, componentsBannerWarningAction, componentsBannerErrorTitle, componentsBannerErrorMsg, componentsSubsectionConfirmDialog, componentsDialogTriggerButtonTitle, componentsDialogTitle, componentsDialogMessage, componentsDialogCheckboxText, componentsDialogConfirmButton, componentsDialogResultPrefix, componentsDialogResultInitial, componentsDialogResultConfirmed, componentsDialogResultCancelled, componentsSubsectionFormFields, componentsFieldNormalLabel, componentsFieldNormalHelper, componentsFieldErrorLabel, componentsFieldErrorMessage, componentsFieldDisabledLabel, componentsFieldDisabledHelper
     case modelPageScopeNote, modelPageBannerDefaultCodex, modelPageBannerUnset, modelPageBannerPendingRestart, modelPageBannerErrorSummary, modelPageSectionBackend, modelPageBackendCodexDesc, modelPageBackendOpenAIDesc, modelPageSectionConnection, modelPageFieldBaseUrl, modelPageFieldBaseUrlHelper, modelPageFieldModel, modelPageFieldModelPlaceholder, modelPageFieldKeySource, modelPageKeySourceEnv, modelPageKeySourceFile, modelPageKeySourceEnvHelper, modelPageKeySourceFileHelper, modelPageFieldKeyStatus, modelPageKeyStatusEnvNotFound, modelPageKeyNeverExposed, modelPageSectionParameters, modelPageFieldTimeout, modelPageTimeoutHelper, modelPageFieldSupportsImages, modelPageSupportsImagesHelper, modelPageFieldImagesPerCall, modelPageImagesPerCallHelper, modelPageFieldJsonOutput, modelPageJsonOutputHelper, modelPageFieldMaxTokens, modelPageMaxTokensReadOnly, modelPageButtonTest, modelPageButtonDiscard, modelPageTestPassedTitle, modelPageTestPassedNote, modelPageTestFailedTitle, modelPageTestFailedNote, modelPageDialogConfirmTitle, modelPageDialogConfirmBody, modelPageDialogConfirmCheckbox, modelPageDialogConfirmButton, modelPageErrorUrlRequired, modelPageErrorUrlInvalid, modelPageErrorHttpsRequired, modelPageErrorUrlCredentials, modelPageErrorModelRequired, modelPageErrorTimeoutRange, modelPageErrorImagesRange, modelPageErrorEnvRequired, modelPageErrorEnvInvalid, modelPageErrorFileRequired, modelPageErrorFileNotAbsolute, modelPageErrorFilePermission, modelPageErrorFileNotFoundOrAccess, brainPageTabRoleDefinition, brainPageTabKnowledge, brainPageTabTemplates, brainPageTabBindings, brainPageTabHistory, brainPageTabPreview, brainPageModelConfigured, brainPageModelUnconfigured, brainPageGotoModelSettings, brainPageRollbackTitle, brainPageRollbackCheckboxPrompt, brainPageRollbackConfirmButton, brainPageHistoryUnavailable, brainPageLegacyIncompleteDraftNotice, brainPageLegacyIncompleteDraftShort, brainPageMissingFieldIndicator, brainPageDiffSelectHint, brainPageTryItNotice, brainPageSaveDraftFirstNotice, brainPageEmptyHistoryTitle, contactsPageEmptyAll, contactsPageEmptyCategory, contactsPageSelectDetailPrompt, contactsPageSyncStarted, contactsPagePersonaBinding, mcpPageSectionReplyMode, mcpPageSaveSettingsBtn, mcpPageSaveSuccess, mcpPageGoToPersona, mcpPagePointerText, mcpPageRotateTokenTitle, mcpPageRotateTokenInfo, mcpPageOpenApiBusy, mcpPageEmptyEndpoints, mcpPageEmptyTools, logsPageExportLogsTitle, logsPageEmptyLogsTitle, logsPageEmptyFilterTitle, logsPageExportSuccess, logsPageExportFailed, updatePagePageTitle, updatePageSectionRollback, updatePageSectionOperations, updatePageSectionRecovery, updatePageRollbackAppNotice, updatePageNoPreviousVersion, updatePageRollbackCheckboxPrompt, updatePageRollbackConfirmButton, updatePageRollbackSuccess, updatePageRollbackUnavailable, updatePageEmptyCandidate, navComponents
     case legacyActions, legacyConfig, openAttachments, openLogs, copyDiagnostics, allowlist, ignorelist, timeoutAction, skipTurn, defaultPlaceholder, ignorePlaceholder, configUnavailable, confirmBusy, confirmBusyBody, continueAction, actionRequested, actionCancelled, actionFailed, copiedDiagnostics, savingConfig, saveRejected
+    // 设计版页面迁移（自动生成，勿手改 key 名）
+    case uiBrain001, uiBrain002, uiBrain003, uiBrain004, uiBrain005, uiBrain006, uiBrain007, uiBrain008, uiBrain009, uiBrain010, uiBrain011, uiBrain012, uiBrain013, uiBrain014, uiBrain015, uiBrain016, uiBrain017, uiBrain018, uiBrain019, uiBrain020, uiBrain021, uiBrain022, uiBrain023, uiBrain024, uiBrain025, uiBrain026, uiBrain027, uiBrain028, uiBrain029, uiBrain030, uiBrain031, uiBrain032, uiBrain033, uiBrain034, uiBrain035, uiBrain036, uiBrain037, uiBrain038, uiBrain039, uiBrain040, uiBrain041, uiBrain042, uiBrain043, uiBrain044, uiBrain045, uiBrain046, uiBrain047, uiBrain048, uiBrain049, uiBrain050, uiBrain051, uiBrain052, uiBrain053, uiBrain054, uiBrain055, uiBrain056, uiBrain057, uiBrain058, uiBrain059, uiBrain060, uiBrain061, uiBrain062, uiBrain063, uiBrain064, uiBrain065, uiBrain066, uiBrain067, uiBrain068, uiBrain069, uiBrain070, uiBrain071, uiBrain072, uiBrain073, uiBrain074, uiBrain075, uiBrain076, uiBrain077, uiBrain078, uiBrain079, uiBrain080, uiBrain081, uiBrain082, uiBrain083, uiBrain084, uiBrain085, uiBrain086, uiBrain087, uiBrain088, uiBrain089, uiBrain090, uiBrain091, uiBrain092, uiBrain093, uiBrain094, uiBrain095, uiBrain096, uiBrain097, uiBrain098, uiBrain099, uiBrain100, uiBrain101, uiBrain102, uiBrain103, uiBrain104, uiBrain105, uiBrain106, uiBrain107, uiBrain108, uiBrain109, uiBrain110, uiBrain111, uiBrain112, uiMcp113, uiMcp114, uiMcp115, uiMcp116, uiMcp117, uiMcp118, uiMcp119, uiMcp120, uiMcp121, uiMcp122, uiMcp123, uiMcp124, uiMcp125, uiMcp126, uiMcp127, uiMcp128, uiMcp129, uiMcp130, uiMcp131, uiMcp132, uiMcp133, uiMcp134, uiMcp135, uiUpdate136, uiUpdate137, uiUpdate138, uiUpdate139, uiUpdate140, uiUpdate141, uiUpdate142, uiUpdate143, uiUpdate144, uiUpdate145, uiUpdate146, uiUpdate147, uiUpdate148, uiUpdate149, uiUpdate150, uiUpdate151, uiUpdate152, uiUpdate153, uiUpdate154, uiUpdate155, uiUpdate156, uiUpdate157, uiUpdate158, uiUpdate159, uiUpdate160, uiUpdate161, uiUpdate162, uiUpdate163, uiUpdate164, uiUpdate165, uiUpdate166, uiUpdate167, uiUpdate168, uiUpdate169, uiUpdate170, uiUpdate171, uiUpdate172, uiUpdate173, uiUpdate174, uiUpdate175, uiUpdate176, uiUpdate177, uiUpdate178, uiUpdate179, uiUpdate180, uiUpdate181, uiUpdate182, uiUpdate183, uiUpdate184, uiUpdate185, uiUpdate186, uiUpdate187, uiUpdate188, uiUpdate189, uiUpdate190, uiUpdate191, uiUpdate192, uiUpdate193, uiUpdate194, uiUpdate195, uiUpdate196, uiUpdate197, uiUpdate198, uiUpdate199, uiUpdate200, uiUpdate201, uiUpdate202, uiUpdate203, uiUpdate204, uiUpdate205, uiUpdate206, uiUpdate207, uiUpdate208, uiUpdate209, uiUpdate210, uiUpdate211, uiUpdate212, uiUpdate213, uiUpdate214, uiUpdate215, uiUpdate216, uiUpdate217, uiUpdate218, uiUpdate219, uiUpdate220
+    // 收尾：嵌套插值与多行文案
+    case uiResidualUnknownReason, uiResidualUnknown, uiResidualBuiltinBrain, uiResidualYes, uiResidualNo, uiResidualHistoryUnavailableFmt, uiResidualAccountFmt, uiResidualReplyModeFmt, uiResidualModelCalledFmt, uiResidualBudgetFmt, uiResidualNoCompiled, uiResidualMcpTestFailedFmt, uiResidualConnectFailed, uiResidualMcpConfigExample, uiResidualUpdateRecoveryGuide
+    // 设计版页面迁移（自动生成，勿手改 key 名）
+    case uiOverview001, uiOverview002, uiOverview003, uiOverview004, uiOverview005, uiOverview006, uiOverview007, uiOverview008, uiSessions009, uiSessions010, uiSessions011, uiSessions012, uiSessions013, uiSessions014, uiSessions015, uiSessions016, uiSessions017, uiSessions018, uiSessions019, uiSessions020, uiSettings021, uiSettings022, uiSettings023, uiSettings024, uiSettings025, uiSettings026, uiSettings027, uiSettings028, uiSettings029, uiSettings030, uiSettings031, uiSettings032, uiSettings033, uiSettings034, uiSettings035, uiSettings036, uiSettings037, uiSettings038, uiSettings039, uiSettings040, uiSettings041, uiSettings042, uiSettings043, uiSettings044, uiSettings045, uiSettings046, uiShell047, uiShell048, uiStatusPanel049, uiStatusPanel050, uiStatusPanel051, uiStatusPanel052, uiStatusPanel053, uiStatusPanel054, uiStatusPanel055, uiStatusPanel056, uiStatusPanel057, uiStatusPanel058, uiStatusPanel059, uiStatusPanel060, uiStatusPanel061, uiStatusPanel062, uiStatusPanel063, uiStatusPanel064, uiStatusPanel065, uiStatusPanel066, uiStatusPanel067, uiStatusPanel068, uiStatusPanel069, uiStatusPanel070, uiStatusPanel071, uiStatusPanel072, uiStatusPanel073, uiStatusPanel074, uiStatusPanel075, uiStatusPanel076, uiStatusPanel077, uiStatusPanel078, uiStatusPanel079, uiStatusPanel080, uiStatusPanel081, uiStatusPanel082, uiStatusPanel083, uiStatusPanel084, uiStatusPanel085, uiStatusPanel086, uiStatusPanel087, uiStatusPanel088, uiStatusPanel089, uiStatusPanel090, uiStatusPanel091, uiStatusPanel092, uiStatusPanel093, uiStatusPanel094, uiStatusPanel095, uiStatusPanel096, uiStatusPanel097, uiConfigForm098, uiConfigForm099, uiConfigForm100, uiConfigForm101, uiConfigForm102, uiConfigForm103, uiConfigForm104, uiConfigForm105, uiConfigForm106, uiConfigForm107, uiConfigForm108, uiConfigForm109, uiConfigForm110, uiConfigForm111, uiConfigForm112, uiConfigForm113, uiConfigForm114, uiConfigForm115, uiConfigForm116, uiConfigForm117, uiConfigForm118, uiConfigForm119, uiConfigForm120, uiConfigForm121, uiConfigForm122, uiConfigForm123, uiConfigForm124, uiConfigForm125
     // 通用
     case loadMore, unreadCount, recordedOnlyNote
     case appName, quitApp, cancel, loading, valueUnavailable
@@ -1199,6 +1205,732 @@ public enum L10n {
             return e("未读 %d", "%d unread", "%d non lus", "%d non letti", "%d nieprzeczytanych")
         case .recordedOnlyNote:
             return e("仅显示已记录的消息；发送不等于送达。", "Only recorded messages; sent does not mean delivered.", "Messages enregistrés uniquement ; envoyé ne signifie pas remis.", "Solo messaggi registrati; inviato non significa consegnato.", "Tylko zapisane wiadomości; wysłano nie oznacza dostarczono.")
+        // MARK: 设计版页面迁移（自动生成）
+        case .uiBrain001:
+            return e("获取大脑配置失败", "Failed to load Brain configuration", "Échec du chargement de la configuration Brain", "Caricamento della configurazione Brain non riuscito", "Nie udało się wczytać konfiguracji Brain")
+        case .uiBrain002:
+            return e("未记录操作", "No operation recorded", "Aucune opération enregistrée", "Nessuna operazione registrata", "Nie zapisano operacji")
+        case .uiBrain003:
+            return e("保存角色草稿", "Save role draft", "Enregistrer le brouillon du rôle", "Salva bozza del ruolo", "Zapisz szkic roli")
+        case .uiBrain004:
+            return e("保存知识", "Save knowledge", "Enregistrer les connaissances", "Salva conoscenza", "Zapisz wiedzę")
+        case .uiBrain005:
+            return e("版本回退", "Revert version", "Revenir à une version", "Ripristina versione", "Przywróć wersję")
+        case .uiBrain006:
+            return e("…（共 %@ 字）", "…(%@ characters in total)", "…(%@ caractères au total)", "…(%@ caratteri in totale)", "…(łącznie %@ znaków)")
+        case .uiBrain007:
+            return e("无", "None", "Aucun", "Nessuno", "Brak")
+        case .uiBrain008:
+            return e("（%@ 项）", "(%@ items)", "(%@ éléments)", "(%@ elementi)", "(%@ pozycji)")
+        case .uiBrain009:
+            return e("欢迎语", "Welcome message", "Message d’accueil", "Messaggio di benvenuto", "Wiadomość powitalna")
+        case .uiBrain010:
+            return e("信息不足", "Insufficient information", "Informations insuffisantes", "Informazioni insufficienti", "Niewystarczające informacje")
+        case .uiBrain011:
+            return e("缺项标签", "Missing item tag", "Étiquette d’élément manquant", "Etichetta elemento mancante", "Etykieta brakującego elementu")
+        case .uiBrain012:
+            return e("多条标签", "Multi-item tag", "Étiquette multi-éléments", "Etichetta multi-elemento", "Etykieta wielu elementów")
+        case .uiBrain013:
+            return e("不可读原因 %@ 项", "%@ unreadable reasons", "%@ raisons illisibles", "%@ motivi illeggibili", "%@ nieczytelnych powodów")
+        case .uiBrain014:
+            return e("未设置自定义话术", "No custom script set", "Aucun script personnalisé défini", "Nessun copione personalizzato impostato", "Nie ustawiono własnego skryptu")
+        case .uiBrain015:
+            return e("%@：双方均未返回内容（%@）", "%@: neither side returned content (%@)", "%@ : aucun des deux côtés n’a renvoyé de contenu (%@)", "%@: nessuno dei due lati ha restituito contenuti (%@)", "%@: żadna strona nie zwróciła treści (%@)")
+        case .uiBrain016:
+            return e("%@：无变化（%@）", "%@: no changes (%@)", "%@ : aucun changement (%@)", "%@: nessuna modifica (%@)", "%@: brak zmian (%@)")
+        case .uiBrain017:
+            return e("版本 %@：%@", "Version %@: %@", "Version %@ : %@", "Versione %@: %@", "Wersja %@: %@")
+        case .uiBrain018:
+            return e("  角色=%@ · 创建时间=%@ · 草稿=%@ · 运行中=%@", "  role=%@ · created=%@ · draft=%@ · running=%@", "  rôle=%@ · créé le=%@ · brouillon=%@ · en service=%@", "  ruolo=%@ · creato=%@ · bozza=%@ · in esecuzione=%@", "  rola=%@ · utworzono=%@ · szkic=%@ · działająca=%@")
+        case .uiBrain019:
+            return e("【完整性说明】", "[Integrity notes]", "[Note d’intégrité]", "[Nota di integrità]", "[Informacje o integralności]")
+        case .uiBrain020:
+            return e("• 版本 A（%@）后端未返回完整草稿内容，A 侧字段按「%@」处理，不补全、不编造。", "• Version A (%@): the backend did not return the full draft content; side A fields are treated as “%@” — not filled in or invented.", "• Version A (%@) : le backend n’a pas renvoyé le brouillon complet ; les champs du côté A sont traités comme « %@ », sans complétion ni invention.", "• Versione A (%@): il backend non ha restituito la bozza completa; i campi del lato A sono trattati come «%@», senza completamenti né invenzioni.", "• Wersja A (%@): backend nie zwrócił pełnej treści szkicu; pola strony A są traktowane jako „%@” — bez uzupełniania i bez wymyślania.")
+        case .uiBrain021:
+            return e("• 版本 B（%@）后端未返回完整草稿内容，B 侧字段按「%@」处理，不补全、不编造。", "• Version B (%@): the backend did not return the full draft content; side B fields are treated as “%@” — not filled in or invented.", "• Version B (%@) : le backend n’a pas renvoyé le brouillon complet ; les champs du côté B sont traités comme « %@ », sans complétion ni invention.", "• Versione B (%@): il backend non ha restituito la bozza completa; i campi del lato B sono trattati come «%@», senza completamenti né invenzioni.", "• Wersja B (%@): backend nie zwrócił pełnej treści szkicu; pola strony B są traktowane jako „%@” — bez uzupełniania i bez wymyślania.")
+        case .uiBrain022:
+            return e("【版本 %@ 已保存内容】%@", "[Saved content of version %@] %@", "[Contenu enregistré de la version %@] %@", "[Contenuto salvato della versione %@] %@", "[Zapisana treść wersji %@] %@")
+        case .uiBrain023:
+            return e("• 语气风格：%@", "• Tone and style: %@", "• Ton et style : %@", "• Tono e stile: %@", "• Ton i styl: %@")
+        case .uiBrain024:
+            return e("• 身份与业务范围：%@", "• Identity and business scope: %@", "• Identité et périmètre d’activité : %@", "• Identità e ambito di attività: %@", "• Tożsamość i zakres działalności: %@")
+        case .uiBrain025:
+            return e("• 核心目标：%@", "• Core goals: %@", "• Objectifs principaux : %@", "• Obiettivi principali: %@", "• Cele główne: %@")
+        case .uiBrain026:
+            return e("• 业务规则：%@", "• Business rules: %@", "• Règles métier : %@", "• Regole di business: %@", "• Reguły biznesowe: %@")
+        case .uiBrain027:
+            return e("• 引用知识：%@", "• Referenced knowledge: %@", "• Connaissances référencées : %@", "• Conoscenze di riferimento: %@", "• Wiedza referencyjna: %@")
+        case .uiBrain028:
+            return e("• 异常回复模板：%@", "• Fallback reply template: %@", "• Modèle de réponse de repli : %@", "• Modello di risposta di riserva: %@", "• Szablon odpowiedzi awaryjnej: %@")
+        case .uiBrain029:
+            return e("• 上下文预算：%@", "• Context budget: %@", "• Budget de contexte : %@", "• Budget di contesto: %@", "• Budżet kontekstu: %@")
+        case .uiBrain030:
+            return e("字段级差异不可用：需要两个版本都返回完整草稿内容；本次只展示上方的版本元信息与可用一侧的已保存内容。", "Field-level diff unavailable: both versions must return full draft content. Only the version metadata above and the saved content from the available side are shown.", "Comparaison champ par champ indisponible : les deux versions doivent renvoyer le brouillon complet. Seules les métadonnées de version ci-dessus et le contenu enregistré du côté disponible sont affichés.", "Differenze a livello di campo non disponibili: entrambe le versioni devono restituire la bozza completa. Vengono mostrati solo i metadati delle versioni sopra e il contenuto salvato del lato disponibile.", "Różnice na poziomie pól niedostępne: obie wersje muszą zwrócić pełną treść szkicu. Wyświetlane są tylko metadane wersji powyżej oraz zapisana treść dostępnej strony.")
+        case .uiBrain031:
+            return e("名称", "Name", "Nom", "Nome", "Nazwa")
+        case .uiBrain032:
+            return e("语气风格", "Tone and style", "Ton et style", "Tono e stile", "Ton i styl")
+        case .uiBrain033:
+            return e("身份与业务范围", "Identity and business scope", "Identité et périmètre d’activité", "Identità e ambito di attività", "Tożsamość i zakres działalności")
+        case .uiBrain034:
+            return e("核心目标", "Core goals", "Objectifs principaux", "Obiettivi principali", "Cele główne")
+        case .uiBrain035:
+            return e("业务规则", "Business rules", "Règles métier", "Regole di business", "Reguły biznesowe")
+        case .uiBrain036:
+            return e("引用知识", "Referenced knowledge", "Connaissances référencées", "Conoscenze di riferimento", "Wiedza referencyjna")
+        case .uiBrain037:
+            return e("异常回复模板", "Fallback reply template", "Modèle de réponse de repli", "Modello di risposta di riserva", "Szablon odpowiedzi awaryjnej")
+        case .uiBrain038:
+            return e("上下文预算", "Context budget", "Budget de contexte", "Budget di contesto", "Budżet kontekstu")
+        case .uiBrain039:
+            return e("父版本", "Parent version", "Version parente", "Versione padre", "Wersja nadrzędna")
+        case .uiBrain040:
+            return e("内容摘要 sha256", "Content digest sha256", "Empreinte du contenu sha256", "Digest del contenuto sha256", "Skrót treści sha256")
+        case .uiBrain041:
+            return e("初始化大脑", "Initialize Brain", "Initialiser Brain", "Inizializza Brain", "Zainicjuj Brain")
+        case .uiBrain042:
+            return e("读取版本历史超时", "Timed out reading version history", "Délai dépassé lors de la lecture de l’historique des versions", "Timeout durante la lettura dello storico versioni", "Przekroczono limit czasu odczytu historii wersji")
+        case .uiBrain043:
+            return e("读取版本历史失败 (exit %@)", "Failed to read version history (exit %@)", "Échec de la lecture de l’historique des versions (exit %@)", "Lettura dello storico versioni non riuscita (exit %@)", "Nie udało się odczytać historii wersji (exit %@)")
+        case .uiBrain044:
+            return e("版本历史：尚未加载", "Version history: not loaded yet", "Historique des versions : pas encore chargé", "Storico versioni: non ancora caricato", "Historia wersji: jeszcze nie wczytano")
+        case .uiBrain045:
+            return e("真实模型调用：状态待加载", "Real model calls: status not loaded yet", "Appels réels au modèle : statut en attente de chargement", "Chiamate reali al modello: stato in attesa di caricamento", "Rzeczywiste wywołania modelu: stan oczekuje na wczytanie")
+        case .uiBrain046:
+            return e("欢迎语:", "Welcome message:", "Message d’accueil :", "Messaggio di benvenuto:", "Wiadomość powitalna:")
+        case .uiBrain047:
+            return e("信息不足:", "Insufficient information:", "Informations insuffisantes :", "Informazioni insufficienti:", "Niewystarczające informacje:")
+        case .uiBrain048:
+            return e("格式不支持:", "Unsupported format:", "Format non pris en charge :", "Formato non supportato:", "Nieobsługiwany format:")
+        case .uiBrain049:
+            return e("文件超限:", "File too large:", "Fichier trop volumineux :", "File troppo grande:", "Plik przekracza limit:")
+        case .uiBrain050:
+            return e("绑定大脑角色:", "Bind Brain role", "Lier un rôle Brain", "Associa ruolo Brain", "Powiąż rolę Brain")
+        case .uiBrain051:
+            return e("版本管理：保存草稿不影响运行版本；启用配置仅对新轮次生效。支持并发修改检测 (CAS) 与原子激活/回退。", "Version management: saving a draft does not affect the running version; enabling a configuration applies only to new turns. Concurrent-modification detection (CAS) and atomic activation/revert are supported.", "Gestion des versions : l’enregistrement d’un brouillon n’affecte pas la version en service ; l’activation d’une configuration ne s’applique qu’aux nouveaux tours. Détection des modifications concurrentes (CAS) et activation/retour atomiques pris en charge.", "Gestione versioni: salvare una bozza non influisce sulla versione in esecuzione; l’attivazione di una configurazione vale solo per i nuovi turni. Sono supportati il rilevamento delle modifiche concorrenti (CAS) e l’attivazione/ripristino atomici.", "Zarządzanie wersjami: zapisanie szkicu nie wpływa na działającą wersję; włączenie konfiguracji dotyczy tylko nowych tur. Obsługiwane są wykrywanie równoczesnych zmian (CAS) oraz atomowa aktywacja/przywrócenie.")
+        case .uiBrain052:
+            return e("历史版本：只读列出后端保存的代次与版本，可对比任意两个版本的差异，并可带二次确认回滚到选定代次。旧代次没有完整草稿时只展示后端已保存内容，不补全、不编造。", "Version history: a read-only list of the generations and versions saved by the backend; compare any two versions and roll back to a selected generation after confirmation. When an older generation has no full draft, only the content saved by the backend is shown — nothing is filled in or invented.", "Historique des versions : liste en lecture seule des générations et versions enregistrées par le backend ; comparez deux versions et revenez à une génération choisie après confirmation. Si une ancienne génération n’a pas de brouillon complet, seul le contenu enregistré par le backend est affiché, sans complétion ni invention.", "Storico versioni: elenco in sola lettura delle generazioni e versioni salvate dal backend; confronta due versioni e ripristina una generazione scelta dopo conferma. Se una generazione precedente non ha una bozza completa, viene mostrato solo il contenuto salvato dal backend, senza completamenti né invenzioni.", "Historia wersji: lista tylko do odczytu generacji i wersji zapisanych przez backend; porównaj dowolne dwie wersje i po potwierdzeniu przywróć wybraną generację. Gdy starsza generacja nie ma pełnego szkicu, wyświetlana jest tylko treść zapisana przez backend — bez uzupełniania i wymyślania.")
+        case .uiBrain053:
+            return e("版本与代次规则说明", "Version and generation rules", "Règles des versions et générations", "Regole di versioni e generazioni", "Zasady wersji i generacji")
+        case .uiBrain054:
+            return e("• 草稿与运行分离：保存草稿仅存入本地草稿区，不影响当前服务对外响应。", "• Drafts separated from running config: saving a draft only stores it in the local draft area and does not affect the service’s current responses.", "• Brouillons séparés de l’exécution : l’enregistrement d’un brouillon le stocke uniquement dans la zone de brouillon locale et n’affecte pas les réponses actuelles du service.", "• Bozze separate dall’esecuzione: salvare una bozza la memorizza solo nell’area locale delle bozze e non influisce sulle risposte attuali del servizio.", "• Szkice oddzielone od działania: zapisanie szkicu trafia wyłącznie do lokalnego obszaru szkiców i nie wpływa na bieżące odpowiedzi usługi.")
+        case .uiBrain055:
+            return e("• 原子激活：点击「启用配置」时将草稿生成新版本并原子推进激活代次。", "• Atomic activation: clicking “Enable configuration” turns the draft into a new version and atomically advances the active generation.", "• Activation atomique : cliquer sur « Activer la configuration » transforme le brouillon en nouvelle version et avance la génération active de façon atomique.", "• Attivazione atomica: facendo clic su «Attiva configurazione» la bozza diventa una nuova versione e la generazione attiva avanza in modo atomico.", "• Aktywacja atomowa: kliknięcie „Włącz konfigurację” zamienia szkic w nową wersję i atomowo przesuwa aktywną generację.")
+        case .uiBrain056:
+            return e("• 安全回退：点击「回退版本」将配置无损切换回上一稳定激活代次。", "• Safe revert: clicking “Revert version” switches the configuration losslessly back to the previous stable active generation.", "• Retour sûr : cliquer sur « Revenir à la version » rebascule la configuration sans perte vers la génération active stable précédente.", "• Ripristino sicuro: facendo clic su «Ripristina versione» la configurazione torna senza perdite alla precedente generazione attiva stabile.", "• Bezpieczne przywrócenie: kliknięcie „Przywróć wersję” bezstratnie przełącza konfigurację na poprzednią stabilną aktywną generację.")
+        case .uiBrain057:
+            return e("操作", "Operation", "Opération", "Operazione", "Operacja")
+        case .uiBrain058:
+            return e("默认版本ID", "Default version ID", "ID de version par défaut", "ID versione predefinito", "Domyślny ID wersji")
+        case .uiBrain059:
+            return e("回滚到历史版本 (二次确认)", "Roll back to a historical version (confirm)", "Revenir à une version historique (confirmation)", "Ripristina una versione storica (conferma)", "Przywróć wersję historyczną (potwierdzenie)")
+        case .uiBrain060:
+            return e("试一试：输入一段客户问题，查看大脑如何组装上下文与预览回复。合成测试仅执行确定性组装预览 (assemble_only)，标明【未调用模型】，不产生费用，绝不发送真实微信消息。", "Try it: enter a customer question to see how the Brain assembles context and previews a reply. The synthetic test only runs a deterministic assembly preview (assemble_only), is labelled [no model call], incurs no cost and never sends real WeChat messages.", "Essai : saisissez une question client pour voir comment le Brain assemble le contexte et prévisualise une réponse. Le test synthétique exécute uniquement un aperçu d’assemblage déterministe (assemble_only), est marqué [aucun appel au modèle], ne coûte rien et n’envoie jamais de vrais messages WeChat.", "Prova: inserisci una domanda di un cliente per vedere come il Brain assembla il contesto e genera l’anteprima di una risposta. Il test sintetico esegue solo un’anteprima di assemblaggio deterministica (assemble_only), è contrassegnato [nessuna chiamata al modello], non comporta costi e non invia mai messaggi WeChat reali.", "Wypróbuj: wpisz pytanie klienta, aby zobaczyć, jak Brain składa kontekst i generuje podgląd odpowiedzi. Test syntetyczny wykonuje wyłącznie deterministyczny podgląd składania (assemble_only), jest oznaczony [bez wywołania modelu], nie generuje kosztów i nigdy nie wysyła prawdziwych wiadomości WeChat.")
+        case .uiBrain061:
+            return e("例如：你们支持七天无理由退货吗？", "Example: do you accept seven-day returns with no questions asked?", "Exemple : acceptez-vous les retours sous sept jours sans justification ?", "Esempio: accettate resi entro sette giorni senza motivo?", "Przykład: czy obsługujecie zwroty w ciągu siedmiu dni bez podania przyczyny?")
+        case .uiBrain062:
+            return e("客户问题:", "Customer question:", "Question du client :", "Domanda del cliente:", "Pytanie klienta:")
+        case .uiBrain063:
+            return e("试一试结果（预览回复 + 组装预览快照与决策）:", "Try-it result (preview reply + assembly-preview snapshot and decision):", "Résultat de l’essai (réponse prévisualisée + instantané d’aperçu d’assemblage et décision) :", "Risultato della prova (risposta di anteprima + snapshot dell’anteprima di assemblaggio e decisione):", "Wynik próby (podgląd odpowiedzi + migawka podglądu składania i decyzja):")
+        case .uiBrain064:
+            return e("加载大脑配置失败: %@", "Failed to load Brain configuration: %@", "Échec du chargement de la configuration Brain : %@", "Caricamento della configurazione Brain non riuscito: %@", "Nie udało się wczytać konfiguracji Brain: %@")
+        case .uiBrain065:
+            return e("版本历史：正在加载…", "Version history: loading…", "Historique des versions : chargement…", "Storico versioni: caricamento…", "Historia wersji: wczytywanie…")
+        case .uiBrain066:
+            return e("暂无版本历史记录", "No version history yet", "Aucun historique de versions", "Nessuno storico versioni", "Brak historii wersji")
+        case .uiBrain067:
+            return e("版本历史：当前 %@ · 代次记录 %@ 条 · 版本 %@ 个", "Version history: current version %@ · %@ generation records · %@ versions", "Historique des versions : version actuelle %@ · %@ enregistrements de générations · %@ versions", "Storico versioni: versione attuale %@ · %@ record di generazioni · %@ versioni", "Historia wersji: bieżąca wersja %@ · rekordy generacji: %@ · wersje: %@")
+        case .uiBrain068:
+            return e("\n后端历史口径：%@（只保留已生效激活、已提交写入与可达版本；更早的编辑历史未保留）", "\nBackend history scope: %@ (only applied activations, committed writes and reachable versions are kept; earlier edit history is not retained)", "\nPérimètre de l’historique backend : %@ (seules les activations appliquées, les écritures validées et les versions accessibles sont conservées ; l’historique des modifications antérieures n’est pas retenu)", "\nAmbito dello storico del backend: %@ (vengono conservate solo attivazioni applicate, scritture confermate e versioni raggiungibili; lo storico delle modifiche precedenti non è mantenuto)", "\nZakres historii backendu: %@ (zapisywane są tylko zastosowane aktywacje, zatwierdzone zapisy i osiągalne wersje; wcześniejsza historia edycji nie jest zachowywana)")
+        case .uiBrain069:
+            return e("请选择两个版本后点击「对比差异」。", "Select two versions, then click “Compare differences”.", "Sélectionnez deux versions, puis cliquez sur « Comparer les différences ».", "Seleziona due versioni, poi fai clic su «Confronta differenze».", "Wybierz dwie wersje, a następnie kliknij „Porównaj różnice”.")
+        case .uiBrain070:
+            return e("当前没有可对比的版本记录。", "There are no version records to compare.", "Aucun enregistrement de version à comparer pour le moment.", "Al momento non ci sono record di versione da confrontare.", "Obecnie brak rekordów wersji do porównania.")
+        case .uiBrain071:
+            return e("内置大脑", "Built-in Brain", "Brain intégré", "Brain integrato", "Wbudowany Brain")
+        case .uiBrain072:
+            return e("未知（未返回模型摘要）", "Unknown (no model summary returned)", "Inconnu (aucun résumé du modèle renvoyé)", "Sconosciuto (nessun riepilogo del modello restituito)", "Nieznane (nie zwrócono podsumowania modelu)")
+        case .uiBrain073:
+            return e("回复方式：%@ · 真实模型调用：当前构建仅支持 assemble_only 确定性组装预览（不调用模型、不产生费用），因此不会生成真实回复文本。", "Reply mode: %@ · Real model calls: this build only supports assemble_only deterministic assembly previews (no model call, no cost), so no real reply text is generated.", "Mode de réponse : %@ · Appels réels au modèle : cette version ne prend en charge que les aperçus d’assemblage déterministes assemble_only (aucun appel au modèle, aucun coût), aucun texte de réponse réel n’est donc généré.", "Modalità di risposta: %@ · Chiamate reali al modello: questa build supporta solo anteprime di assemblaggio deterministiche assemble_only (nessuna chiamata al modello, nessun costo), quindi non viene generato alcun testo di risposta reale.", "Tryb odpowiedzi: %@ · Rzeczywiste wywołania modelu: ta kompilacja obsługuje tylko deterministyczne podglądy składania assemble_only (bez wywołania modelu, bez kosztów), więc nie powstaje prawdziwy tekst odpowiedzi.")
+        case .uiBrain074:
+            return e("• 联系人: %@ [%@] ➔ %@ (%@) [版本: %@]", "• Contact: %@ [%@] ➔ %@ (%@) [version: %@]", "• Contact : %@ [%@] ➔ %@ (%@) [version : %@]", "• Contatto: %@ [%@] ➔ %@ (%@) [versione: %@]", "• Kontakt: %@ [%@] ➔ %@ (%@) [wersja: %@]")
+        case .uiBrain075:
+            return e("角色: %@ · 草稿: %@ · 运行: %@", "Role: %@ · Draft: %@ · Running: %@", "Rôle : %@ · Brouillon : %@ · En service : %@", "Ruolo: %@ · Bozza: %@ · In esecuzione: %@", "Rola: %@ · Szkic: %@ · Działająca: %@")
+        case .uiBrain076:
+            return e("删除失败：%@", "Delete failed: %@", "Échec de la suppression : %@", "Eliminazione non riuscita: %@", "Usuwanie nie powiodło się: %@")
+        case .uiBrain077:
+            return e("角色「%@」已启用（%@），适用范围已核对。", "Role “%@” is enabled (%@) and its scope has been verified.", "Le rôle « %@ » est activé (%@) et son périmètre a été vérifié.", "Il ruolo «%@» è attivato (%@) e l’ambito è stato verificato.", "Rola „%@” jest włączona (%@), a jej zakres został sprawdzony.")
+        case .uiBrain078:
+            return e("启用未确认：%@。请重新读取配置核对；已保存的绑定草稿会保留。", "Activation not confirmed: %@. Reload the configuration to verify; the saved binding draft will be kept.", "Activation non confirmée : %@. Rechargez la configuration pour vérifier ; le brouillon de liaison enregistré sera conservé.", "Attivazione non confermata: %@. Ricarica la configurazione per verificare; la bozza di associazione salvata verrà mantenuta.", "Aktywacja niepotwierdzona: %@. Wczytaj ponownie konfigurację, aby to sprawdzić; zapisany szkic powiązania zostanie zachowany.")
+        case .uiBrain079:
+            return e("回退失败：尚未加载大脑配置", "Revert failed: Brain configuration not loaded yet", "Échec du retour : la configuration Brain n’est pas encore chargée", "Ripristino non riuscito: configurazione Brain non ancora caricata", "Przywrócenie nie powiodło się: konfiguracja Brain nie została jeszcze wczytana")
+        case .uiBrain080:
+            return e("回滚大脑配置到第 %@ 代？", "Roll the Brain configuration back to generation %@?", "Revenir à la génération %@ de la configuration Brain ?", "Ripristinare la configurazione Brain alla generazione %@?", "Przywrócić konfigurację Brain do generacji %@?")
+        case .uiBrain081:
+            return e("回滚将把账号配置原子切换到第 %@ 代的已保存状态；当前未保存的草稿将丢失。仅影响新轮次。\n", "The rollback will atomically switch the account configuration to the state saved in generation %@; unsaved drafts will be lost. Only new turns are affected.\n", "Le retour basculera atomiquement la configuration du compte vers l’état enregistré de la génération %@ ; les brouillons non enregistrés seront perdus. Seuls les nouveaux tours sont concernés.\n", "Il ripristino passerà in modo atomico la configurazione dell’account allo stato salvato della generazione %@; le bozze non salvate andranno perse. Influisce solo sui nuovi turni.\n", "Przywrócenie atomowo przełączy konfigurację konta na stan zapisany w generacji %@; niezapisane szkice zostaną utracone. Dotyczy to tylko nowych tur.\n")
+        case .uiBrain082:
+            return e("未保存完整草稿（仅显示后端已保存内容，不补全）", "No full draft saved (showing only backend-saved content, nothing filled in)", "Aucun brouillon complet enregistré (seul le contenu enregistré par le backend est affiché, sans complétion)", "Nessuna bozza completa salvata (viene mostrato solo il contenuto salvato dal backend, senza completamenti)", "Brak zapisanego pełnego szkicu (wyświetlana jest tylko treść zapisana przez backend, bez uzupełniania)")
+        case .uiBrain083:
+            return e("该代次不是激活快照，仅记录写入结果", "This generation is not an activation snapshot; only write results are recorded", "Cette génération n’est pas un instantané d’activation ; seuls les résultats d’écriture sont enregistrés", "Questa generazione non è uno snapshot di attivazione; sono registrati solo i risultati di scrittura", "Ta generacja nie jest migawką aktywacji; zapisywane są tylko wyniki zapisu")
+        case .uiBrain084:
+            return e("有激活快照", "Has activation snapshot", "Instantané d’activation présent", "Snapshot di attivazione presente", "Zawiera migawkę aktywacji")
+        case .uiBrain085:
+            return e("\n• 目标代次：第 %@ 代 · %@ · 操作=%@", "\n• Target generation: generation %@ · %@ · operation=%@", "\n• Génération cible : génération %@ · %@ · opération=%@", "\n• Generazione di destinazione: generazione %@ · %@ · operazione=%@", "\n• Generacja docelowa: generacja %@ · %@ · operacja=%@")
+        case .uiBrain086:
+            return e("\n• 运行配置：默认角色=%@，版本=%@，覆盖规则=%@ 条（%@）", "\n• Running configuration: default role=%@, version=%@, override rules=%@ (%@)", "\n• Configuration en service : rôle par défaut=%@, version=%@, règles de remplacement=%@ (%@)", "\n• Configurazione in esecuzione: ruolo predefinito=%@, versione=%@, regole di override=%@ (%@)", "\n• Konfiguracja działająca: rola domyślna=%@, wersja=%@, reguły nadpisań=%@ (%@)")
+        case .uiBrain087:
+            return e("\n• 草稿状态：%@", "\n• Draft status: %@", "\n• État du brouillon : %@", "\n• Stato della bozza: %@", "\n• Stan szkicu: %@")
+        case .uiBrain088:
+            return e("\n• 后端未记录该代次的详细快照；回滚只恢复该代次实际保存的配置。", "\n• The backend recorded no detailed snapshot for this generation; the rollback restores only the configuration actually saved for it.", "\n• Le backend n’a enregistré aucun instantané détaillé pour cette génération ; le retour ne restaure que la configuration réellement enregistrée pour celle-ci.", "\n• Il backend non ha registrato uno snapshot dettagliato per questa generazione; il ripristino riporta solo la configurazione effettivamente salvata per essa.", "\n• Backend nie zapisał szczegółowej migawki tej generacji; przywrócenie odtwarza tylko konfigurację faktycznie dla niej zapisaną.")
+        case .uiBrain089:
+            return e("已取消回滚", "Rollback canceled", "Retour annulé", "Ripristino annullato", "Przywracanie anulowane")
+        case .uiBrain090:
+            return e("已回退至代次 %@", "Reverted to generation %@", "Retour à la génération %@", "Ripristinata la generazione %@", "Przywrócono generację %@")
+        case .uiBrain091:
+            return e("（该代次未保存完整草稿，仅恢复后端已保存内容）", "(No full draft saved for this generation; only backend-saved content was restored)", "(Aucun brouillon complet enregistré pour cette génération ; seul le contenu enregistré par le backend a été restauré)", "(Nessuna bozza completa salvata per questa generazione; è stato ripristinato solo il contenuto salvato dal backend)", "(Dla tej generacji nie zapisano pełnego szkicu; przywrócono tylko treść zapisaną przez backend)")
+        case .uiBrain092:
+            return e("请先保存角色草稿，再执行「试一试」。", "Save the role draft first, then run “Try it”.", "Enregistrez d’abord le brouillon du rôle, puis lancez « Essai ».", "Salva prima la bozza del ruolo, poi esegui «Prova».", "Najpierw zapisz szkic roli, a potem uruchom „Wypróbuj”.")
+        case .uiBrain093:
+            return e("请先选择一个角色，再执行「试一试」。", "Select a role first, then run “Try it”.", "Sélectionnez d’abord un rôle, puis lancez « Essai ».", "Seleziona prima un ruolo, poi esegui «Prova».", "Najpierw wybierz rolę, a potem uruchom „Wypróbuj”.")
+        case .uiBrain094:
+            return e("请输入客户问题正文", "Enter the customer question text", "Saisissez le texte de la question du client", "Inserisci il testo della domanda del cliente", "Wpisz treść pytania klienta")
+        case .uiBrain095:
+            return e("试一试失败: %@\n", "Try-it failed: %@\n", "Échec de l’essai : %@\n", "Prova non riuscita: %@\n", "Próba nie powiodła się: %@\n")
+        case .uiBrain096:
+            return e("真实模型调用不可用：当前构建只提供 assemble_only 确定性组装预览，不会生成真实回复。\n", "Real model calls unavailable: this build only provides assemble_only deterministic assembly previews and will not generate a real reply.\n", "Appels réels au modèle indisponibles : cette version ne propose que des aperçus d’assemblage déterministes assemble_only et ne génère aucune réponse réelle.\n", "Chiamate reali al modello non disponibili: questa build offre solo anteprime di assemblaggio deterministiche assemble_only e non genera risposte reali.\n", "Rzeczywiste wywołania modelu niedostępne: ta kompilacja oferuje tylko deterministyczne podglądy składania assemble_only i nie generuje prawdziwej odpowiedzi.\n")
+        case .uiBrain097:
+            return e("【试一试结果】\n", "[Try-it result]\n", "[Résultat de l’essai]\n", "[Risultato della prova]\n", "[Wynik próby]\n")
+        case .uiBrain098:
+            return e("客户问题: %@\n", "Customer question: %@\n", "Question du client : %@\n", "Domanda del cliente: %@\n", "Pytanie klienta: %@\n")
+        case .uiBrain099:
+            return e("费用说明: %@\n", "Cost note: %@\n", "Note sur les coûts : %@\n", "Nota sui costi: %@\n", "Informacje o kosztach: %@\n")
+        case .uiBrain100:
+            return e("\n【预览回复】\n", "\n[Preview reply]\n", "\n[Réponse prévisualisée]\n", "\n[Risposta di anteprima]\n", "\n[Podgląd odpowiedzi]\n")
+        case .uiBrain101:
+            return e("后端返回了决策，但未包含 reply 字段；不编造回复内容。\n", "The backend returned a decision but no reply field; no reply content will be invented.\n", "Le backend a renvoyé une décision sans champ reply ; aucun contenu de réponse ne sera inventé.\n", "Il backend ha restituito una decisione ma nessun campo reply; nessun contenuto di risposta verrà inventato.\n", "Backend zwrócił decyzję, ale bez pola reply; treść odpowiedzi nie będzie wymyślana.\n")
+        case .uiBrain102:
+            return e("不可用：本次为确定性组装预览 (assemble_only)，未调用真实模型，无法生成回复文本。\n", "Unavailable: this is a deterministic assembly preview (assemble_only); no real model was called, so no reply text can be generated.\n", "Indisponible : il s’agit d’un aperçu d’assemblage déterministe (assemble_only) ; aucun modèle réel n’a été appelé, aucun texte de réponse ne peut être généré.\n", "Non disponibile: questa è un’anteprima di assemblaggio deterministica (assemble_only); non è stato chiamato alcun modello reale, quindi non è possibile generare testo di risposta.\n", "Niedostępne: to deterministyczny podgląd składania (assemble_only); nie wywołano rzeczywistego modelu, więc nie można wygenerować tekstu odpowiedzi.\n")
+        case .uiBrain103:
+            return e("\n【系统约束】\n", "\n[System constraints]\n", "\n[Contraintes système]\n", "\n[Vincoli di sistema]\n", "\n[Ograniczenia systemu]\n")
+        case .uiBrain104:
+            return e("后端未返回独立系统约束字段（组装内容中未解析到 system_contract）；不做推测。\n", "The backend returned no separate system-constraint field (no system_contract parsed from the assembled content); nothing is inferred.\n", "Le backend n’a renvoyé aucun champ de contraintes système distinct (aucun system_contract analysé dans le contenu assemblé) ; aucune supposition n’est faite.\n", "Il backend non ha restituito un campo separato per i vincoli di sistema (nessun system_contract rilevato nel contenuto assemblato); non vengono fatte supposizioni.\n", "Backend nie zwrócił osobnego pola ograniczeń systemowych (w złożonej treści nie odnaleziono system_contract); niczego nie zakładamy.\n")
+        case .uiBrain105:
+            return e("\n【组装内容 (compiled)】\n", "\n[Assembled content (compiled)]\n", "\n[Contenu assemblé (compiled)]\n", "\n[Contenuto assemblato (compiled)]\n", "\n[Złożona treść (compiled)]\n")
+        case .uiBrain106:
+            return e("未保存完整草稿", "No full draft saved", "Aucun brouillon complet enregistré", "Nessuna bozza completa salvata", "Brak zapisanego pełnego szkicu")
+        case .uiBrain107:
+            return e("第 %@ 代 · %@ · 操作=%@", "Generation %@ · %@ · operation=%@", "Génération %@ · %@ · opération=%@", "Generazione %@ · %@ · operazione=%@", "Generacja %@ · %@ · operacja=%@")
+        case .uiBrain108:
+            return e("写入角色: %@ · 写入版本: %@", "Written role: %@ · written version: %@", "Rôle écrit : %@ · version écrite : %@", "Ruolo scritto: %@ · versione scritta: %@", "Zapisana rola: %@ · zapisana wersja: %@")
+        case .uiBrain109:
+            return e("运行/草稿配置: 后端未记录该代次的绑定快照（仅写入结果）", "Running/draft configuration: the backend recorded no binding snapshot for this generation (write results only)", "Configuration en service/brouillon : le backend n’a enregistré aucun instantané de liaison pour cette génération (résultats d’écriture uniquement)", "Configurazione in esecuzione/bozza: il backend non ha registrato uno snapshot di associazione per questa generazione (solo risultati di scrittura)", "Konfiguracja działająca/szkic: backend nie zapisał migawki powiązania dla tej generacji (tylko wyniki zapisu)")
+        case .uiBrain110:
+            return e("运行配置: 默认角色=%@ · 版本=%@ · 覆盖规则=%@ 条", "Running configuration: default role=%@ · version=%@ · %@ override rules", "Configuration en service : rôle par défaut=%@ · version=%@ · %@ règles de remplacement", "Configurazione in esecuzione: ruolo predefinito=%@ · versione=%@ · regole di override: %@", "Konfiguracja działająca: rola domyślna=%@ · wersja=%@ · reguły nadpisań: %@")
+        case .uiBrain111:
+            return e("草稿状态: 已保存完整草稿", "Draft status: full draft saved", "État du brouillon : brouillon complet enregistré", "Stato della bozza: bozza completa salvata", "Stan szkicu: zapisano pełny szkic")
+        case .uiBrain112:
+            return e("草稿状态: 该代次未保存完整草稿，仅显示后端已保存内容（不补全、不编造）", "Draft status: no full draft saved for this generation; showing only backend-saved content (nothing filled in or invented)", "État du brouillon : aucun brouillon complet enregistré pour cette génération ; seul le contenu enregistré par le backend est affiché (sans complétion ni invention)", "Stato della bozza: nessuna bozza completa salvata per questa generazione; viene mostrato solo il contenuto salvato dal backend (senza completamenti né invenzioni)", "Stan szkicu: dla tej generacji nie zapisano pełnego szkicu; wyświetlana jest tylko treść zapisana przez backend (bez uzupełniania i wymyślania)")
+        case .uiMcp113:
+            return e("无效 UTF8 数据", "Invalid UTF8 data", "Données UTF8 non valides", "Dati UTF8 non validi", "Nieprawidłowe dane UTF8")
+        case .uiMcp114:
+            return e("角色定义、知识与话术请前往【客服角色】页面管理；本页面仅管理回复模式、外部超时与对外接口连接。", "Manage role definitions, knowledge and scripts on the [Brain] page; this page only manages the Brain mode, external timeouts and the external interface connection.", "La définition des rôles, les connaissances et les scripts se gèrent sur la page [Brain] ; cette page ne gère que le mode Brain, les délais d’attente externes et la connexion de l’interface externe.", "Definizioni dei ruoli, conoscenze e copioni si gestiscono nella pagina [Brain]; questa pagina gestisce solo la modalità Brain, i timeout esterni e la connessione dell’interfaccia esterna.", "Definicje ról, wiedzę i skrypty konfiguruje się na stronie [Brain]; ta strona zarządza tylko trybem Brain, limitami czasu zewnętrznego i połączeniem interfejsu zewnętrznego.")
+        case .uiMcp115:
+            return e("内置大脑 (调用配置好的大模型生成回复)", "Built-in Brain (calls the configured large model to generate replies)", "Brain intégré (appelle le grand modèle configuré pour générer les réponses)", "Brain integrato (chiama il modello di grandi dimensioni configurato per generare risposte)", "Wbudowany Brain (wywołuje skonfigurowany duży model, aby generować odpowiedzi)")
+        case .uiMcp116:
+            return e("外部大脑 (MCP 协议接管消息轮询与回复决策)", "External Brain (the MCP protocol takes over message polling and reply decisions)", "Brain externe (le protocole MCP prend en charge l’interrogation des messages et les décisions de réponse)", "Brain esterno (il protocollo MCP gestisce il polling dei messaggi e le decisioni di risposta)", "Zewnętrzny Brain (protokół MCP przejmuje odpytywanie wiadomości i decyzje o odpowiedzi)")
+        case .uiMcp117:
+            return e("保存大脑设置", "Save Brain settings", "Enregistrer les réglages Brain", "Salva impostazioni Brain", "Zapisz ustawienia Brain")
+        case .uiMcp118:
+            return e("启用对外接口（外部大脑通过 HTTP 接入）", "Enable external interface (external Brain connects over HTTP)", "Activer l’interface externe (le Brain externe se connecte via HTTP)", "Abilita interfaccia esterna (il Brain esterno si collega tramite HTTP)", "Włącz interfejs zewnętrzny (zewnętrzny Brain łączy się przez HTTP)")
+        case .uiMcp119:
+            return e("回复决策大脑", "Reply decision Brain", "Brain décisionnel des réponses", "Brain per le decisioni di risposta", "Brain decydujący o odpowiedziach")
+        case .uiMcp120:
+            return e("等待回复:", "Reply wait:", "Attente de réponse :", "Attesa risposta:", "Oczekiwanie na odpowiedź:")
+        case .uiMcp121:
+            return e("超时后动作:", "Action on timeout:", "Action après expiration :", "Azione allo scadere:", "Działanie po przekroczeniu czasu:")
+        case .uiMcp122:
+            return e("最长排队:", "Max queue wait:", "Attente max. en file :", "Attesa massima in coda:", "Maks. czas w kolejce:")
+        case .uiMcp123:
+            return e("前往大脑页面", "Go to Brain page", "Aller à la page Brain", "Vai alla pagina Brain", "Przejdź do strony Brain")
+        case .uiMcp124:
+            return e("Bearer <令牌>", "Bearer <token>", "Bearer <token>", "Bearer <token>", "Bearer <token>")
+        case .uiMcp125:
+            return e("开关状态: 已开启", "Switch: on", "Interrupteur : activé", "Interruttore: attivo", "Przełącznik: włączony")
+        case .uiMcp126:
+            return e("开关状态: 已关闭", "Switch: off", "Interrupteur : désactivé", "Interruttore: disattivo", "Przełącznik: wyłączony")
+        case .uiMcp127:
+            return e("接口地址: http://%@:%@/mcp", "Endpoint: http://%@:%@/mcp", "Adresse de l’interface : http://%@:%@/mcp", "Indirizzo dell’interfaccia: http://%@:%@/mcp", "Adres interfejsu: http://%@:%@/mcp")
+        case .uiMcp128:
+            return e("大脑设置已保存", "Brain settings saved", "Réglages Brain enregistrés", "Impostazioni Brain salvate", "Ustawienia Brain zapisane")
+        case .uiMcp129:
+            return e("已开启，服务重启后生效（约数秒）", "Enabled; takes effect after the service restarts (a few seconds)", "Activé ; prend effet après le redémarrage du service (quelques secondes)", "Attivato; ha effetto dopo il riavvio del servizio (pochi secondi)", "Włączono; zacznie działać po ponownym uruchomieniu usługi (kilka sekund)")
+        case .uiMcp130:
+            return e("已关闭，服务重启后生效（约数秒）", "Disabled; takes effect after the service restarts (a few seconds)", "Désactivé ; prend effet après le redémarrage du service (quelques secondes)", "Disattivato; ha effetto dopo il riavvio del servizio (pochi secondi)", "Wyłączono; zacznie działać po ponownym uruchomieniu usługi (kilka sekund)")
+        case .uiMcp131:
+            return e("重新生成对外接口令牌", "Regenerate external interface token", "Régénérer le token de l’interface externe", "Rigenera il token dell’interfaccia esterna", "Wygeneruj ponownie token interfejsu zewnętrznego")
+        case .uiMcp132:
+            return e("重新生成后将立即生效，当前连接的大脑将会断开。确定重新生成吗？", "Regenerating takes effect immediately and disconnects the currently connected Brain. Regenerate now?", "La régénération prend effet immédiatement et déconnecte le Brain actuellement connecté. Régénérer maintenant ?", "La rigenerazione ha effetto immediato e disconnette il Brain attualmente connesso. Rigenerare ora?", "Ponowne wygenerowanie zadziała natychmiast i rozłączy obecnie podłączony Brain. Wygenerować ponownie?")
+        case .uiMcp133:
+            return e("连接正常 (可用工具: %@ 个)", "Connected (available tools: %@)", "Connexion correcte (outils disponibles : %@)", "Connessione attiva (strumenti disponibili: %@)", "Połączenie działa (dostępne narzędzia: %@)")
+        case .uiMcp134:
+            return e("已有大脑连接中", "A Brain is already connected", "Un Brain est déjà connecté", "Un Brain è già connesso", "Brain jest już podłączony")
+        case .uiMcp135:
+            return e("外部大脑接口", "External Brain interface", "Interface du Brain externe", "Interfaccia del Brain esterno", "Interfejs zewnętrznego Brain")
+        case .uiUpdate136:
+            return e("更新器输出或管道超出限制", "Updater output or pipe exceeded the limit", "La sortie ou le pipe du programme de mise à jour a dépassé la limite", "L’output o la pipe del programma di aggiornamento hanno superato il limite", "Wynik lub potok aktualizatora przekroczył limit")
+        case .uiUpdate137:
+            return e("%@ / %@ (不可信)", "%@ / %@ (untrusted)", "%@ / %@ (non fiable)", "%@ / %@ (non attendibile)", "%@ / %@ (niezaufane)")
+        case .uiUpdate138:
+            return e("%@ (防降级高水位，非安装版本)", "%@ (anti-downgrade high-water mark, not the installed version)", "%@ (seuil haut anti-rétrogradation, pas la version installée)", "%@ (limite anti-degradazione, non la versione installata)", "%@ (znacznik antydegradacji, nie zainstalowana wersja)")
+        case .uiUpdate139:
+            return e("命令执行错误 [%@]: %@", "Command execution error [%@]: %@", "Erreur d’exécution de la commande [%@] : %@", "Errore di esecuzione del comando [%@]: %@", "Błąd wykonania polecenia [%@]: %@")
+        case .uiUpdate140:
+            return e("回滚到上一版本…", "Roll back to the previous version…", "Revenir à la version précédente…", "Ripristino alla versione precedente…", "Przywracanie poprzedniej wersji…")
+        case .uiUpdate141:
+            return e("整包换回上一个已安装的应用程序，执行前需要二次确认", "Swap the whole bundle back to the previously installed application; a confirmation is required before running", "Remplacer l’intégralité du paquet par l’application précédemment installée ; une confirmation est requise avant l’exécution", "Sostituisce l’intero bundle con l’applicazione installata in precedenza; è necessaria una conferma prima dell’esecuzione", "Przywraca cały pakiet do poprzednio zainstalowanej aplikacji; przed wykonaniem wymagane jest potwierdzenie")
+        case .uiUpdate142:
+            return e("查询中…", "Checking…", "Vérification…", "Verifica in corso…", "Sprawdzanie…")
+        case .uiUpdate143:
+            return e("备份记录时间：", "Backup record time:", "Date d’enregistrement de la sauvegarde :", "Ora del record di backup:", "Czas zapisu kopii zapasowej:")
+        case .uiUpdate144:
+            return e("当前不可回滚：%@", "Rollback unavailable: %@", "Retour indisponible : %@", "Ripristino non disponibile: %@", "Przywracanie niedostępne: %@")
+        case .uiUpdate145:
+            return e("回滚未完成 (退出码 %@)", "Rollback did not complete (exit code %@)", "Le retour ne s’est pas terminé (code de sortie %@)", "Il ripristino non è stato completato (codice di uscita %@)", "Przywracanie nie zostało ukończone (kod wyjścia %@)")
+        case .uiUpdate146:
+            return e("无法将字符串转为 UTF-8 字节", "Cannot convert string to UTF-8 bytes", "Impossible de convertir la chaîne en octets UTF-8", "Impossibile convertire la stringa in byte UTF-8", "Nie można przekonwertować ciągu na bajty UTF-8")
+        case .uiUpdate147:
+            return e("未知阶段", "Unknown stage", "Étape inconnue", "Fase sconosciuta", "Nieznany etap")
+        case .uiUpdate148:
+            return e("无事务ID", "No transaction ID", "Aucun ID de transaction", "Nessun ID transazione", "Brak ID transakcji")
+        case .uiUpdate149:
+            return e("可信更新器不可用", "Trusted updater unavailable", "Programme de mise à jour de confiance indisponible", "Programma di aggiornamento attendibile non disponibile", "Zaufany aktualizator niedostępny")
+        case .uiUpdate150:
+            return e("更新清单尚未验证或更新器暂不支持下载", "The update manifest is not verified yet, or the updater does not support downloads", "Le manifeste de mise à jour n’est pas encore vérifié, ou le programme de mise à jour ne prend pas en charge le téléchargement", "Il manifest di aggiornamento non è ancora verificato oppure il programma di aggiornamento non supporta i download", "Manifest aktualizacji nie został jeszcze zweryfikowany albo aktualizator nie obsługuje pobierania")
+        case .uiUpdate151:
+            return e("更新缓存已满，请清理未使用候选后重试", "The update cache is full; clean up unused candidates and try again", "Le cache de mise à jour est plein ; supprimez les candidats inutilisés et réessayez", "La cache degli aggiornamenti è piena; rimuovi i candidati inutilizzati e riprova", "Pamięć podręczna aktualizacji jest pełna; usuń nieużywane kandydaty i spróbuj ponownie")
+        case .uiUpdate152:
+            return e("已有更新包正在下载，请稍后重试", "An update package is already downloading; try again later", "Un paquet de mise à jour est déjà en cours de téléchargement ; réessayez plus tard", "È già in corso il download di un pacchetto di aggiornamento; riprova più tardi", "Trwa już pobieranie pakietu aktualizacji; spróbuj ponownie później")
+        case .uiUpdate153:
+            return e("下载或校验未完成，请重试", "Download or verification did not complete; please try again", "Le téléchargement ou la vérification ne s’est pas terminé ; veuillez réessayer", "Download o verifica non completati; riprova", "Pobieranie lub weryfikacja nie zostały ukończone; spróbuj ponownie")
+        case .uiUpdate154:
+            return e("更新源或下载结果已变化，请重新检查更新", "The update source or download result has changed; check for updates again", "La source de mise à jour ou le résultat du téléchargement a changé ; vérifiez à nouveau les mises à jour", "L’origine degli aggiornamenti o il risultato del download è cambiato; controlla di nuovo gli aggiornamenti", "Źródło aktualizacji lub wynik pobierania uległy zmianie; sprawdź aktualizacje ponownie")
+        case .uiUpdate155:
+            return e("加载中...", "Loading...", "Chargement...", "Caricamento...", "Wczytywanie...")
+        case .uiUpdate156:
+            return e("未校验 (未知)", "Not verified (unknown)", "Non vérifié (inconnu)", "Non verificato (sconosciuto)", "Niezweryfikowane (nieznane)")
+        case .uiUpdate157:
+            return e("尚未检查更新。点击「检查更新」读取授权清单状态；未配置更新源时不会联网或下载。", "Updates have not been checked yet. Click “Check for updates” to read the authorized manifest status; without a configured update source, nothing connects to the network or downloads.", "Les mises à jour n’ont pas encore été vérifiées. Cliquez sur « Rechercher des mises à jour » pour lire l’état du manifeste autorisé ; sans source de mise à jour configurée, aucun accès réseau ni téléchargement n’a lieu.", "Gli aggiornamenti non sono ancora stati controllati. Fai clic su «Verifica aggiornamenti» per leggere lo stato del manifest autorizzato; senza un’origine degli aggiornamenti configurata non vengono effettuati accessi alla rete né download.", "Nie sprawdzono jeszcze aktualizacji. Kliknij „Sprawdź aktualizacje”, aby odczytać stan autoryzowanego manifestu; bez skonfigurowanego źródła aktualizacji nie ma połączenia sieciowego ani pobierania.")
+        case .uiUpdate158:
+            return e("只读", "Read-only", "Lecture seule", "Sola lettura", "Tylko odczyt")
+        case .uiUpdate159:
+            return e("只读监控中", "Read-only monitoring", "Surveillance en lecture seule", "Monitoraggio in sola lettura", "Monitorowanie tylko do odczytu")
+        case .uiUpdate160:
+            return e("检查更新", "Check for updates", "Rechercher des mises à jour", "Verifica aggiornamenti", "Sprawdź aktualizacje")
+        case .uiUpdate161:
+            return e("刷新状态", "Refresh status", "Actualiser l’état", "Aggiorna stato", "Odśwież stan")
+        case .uiUpdate162:
+            return e("下载更新", "Download update", "Télécharger la mise à jour", "Scarica aggiornamento", "Pobierz aktualizację")
+        case .uiUpdate163:
+            return e("安装并重启", "Install and restart", "Installer et redémarrer", "Installa e riavvia", "Zainstaluj i uruchom ponownie")
+        case .uiUpdate164:
+            return e("延期更新", "Defer update", "Reporter la mise à jour", "Rinvia aggiornamento", "Odrocz aktualizację")
+        case .uiUpdate165:
+            return e("受控写入（当前未启用）：下载、安装、延期由真实更新事务控制，界面不会模拟成功。", "Controlled writes (currently disabled): download, install and defer are driven by real update transactions; the interface will not simulate success.", "Écritures contrôlées (actuellement désactivées) : le téléchargement, l’installation et le report sont pilotés par de vraies transactions de mise à jour ; l’interface ne simule pas de réussite.", "Scritture controllate (attualmente disattivate): download, installazione e rinvio sono gestiti da transazioni di aggiornamento reali; l’interfaccia non simula il successo.", "Zapisy kontrolowane (obecnie wyłączone): pobieranie, instalacja i odroczenie są sterowane rzeczywistymi transakcjami aktualizacji; interfejs nie symuluje sukcesu.")
+        case .uiUpdate166:
+            return e("当前处于只读状态查看阶段；真实下载、安装、排空延期与恢复写入均已安全禁用；整包回滚由回滚卡片单独控制。", "Currently in a read-only viewing phase; real downloads, installs, draining deferrals and restore writes are safely disabled; full-bundle rollback is controlled separately by the rollback card.", "Phase d’observation en lecture seule ; les téléchargements réels, installations, reports en cours de vidage et écritures de restauration sont désactivés en toute sécurité ; le retour de l’intégralité du paquet est contrôlé séparément par la carte de retour.", "Fase di visualizzazione in sola lettura; download, installazioni, rinvii in svuotamento e scritture di ripristino reali sono disattivati in sicurezza; il ripristino dell’intero bundle è controllato separatamente dalla scheda di ripristino.", "Trwa etap przeglądania tylko do odczytu; rzeczywiste pobierania, instalacje, odroczenia w trakcie opróżniania i zapisy przywracania są bezpiecznie wyłączone; przywracanie całego pakietu jest sterowane osobno przez kartę przywracania.")
+        case .uiUpdate167:
+            return e("显示技术详情", "Show technical details", "Afficher les détails techniques", "Mostra dettagli tecnici", "Pokaż szczegóły techniczne")
+        case .uiUpdate168:
+            return e("版本与更新", "Version and updates", "Version et mises à jour", "Versione e aggiornamenti", "Wersja i aktualizacje")
+        case .uiUpdate169:
+            return e("发布时间", "Release date", "Date de publication", "Data di pubblicazione", "Data publikacji")
+        case .uiUpdate170:
+            return e("适用环境", "Target environment", "Environnement cible", "Ambiente di destinazione", "Środowisko docelowe")
+        case .uiUpdate171:
+            return e("当前仅支持检查状态，此操作尚未启用", "Only status checking is supported right now; this action is not enabled yet", "Seule la vérification de l’état est prise en charge pour le moment ; cette action n’est pas encore activée", "Al momento è supportato solo il controllo dello stato; questa azione non è ancora attiva", "Obecnie obsługiwane jest tylko sprawdzanie stanu; ta czynność nie jest jeszcze włączona")
+        case .uiUpdate172:
+            return e("需要人工恢复", "Manual recovery required", "Récupération manuelle requise", "Ripristino manuale necessario", "Wymagane ręczne odzyskanie")
+        case .uiUpdate173:
+            return e("核心编译版本", "Core build version", "Version de compilation du cœur", "Versione di build del core", "Wersja kompilacji rdzenia")
+        case .uiUpdate174:
+            return e("整套安装序列", "Full install sequence", "Séquence d’installation complète", "Sequenza di installazione completa", "Pełna sekwencja instalacji")
+        case .uiUpdate175:
+            return e("防降级高水位", "Anti-downgrade high-water mark", "Seuil haut anti-rétrogradation", "Limite anti-degradazione", "Znacznik antydegradacji")
+        case .uiUpdate176:
+            return e("发布状态与来源", "Release status and source", "État et source de la publication", "Stato e origine della release", "Stan i źródło wydania")
+        case .uiUpdate177:
+            return e("宿主运行架构", "Host architecture", "Architecture de l’hôte", "Architettura host", "Architektura hosta")
+        case .uiUpdate178:
+            return e("组件一致性", "Component consistency", "Cohérence des composants", "Coerenza dei componenti", "Spójność komponentów")
+        case .uiUpdate179:
+            return e("维护抑制状态", "Maintenance hold state", "État de blocage pour maintenance", "Stato di blocco per manutenzione", "Stan wstrzymania konserwacyjnego")
+        case .uiUpdate180:
+            return e("更新包大小", "Update package size", "Taille du paquet de mise à jour", "Dimensione del pacchetto di aggiornamento", "Rozmiar pakietu aktualizacji")
+        case .uiUpdate181:
+            return e("发布者验证", "Publisher verification", "Vérification de l’éditeur", "Verifica dell’editore", "Weryfikacja wydawcy")
+        case .uiUpdate182:
+            return e("本机重签名", "Local re-signing", "Resignature locale", "Firma locale", "Lokalne ponowne podpisanie")
+        case .uiUpdate183:
+            return e("组件版本不一致", "Component versions do not match", "Les versions des composants ne correspondent pas", "Le versioni dei componenti non corrispondono", "Wersje komponentów nie są zgodne")
+        case .uiUpdate184:
+            return e("响应未提供发布者验签成功证明", "The response provided no proof of successful publisher signature verification", "La réponse ne fournissait aucune preuve de vérification réussie de la signature de l’éditeur", "La risposta non forniva alcuna prova di verifica riuscita della firma dell’editore", "Odpowiedź nie zawierała dowodu pomyślnej weryfikacji podpisu wydawcy")
+        case .uiUpdate185:
+            return e("此版本已有匹配的安装记录", "A matching install record already exists for this version", "Un enregistrement d’installation correspondant existe déjà pour cette version", "Esiste già un record di installazione corrispondente per questa versione", "Dla tej wersji istnieje już pasujący zapis instalacji")
+        case .uiUpdate186:
+            return e("清单签名与安装记录已核对", "Manifest signature and install record verified", "Signature du manifeste et enregistrement d’installation vérifiés", "Firma del manifest e record di installazione verificati", "Podpis manifestu i zapis instalacji zostały zweryfikowane")
+        case .uiUpdate187:
+            return e("运行状态需单独核验", "Running state must be verified separately", "L’état d’exécution doit être vérifié séparément", "Lo stato di esecuzione va verificato separatamente", "Stan działania wymaga osobnej weryfikacji")
+        case .uiUpdate188:
+            return e("清单与当前环境兼容", "Manifest is compatible with the current environment", "Le manifeste est compatible avec l’environnement actuel", "Il manifest è compatibile con l’ambiente attuale", "Manifest jest zgodny z bieżącym środowiskiem")
+        case .uiUpdate189:
+            return e("更新检查未通过", "Update check failed", "La recherche de mise à jour a échoué", "Verifica aggiornamenti non riuscita", "Sprawdzanie aktualizacji nie powiodło się")
+        case .uiUpdate190:
+            return e("签名或环境检查未通过", "Signature or environment check failed", "La vérification de la signature ou de l’environnement a échoué", "Verifica della firma o dell’ambiente non riuscita", "Weryfikacja podpisu lub środowiska nie powiodła się")
+        case .uiUpdate191:
+            return e("发现新版本，清单签名已验证", "New version found; manifest signature verified", "Nouvelle version détectée ; signature du manifeste vérifiée", "Nuova versione trovata; firma del manifest verificata", "Znaleziono nową wersję; podpis manifestu zweryfikowany")
+        case .uiUpdate192:
+            return e("清单与当前系统兼容，安装包待校验", "Manifest is compatible with the current system; the installer still needs verification", "Le manifeste est compatible avec le système actuel ; le paquet d’installation reste à vérifier", "Il manifest è compatibile con il sistema attuale; il pacchetto di installazione deve ancora essere verificato", "Manifest jest zgodny z bieżącym systemem; pakiet instalacyjny czeka na weryfikację")
+        case .uiUpdate193:
+            return e("安装包与本机签名尚未校验", "The installer and local signature have not been verified yet", "Le paquet d’installation et la signature locale n’ont pas encore été vérifiés", "Il pacchetto di installazione e la firma locale non sono ancora stati verificati", "Pakiet instalacyjny i podpis lokalny nie zostały jeszcze zweryfikowane")
+        case .uiUpdate194:
+            return e("下载中…", "Downloading…", "Téléchargement…", "Download in corso…", "Pobieranie…")
+        case .uiUpdate195:
+            return e("已下载", "Downloaded", "Téléchargé", "Scaricato", "Pobrano")
+        case .uiUpdate196:
+            return e("校验本地更新包", "Verify local update package", "Vérifier le paquet de mise à jour local", "Verifica il pacchetto di aggiornamento locale", "Zweryfikuj lokalny pakiet aktualizacji")
+        case .uiUpdate197:
+            return e("更新包已下载，安装前将继续验证", "The update package is downloaded; verification continues before installation", "Le paquet de mise à jour est téléchargé ; la vérification se poursuit avant l’installation", "Il pacchetto di aggiornamento è stato scaricato; la verifica proseguirà prima dell’installazione", "Pakiet aktualizacji został pobrany; weryfikacja będzie kontynuowana przed instalacją")
+        case .uiUpdate198:
+            return e("安装包摘要已验证，尚未解包与本机签名", "The installer digest is verified; it has not been unpacked or locally signed yet", "L’empreinte du paquet d’installation est vérifiée ; il n’a pas encore été décompressé ni signé localement", "Il digest del pacchetto di installazione è verificato; non è ancora stato scompattato né firmato localmente", "Skrót pakietu instalacyjnego został zweryfikowany; nie został jeszcze rozpakowany ani podpisany lokalnie")
+        case .uiUpdate199:
+            return e("本机有候选缓存，需重新校验更新包", "A candidate is cached locally; the update package must be verified again", "Un candidat est en cache local ; le paquet de mise à jour doit être vérifié à nouveau", "Un candidato è in cache locale; il pacchetto di aggiornamento deve essere verificato di nuovo", "Kandydat jest w lokalnej pamięci podręcznej; pakiet aktualizacji wymaga ponownej weryfikacji")
+        case .uiUpdate200:
+            return e("缓存尚未重新校验，不代表已安装", "The cache has not been re-verified; this does not mean it is installed", "Le cache n’a pas été vérifié à nouveau ; cela ne signifie pas qu’il est installé", "La cache non è stata verificata di nuovo; ciò non significa che sia installato", "Pamięć podręczna nie została ponownie zweryfikowana; nie oznacza to, że jest zainstalowana")
+        case .uiUpdate201:
+            return e("下载到本机私有缓存，不会停止业务或安装", "Downloads to a local private cache; does not stop operations or install anything", "Télécharge dans un cache privé local ; n’arrête pas l’activité et n’installe rien", "Scarica in una cache privata locale; non interrompe l’attività né installa nulla", "Pobiera do lokalnej prywatnej pamięci podręcznej; nie wstrzymuje działania ani nic nie instaluje")
+        case .uiUpdate202:
+            return e("当前更新器未报告可用的下载能力", "The updater does not currently report download capability", "Le programme de mise à jour ne signale actuellement aucune capacité de téléchargement", "Il programma di aggiornamento attualmente non segnala capacità di download", "Aktualizator nie zgłasza obecnie możliwości pobierania")
+        case .uiUpdate203:
+            return e("可下载", "Download available", "Téléchargement possible", "Download disponibile", "Pobieranie dostępne")
+        case .uiUpdate204:
+            return e("支持已验证清单的受限下载；安装、延期和恢复尚未启用。", "Restricted downloads of verified manifests are supported; install, defer and restore are not enabled yet.", "Les téléchargements restreints de manifestes vérifiés sont pris en charge ; l’installation, le report et la restauration ne sont pas encore activés.", "Sono supportati download limitati di manifest verificati; installazione, rinvio e ripristino non sono ancora attivi.", "Obsługiwane jest ograniczone pobieranie zweryfikowanych manifestów; instalacja, odroczenie i przywracanie nie są jeszcze włączone.")
+        case .uiUpdate205:
+            return e("仅检查", "Check only", "Vérification uniquement", "Solo verifica", "Tylko sprawdzanie")
+        case .uiUpdate206:
+            return e("下载需由更新器报告支持；安装、延期和恢复尚未启用。", "Downloads require the updater to report support; install, defer and restore are not enabled yet.", "Le téléchargement nécessite que le programme de mise à jour signale sa prise en charge ; l’installation, le report et la restauration ne sont pas encore activés.", "Il download richiede che il programma di aggiornamento ne segnali il supporto; installazione, rinvio e ripristino non sono ancora attivi.", "Pobieranie wymaga zgłoszenia obsługi przez aktualizator; instalacja, odroczenie i przywracanie nie są jeszcze włączone.")
+        case .uiUpdate207:
+            return e("尚未配置授权更新清单；当前不会联网、下载或安装。", "No authorized update manifest is configured; nothing connects to the network, downloads or installs.", "Aucun manifeste de mise à jour autorisé n’est configuré ; aucun accès réseau, téléchargement ou installation n’a lieu.", "Nessun manifest di aggiornamento autorizzato è configurato; non vengono effettuati accessi alla rete, download o installazioni.", "Nie skonfigurowano autoryzowanego manifestu aktualizacji; nie ma połączenia sieciowego, pobierania ani instalacji.")
+        case .uiUpdate208:
+            return e("尚未配置授权更新源；当前仅展示本地状态，不会联网、下载或安装。", "No authorized update source is configured; only local status is shown and nothing connects to the network, downloads or installs.", "Aucune source de mise à jour autorisée n’est configurée ; seul l’état local est affiché, sans accès réseau, téléchargement ni installation.", "Nessuna origine di aggiornamento autorizzata è configurata; viene mostrato solo lo stato locale e non si effettuano accessi alla rete, download o installazioni.", "Nie skonfigurowano autoryzowanego źródła aktualizacji; wyświetlany jest tylko stan lokalny, bez połączenia sieciowego, pobierania i instalacji.")
+        case .uiUpdate209:
+            return e("空闲 (只读状态)", "Idle (read-only state)", "Inactif (état en lecture seule)", "Inattivo (stato di sola lettura)", "Bezczynny (stan tylko do odczytu)")
+        case .uiUpdate210:
+            return e("状态: %@ (外部事务)", "Status: %@ (external transaction)", "État : %@ (transaction externe)", "Stato: %@ (transazione esterna)", "Stan: %@ (transakcja zewnętrzna)")
+        case .uiUpdate211:
+            return e("外部更新事务处于排空等待态；当前界面为只读，延期请由管理员命令行协调。", "An external update transaction is waiting to drain; this interface is read-only — coordinate deferrals via the administrator command line.", "Une transaction de mise à jour externe attend d’être vidée ; cette interface est en lecture seule — coordonnez les reports via la ligne de commande administrateur.", "Una transazione di aggiornamento esterna è in attesa di svuotamento; questa interfaccia è in sola lettura — coordina i rinvii tramite la riga di comando dell’amministratore.", "Zewnętrzna transakcja aktualizacji oczekuje na opróżnienie; ten interfejs jest tylko do odczytu — odroczenia koordynuj przez wiersz poleceń administratora.")
+        case .uiUpdate212:
+            return e("正在查询更新状态 (只读查询)...", "Checking update status (read-only query)...", "Interrogation de l’état des mises à jour (requête en lecture seule)...", "Interrogazione dello stato degli aggiornamenti (query in sola lettura)...", "Sprawdzanie stanu aktualizacji (zapytanie tylko do odczytu)...")
+        case .uiUpdate213:
+            return e("检查未通过，请查看提示。", "The check failed; see the message.", "La vérification a échoué ; consultez le message.", "La verifica non è riuscita; consulta il messaggio.", "Sprawdzanie nie powiodło się; zobacz komunikat.")
+        case .uiUpdate214:
+            return e("清单检查完成，本次未下载或安装。", "Manifest check complete; nothing was downloaded or installed.", "Vérification du manifeste terminée ; aucun téléchargement ni installation n’a eu lieu.", "Controllo del manifest completato; non è stato scaricato né installato nulla.", "Sprawdzanie manifestu zakończone; nic nie pobrano ani nie zainstalowano.")
+        case .uiUpdate215:
+            return e("正在下载并校验更新包，不改变业务运行状态。", "Downloading and verifying the update package; the running service state is unchanged.", "Téléchargement et vérification du paquet de mise à jour ; l’état d’activité reste inchangé.", "Download e verifica del pacchetto di aggiornamento in corso; lo stato operativo resta invariato.", "Pobieranie i weryfikacja pakietu aktualizacji; stan działania usługi pozostaje bez zmian.")
+        case .uiUpdate216:
+            return e("更新包已下载并校验，尚未安装。", "The update package has been downloaded and verified; it is not installed yet.", "Le paquet de mise à jour a été téléchargé et vérifié ; il n’est pas encore installé.", "Il pacchetto di aggiornamento è stato scaricato e verificato; non è ancora installato.", "Pakiet aktualizacji został pobrany i zweryfikowany; nie jest jeszcze zainstalowany.")
+        case .uiUpdate217:
+            return e("下载结果与当前清单不同，请重新检查更新。", "The download result differs from the current manifest; check for updates again.", "Le résultat du téléchargement diffère du manifeste actuel ; vérifiez à nouveau les mises à jour.", "Il risultato del download differisce dal manifest attuale; controlla di nuovo gli aggiornamenti.", "Wynik pobierania różni się od bieżącego manifestu; sprawdź aktualizacje ponownie.")
+        case .uiUpdate218:
+            return e("下载未完成：%@", "Download did not complete: %@", "Téléchargement non terminé : %@", "Download non completato: %@", "Pobieranie nie zostało ukończone: %@")
+        case .uiUpdate219:
+            return e("操作未启用: 当前阶段安装/延期/恢复入口尚未启用 (unsupported)，不进行任何写入或业务状态修改。", "Action not enabled: install/defer/restore entry points are not enabled at this stage (unsupported); no writes or operational state changes are performed.", "Action non activée : les entrées installation/report/restauration ne sont pas encore activées à ce stade (unsupported) ; aucune écriture ni modification de l’état d’activité n’est effectuée.", "Azione non attiva: le voci installa/rinvia/ripristina non sono abilitate in questa fase (unsupported); non viene eseguita alcuna scrittura né modifica dello stato operativo.", "Czynność niewłączona: opcje instalacji/odroczenia/przywracania nie są na tym etapie włączone (unsupported); nie wykonuje się żadnych zapisów ani zmian stanu działania.")
+        case .uiUpdate220:
+            return e("状态已刷新 (只读)。", "Status refreshed (read-only).", "État actualisé (lecture seule).", "Stato aggiornato (sola lettura).", "Stan odświeżony (tylko odczyt).")
+
+        // MARK: 收尾：嵌套插值与多行文案
+        case .uiResidualUnknownReason:
+            return e("未知原因", "unknown reason", "raison inconnue", "motivo sconosciuto", "nieznany powód")
+        case .uiResidualUnknown:
+            return e("未知", "unknown", "inconnu", "sconosciuto", "nieznane")
+        case .uiResidualBuiltinBrain:
+            return e("内置大脑", "built-in brain", "cerveau intégré", "cervello integrato", "wbudowany mózg")
+        case .uiResidualYes:
+            return e("是", "yes", "oui", "sì", "tak")
+        case .uiResidualNo:
+            return e("否", "no", "non", "no", "nie")
+        case .uiResidualHistoryUnavailableFmt:
+            return e("版本历史暂不可用：%@", "Version history is unavailable: %@", "Historique des versions indisponible : %@", "Cronologia versioni non disponibile: %@", "Historia wersji niedostępna: %@")
+        case .uiResidualAccountFmt:
+            return e("当前账号: %@", "Current account: %@", "Compte actuel : %@", "Account attuale: %@", "Bieżące konto: %@")
+        case .uiResidualReplyModeFmt:
+            return e("回复方式：%@", "Reply mode: %@", "Mode de réponse : %@", "Modalità di risposta: %@", "Tryb odpowiedzi: %@")
+        case .uiResidualModelCalledFmt:
+            return e("是否调用模型: %@\\n", "Model called: %@\\n", "Modèle appelé : %@\\n", "Modello chiamato: %@\\n", "Wywołano model: %@\\n")
+        case .uiResidualBudgetFmt:
+            return e("字节预算: 原始=%@, 纳入=%@, 是否截断=%@\\n", "Byte budget: original=%@, included=%@, truncated=%@\\n", "Budget d'octets : original=%@, inclus=%@, tronqué=%@\\n", "Budget in byte: originale=%@, incluso=%@, troncato=%@\\n", "Budżet bajtów: oryginał=%@, uwzględniono=%@, obcięto=%@\\n")
+        case .uiResidualNoCompiled:
+            return e("（后端未返回组装内容）", "(backend returned no assembled content)", "(le backend n'a renvoyé aucun contenu assemblé)", "(il backend non ha restituito contenuti assemblati)", "(backend nie zwrócił złożonej treści)")
+        case .uiResidualMcpTestFailedFmt:
+            return e("测试失败: %@", "Test failed: %@", "Échec du test : %@", "Test non riuscito: %@", "Test nie powiódł się: %@")
+        case .uiResidualConnectFailed:
+            return e("连接失败", "Connection failed", "Échec de la connexion", "Connessione non riuscita", "Połączenie nie powiodło się")
+        case .uiResidualMcpConfigExample:
+            return e("1. 运维 SSH 入口 (终端 / SSH 转发):\\nssh <用户>@<本机地址> nc -U ~/.wechat-rpa/worker.sock\\n\\n2. 对外接口配置 (Claude Desktop / Cursor 等 HTTP MCP 客户端):\\n{\\n  \"mcpServers\": {\\n    \"wechat-brain\": {\\n      \"url\": \"http://<bind>:<port>/mcp\",\\n      \"headers\": {\\n        \"Authorization\": \"Bearer <token>\"\\n      }\\n    }\\n  }\\n}", "1. Ops SSH entry (terminal / SSH forwarding):\\nssh <user>@<host> nc -U ~/.wechat-rpa/worker.sock\\n\\n2. External API config (HTTP MCP clients such as Claude Desktop / Cursor):\\n{\\n  \"mcpServers\": {\\n    \"wechat-brain\": {\\n      \"url\": \"http://<bind>:<port>/mcp\",\\n      \"headers\": {\\n        \"Authorization\": \"Bearer <token>\"\\n      }\\n    }\\n  }\\n}", "1. Accès SSH d'exploitation (terminal / redirection SSH) :\\nssh <utilisateur>@<hôte> nc -U ~/.wechat-rpa/worker.sock\\n\\n2. Configuration de l'API externe (clients HTTP MCP comme Claude Desktop / Cursor) :\\n{\\n  \"mcpServers\": {\\n    \"wechat-brain\": {\\n      \"url\": \"http://<bind>:<port>/mcp\",\\n      \"headers\": {\\n        \"Authorization\": \"Bearer <token>\"\\n      }\\n    }\\n  }\\n}", "1. Accesso SSH operativo (terminale / inoltro SSH):\\nssh <utente>@<host> nc -U ~/.wechat-rpa/worker.sock\\n\\n2. Configurazione API esterna (client HTTP MCP come Claude Desktop / Cursor):\\n{\\n  \"mcpServers\": {\\n    \"wechat-brain\": {\\n      \"url\": \"http://<bind>:<port>/mcp\",\\n      \"headers\": {\\n        \"Authorization\": \"Bearer <token>\"\\n      }\\n    }\\n  }\\n}", "1. Dostęp SSH operacyjny (terminal / przekierowanie SSH):\\nssh <użytkownik>@<host> nc -U ~/.wechat-rpa/worker.sock\\n\\n2. Konfiguracja zewnętrznego API (klienci HTTP MCP, np. Claude Desktop / Cursor):\\n{\\n  \"mcpServers\": {\\n    \"wechat-brain\": {\\n      \"url\": \"http://<bind>:<port>/mcp\",\\n      \"headers\": {\\n        \"Authorization\": \"Bearer <token>\"\\n      }\\n    }\\n  }\\n}")
+        case .uiResidualUpdateRecoveryGuide:
+            return e("【更新异常中断，需要人工恢复】\\n- 事务 ID: %@\\n- 中断阶段: %@\\n- 错误原因: %@\\n\\n只读说明与受控恢复指引:\\n1. 维护标志文件已记录；实际核心进程存活状态与业务数据完整性未知。\\n2. 当前界面处于严格只读受控阶段，禁止通过界面清除维护标志或进行破坏性写入。\\n3. 真实版本回退能力当前处于 unsupported 禁用状态，不可直接回退；需要专门受控恢复。\\n4. 请核对 ~/.wechat-rpa/logs/core.log 与 host.log 获取详细故障上下文并联系管理员。", "[Update interrupted abnormally; manual recovery is required]\\n- Transaction ID: %@\\n- Interrupted stage: %@\\n- Error: %@\\n\\nRead-only notes and controlled recovery steps:\\n1. A maintenance flag file has been recorded; the actual core process liveness and business-data integrity are unknown.\\n2. This screen is strictly read-only; clearing the maintenance flag or performing destructive writes here is not allowed.\\n3. Real version rollback is currently unsupported and disabled; a controlled recovery is required.\\n4. Check ~/.wechat-rpa/logs/core.log and host.log for details and contact an administrator.", "«\\n[Mise à jour interrompue anormalement, une récupération manuelle est nécessaire]\\n- ID de transaction : %@\\n- Étape interrompue : %@\\n- Erreur : %@\\n\\nNotes en lecture seule et étapes de récupération contrôlée :\\n1. Un fichier indicateur de maintenance a été enregistré ; l'état réel du processus cœur et l'intégrité des données métier sont inconnus.\\n2. Cette interface est strictement en lecture seule ; effacer l'indicateur ou effectuer des écritures destructrices ici est interdit.\\n3. Le retour à une version réelle est actuellement désactivé (unsupported) ; une récupération contrôlée est nécessaire.\\n4. Consultez ~/.wechat-rpa/logs/core.log et host.log pour le contexte et contactez un administrateur.\\n»", "[Aggiornamento interrotto in modo anomalo, è necessaria una ripristino manuale]\\n- ID transazione: %@\\n- Fase interrotta: %@\\n- Errore: %@\\n\\nNote in sola lettura e passi di ripristino controllato:\\n1. È stato registrato un file di flag di manutenzione; lo stato reale del processo core e l’integrità dei dati aziendali sono sconosciuti.\\n2. Questa schermata è strettamente in sola lettura; cancellare il flag o eseguire scritture distruttive qui non è consentito.\\n3. Il ripristino reale della versione è attualmente disabilitato (unsupported); è necessario un ripristino controllato.\\n4. Controlla ~/.wechat-rpa/logs/core.log e host.log per i dettagli e contatta un amministratore.", "[Aktualizacja przerwana nieprawidłowo, wymagane jest ręczne przywrócenie]\\n- ID transakcji: %@\\n- Przerwany etap: %@\\n- Błąd: %@\\n\\nUwagi tylko do odczytu i kroki kontrolowanego przywracania:\\n1. Zapisano plik znacznika konserwacji; rzeczywisty stan procesu rdzenia i integralność danych biznesowych są nieznane.\\n2. Ten ekran jest ściśle tylko do odczytu; czyszczenie znacznika lub destrukcyjne zapisy nie są tu dozwolone.\\n3. Rzeczywiste przywracanie wersji jest obecnie wyłączone (unsupported); wymagane jest kontrolowane przywrócenie.\\n4. Sprawdź ~/.wechat-rpa/logs/core.log i host.log, aby uzyskać szczegóły, i skontaktuj się z administratorem.")
+
+        // MARK: 设计版页面迁移（自动生成）
+        case .uiOverview001:
+            return e("今日已发送: —", "Sent today: —", "Envoyés aujourd'hui : —", "Inviati oggi: —", "Wysłano dzisiaj: —")
+        case .uiOverview002:
+            return e("监听会话: -", "Monitored sessions: -", "Sessions surveillées : -", "Sessioni monitorate: -", "Monitorowane sesje: -")
+        case .uiOverview003:
+            return e("待人工: -", "Awaiting human: -", "En attente d'un humain : -", "In attesa di un operatore: -", "Oczekują na obsługę: -")
+        case .uiOverview004:
+            return e("今日已发送: ", "Sent today: ", "Envoyés aujourd'hui : ", "Inviati oggi: ", "Wysłano dzisiaj: ")
+        case .uiOverview005:
+            return e("监听会话: %@", "Watching: %@", "En surveillance : %@", "In ascolto: %@", "Obserwowane: %@")
+        case .uiOverview006:
+            return e("待人工: %@", "Awaiting human: %@", "En attente d'un humain : %@", "In attesa di un operatore: %@", "Oczekują na obsługę: %@")
+        case .uiOverview007:
+            return e("%@ （建议: %@）", "%@ (suggested: %@)", "%@ (suggestion : %@)", "%@ (suggerimento: %@)", "%@ (sugestia: %@)")
+        case .uiOverview008:
+            return e("MCP/大脑", "MCP/Brain", "MCP/Brain", "MCP/Brain", "MCP/Brain")
+        case .uiSessions009:
+            return e("会话监听列表", "Session monitoring list", "Liste des sessions surveillées", "Elenco delle sessioni monitorate", "Lista monitorowanych sesji")
+        case .uiSessions010:
+            return e("对话轮次追溯 (Provenance)", "Turn provenance", "Traçabilité des tours (Provenance)", "Tracciabilità dei turni (Provenance)", "Pochodzenie tur (Provenance)")
+        case .uiSessions011:
+            return e("停止自动回复，把这个会话交给人工处理", "Stop auto-reply and hand this conversation to a person", "Arrêter la réponse automatique et confier cette conversation à un humain", "Interrompi la risposta automatica e affida questa conversazione a una persona", "Zatrzymaj automatyczne odpowiedzi i przekaż tę rozmowę człowiekowi")
+        case .uiSessions012:
+            return e("未找到轮次追溯 (该轮次 ID 不存在或为旧版无追溯轮次): %@", "Turn provenance not found (unknown turn ID or a legacy turn without provenance): %@", "Traçabilité du tour introuvable (ID inconnu ou tour hérité sans traçabilité) : %@", "Tracciamento del turno non trovato (ID sconosciuto o turno legacy senza tracciamento): %@", "Nie znaleziono śladu tury (nieznany ID lub starsza tura bez śladu): %@")
+        case .uiSessions013:
+            return e("【轮次追溯详情】\n", "[Turn provenance details]\n", "[Détails de la traçabilité du tour]\n", "[Dettagli di tracciabilità del turno]\n", "[Szczegóły pochodzenia tury]\n")
+        case .uiSessions014:
+            return e("把这个会话转人工？", "Hand this conversation to a person?", "Confier cette conversation à un humain ?", "Affidare questa conversazione a una persona?", "Przekazać tę rozmowę człowiekowi?")
+        case .uiSessions015:
+            return e("转人工后「%@」将停止自动回复，由人工接手。这项操作会影响真实会话。", "After handing over, “%@” stops auto-reply and a person takes over. This affects a real conversation.", "Après le transfert, « %@ » n'aura plus de réponse automatique et un humain prendra le relais. Cela concerne une vraie conversation.", "Dopo il passaggio, «%@» non avrà più risposta automatica e subentrerà una persona. L'operazione riguarda una conversazione reale.", "Po przekazaniu „%@” przestanie odpowiadać automatycznie, a rozmowę przejmie człowiek. Ta operacja dotyczy prawdziwej rozmowy.")
+        case .uiSessions016:
+            return e("正在把「%@」转人工…", "Handing “%@” to a person…", "Transfert de « %@ » vers un humain…", "Passaggio di «%@» a una persona…", "Przekazywanie „%@” człowiekowi…")
+        case .uiSessions017:
+            return e("历史库里找不到会话「%@」，无法定位稳定会话 ID", "Session “%@” not found in the history database; cannot resolve a stable session ID", "Conversation « %@ » introuvable dans l'historique ; impossible de résoudre un ID stable", "Conversazione «%@» non trovata nella cronologia; impossibile risolvere un ID stabile", "Nie znaleziono sesji „%@” w historii; nie można ustalić stabilnego ID")
+        case .uiSessions018:
+            return e("存在 %@ 个同名会话「%@」，不能按名字转人工", "%@ sessions are named “%@”; cannot hand over by name", "%@ conversations portent le nom « %@ » ; transfert impossible par nom", "%@ conversazioni si chiamano «%@»; impossibile passare per nome", "Istnieje %@ sesji o nazwie „%@”; nie można przekazać według nazwy")
+        case .uiSessions019:
+            return e("已把「%@」转人工，自动回复已停止", "“%@” handed to a person; auto-reply stopped", "« %@ » transférée à un humain ; réponse automatique arrêtée", "«%@» passata a una persona; risposta automatica interrotta", "Przekazano „%@” człowiekowi; automatyczne odpowiedzi zatrzymane")
+        case .uiSessions020:
+            return e("转人工失败：%@", "Handover failed: %@", "Échec du transfert : %@", "Passaggio non riuscito: %@", "Przekazanie nie powiodło się: %@")
+        case .uiSettings021:
+            return e("%@ (%@) 必须为有效整数", "%@ (%@) must be a valid integer", "%@ (%@) doit être un entier valide", "%@ (%@) deve essere un numero intero valido", "%@ (%@) musi być poprawną liczbą całkowitą")
+        case .uiSettings022:
+            return e("%@ (%@) 类型不正确", "%@ (%@) has the wrong type", "%@ (%@) a un type incorrect", "%@ (%@) ha un tipo errato", "%@ (%@) ma nieprawidłowy typ")
+        case .uiSettings023:
+            return e("%@ (%@) 超出范围 (%@-%@ %@)", "%@ (%@) is out of range (%@-%@ %@)", "%@ (%@) est hors limites (%@-%@ %@)", "%@ (%@) è fuori intervallo (%@-%@ %@)", "%@ (%@) jest poza zakresem (%@-%@ %@)")
+        case .uiSettings024:
+            return e("屏幕录制权限（微信窗口识别）", "Screen Recording permission (WeChat window detection)", "Autorisation Enregistrement de l'écran (détection des fenêtres WeChat)", "Autorizzazione Registrazione schermo (rilevamento delle finestre WeChat)", "Uprawnienie Nagrywanie ekranu (wykrywanie okien WeChat)")
+        case .uiSettings025:
+            return e("辅助功能权限（窗口控制与点击）", "Accessibility permission (window control and clicks)", "Autorisation Accessibilité (contrôle des fenêtres et clics)", "Autorizzazione Accessibilità (controllo finestre e clic)", "Uprawnienie Dostępność (sterowanie oknami i kliknięcia)")
+        case .uiSettings026:
+            return e("桌面文件夹（附件与临时文件）", "Desktop folder (attachments and temp files)", "Dossier Bureau (pièces jointes et fichiers temporaires)", "Cartella Scrivania (allegati e file temporanei)", "Folder Pulpit (załączniki i pliki tymczasowe)")
+        case .uiSettings027:
+            return e("文稿文件夹（附件读写）", "Documents folder (attachment read/write)", "Dossier Documents (lecture/écriture des pièces jointes)", "Cartella Documenti (lettura/scrittura allegati)", "Folder Dokumenty (odczyt i zapis załączników)")
+        case .uiSettings028:
+            return e("下载文件夹（附件读写）", "Downloads folder (attachment read/write)", "Dossier Téléchargements (lecture/écriture des pièces jointes)", "Cartella Download (lettura/scrittura allegati)", "Folder Pobrane (odczyt i zapis załączników)")
+        case .uiSettings029:
+            return e("请求权限", "Request permission", "Demander l'autorisation", "Richiedi autorizzazione", "Poproś o uprawnienie")
+        case .uiSettings030:
+            return e("重新检查权限", "Recheck permissions", "Vérifier à nouveau les autorisations", "Ricontrolla le autorizzazioni", "Sprawdź uprawnienia ponownie")
+        case .uiSettings031:
+            return e("冷却时间:", "Cooldown:", "Délai de recharge :", "Intervallo di attesa:", "Czas odnowienia:")
+        case .uiSettings032:
+            return e("0–300 秒 (默认 15)", "0–300 s (default 15)", "0–300 s (par défaut 15)", "0–300 s (predefinito 15)", "0–300 s (domyślnie 15)")
+        case .uiSettings033:
+            return e("每小时上限:", "Max per hour:", "Maximum par heure :", "Massimo all'ora:", "Maks. na godzinę:")
+        case .uiSettings034:
+            return e("1–100 条 (默认 20)", "1–100 messages (default 20)", "1–100 messages (par défaut 20)", "1–100 messaggi (predefinito 20)", "1–100 wiadomości (domyślnie 20)")
+        case .uiSettings035:
+            return e("静默等待:", "Silence wait:", "Attente de silence :", "Attesa del silenzio:", "Oczekiwanie na ciszę:")
+        case .uiSettings036:
+            return e("0–120 秒 (默认 10)", "0–120 s (default 10)", "0–120 s (par défaut 10)", "0–120 s (predefinito 10)", "0–120 s (domyślnie 10)")
+        case .uiSettings037:
+            return e("单轮最长:", "Max per turn:", "Maximum par tour :", "Massimo per turno:", "Maks. na turę:")
+        case .uiSettings038:
+            return e("10–600 秒 (默认 60)", "10–600 s (default 60)", "10–600 s (par défaut 60)", "10–600 s (predefinito 60)", "10–600 s (domyślnie 60)")
+        case .uiSettings039:
+            return e("上下文条数:", "Context messages:", "Messages de contexte :", "Messaggi di contesto:", "Liczba komunikatów kontekstu:")
+        case .uiSettings040:
+            return e("0–100 条 (默认 5)", "0–100 messages (default 5)", "0–100 messages (par défaut 5)", "0–100 messaggi (predefinito 5)", "0–100 wiadomości (domyślnie 5)")
+        case .uiSettings041:
+            return e("附件上限:", "Attachment limit:", "Limite des pièces jointes :", "Limite allegati:", "Limit załączników:")
+        case .uiSettings042:
+            return e("1–200 MB (默认 50)", "1–200 MB (default 50)", "1–200 Mo (par défaut 50)", "1–200 MB (predefinito 50)", "1–200 MB (domyślnie 50)")
+        case .uiSettings043:
+            return e("注：允许名单与忽略名单已移至「联系人」页；外部大脑配置已移至「MCP」页。", "Note: the allow and ignore lists moved to the Contacts page; external Brain settings moved to the MCP page.", "Remarque : les listes d'autorisation et d'ignorés ont été déplacées vers la page Contacts ; la configuration du Brain externe se trouve désormais sur la page MCP.", "Nota: gli elenchi di autorizzazione e di esclusione sono stati spostati nella pagina Contatti; la configurazione del Brain esterno è ora nella pagina MCP.", "Uwaga: listy dozwolonych i ignorowanych przeniesiono na stronę Kontakty; konfiguracja zewnętrznego Brain jest teraz na stronie MCP.")
+        case .uiSettings044:
+            return e("已授权", "Authorized", "Autorisé", "Autorizzato", "Autoryzowano")
+        case .uiSettings045:
+            return e("配置保存成功", "Configuration saved", "Configuration enregistrée", "Configurazione salvata", "Konfiguracja zapisana")
+        case .uiSettings046:
+            return e("已载入默认值，点击「保存配置」后生效", "Defaults loaded; click \"Save configuration\" to apply", "Valeurs par défaut chargées ; cliquez sur « Enregistrer la configuration » pour appliquer", "Valori predefiniti caricati; fai clic su \"Salva configurazione\" per applicarli", "Wczytano wartości domyślne; kliknij „Zapisz konfigurację”, aby je zastosować")
+        case .uiShell047:
+            return e("页面导航", "Page navigation", "Navigation des pages", "Navigazione pagine", "Nawigacja stron")
+        case .uiShell048:
+            return e("当前页面", "Current page", "Page actuelle", "Pagina corrente", "Bieżąca strona")
+        case .uiStatusPanel049:
+            return e("开发构建", "Development build", "Version de développement", "Build di sviluppo", "Kompilacja deweloperska")
+        case .uiStatusPanel050:
+            return e("微信客服助手 — 系统状态 (版本: %@)", "WeChat Support Assistant — System status (version: %@)", "Assistant de support WeChat — État du système (version : %@)", "Assistente di supporto WeChat — Stato del sistema (versione: %@)", "Asystent obsługi WeChat — Stan systemu (wersja: %@)")
+        case .uiStatusPanel051:
+            return e("权限状态", "Permission status", "État des autorisations", "Stato delle autorizzazioni", "Stan uprawnień")
+        case .uiStatusPanel052:
+            return e("机器人核心", "Bot core", "Cœur du bot", "Core del bot", "Rdzeń bota")
+        case .uiStatusPanel053:
+            return e("各会话状态", "Per-session status", "État de chaque session", "Stato per sessione", "Stan poszczególnych sesji")
+        case .uiStatusPanel054:
+            return e("微信客户端", "WeChat client", "Client WeChat", "Client WeChat", "Klient WeChat")
+        case .uiStatusPanel055:
+            return e("布局地图", "Layout map", "Carte de disposition", "Mappa del layout", "Mapa układu")
+        case .uiStatusPanel056:
+            return e("磁盘空间", "Disk space", "Espace disque", "Spazio su disco", "Miejsce na dysku")
+        case .uiStatusPanel057:
+            return e("大脑状态", "Brain status", "État du Brain", "Stato del Brain", "Stan Brain")
+        case .uiStatusPanel058:
+            return e("正在检查...", "Checking...", "Vérification...", "Verifica in corso...", "Sprawdzanie...")
+        case .uiStatusPanel059:
+            return e("立即刷新", "Refresh now", "Actualiser maintenant", "Aggiorna ora", "Odśwież teraz")
+        case .uiStatusPanel060:
+            return e("暂停机器人", "Pause bot", "Mettre le bot en pause", "Metti in pausa il bot", "Wstrzymaj bota")
+        case .uiStatusPanel061:
+            return e("账号:", "Account:", "Compte :", "Account:", "Konto:")
+        case .uiStatusPanel062:
+            return e("模型:", "Model:", "Modèle :", "Modello:", "Model:")
+        case .uiStatusPanel063:
+            return e("密钥:", "API key:", "Clé API :", "Chiave API:", "Klucz API:")
+        case .uiStatusPanel064:
+            return e("附件上限 MB (1~200):", "Attachment limit MB (1–200):", "Limite des pièces jointes Mo (1–200) :", "Limite allegati MB (1–200):", "Limit załączników MB (1–200):")
+        case .uiStatusPanel065:
+            return e("每小时回复上限:", "Max replies per hour:", "Réponses max. par heure :", "Risposte massime all'ora:", "Maks. odpowiedzi na godzinę:")
+        case .uiStatusPanel066:
+            return e("冷却时间 (秒):", "Cooldown (seconds):", "Délai de recharge (secondes) :", "Intervallo di attesa (secondi):", "Czas odnowienia (sekundy):")
+        case .uiStatusPanel067:
+            return e("静默等待 (秒):", "Silence wait (seconds):", "Attente de silence (secondes) :", "Attesa del silenzio (secondi):", "Oczekiwanie na ciszę (sekundy):")
+        case .uiStatusPanel068:
+            return e("轮次最长时间 (秒):", "Max turn duration (seconds):", "Durée max. d'un tour (secondes) :", "Durata massima del turno (secondi):", "Maks. czas tury (sekundy):")
+        case .uiStatusPanel069:
+            return e("上下文消息条数:", "Context message count:", "Nombre de messages de contexte :", "Numero di messaggi di contesto:", "Liczba komunikatów kontekstu:")
+        case .uiStatusPanel070:
+            return e("回复由:", "Replies by:", "Réponses générées par :", "Risposte fornite da:", "Odpowiada:")
+        case .uiStatusPanel071:
+            return e("外部大脑超时 (秒):", "External Brain timeout (seconds):", "Délai d'attente du Brain externe (secondes) :", "Timeout del Brain esterno (secondi):", "Limit czasu zewnętrznego Brain (sekundy):")
+        case .uiStatusPanel072:
+            return e("外部大脑 (MCP next_turn / reply)", "External Brain (MCP next_turn / reply)", "Brain externe (MCP next_turn / reply)", "Brain esterno (MCP next_turn / reply)", "Zewnętrzny Brain (MCP next_turn / reply)")
+        case .uiStatusPanel073:
+            return e("改用内置大脑", "Use built-in Brain instead", "Utiliser le Brain intégré", "Usa il Brain integrato", "Użyj wbudowanego Brain")
+        case .uiStatusPanel074:
+            return e("留空使用默认值 120", "Leave empty to use the default of 120", "Laisser vide pour utiliser la valeur par défaut 120", "Lascia vuoto per usare il valore predefinito 120", "Pozostaw puste, aby użyć domyślnej wartości 120")
+        case .uiStatusPanel075:
+            return e(" (建议: %@)", " (suggested: %@)", " (suggestion : %@)", " (suggerimento: %@)", " (sugestia: %@)")
+        case .uiStatusPanel076:
+            return e("恢复机器人", "Resume bot", "Reprendre le bot", "Riprendi il bot", "Wznów bota")
+        case .uiStatusPanel077:
+            return e("退避重试中 (预计 %@ 重试)", "Back-off retry (next retry %@)", "Nouvelle tentative différée (prochaine : %@)", "Nuovo tentativo in back-off (prossimo: %@)", "Ponowna próba z opóźnieniem (następna: %@)")
+        case .uiStatusPanel078:
+            return e("未找到机器人配置文件（%@），无法保存", "Bot config file not found (%@); cannot save", "Fichier de configuration du bot introuvable (%@) ; enregistrement impossible", "File di configurazione del bot non trovato (%@); impossibile salvare", "Nie znaleziono pliku konfiguracji bota (%@); nie można zapisać")
+        case .uiStatusPanel079:
+            return e("机器人正在发送回复", "The bot is sending a reply", "Le bot envoie une réponse", "Il bot sta inviando una risposta", "Bot wysyła odpowiedź")
+        case .uiStatusPanel080:
+            return e("机器人当前正在处理并发送消息，执行「%@」可能会打断发送。确定要继续吗？", "The bot is currently processing and sending messages; “%@” may interrupt sending. Continue?", "Le bot traite et envoie des messages ; « %@ » peut interrompre l'envoi. Continuer ?", "Il bot sta elaborando e inviando messaggi; «%@» potrebbe interrompere l'invio. Continuare?", "Bot właśnie przetwarza i wysyła wiadomości; „%@” może przerwać wysyłkę. Kontynuować?")
+        case .uiStatusPanel081:
+            return e("正在重启桌面服务...", "Restarting the desktop service...", "Redémarrage du service de bureau...", "Riavvio del servizio desktop...", "Ponowne uruchamianie usługi pulpitu...")
+        case .uiStatusPanel082:
+            return e("桌面服务已触发重启", "Desktop service restart triggered", "Redémarrage du service de bureau déclenché", "Riavvio del servizio desktop avviato", "Uruchomiono ponowne uruchomienie usługi pulpitu")
+        case .uiStatusPanel083:
+            return e("正在重启机器人...", "Restarting the bot...", "Redémarrage du bot...", "Riavvio del bot...", "Ponowne uruchamianie bota...")
+        case .uiStatusPanel084:
+            return e("已触发 Rust 核心重启", "Rust core restart triggered", "Redémarrage du cœur Rust déclenché", "Riavvio del core Rust avviato", "Uruchomiono ponowne uruchomienie rdzenia Rust")
+        case .uiStatusPanel085:
+            return e("已触发机器人重启", "Bot restart triggered", "Redémarrage du bot déclenché", "Riavvio del bot avviato", "Uruchomiono ponowne uruchomienie bota")
+        case .uiStatusPanel086:
+            return e("重启机器人失败: %@", "Restarting the bot failed: %@", "Échec du redémarrage du bot : %@", "Riavvio del bot non riuscito: %@", "Ponowne uruchomienie bota nie powiodło się: %@")
+        case .uiStatusPanel087:
+            return e("机器人已恢复运行", "Bot resumed", "Bot repris", "Bot ripreso", "Bot wznowiony")
+        case .uiStatusPanel088:
+            return e("机器人已暂停", "Bot paused", "Bot en pause", "Bot in pausa", "Bot wstrzymany")
+        case .uiStatusPanel089:
+            return e("操作失败: %@", "Operation failed: %@", "Échec de l'opération : %@", "Operazione non riuscita: %@", "Operacja nie powiodła się: %@")
+        case .uiStatusPanel090:
+            return e("正在恢复自动回复：%@", "Resuming auto-reply: %@", "Reprise de la réponse automatique : %@", "Ripresa della risposta automatica: %@", "Wznawianie automatycznych odpowiedzi: %@")
+        case .uiStatusPanel091:
+            return e("已恢复自动回复", "Auto-replies resumed", "Réponses automatiques reprises", "Risposte automatiche riprese", "Wznowiono automatyczne odpowiedzi")
+        case .uiStatusPanel092:
+            return e("恢复失败：%@", "Resume failed: %@", "Échec de la reprise : %@", "Ripresa non riuscita: %@", "Wznowienie nie powiodło się: %@")
+        case .uiStatusPanel093:
+            return e("微信窗口已放回标准位置 (880x640)", "WeChat window restored to its standard position (880x640)", "Fenêtre WeChat replacée à sa position standard (880x640)", "Finestra WeChat riportata nella posizione standard (880x640)", "Okno WeChat przywrócone do standardowej pozycji (880x640)")
+        case .uiStatusPanel094:
+            return e("正在保存并校验配置...", "Saving and validating the configuration...", "Enregistrement et vérification de la configuration...", "Salvataggio e verifica della configurazione...", "Zapisywanie i weryfikacja konfiguracji...")
+        case .uiStatusPanel095:
+            return e("配置路径无效", "Invalid configuration path", "Chemin de configuration invalide", "Percorso della configurazione non valido", "Nieprawidłowa ścieżka konfiguracji")
+        case .uiStatusPanel096:
+            return e("表单格式错误: %@", "Form format error: %@", "Erreur de format du formulaire : %@", "Errore di formato del modulo: %@", "Błąd formatu formularza: %@")
+        case .uiStatusPanel097:
+            return e("配置保存成功，机器人已重启生效", "Configuration saved; the bot restarted to apply it", "Configuration enregistrée ; le bot a redémarré pour l'appliquer", "Configurazione salvata; il bot si è riavviato per applicarla", "Konfiguracja zapisana; bot uruchomił się ponownie, aby ją zastosować")
+        case .uiConfigForm098:
+            return e("超时必须为 1–180 之间的整数", "Timeout must be an integer between 1 and 180", "Le délai doit être un nombre entier compris entre 1 et 180", "Il timeout deve essere un numero intero tra 1 e 180", "Limit czasu musi być liczbą całkowitą z zakresu 1–180")
+        case .uiConfigForm099:
+            return e("图片数必须为 1–16 之间的整数", "Image count must be an integer between 1 and 16", "Le nombre d'images doit être un nombre entier compris entre 1 et 16", "Il numero di immagini deve essere un numero intero tra 1 e 16", "Liczba obrazów musi być liczbą całkowitą z zakresu 1–16")
+        case .uiConfigForm100:
+            return e("请选择有效的接入方式", "Choose a valid access method", "Sélectionnez un mode de connexion valide", "Seleziona un metodo di accesso valido", "Wybierz prawidłowy sposób połączenia")
+        case .uiConfigForm101:
+            return e("接口地址必须使用 HTTPS（本机可用 HTTP），且不能包含凭据、查询或片段", "The endpoint must use HTTPS (HTTP is allowed on the local machine) and must not contain credentials, a query, or a fragment", "L'adresse de l'interface doit utiliser HTTPS (HTTP autorisé en local) et ne peut contenir ni identifiants, ni requête, ni fragment", "L'indirizzo dell'interfaccia deve usare HTTPS (HTTP è consentito in locale) e non può contenere credenziali, query o frammenti", "Adres interfejsu musi używać HTTPS (lokalnie dozwolone jest HTTP) i nie może zawierać danych logowania, zapytania ani fragmentu")
+        case .uiConfigForm102:
+            return e("请填写有效的环境变量名", "Enter a valid environment variable name", "Saisissez un nom de variable d'environnement valide", "Inserisci un nome di variabile d'ambiente valido", "Podaj prawidłową nazwę zmiennej środowiskowej")
+        case .uiConfigForm103:
+            return e("密钥文件必须为当前用户所有的绝对路径普通文件、权限 0600、非符号链接且内容有效", "The key file must be an absolute-path regular file owned by the current user, with mode 0600, not a symlink, and valid contents", "Le fichier de clé doit être un fichier ordinaire en chemin absolu appartenant à l'utilisateur actuel, avec les droits 0600, sans lien symbolique et au contenu valide", "Il file della chiave deve essere un file regolare con percorso assoluto di proprietà dell'utente corrente, con permessi 0600, non un collegamento simbolico e con contenuto valido", "Plik klucza musi być zwykłym plikiem o ścieżce bezwzględnej, należącym do bieżącego użytkownika, z uprawnieniami 0600, bez dowiązania symbolicznego i z prawidłową zawartością")
+        case .uiConfigForm104:
+            return e("请选择有效的密钥来源", "Choose a valid key source", "Sélectionnez une source de clé valide", "Seleziona un'origine valida per la chiave", "Wybierz prawidłowe źródło klucza")
+        case .uiConfigForm105:
+            return e("%@ 不能为空，必须为整数", "%@ cannot be empty; an integer is required", "%@ ne peut pas être vide ; un entier est requis", "%@ non può essere vuoto; è richiesto un numero intero", "%@ nie może być puste; wymagana jest liczba całkowita")
+        case .uiConfigForm106:
+            return e("%@ 必须为整数，不能包含小数或非数字字符", "%@ must be an integer without decimals or non-numeric characters", "%@ doit être un entier, sans décimales ni caractères non numériques", "%@ deve essere un numero intero, senza decimali o caratteri non numerici", "%@ musi być liczbą całkowitą, bez ułamków i znaków nienumerycznych")
+        case .uiConfigForm107:
+            return e("%@ 必须为整数", "%@ must be an integer", "%@ doit être un entier", "%@ deve essere un numero intero", "%@ musi być liczbą całkowitą")
+        case .uiConfigForm108:
+            return e("brain_timeout_seconds 必须为整数", "brain_timeout_seconds must be an integer", "brain_timeout_seconds doit être un nombre entier", "brain_timeout_seconds deve essere un numero intero", "brain_timeout_seconds musi być liczbą całkowitą")
+        case .uiConfigForm109:
+            return e("brain.external.timeout_seconds 必须在 1 到 3600 秒之间", "brain.external.timeout_seconds must be between 1 and 3600 seconds", "brain.external.timeout_seconds doit être compris entre 1 et 3600 secondes", "brain.external.timeout_seconds deve essere compreso tra 1 e 3600 secondi", "brain.external.timeout_seconds musi mieścić się w zakresie od 1 do 3600 sekund")
+        case .uiConfigForm110:
+            return e("brain.external.timeout_action 必须是 skip、builtin 或 handoff", "brain.external.timeout_action must be skip, builtin, or handoff", "brain.external.timeout_action doit être skip, builtin ou handoff", "brain.external.timeout_action deve essere skip, builtin o handoff", "brain.external.timeout_action musi mieć wartość skip, builtin lub handoff")
+        case .uiConfigForm111:
+            return e("brain_queue_minutes 必须为整数", "brain_queue_minutes must be an integer", "brain_queue_minutes doit être un nombre entier", "brain_queue_minutes deve essere un numero intero", "brain_queue_minutes musi być liczbą całkowitą")
+        case .uiConfigForm112:
+            return e("brain.external.queue_minutes 必须在 1 到 1440 分钟之间", "brain.external.queue_minutes must be between 1 and 1440 minutes", "brain.external.queue_minutes doit être compris entre 1 et 1440 minutes", "brain.external.queue_minutes deve essere compreso tra 1 e 1440 minuti", "brain.external.queue_minutes musi mieścić się w zakresie od 1 do 1440 minut")
+        case .uiConfigForm113:
+            return e("brain.mode 必须是 builtin 或 external", "brain.mode must be builtin or external", "brain.mode doit être builtin ou external", "brain.mode deve essere builtin o external", "brain.mode musi mieć wartość builtin lub external")
+        case .uiConfigForm114:
+            return e("brain.mode 缺失", "brain.mode is missing", "brain.mode est absent", "Manca brain.mode", "Brak brain.mode")
+        case .uiConfigForm115:
+            return e("brain.mode=builtin 时不允许包含其他字段", "No other fields are allowed when brain.mode=builtin", "Aucun autre champ n'est autorisé lorsque brain.mode=builtin", "Nessun altro campo è consentito con brain.mode=builtin", "Przy brain.mode=builtin nie są dozwolone inne pola")
+        case .uiConfigForm116:
+            return e("brain 包含未知字段: %@", "brain contains unknown fields: %@", "brain contient des champs inconnus : %@", "brain contiene campi sconosciuti: %@", "brain zawiera nieznane pola: %@")
+        case .uiConfigForm117:
+            return e("brain.external 包含未知字段: %@", "brain.external contains unknown fields: %@", "brain.external contient des champs inconnus : %@", "brain.external contiene campi sconosciuti: %@", "brain.external zawiera nieznane pola: %@")
+        case .uiConfigForm118:
+            return e("MODEL_FORM_INVALID: 模型配置格式无效", "MODEL_FORM_INVALID: invalid model configuration format", "MODEL_FORM_INVALID : format de configuration du modèle invalide", "MODEL_FORM_INVALID: formato della configurazione del modello non valido", "MODEL_FORM_INVALID: nieprawidłowy format konfiguracji modelu")
+        case .uiConfigForm119:
+            return e("配置校验失败", "Configuration validation failed", "Échec de la validation de la configuration", "Convalida della configurazione non riuscita", "Walidacja konfiguracji nie powiodła się")
+        case .uiConfigForm120:
+            return e("配置文件备份失败: %@，已中止保存", "Backing up the config failed: %@; save aborted", "La sauvegarde de la configuration a échoué : %@ ; enregistrement annulé", "Backup della configurazione non riuscito: %@; salvataggio annullato", "Kopia zapasowa konfiguracji nie powiodła się: %@; zapis przerwany")
+        case .uiConfigForm121:
+            return e("CONFIG_CHECK_TIMEOUT: 配置校验超时", "CONFIG_CHECK_TIMEOUT: configuration check timed out", "CONFIG_CHECK_TIMEOUT : délai dépassé pour la vérification de la configuration", "CONFIG_CHECK_TIMEOUT: verifica della configurazione scaduta", "CONFIG_CHECK_TIMEOUT: przekroczono czas weryfikacji konfiguracji")
+        case .uiConfigForm122:
+            return e("CONFIG_CHECK_FAILED: 配置校验失败，请检查配置", "CONFIG_CHECK_FAILED: configuration check failed; review your configuration", "CONFIG_CHECK_FAILED : échec de la vérification de la configuration ; vérifiez votre configuration", "CONFIG_CHECK_FAILED: verifica della configurazione non riuscita; controlla la configurazione", "CONFIG_CHECK_FAILED: weryfikacja konfiguracji nie powiodła się; sprawdź konfigurację")
+        case .uiConfigForm123:
+            return e("config-check 超时", "config-check timed out", "config-check : délai dépassé", "config-check scaduto", "config-check: przekroczono czas")
+        case .uiConfigForm124:
+            return e("config-check 校验失败 (exit %@)", "config-check validation failed (exit %@)", "Échec de la validation config-check (exit %@)", "Validazione config-check non riuscita (exit %@)", "Walidacja config-check nie powiodła się (exit %@)")
+        case .uiConfigForm125:
+            return e("无法执行 config-check (exit %@)", "Could not run config-check (exit %@)", "Impossible d'exécuter config-check (exit %@)", "Impossibile eseguire config-check (exit %@)", "Nie można uruchomić config-check (exit %@)")
+
         // MARK: 通用
         case .appName:
             return e("微信客服助手", "WeChat Support Assistant", "Assistant de support WeChat", "Assistente di supporto WeChat", "Asystent obsługi WeChat")
