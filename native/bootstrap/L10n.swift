@@ -1935,7 +1935,7 @@ public enum L10n {
 
         // MARK: 机器人暂停原因
         case .evBotWechatNotLoggedIn:
-            return e("机器人已暂停：微信未登录或未运行（PID: %@）", "Bot paused: WeChat is not signed in or not running (PID: %@)", "Bot en pause : WeChat n’est pas connecté ou n’est pas lancé (PID : %@)", "Bot in pausa: WeChat non ha effettuato l’accesso o non è in esecuzione (PID: %@)", "Bot wstrzymany: WeChat nie jest zalogowany lub nie działa (PID: %@)")
+            return e("机器人已暂停：微信未登录或未运行 %@", "Bot paused: WeChat is not signed in or not running %@", "Bot en pause : WeChat n’est pas connecté ou n’est pas lancé %@", "Bot in pausa: WeChat non ha effettuato l’accesso o non è in esecuzione %@", "Bot wstrzymany: WeChat nie jest zalogowany lub nie działa %@")
         case .evBotWechatNotLoggedInFix:
             return e("先启动并登录微信，再点「恢复自动回复」", "Start and sign in to WeChat first, then click “Resume auto-reply”", "Lancez WeChat et connectez-vous, puis cliquez sur « Reprendre la réponse automatique »", "Avvia WeChat e accedi, poi fai clic su «Riprendi risposta automatica»", "Najpierw uruchom i zaloguj się do WeChat, potem kliknij „Wznów automatyczne odpowiedzi”")
 
