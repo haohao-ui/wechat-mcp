@@ -59,6 +59,8 @@ final class HostAppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
+        // 设计稿是浅色工作台：固定浅色外观，避免跟随系统深色导致与效果图不一致。
+        NSApplication.shared.appearance = NSAppearance(named: .aqua)
         window.title = L10n.t(.appName)
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 900, height: 640)

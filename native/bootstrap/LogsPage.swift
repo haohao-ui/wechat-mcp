@@ -10,15 +10,23 @@ func plainLogDisplayText(_ line: String) -> String {
 public final class LogsPageController: NSViewController {
     private let context: StatusPanelController
 
+    private static let pageMargin: CGFloat = 24
+    private static let labelColumnWidth: CGFloat = 70
+
     // Top action bar
     private let openLogsButton = NSButton(title: L10n.t(.openLogs), target: nil, action: nil)
     private let openAttachmentsButton = NSButton(title: L10n.t(.openAttachments), target: nil, action: nil)
     private let copyDiagnosticsButton = NSButton(title: L10n.t(.copyDiagnostics), target: nil, action: nil)
-    private let copyMessageLabel = NSTextField(labelWithString: "")
+    private let copyStatusTag = ThemeStatusTag(status: .normal, customText: L10n.t(.copiedDiagnostics))
 
     // Controls
     private let logSourcePopup = NSPopUpButton()
-    private let logLevelPopup = NSPopUpButton()
+    private let levelControl = NSSegmentedControl(
+        labels: [L10n.t(.logsLevelAll), L10n.t(.logsLevelWarnAndAbove), L10n.t(.logsLevelErrorOnly)],
+        trackingMode: .selectOne,
+        target: nil,
+        action: nil
+    )
     private let searchField = NSSearchField()
     private let pauseTailButton = NSButton(title: L10n.t(.actionPause), target: nil, action: nil)
     private let clearButton = NSButton(title: L10n.t(.logsClear), target: nil, action: nil)
@@ -54,88 +62,172 @@ public final class LogsPageController: NSViewController {
         tailTimer?.invalidate()
     }
 
+    // MARK: - Shared visual helpers (令牌全部来自 Theme.Colors)
+
+    private func styleSecondaryButton(_ button: NSButton) {
+        button.bezelStyle = .rounded
+        button.controlSize = .regular
+        button.font = NSFont.systemFont(ofSize: 13)
+        button.setContentHuggingPriority(.required, for: .horizontal)
+    }
+
+    private func makeFieldLabel(_ text: String) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        label.textColor = Theme.Colors.textPrimary
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        label.widthAnchor.constraint(equalToConstant: Self.labelColumnWidth).isActive = true
+        return label
+    }
+
+    private func makeSpacer() -> NSView {
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return spacer
+    }
+
+    private func makeRow(_ views: [NSView], spacing: CGFloat = 10) -> NSStackView {
+        let row = NSStackView(views: views)
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = spacing
+        row.translatesAutoresizingMaskIntoConstraints = false
+        return row
+    }
+
+    private func makeDivider() -> NSView {
+        let divider = NSView()
+        divider.wantsLayer = true
+        divider.layer?.backgroundColor = Theme.Colors.cardBorder.cgColor
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        divider.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        return divider
+    }
+
+    // MARK: - Layout
+
     private func setupUI() {
-        let mainStack = NSStackView()
-        mainStack.orientation = .vertical
-        mainStack.alignment = .leading
-        mainStack.spacing = 12
-        mainStack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(mainStack)
+        view.wantsLayer = true
+        view.layer?.backgroundColor = Theme.Colors.pageBackground.cgColor
 
-        // 1. Top action bar
-        let topBar = NSStackView()
-        topBar.orientation = .horizontal
-        topBar.alignment = .centerY
-        topBar.spacing = 10
-
+        // 1. 顶部操作行：次要按钮 + 复制成功状态
         openLogsButton.target = self
         openLogsButton.action = #selector(handleOpenLogs)
         openAttachmentsButton.target = self
         openAttachmentsButton.action = #selector(handleOpenAttachments)
         copyDiagnosticsButton.target = self
         copyDiagnosticsButton.action = #selector(handleCopyDiagnostics)
+        for button in [openLogsButton, openAttachmentsButton, copyDiagnosticsButton] {
+            styleSecondaryButton(button)
+        }
+        copyStatusTag.isHidden = true
+        copyStatusTag.setContentHuggingPriority(.required, for: .horizontal)
+        let topBar = makeRow([openLogsButton, openAttachmentsButton, copyDiagnosticsButton, copyStatusTag, makeSpacer()])
+        view.addSubview(topBar)
 
-        topBar.addArrangedSubview(openLogsButton)
-        topBar.addArrangedSubview(openAttachmentsButton)
-        topBar.addArrangedSubview(copyDiagnosticsButton)
-        topBar.addArrangedSubview(copyMessageLabel)
-        mainStack.addArrangedSubview(topBar)
+        let divider = makeDivider()
+        view.addSubview(divider)
 
-        // 2. Filter & Controls
-        let controlBar = NSStackView()
-        controlBar.orientation = .horizontal
-        controlBar.alignment = .centerY
-        controlBar.spacing = 10
-
+        // 2. 筛选与搜索
         logSourcePopup.addItems(withTitles: ["core.log", "bot-worker.log", "host.log"])
         logSourcePopup.target = self
         logSourcePopup.action = #selector(handleSourceChanged)
 
-        logLevelPopup.addItems(withTitles: [L10n.t(.logsLevelAll), L10n.t(.logsLevelWarnAndAbove), L10n.t(.logsLevelErrorOnly)])
-        logLevelPopup.target = self
-        logLevelPopup.action = #selector(handleFilterChanged)
+        levelControl.selectedSegment = 0
+        levelControl.segmentStyle = .rounded
+        levelControl.font = NSFont.systemFont(ofSize: 12)
+        levelControl.target = self
+        levelControl.action = #selector(handleLevelChanged)
+        levelControl.widthAnchor.constraint(equalToConstant: 240).isActive = true
 
         searchField.placeholderString = L10n.t(.logsSearchPlaceholder)
-        searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
+        searchField.font = NSFont.systemFont(ofSize: 13)
         searchField.target = self
         searchField.action = #selector(handleFilterChanged)
+        searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
 
         pauseTailButton.target = self
         pauseTailButton.action = #selector(handlePauseResumeTail)
+        styleSecondaryButton(pauseTailButton)
         clearButton.target = self
         clearButton.action = #selector(handleClear)
+        styleSecondaryButton(clearButton)
 
-        controlBar.addArrangedSubview(NSTextField(labelWithString: L10n.t(.contactsDetailSource)))
-        controlBar.addArrangedSubview(logSourcePopup)
-        controlBar.addArrangedSubview(NSTextField(labelWithString: L10n.t(.logsLevelLabel)))
-        controlBar.addArrangedSubview(logLevelPopup)
-        controlBar.addArrangedSubview(searchField)
-        controlBar.addArrangedSubview(pauseTailButton)
-        controlBar.addArrangedSubview(clearButton)
-        mainStack.addArrangedSubview(controlBar)
+        let sourceRow = makeRow([makeFieldLabel(L10n.t(.logsSourceLabel)), logSourcePopup, makeSpacer()])
+        let levelRow = makeRow([
+            makeFieldLabel(L10n.t(.logsLevelLabel)),
+            levelControl,
+            searchField,
+            pauseTailButton,
+            clearButton
+        ])
+        let filterStack = NSStackView(views: [sourceRow, levelRow])
+        filterStack.orientation = .vertical
+        filterStack.alignment = .leading
+        filterStack.spacing = 10
+        filterStack.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(filterStack)
 
-        // 3. Log Scroll View
+        // 3. 日志白卡片
+        let logCard = NSBox()
+        logCard.title = ""
+        logCard.titlePosition = .noTitle
+        logCard.boxType = .primary
+        logCard.translatesAutoresizingMaskIntoConstraints = false
+
         let scrollView = NSScrollView()
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = true
+        scrollView.drawsBackground = true
+        scrollView.backgroundColor = Theme.Colors.cardBackground
+        scrollView.borderType = .noBorder
 
         textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = true
+        textView.drawsBackground = true
+        textView.backgroundColor = Theme.Colors.cardBackground
+        textView.textColor = Theme.Colors.textPrimary
         textView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.textContainerInset = NSSize(width: 12, height: 12)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
         scrollView.documentView = textView
-        mainStack.addArrangedSubview(scrollView)
+        logCard.setContent(scrollView, inset: 8)
+        view.addSubview(logCard)
 
         NSLayoutConstraint.activate([
-            mainStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            mainStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            mainStack.topAnchor.constraint(equalTo: view.topAnchor, constant: 16),
-            mainStack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16),
-            scrollView.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
-            scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 200)
+            topBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Self.pageMargin),
+            topBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Self.pageMargin),
+            topBar.topAnchor.constraint(equalTo: view.topAnchor, constant: 8),
+
+            divider.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Self.pageMargin),
+            divider.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Self.pageMargin),
+            divider.topAnchor.constraint(equalTo: topBar.bottomAnchor, constant: 14),
+
+            filterStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Self.pageMargin),
+            filterStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Self.pageMargin),
+            filterStack.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 12),
+
+            sourceRow.widthAnchor.constraint(equalTo: filterStack.widthAnchor),
+            levelRow.widthAnchor.constraint(equalTo: filterStack.widthAnchor),
+
+            logCard.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Self.pageMargin),
+            logCard.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Self.pageMargin),
+            logCard.topAnchor.constraint(equalTo: filterStack.bottomAnchor, constant: 16),
+            logCard.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16),
+            logCard.heightAnchor.constraint(greaterThanOrEqualToConstant: 200)
         ])
     }
+
+    // MARK: - Tailing
 
     private func startTailTimer() {
         tailTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -163,8 +255,60 @@ public final class LogsPageController: NSViewController {
         applyFilterAndRender()
     }
 
+    // MARK: - Rendering
+
+    private func levelColor(for token: String) -> NSColor? {
+        switch token {
+        case "[ERROR]", "[FATAL]", "ERROR", "FATAL":
+            return Theme.Colors.statusErrorText
+        case "[WARN]", "[WARNING]", "WARN", "WARNING":
+            return Theme.Colors.statusWarningText
+        case "[INFO]", "INFO":
+            return Theme.Colors.statusNormalText
+        case "[DEBUG]", "DEBUG", "[TRACE]", "TRACE":
+            return Theme.Colors.textSecondary
+        default:
+            return nil
+        }
+    }
+
+    private func attributedLogText(_ lines: [String]) -> NSAttributedString {
+        let baseFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.minimumLineHeight = 22
+        paragraph.maximumLineHeight = 22
+        paragraph.lineBreakMode = .byClipping
+
+        let result = NSMutableAttributedString()
+        let tokens = ["[ERROR]", "[FATAL]", "[WARN]", "[WARNING]", "[INFO]", "[DEBUG]", "[TRACE]",
+                      "ERROR", "FATAL", "WARN", "WARNING", "INFO", "DEBUG", "TRACE"]
+        for (index, raw) in lines.enumerated() {
+            let line = plainLogDisplayText(raw) + (index == lines.count - 1 ? "" : "\n")
+            let attributed = NSMutableAttributedString(string: line, attributes: [
+                .font: baseFont,
+                .foregroundColor: Theme.Colors.textPrimary,
+                .paragraphStyle: paragraph
+            ])
+            let nsLine = line as NSString
+            for token in tokens {
+                guard let color = levelColor(for: token) else { continue }
+                var searchRange = NSRange(location: 0, length: nsLine.length)
+                while true {
+                    let found = nsLine.range(of: token, options: [], range: searchRange)
+                    if found.location == NSNotFound { break }
+                    attributed.addAttribute(.foregroundColor, value: color, range: found)
+                    let next = found.location + max(found.length, 1)
+                    if next >= nsLine.length { break }
+                    searchRange = NSRange(location: next, length: nsLine.length - next)
+                }
+            }
+            result.append(attributed)
+        }
+        return result
+    }
+
     private func applyFilterAndRender() {
-        let levelFilter = logLevelPopup.indexOfSelectedItem
+        let levelFilter = levelControl.selectedSegment
         let keyword = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
         let filtered = allLines.filter { line in
@@ -173,19 +317,25 @@ public final class LogsPageController: NSViewController {
                 return false
             }
             if levelFilter == 1 { // 警告及以上
-                return lower.contains("warn") || lower.contains("error")
+                return lower.contains("warn") || lower.contains("error") || lower.contains("fatal")
             } else if levelFilter == 2 { // 只看错误
                 return lower.contains("error") || lower.contains("fatal")
             }
             return true
         }
 
-        textView.string = filtered.map(plainLogDisplayText).joined(separator: "\n")
+        textView.textStorage?.setAttributedString(attributedLogText(filtered))
         textView.scrollToEndOfDocument(nil)
     }
 
+    // MARK: - Actions
+
     @objc private func handleSourceChanged() {
         switchLogSource()
+    }
+
+    @objc private func handleLevelChanged() {
+        applyFilterAndRender()
     }
 
     @objc private func handleFilterChanged() {
@@ -199,7 +349,7 @@ public final class LogsPageController: NSViewController {
 
     @objc private func handleClear() {
         allLines.removeAll()
-        textView.string = ""
+        textView.textStorage?.setAttributedString(NSAttributedString())
     }
 
     @objc private func handleOpenLogs() {
@@ -212,10 +362,9 @@ public final class LogsPageController: NSViewController {
 
     @objc private func handleCopyDiagnostics() {
         context.copyDiagnostics()
-        copyMessageLabel.stringValue = L10n.t(.copiedDiagnostics)
-        copyMessageLabel.textColor = .systemGreen
+        copyStatusTag.isHidden = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-            self?.copyMessageLabel.stringValue = ""
+            self?.copyStatusTag.isHidden = true
         }
     }
 }

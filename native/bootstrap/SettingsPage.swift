@@ -60,6 +60,10 @@ public struct SettingsFormLogic {
 public final class SettingsPageController: NSViewController {
     private let context: StatusPanelController
 
+    /// 统一的字段标签列宽（设计稿：标签左、控件右，标签列 180）。
+    private static let labelColumnWidth: CGFloat = 180
+    private static let cardInset: CGFloat = 20
+
     // UI Fields
     private let accountLabel = NSTextField(labelWithString: "-")
     private let backendLabel = NSTextField(labelWithString: "-")
@@ -74,7 +78,7 @@ public final class SettingsPageController: NSViewController {
     private let maxAttachmentField = NSTextField()
     private let manageWindowCheck = NSButton(checkboxWithTitle: L10n.t(.manageWindow), target: nil, action: nil)
 
-    private let saveButton = NSButton(title: L10n.t(.actionSaveConfig), target: nil, action: nil)
+    private let saveButton = ThemePrimaryButton(title: L10n.t(.actionSaveConfig), target: nil, action: nil)
     private let restoreDefaultsButton = NSButton(title: L10n.t(.actionRestoreDefaults), target: nil, action: nil)
     private let statusMessageLabel = NSTextField(wrappingLabelWithString: "")
 
@@ -107,25 +111,135 @@ public final class SettingsPageController: NSViewController {
 
     private let languagePopup = NSPopUpButton()
 
+    // MARK: - Shared visual helpers (令牌全部来自 Theme.Colors)
+
+    private func makePrimaryLabel(_ text: String, size: CGFloat = 13) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = NSFont.systemFont(ofSize: size)
+        label.textColor = Theme.Colors.textPrimary
+        label.lineBreakMode = .byTruncatingTail
+        return label
+    }
+
+    private func makeFieldLabel(_ text: String) -> NSTextField {
+        let label = makePrimaryLabel(text)
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        label.widthAnchor.constraint(equalToConstant: Self.labelColumnWidth).isActive = true
+        return label
+    }
+
+    private func makeValueLabel(_ text: String) -> NSTextField {
+        let label = makePrimaryLabel(text)
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return label
+    }
+
+    private func styleValueLabel(_ label: NSTextField) {
+        label.font = NSFont.systemFont(ofSize: 13)
+        label.textColor = Theme.Colors.textPrimary
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    }
+
+    private func makeHintLabel(_ text: String) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = NSFont.systemFont(ofSize: 12)
+        label.textColor = Theme.Colors.textSecondary
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return label
+    }
+
+    private func makeWrappingHintLabel(_ text: String) -> NSTextField {
+        let label = NSTextField(wrappingLabelWithString: text)
+        label.font = NSFont.systemFont(ofSize: 12)
+        label.textColor = Theme.Colors.textSecondary
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return label
+    }
+
+    private func styleSecondaryButton(_ button: NSButton) {
+        button.bezelStyle = .rounded
+        button.controlSize = .regular
+        button.font = NSFont.systemFont(ofSize: 13)
+        button.setContentHuggingPriority(.required, for: .horizontal)
+    }
+
+    private func makeSpacer() -> NSView {
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return spacer
+    }
+
+    private func makeRow(_ views: [NSView], spacing: CGFloat = 12) -> NSStackView {
+        let row = NSStackView(views: views)
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = spacing
+        row.translatesAutoresizingMaskIntoConstraints = false
+        return row
+    }
+
+    private func makeVerticalStack(spacing: CGFloat = 12) -> NSStackView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = spacing
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        return stack
+    }
+
+    /// 白卡片：标题 17 semibold + 内边距 20（NSBox.setContent 由 Shell 统一提供白底/圆角/描边）。
+    private func createSectionBox(title: String) -> NSBox {
+        let box = NSBox()
+        box.title = title
+        box.boxType = .primary
+        box.translatesAutoresizingMaskIntoConstraints = false
+        return box
+    }
+
+    private func addFullWidthRow(_ row: NSView, to stack: NSStackView) {
+        stack.addArrangedSubview(row)
+        row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+    }
+
+    private func makeDivider() -> NSView {
+        let divider = NSView()
+        divider.wantsLayer = true
+        divider.layer?.backgroundColor = Theme.Colors.cardBorder.cgColor
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        divider.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        return divider
+    }
+
+    private func makeStyleField(_ field: NSTextField) {
+        field.font = NSFont.systemFont(ofSize: 13)
+        field.alignment = .center
+        field.textColor = Theme.Colors.textPrimary
+        field.widthAnchor.constraint(equalToConstant: 100).isActive = true
+    }
+
+    // MARK: - Layout
+
     private func setupUI() {
+        view.wantsLayer = true
+        view.layer?.backgroundColor = Theme.Colors.pageBackground.cgColor
+
         let scrollView = NSScrollView(frame: view.bounds)
         scrollView.autoresizingMask = [.width, .height]
         scrollView.hasVerticalScroller = true
         scrollView.drawsBackground = false
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
 
-        let contentStack = NSStackView()
-        contentStack.orientation = .vertical
-        contentStack.alignment = .leading
-        contentStack.spacing = 18
-        contentStack.translatesAutoresizingMaskIntoConstraints = false
+        let contentStack = makeVerticalStack(spacing: 20)
 
         // 1. 系统权限
-        let permBox = createSectionBox(title: "系统权限")
-        let permStack = NSStackView()
-        permStack.orientation = .vertical
-        permStack.alignment = .leading
-        permStack.spacing = 8
-        permStack.translatesAutoresizingMaskIntoConstraints = false
+        let permBox = createSectionBox(title: L10n.t(.uiSettings047))
+        let permStack = makeVerticalStack(spacing: 12)
 
         let perms: [(PermissionKind, String)] = [
             (.screen, L10n.t(.uiSettings024)),
@@ -136,148 +250,136 @@ public final class SettingsPageController: NSViewController {
         ]
 
         for (kind, title) in perms {
-            let row = NSStackView()
-            row.orientation = .horizontal
-            row.alignment = .centerY
-            row.spacing = 10
-
-            let nameLbl = NSTextField(labelWithString: title)
-            nameLbl.font = NSFont.systemFont(ofSize: 12)
-            nameLbl.widthAnchor.constraint(equalToConstant: 260).isActive = true
+            let nameLbl = makePrimaryLabel(title)
+            nameLbl.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
             let stLbl = NSTextField(labelWithString: L10n.t(.statusChecking))
             stLbl.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-            stLbl.widthAnchor.constraint(equalToConstant: 70).isActive = true
+            stLbl.textColor = Theme.Colors.textSecondary
+            stLbl.alignment = .left
+            stLbl.widthAnchor.constraint(equalToConstant: 96).isActive = true
+            stLbl.setContentHuggingPriority(.required, for: .horizontal)
 
             let reqBtn = NSButton(title: L10n.t(.uiSettings029), target: self, action: #selector(handleRequestPermission(_:)))
             reqBtn.identifier = NSUserInterfaceItemIdentifier(kind.rawValue)
+            styleSecondaryButton(reqBtn)
 
             let setBtn = NSButton(title: L10n.t(.actionOpenSystemSettings), target: self, action: #selector(handleOpenSettings(_:)))
             setBtn.identifier = NSUserInterfaceItemIdentifier(kind.rawValue)
+            styleSecondaryButton(setBtn)
 
-            row.addArrangedSubview(nameLbl)
-            row.addArrangedSubview(stLbl)
-            row.addArrangedSubview(reqBtn)
-            row.addArrangedSubview(setBtn)
-
-            permStack.addArrangedSubview(row)
+            let row = makeRow([nameLbl, stLbl, makeSpacer(), reqBtn, setBtn])
+            addFullWidthRow(row, to: permStack)
             permissionViews[kind] = (stLbl, reqBtn, setBtn)
         }
 
         let recheckBtn = NSButton(title: L10n.t(.uiSettings030), target: self, action: #selector(handleRecheckPermissions))
-        permStack.addArrangedSubview(recheckBtn)
+        styleSecondaryButton(recheckBtn)
+        addFullWidthRow(makeRow([recheckBtn, makeSpacer()]), to: permStack)
 
-        permBox.setContent(permStack)
+        permBox.setContent(permStack, inset: Self.cardInset)
         contentStack.addArrangedSubview(permBox)
 
-        // 2. 界面语言（五语）：切换后由宿主重建侧栏，导航与页面文案一起更新。
-        let langBox = createSectionBox(title: L10n.t(.settingsLanguageBox))
-        let langStack = NSStackView()
-        langStack.orientation = .horizontal
-        langStack.alignment = .centerY
-        langStack.spacing = 10
-        langStack.translatesAutoresizingMaskIntoConstraints = false
-        langStack.addArrangedSubview(NSTextField(labelWithString: L10n.t(.languageLabel)))
+        // 2. 运行规则（回复节奏与运行参数）
+        let paceBox = createSectionBox(title: L10n.t(.uiSettings049))
+        let paceStack = makeVerticalStack(spacing: 12)
+
+        for f in [cooldownField, maxRepliesField, quietSecField, maxSecField, contextMsgField, maxAttachmentField] {
+            makeStyleField(f)
+        }
+
+        let paceRows: [(NSTextField, NSTextField)] = [
+            (makeFieldLabel(L10n.t(.uiSettings031)), makeHintLabel(L10n.t(.uiSettings032))),
+            (makeFieldLabel(L10n.t(.uiSettings033)), makeHintLabel(L10n.t(.uiSettings034))),
+            (makeFieldLabel(L10n.t(.uiSettings035)), makeHintLabel(L10n.t(.uiSettings036))),
+            (makeFieldLabel(L10n.t(.uiSettings037)), makeHintLabel(L10n.t(.uiSettings038))),
+            (makeFieldLabel(L10n.t(.uiSettings039)), makeHintLabel(L10n.t(.uiSettings040))),
+            (makeFieldLabel(L10n.t(.uiSettings041)), makeHintLabel(L10n.t(.uiSettings042)))
+        ]
+        let paceFields = [cooldownField, maxRepliesField, quietSecField, maxSecField, contextMsgField, maxAttachmentField]
+        for (idx, pair) in paceRows.enumerated() {
+            let row = makeRow([pair.0, paceFields[idx], pair.1, makeSpacer()])
+            addFullWidthRow(row, to: paceStack)
+        }
+
+        manageWindowCheck.font = NSFont.systemFont(ofSize: 13)
+        manageWindowCheck.contentTintColor = Theme.Colors.brand
+        paceStack.addArrangedSubview(manageWindowCheck)
+
+        let noteLbl = makeWrappingHintLabel(L10n.t(.uiSettings043))
+        addFullWidthRow(noteLbl, to: paceStack)
+
+        let divider = makeDivider()
+        addFullWidthRow(divider, to: paceStack)
+
+        restoreDefaultsButton.target = self
+        restoreDefaultsButton.action = #selector(handleRestoreDefaults)
+        styleSecondaryButton(restoreDefaultsButton)
+        saveButton.target = self
+        saveButton.action = #selector(handleSaveConfig)
+
+        statusMessageLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        statusMessageLabel.textColor = Theme.Colors.textSecondary
+        statusMessageLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let actionsRow = makeRow([saveButton, restoreDefaultsButton, makeSpacer()])
+        addFullWidthRow(actionsRow, to: paceStack)
+        statusMessageLabel.maximumNumberOfLines = 2
+        addFullWidthRow(statusMessageLabel, to: paceStack)
+
+        paceBox.setContent(paceStack, inset: Self.cardInset)
+        contentStack.addArrangedSubview(paceBox)
+
+        // 3. 界面语言（五语）：切换后由宿主重建侧栏，导航与页面文案一起更新。
+        let langBox = createSectionBox(title: L10n.t(.uiSettings050))
+        let langStack = makeVerticalStack(spacing: 8)
         languagePopup.addItems(withTitles: AppLanguage.allCases.map { $0.displayName })
         if let idx = AppLanguage.allCases.firstIndex(of: L10n.language) {
             languagePopup.selectItem(at: idx)
         }
         languagePopup.target = self
         languagePopup.action = #selector(handleLanguageChange)
-        langStack.addArrangedSubview(languagePopup)
-        langBox.setContent(langStack)
+        let langRow = makeRow([makeFieldLabel(L10n.t(.languageLabel)), languagePopup, makeSpacer()])
+        addFullWidthRow(langRow, to: langStack)
+        let langNote = makeWrappingHintLabel(L10n.t(.languageNote))
+        addFullWidthRow(langNote, to: langStack)
+        langBox.setContent(langStack, inset: Self.cardInset)
         contentStack.addArrangedSubview(langBox)
 
-        // 2. 账号与模型
-        let accountBox = createSectionBox(title: L10n.t(.settingsAccountBox))
-        let accGrid = NSGridView(views: [
-            [NSTextField(labelWithString: L10n.t(.labelAccount)), accountLabel],
-            [NSTextField(labelWithString: L10n.t(.labelBackend)), backendLabel],
-            [NSTextField(labelWithString: L10n.t(.labelModelName)), modelLabel],
-            [NSTextField(labelWithString: L10n.t(.labelApiKey)), keyStatusLabel]
-        ])
-        accGrid.translatesAutoresizingMaskIntoConstraints = false
-        accGrid.rowSpacing = 10
-        accGrid.columnSpacing = 12
-        accountBox.setContent(accGrid)
+        // 4. 账号与模型
+        let accountBox = createSectionBox(title: L10n.t(.uiSettings051))
+        let accountStack = makeVerticalStack(spacing: 12)
+        let accountRows: [(String, NSTextField)] = [
+            (L10n.t(.labelAccount), accountLabel),
+            (L10n.t(.labelBackend), backendLabel),
+            (L10n.t(.labelModelName), modelLabel),
+            (L10n.t(.labelApiKey), keyStatusLabel)
+        ]
+        for (title, value) in accountRows {
+            styleValueLabel(value)
+            addFullWidthRow(makeRow([makeFieldLabel(title), value]), to: accountStack)
+        }
+        accountBox.setContent(accountStack, inset: Self.cardInset)
         contentStack.addArrangedSubview(accountBox)
 
-        // 3. 回复节奏与附件配置
-        let paceBox = createSectionBox(title: L10n.t(.paceBox))
-        let paceGrid = NSGridView(views: [
-            [NSTextField(labelWithString: L10n.t(.uiSettings031)), cooldownField, NSTextField(labelWithString: L10n.t(.uiSettings032))],
-            [NSTextField(labelWithString: L10n.t(.uiSettings033)), maxRepliesField, NSTextField(labelWithString: L10n.t(.uiSettings034))],
-            [NSTextField(labelWithString: L10n.t(.uiSettings035)), quietSecField, NSTextField(labelWithString: L10n.t(.uiSettings036))],
-            [NSTextField(labelWithString: L10n.t(.uiSettings037)), maxSecField, NSTextField(labelWithString: L10n.t(.uiSettings038))],
-            [NSTextField(labelWithString: L10n.t(.uiSettings039)), contextMsgField, NSTextField(labelWithString: L10n.t(.uiSettings040))],
-            [NSTextField(labelWithString: L10n.t(.uiSettings041)), maxAttachmentField, NSTextField(labelWithString: L10n.t(.uiSettings042))]
+        // 5. 应用与更新
+        let updateBox = createSectionBox(title: L10n.t(.uiSettings052))
+        let updateStack = makeVerticalStack(spacing: 10)
+        let verRow = makeRow([
+            makeFieldLabel(L10n.t(.hostVersion)),
+            makeValueLabel(hostAppVersion()),
+            makeSpacer()
         ])
-        paceGrid.translatesAutoresizingMaskIntoConstraints = false
-        paceGrid.rowSpacing = 12
-        paceGrid.columnSpacing = 12
-
-        for f in [cooldownField, maxRepliesField, quietSecField, maxSecField, contextMsgField, maxAttachmentField] {
-            f.widthAnchor.constraint(equalToConstant: 100).isActive = true
-        }
-
-        let paceStack = NSStackView()
-        paceStack.orientation = .vertical
-        paceStack.alignment = .leading
-        paceStack.spacing = 10
-        paceStack.addArrangedSubview(paceGrid)
-        paceStack.addArrangedSubview(manageWindowCheck)
-
-        let noteLbl = NSTextField(wrappingLabelWithString: L10n.t(.uiSettings043))
-        noteLbl.font = NSFont.systemFont(ofSize: 11)
-        noteLbl.textColor = .secondaryLabelColor
-        paceStack.addArrangedSubview(noteLbl)
-
-        paceBox.setContent(paceStack)
-        contentStack.addArrangedSubview(paceBox)
-
-        // 4. 应用版本与更新导航
-        let updateBox = createSectionBox(title: L10n.t(.updateBox))
-        let updateStack = NSStackView()
-        updateStack.orientation = .vertical
-        updateStack.alignment = .leading
-        updateStack.spacing = 8
-
-        let verRow = NSStackView()
-        verRow.orientation = .horizontal
-        verRow.spacing = 8
-        let verTitle = NSTextField(labelWithString: L10n.t(.hostVersion))
-        verTitle.font = NSFont.systemFont(ofSize: 12)
-        let verVal = NSTextField(labelWithString: hostAppVersion())
-        verVal.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-        verRow.addArrangedSubview(verTitle)
-        verRow.addArrangedSubview(verVal)
-        updateStack.addArrangedSubview(verRow)
-
-        let updateIntro = NSTextField(wrappingLabelWithString: L10n.t(.updateIntro))
-        updateIntro.font = NSFont.systemFont(ofSize: 11)
-        updateIntro.textColor = .secondaryLabelColor
-        updateStack.addArrangedSubview(updateIntro)
-
+        addFullWidthRow(verRow, to: updateStack)
+        let updateIntro = makeWrappingHintLabel(L10n.t(.updateIntro))
+        addFullWidthRow(updateIntro, to: updateStack)
         jumpToUpdateButton.target = self
         jumpToUpdateButton.action = #selector(handleJumpToUpdate)
-        updateStack.addArrangedSubview(jumpToUpdateButton)
-
-        updateBox.setContent(updateStack)
+        styleSecondaryButton(jumpToUpdateButton)
+        let jumpRow = makeRow([jumpToUpdateButton, makeSpacer()])
+        addFullWidthRow(jumpRow, to: updateStack)
+        updateBox.setContent(updateStack, inset: Self.cardInset)
         contentStack.addArrangedSubview(updateBox)
-
-        // 5. 底部操作按钮
-        let btnRow = NSStackView()
-        btnRow.orientation = .horizontal
-        btnRow.spacing = 12
-        saveButton.target = self
-        saveButton.action = #selector(handleSaveConfig)
-        restoreDefaultsButton.target = self
-        restoreDefaultsButton.action = #selector(handleRestoreDefaults)
-
-        btnRow.addArrangedSubview(saveButton)
-        btnRow.addArrangedSubview(restoreDefaultsButton)
-        btnRow.addArrangedSubview(statusMessageLabel)
-        contentStack.addArrangedSubview(btnRow)
 
         let document = FlippedView()
         document.translatesAutoresizingMaskIntoConstraints = false
@@ -286,33 +388,29 @@ public final class SettingsPageController: NSViewController {
         view.addSubview(scrollView)
 
         NSLayoutConstraint.activate([
+            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: view.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             document.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
             document.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
             document.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
             contentStack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 24),
             contentStack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -24),
-            contentStack.topAnchor.constraint(equalTo: document.topAnchor, constant: 16),
-            contentStack.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -16),
-            permBox.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
-            accountBox.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
-            paceBox.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
-            updateBox.widthAnchor.constraint(equalTo: contentStack.widthAnchor)
+            contentStack.topAnchor.constraint(equalTo: document.topAnchor, constant: 8),
+            contentStack.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -24)
         ])
+        for card in [permBox, paceBox, langBox, accountBox, updateBox] {
+            card.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
+        }
     }
+
+    // MARK: - Actions
 
     @objc private func handleLanguageChange() {
         let idx = languagePopup.indexOfSelectedItem
         guard idx >= 0, idx < AppLanguage.allCases.count else { return }
         L10n.setLanguage(AppLanguage.allCases[idx])
-    }
-
-    private func createSectionBox(title: String) -> NSBox {
-        let box = NSBox()
-        box.title = title
-        box.titleFont = NSFont.systemFont(ofSize: 13, weight: .bold)
-        box.boxType = .primary
-        box.translatesAutoresizingMaskIntoConstraints = false
-        return box
     }
 
     public func populateCurrentValues() {
@@ -340,15 +438,15 @@ public final class SettingsPageController: NSViewController {
             switch st {
             case .some(true):
                 views.status.stringValue = L10n.t(.uiSettings044)
-                views.status.textColor = .systemGreen
+                views.status.textColor = Theme.Colors.statusNormalText
                 views.reqBtn.isEnabled = false
             case .some(false):
-                views.status.stringValue = "未授权"
-                views.status.textColor = .systemRed
+                views.status.stringValue = L10n.t(.uiSettings048)
+                views.status.textColor = Theme.Colors.statusWarningText
                 views.reqBtn.isEnabled = true
             case .none:
                 views.status.stringValue = L10n.t(.uiResidualUnknown)
-                views.status.textColor = .secondaryLabelColor
+                views.status.textColor = Theme.Colors.statusInactiveText
                 views.reqBtn.isEnabled = true
             }
         }
@@ -387,14 +485,14 @@ public final class SettingsPageController: NSViewController {
             do {
                 try context.persistConfig(updated)
                 statusMessageLabel.stringValue = L10n.t(.uiSettings045)
-                statusMessageLabel.textColor = .systemGreen
+                statusMessageLabel.textColor = Theme.Colors.statusNormalText
             } catch {
                 statusMessageLabel.stringValue = L10n.t(.saveFailed, String(describing: error.localizedDescription))
-                statusMessageLabel.textColor = .systemRed
+                statusMessageLabel.textColor = Theme.Colors.statusErrorText
             }
         case .failure(let err):
             statusMessageLabel.stringValue = L10n.t(.validationError, String(describing: err))
-            statusMessageLabel.textColor = .systemRed
+            statusMessageLabel.textColor = Theme.Colors.statusErrorText
         }
     }
 
@@ -407,7 +505,7 @@ public final class SettingsPageController: NSViewController {
         maxAttachmentField.stringValue = "50"
         manageWindowCheck.state = .on
         statusMessageLabel.stringValue = L10n.t(.uiSettings046)
-        statusMessageLabel.textColor = .systemBlue
+        statusMessageLabel.textColor = Theme.Colors.textSecondary
     }
 
     public func triggerUpdateNavigation() {

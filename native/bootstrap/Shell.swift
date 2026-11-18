@@ -51,16 +51,19 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
         sidebarTable.headerView = nil
         sidebarTable.dataSource = self
         sidebarTable.delegate = self
-        sidebarTable.rowHeight = 44
+        sidebarTable.rowHeight = 40
         sidebarTable.style = .sourceList
-        sidebarTable.backgroundColor = .windowBackgroundColor
+        sidebarTable.backgroundColor = Theme.Colors.sidebarBackground
         sidebarTable.setAccessibilityLabel(L10n.t(.uiShell047))
-        sidebarTable.intercellSpacing = NSSize(width: 0, height: 4)
+        sidebarTable.intercellSpacing = NSSize(width: 0, height: 2)
         sidebarScroll.documentView = sidebarTable
 
         // 右侧内容区
         contentContainer.translatesAutoresizingMaskIntoConstraints = false
-        pageTitle.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
+        contentContainer.wantsLayer = true
+        contentContainer.layer?.backgroundColor = Theme.Colors.pageBackground.cgColor
+        pageTitle.font = NSFont.systemFont(ofSize: 28, weight: .semibold)
+        pageTitle.textColor = Theme.Colors.textPrimary
         pageTitle.translatesAutoresizingMaskIntoConstraints = false
         pageTitle.setAccessibilityLabel(L10n.t(.uiShell048))
         pageHost.translatesAutoresizingMaskIntoConstraints = false
@@ -83,8 +86,8 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
             splitView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             splitView.topAnchor.constraint(equalTo: view.topAnchor),
             splitView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            sidebarScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 196),
-            sidebarScroll.widthAnchor.constraint(lessThanOrEqualToConstant: 196)
+            sidebarScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 220),
+            sidebarScroll.widthAnchor.constraint(lessThanOrEqualToConstant: 220)
         ])
     }
 
@@ -146,12 +149,13 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
                        "settings": "gearshape", "logs": "doc.text", "update": "arrow.down.circle"]
         let icon = NSImageView(image: NSImage(systemSymbolName: symbols[entry.id] ?? "square", accessibilityDescription: nil) ?? NSImage())
         icon.contentTintColor = .secondaryLabelColor
-        icon.widthAnchor.constraint(equalToConstant: 18).isActive = true
-        icon.heightAnchor.constraint(equalToConstant: 18).isActive = true
+        icon.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 16).isActive = true
         let label = NSTextField(labelWithString: entry.title)
-        label.font = NSFont.systemFont(ofSize: 14, weight: .medium)
+        label.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        label.textColor = Theme.Colors.textPrimary
         let row = NSStackView(views: [icon, label])
-        row.spacing = 12
+        row.spacing = 10
         row.alignment = .centerY
         row.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 0, right: 8)
         return row
@@ -178,7 +182,8 @@ extension NSBox {
             let stack = NSStackView()
             if titlePosition != .noTitle && !title.isEmpty {
                 let heading = NSTextField(labelWithString: title)
-                heading.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
+                heading.font = NSFont.systemFont(ofSize: 17, weight: .semibold)
+                heading.textColor = Theme.Colors.textPrimary
                 stack.addArrangedSubview(heading)
             }
             stack.addArrangedSubview(content)
@@ -189,10 +194,10 @@ extension NSBox {
             embedded = stack
             boxType = .custom
             titlePosition = .noTitle
-            fillColor = .controlBackgroundColor
-            borderColor = .separatorColor
+            fillColor = Theme.Colors.cardBackground
+            borderColor = Theme.Colors.cardBorder
             borderWidth = 1
-            cornerRadius = 8
+            cornerRadius = 12
         } else {
             embedded = content
         }
@@ -215,7 +220,7 @@ extension NSBox {
 private final class NavigationRowView: NSTableRowView {
     override func drawSelection(in dirtyRect: NSRect) {
         guard selectionHighlightStyle != .none else { return }
-        NSColor.systemGreen.withAlphaComponent(0.14).setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 6, dy: 3), xRadius: 8, yRadius: 8).fill()
+        Theme.Colors.selectedRowBackground.setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 2), xRadius: 8, yRadius: 8).fill()
     }
 }
