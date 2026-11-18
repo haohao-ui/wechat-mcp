@@ -79,7 +79,22 @@ pub fn acquire_core_lock_for_maintenance(state_dir: &Path) -> Result<File> {
     if core_is_running(state_dir) {
         anyhow::bail!("先停止服务 (core.lock is held)");
     }
-    acquire_core_lock(state_dir).context("先停止服务：无法获取 core.lock")
+    // 同一进程刚释放 core.lock 后立刻再取（连续执行历史维护命令、测试并行跑）时，
+    // flock 的释放存在极短的可见性窗口，直接 try_lock 会误报「无法获取 core.lock」。
+    // 维护命令本来就是「等服务停下来再执行」，给一个有界重试；真有服务占着锁时
+    // 仍然会在 deadline 后如实报错。
+    let deadline = std::time::Instant::now() + Duration::from_millis(1500);
+    loop {
+        match acquire_core_lock(state_dir) {
+            Ok(file) => return Ok(file),
+            Err(err) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(err).context("先停止服务：无法获取 core.lock");
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
 }
 
 pub fn acquire_core_lock(state_dir: &Path) -> Result<File> {
