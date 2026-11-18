@@ -105,6 +105,8 @@ public final class SettingsPageController: NSViewController {
         updatePermissionStatuses()
     }
 
+    private let languagePopup = NSPopUpButton()
+
     private func setupUI() {
         let scrollView = NSScrollView(frame: view.bounds)
         scrollView.autoresizingMask = [.width, .height]
@@ -167,6 +169,24 @@ public final class SettingsPageController: NSViewController {
 
         permBox.setContent(permStack)
         contentStack.addArrangedSubview(permBox)
+
+        // 2. 界面语言（五语）：切换后由宿主重建侧栏，导航与页面文案一起更新。
+        let langBox = createSectionBox(title: L10n.t(.settingsLanguageBox))
+        let langStack = NSStackView()
+        langStack.orientation = .horizontal
+        langStack.alignment = .centerY
+        langStack.spacing = 10
+        langStack.translatesAutoresizingMaskIntoConstraints = false
+        langStack.addArrangedSubview(NSTextField(labelWithString: L10n.t(.languageLabel)))
+        languagePopup.addItems(withTitles: AppLanguage.allCases.map { $0.displayName })
+        if let idx = AppLanguage.allCases.firstIndex(of: L10n.language) {
+            languagePopup.selectItem(at: idx)
+        }
+        languagePopup.target = self
+        languagePopup.action = #selector(handleLanguageChange)
+        langStack.addArrangedSubview(languagePopup)
+        langBox.setContent(langStack)
+        contentStack.addArrangedSubview(langBox)
 
         // 2. 账号与模型
         let accountBox = createSectionBox(title: L10n.t(.settingsAccountBox))
@@ -278,6 +298,12 @@ public final class SettingsPageController: NSViewController {
             paceBox.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
             updateBox.widthAnchor.constraint(equalTo: contentStack.widthAnchor)
         ])
+    }
+
+    @objc private func handleLanguageChange() {
+        let idx = languagePopup.indexOfSelectedItem
+        guard idx >= 0, idx < AppLanguage.allCases.count else { return }
+        L10n.setLanguage(AppLanguage.allCases[idx])
     }
 
     private func createSectionBox(title: String) -> NSBox {

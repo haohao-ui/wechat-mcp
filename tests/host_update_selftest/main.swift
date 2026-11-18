@@ -497,6 +497,10 @@ func runTests() -> Int32 {
             if arguments.first == "status" {
                 return ControlRun(status: 0, output: Data("{\"status\":\"idle\",\"maintenance_active\":false,\"capabilities\":{\"schema\":1,\"download\":true}}".utf8), timedOut: false)
             }
+            // 应用更新页会查询整包回滚状态；它不属于「下载」调用，不能被计入下载次数。
+            if arguments.first == "rollback-status" {
+                return ControlRun(status: 0, output: Data("{\"version\":null,\"installed_at\":null,\"can_rollback\":false,\"reason\":\"no_backup\"}".utf8), timedOut: false)
+            }
             lock.lock(); calls += 1; let currentMode = mode; lock.unlock()
             let returnedDigest = currentMode == "changed" ? String(repeating: "b", count: 64) : digest
             let body = """
