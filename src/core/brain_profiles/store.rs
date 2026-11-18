@@ -213,6 +213,150 @@ impl Store {
         root.validate()?;
         Ok(root)
     }
+    /// Account-scoped retained history. Read one root snapshot and validate every
+    /// referenced object through the same ownership/integrity checks as `role`.
+    pub(crate) fn history(
+        &self,
+        ctx: &AccountContext,
+        role_id: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        use serde_json::json;
+        use std::collections::BTreeMap;
+        let root = self.load()?;
+        if let Some(id_) = role_id {
+            require(id(id_), "invalid_arguments")?;
+            require(
+                root.roles
+                    .iter()
+                    .any(|r| r.owner_account_id == ctx.account_id && r.role_id == id_),
+                "not_found",
+            )?;
+        }
+        let account = root
+            .accounts
+            .iter()
+            .find(|a| a.account_id == ctx.account_id);
+        let roles: Vec<_> = root
+            .roles
+            .iter()
+            .filter(|r| {
+                r.owner_account_id == ctx.account_id && role_id.is_none_or(|id_| id_ == r.role_id)
+            })
+            .collect();
+        let generations: Vec<_> = root
+            .activation_history
+            .iter()
+            .filter(|h| h.account_id == ctx.account_id)
+            .collect();
+        let references = |b: &BindingSet| -> Vec<RoleRef> {
+            b.default
+                .iter()
+                .cloned()
+                .chain(b.overrides.iter().map(|o| RoleRef {
+                    role_id: o.role_id.clone(),
+                    revision_id: o.revision_id.clone(),
+                }))
+                .collect()
+        };
+        let active = account.map(|a| references(&a.active)).unwrap_or_default();
+        let mut pending: Vec<RoleRef> = roles
+            .iter()
+            .map(|r| RoleRef {
+                role_id: r.role_id.clone(),
+                revision_id: r.draft_revision_id.clone(),
+            })
+            .collect();
+        pending.extend(active.clone());
+        if let Some(a) = account {
+            pending.extend(references(&a.draft));
+            pending.extend(a.legacy_fallback.iter().cloned());
+        }
+        for h in &generations {
+            pending.extend(references(&h.active));
+        }
+        // Committed drafts can become detached after rollback. Include retained
+        // successful writes, but never enumerate uncommitted orphan files.
+        for request in root
+            .request_results
+            .iter()
+            .filter(|r| r.account_id == ctx.account_id)
+        {
+            if let (Some(role_id), Some(revision_id)) =
+                (&request.result.role_id, &request.result.revision_id)
+            {
+                pending.push(RoleRef {
+                    role_id: role_id.clone(),
+                    revision_id: revision_id.clone(),
+                });
+            }
+        }
+        let mut versions = BTreeMap::new();
+        while let Some(r) = pending.pop() {
+            if role_id.is_some_and(|id_| id_ != r.role_id) {
+                continue;
+            }
+            let key = (r.role_id.clone(), r.revision_id.clone());
+            if versions.contains_key(&key) {
+                continue;
+            }
+            let content = self.role_from(&root, ctx, &r)?;
+            let knowledge: Vec<_> = content
+                .knowledge_refs
+                .iter()
+                .map(|k| self.knowledge_from(&root, ctx, k))
+                .collect::<Result<_>>()?;
+            let is_draft = roles
+                .iter()
+                .any(|e| e.role_id == r.role_id && e.draft_revision_id == r.revision_id);
+            versions.insert(key, json!({"role_id": r.role_id, "revision_id": r.revision_id, "created_at": content.created_at,
+                "is_active": active.contains(&r), "is_draft": is_draft, "content": content, "knowledge": knowledge}));
+            if let Some(parent) = content.parent_revision_id {
+                pending.push(RoleRef {
+                    role_id: content.role_id,
+                    revision_id: parent,
+                });
+            }
+        }
+        // The store retains activation snapshots and a bounded write-result log,
+        // not a full draft binding snapshot at every edit. Preserve that boundary.
+        let mut generation_rows = BTreeMap::new();
+        for request in root
+            .request_results
+            .iter()
+            .filter(|r| r.account_id == ctx.account_id)
+        {
+            generation_rows.insert(request.result.generation, json!({
+                "generation": request.result.generation, "at": request.at, "operation": request.operation,
+                "role_id": request.result.role_id, "revision_id": request.result.revision_id,
+                "is_activation": false, "active": null, "draft": null
+            }));
+        }
+        for activation in &generations {
+            let row = generation_rows
+                .entry(activation.generation)
+                .or_insert_with(|| {
+                    json!({
+                        "generation": activation.generation, "at": activation.at, "operation": null,
+                        "role_id": null, "revision_id": null, "draft": null
+                    })
+                });
+            row["is_activation"] = json!(true);
+            row["active"] = json!(activation.active);
+        }
+        if let Some(row) = generation_rows.get_mut(&root.generation) {
+            row["draft"] = json!(account.map(|a| &a.draft));
+        }
+        let generations: Vec<_> = generation_rows.into_values().collect();
+        let mut versions: Vec<_> = versions.into_values().collect();
+        versions.sort_by_key(|v| std::cmp::Reverse(v["created_at"].as_u64().unwrap_or(0)));
+        Ok(
+            json!({"account_id": ctx.account_id(), "generation": root.generation,
+            "active": account.map(|a| &a.active), "draft": account.map(|a| &a.draft),
+            "roles": roles, "generations": generations, "versions": versions,
+            "history_scope": "retained_activations_committed_writes_and_reachable_revisions"}),
+        )
+    }
+
     pub fn generation(&self) -> Result<u64> {
         Ok(self.load()?.generation)
     }

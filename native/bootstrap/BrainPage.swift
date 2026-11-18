@@ -550,6 +550,216 @@ public struct BrainListPayload: Codable, Equatable {
     }
 }
 
+// MARK: - Brain History Models（issue-2 历史版本，字段对齐后端 brain-history）
+// 新增文案暂用中文硬编码，后续统一迁入 L10n。
+
+/// 代次记录。字段取自后端 `brain-history` 的 `generations`：
+/// generation/at/operation/role_id/revision_id/is_activation/active/draft。
+/// `draft` 只有当前代次快照才有值；为空表示后端没有该代次的完整草稿，
+/// 界面必须如实标注「未保存完整草稿」，不得补全或编造。
+public struct BrainHistoryGeneration: Codable, Equatable {
+    public let generation: UInt64
+    public let at: UInt64?
+    public let operation: String?
+    public let roleId: String?
+    public let revisionId: String?
+    public let isActivation: Bool?
+    public let active: BrainBindingSet?
+    public let draft: BrainBindingSet?
+
+    enum CodingKeys: String, CodingKey {
+        case generation
+        case at
+        case operation
+        case roleId = "role_id"
+        case revisionId = "revision_id"
+        case isActivation = "is_activation"
+        case active
+        case draft
+    }
+
+    public init(
+        generation: UInt64,
+        at: UInt64? = nil,
+        operation: String? = nil,
+        roleId: String? = nil,
+        revisionId: String? = nil,
+        isActivation: Bool? = nil,
+        active: BrainBindingSet? = nil,
+        draft: BrainBindingSet? = nil
+    ) {
+        self.generation = generation
+        self.at = at
+        self.operation = operation
+        self.roleId = roleId
+        self.revisionId = revisionId
+        self.isActivation = isActivation
+        self.active = active
+        self.draft = draft
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.generation = try container.decode(UInt64.self, forKey: .generation)
+        self.at = try container.decodeIfPresent(UInt64.self, forKey: .at)
+        self.operation = try container.decodeIfPresent(String.self, forKey: .operation)
+        self.roleId = try container.decodeIfPresent(String.self, forKey: .roleId)
+        self.revisionId = try container.decodeIfPresent(String.self, forKey: .revisionId)
+        self.isActivation = try container.decodeIfPresent(Bool.self, forKey: .isActivation)
+        // 绑定快照结构异常时按「未记录」处理，避免整份历史读取失败。
+        self.active = try? container.decodeIfPresent(BrainBindingSet.self, forKey: .active)
+        self.draft = try? container.decodeIfPresent(BrainBindingSet.self, forKey: .draft)
+    }
+
+    /// 后端是否为该代次保留了完整草稿快照。
+    public var hasCompleteDraft: Bool {
+        return draft != nil
+    }
+
+    public var runDefaultRoleId: String? {
+        return active?.defaultRef?.roleId ?? draft?.defaultRef?.roleId
+    }
+
+    public var runDefaultRevisionId: String? {
+        return active?.defaultRef?.revisionId ?? draft?.defaultRef?.revisionId
+    }
+
+    public var overrideCount: Int {
+        return active?.overrides.count ?? draft?.overrides.count ?? 0
+    }
+}
+
+/// 版本记录。字段取自后端 `brain-history` 的 `versions`：
+/// role_id/revision_id/created_at/is_active/is_draft/content。
+/// `content` 是后端保存的完整角色修订；解析失败只置空，绝不补造字段。
+/// 历史版本内容：所有字段可选。旧代次只保存了部分字段（persona/goals/rules 可能为 null），
+/// 对比时必须能区分「字段缺失」和「空值」，所以单独用一个宽容类型来解码。
+public struct BrainHistoryVersionContent: Codable, Equatable {
+    public let name: String?
+    public let persona: String?
+    public let tone: String?
+    public let goals: [String]?
+    public let rules: [String]?
+    public let knowledgeRefs: [BrainKnowledgeRef]?
+    public let templates: BrainTemplates?
+    public let budget: BrainContextBudget?
+
+    enum CodingKeys: String, CodingKey {
+        case name, persona, tone, goals, rules
+        case knowledgeRefs = "knowledge_refs"
+        case templates
+        case budget
+    }
+}
+
+public struct BrainHistoryVersion: Codable, Equatable {
+    public let roleId: String?
+    public let revisionId: String
+    public let createdAt: UInt64?
+    public let isActive: Bool?
+    public let isDraft: Bool?
+    public let content: BrainRoleRevision?
+    /// 同一份 content 的宽容解析，只用于版本对比（缺失字段与空值必须可区分）。
+    public let diffContent: BrainHistoryVersionContent?
+
+    enum CodingKeys: String, CodingKey {
+        case roleId = "role_id"
+        case revisionId = "revision_id"
+        case createdAt = "created_at"
+        case isActive = "is_active"
+        case isDraft = "is_draft"
+        case content
+    }
+
+    public init(
+        roleId: String? = nil,
+        revisionId: String,
+        createdAt: UInt64? = nil,
+        isActive: Bool? = nil,
+        isDraft: Bool? = nil,
+        content: BrainRoleRevision? = nil,
+        diffContent: BrainHistoryVersionContent? = nil
+    ) {
+        self.roleId = roleId
+        self.revisionId = revisionId
+        self.createdAt = createdAt
+        self.isActive = isActive
+        self.isDraft = isDraft
+        self.content = content
+        self.diffContent = diffContent
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.revisionId = try container.decode(String.self, forKey: .revisionId)
+        self.roleId = try container.decodeIfPresent(String.self, forKey: .roleId)
+        self.createdAt = try container.decodeIfPresent(UInt64.self, forKey: .createdAt)
+        self.isActive = try container.decodeIfPresent(Bool.self, forKey: .isActive)
+        self.isDraft = try container.decodeIfPresent(Bool.self, forKey: .isDraft)
+        self.content = try? container.decodeIfPresent(BrainRoleRevision.self, forKey: .content)
+        self.diffContent = try? container.decodeIfPresent(BrainHistoryVersionContent.self, forKey: .content)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(revisionId, forKey: .revisionId)
+        try container.encodeIfPresent(roleId, forKey: .roleId)
+        try container.encodeIfPresent(createdAt, forKey: .createdAt)
+        try container.encodeIfPresent(isActive, forKey: .isActive)
+        try container.encodeIfPresent(isDraft, forKey: .isDraft)
+        try container.encodeIfPresent(content, forKey: .content)
+    }
+}
+
+public struct BrainHistoryPayload: Codable, Equatable {
+    public let accountId: String?
+    public let generation: UInt64?
+    public let active: BrainBindingSet?
+    public let draft: BrainBindingSet?
+    public let generations: [BrainHistoryGeneration]?
+    public let versions: [BrainHistoryVersion]?
+    public let historyScope: String?
+
+    enum CodingKeys: String, CodingKey {
+        case accountId = "account_id"
+        case generation
+        case active
+        case draft
+        case generations
+        case versions
+        case historyScope = "history_scope"
+    }
+
+    public init(
+        accountId: String? = nil,
+        generation: UInt64? = nil,
+        active: BrainBindingSet? = nil,
+        draft: BrainBindingSet? = nil,
+        generations: [BrainHistoryGeneration]? = nil,
+        versions: [BrainHistoryVersion]? = nil,
+        historyScope: String? = nil
+    ) {
+        self.accountId = accountId
+        self.generation = generation
+        self.active = active
+        self.draft = draft
+        self.generations = generations
+        self.versions = versions
+        self.historyScope = historyScope
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.accountId = try container.decodeIfPresent(String.self, forKey: .accountId)
+        self.generation = try container.decodeIfPresent(UInt64.self, forKey: .generation)
+        self.active = try? container.decodeIfPresent(BrainBindingSet.self, forKey: .active)
+        self.draft = try? container.decodeIfPresent(BrainBindingSet.self, forKey: .draft)
+        self.generations = try? container.decodeIfPresent([BrainHistoryGeneration].self, forKey: .generations)
+        self.versions = try? container.decodeIfPresent([BrainHistoryVersion].self, forKey: .versions)
+        self.historyScope = try container.decodeIfPresent(String.self, forKey: .historyScope)
+    }
+}
+
 public struct BrainControlError: Codable, Equatable {
     public var code: String
     public var message: String
@@ -646,7 +856,7 @@ public struct BrainPreviewResult: Codable, Equatable {
     }
 
     public var costNote: String {
-        return cost?.note ?? "未调用模型，仅组装预览"
+        return cost?.note ?? L10n.t(.brainCostNotePreviewOnly)
     }
 
     public var budgetTruncated: Bool {
@@ -688,7 +898,7 @@ public struct BrainTurnDetail: Codable, Equatable {
     }
 
     public var provenanceDisplayText: String {
-        return hasProvenance ? "包含完整轮次追溯" : "旧版未记录"
+        return hasProvenance ? L10n.t(.brainProvenanceComplete) : L10n.t(.brainProvenanceLegacyNotRecorded)
     }
 
     public var roleId: String? {
@@ -698,30 +908,30 @@ public struct BrainTurnDetail: Codable, Equatable {
     public var phaseLabels: [String] {
         var labels: [String] = []
         if decision != nil {
-            labels.append("模型已生成")
+            labels.append(L10n.t(.brainPhaseModelGenerated))
         }
         if let exec = execution {
             if let phase = exec["phase"]?.value as? String {
                 if phase == "triggered" {
-                    labels.append("发送已触发")
+                    labels.append(L10n.t(.brainPhaseSendTriggered))
                 } else if phase == "sent" {
-                    labels.append("已发送")
+                    labels.append(L10n.t(.termSent))
                 }
             }
             if let delivery = exec["delivery"]?.value as? String {
                 if delivery == "echo_observed" {
-                    labels.append("己方回显")
-                    labels.append("送达状态: 未知 (unknown)")
+                    labels.append(L10n.t(.brainPhaseEchoObserved))
+                    labels.append(L10n.t(.brainDeliveryUnknown))
                 } else if delivery == "unknown" {
-                    labels.append("送达状态: 未知 (unknown)")
+                    labels.append(L10n.t(.brainDeliveryUnknown))
                 } else {
-                    labels.append("送达状态: \(delivery)")
+                    labels.append(L10n.t(.brainDeliveryStatusFmt, String(describing: delivery)))
                 }
             } else {
-                labels.append("送达状态: 未知 (unknown)")
+                labels.append(L10n.t(.brainDeliveryUnknown))
             }
         }
-        return labels.isEmpty ? ["状态未知"] : labels
+        return labels.isEmpty ? [L10n.t(.modelStateUnknown)] : labels
     }
 }
 
@@ -730,13 +940,13 @@ public struct BrainTurnDetail: Codable, Equatable {
 public struct BrainPageLogic {
     public static func parseBrainList(jsonString: String) throws -> BrainListPayload {
         guard let data = jsonString.data(using: .utf8) else {
-            throw NSError(domain: "BrainPage", code: 1, userInfo: [NSLocalizedDescriptionKey: "无效 UTF8 字符串"])
+            throw NSError(domain: "BrainPage", code: 1, userInfo: [NSLocalizedDescriptionKey: L10n.t(.brainErrInvalidUtf8)])
         }
         let decoder = JSONDecoder()
         do {
             let resp = try decoder.decode(BrainControlResponse<BrainListPayload>.self, from: data)
             guard resp.ok, let payload = resp.data else {
-                let msg = resp.error?.message ?? "获取大脑配置失败"
+                let msg = resp.error?.message ?? L10n.t(.uiBrain001)
                 throw NSError(domain: "BrainPage", code: 2, userInfo: [NSLocalizedDescriptionKey: msg])
             }
             return payload
@@ -750,12 +960,12 @@ public struct BrainPageLogic {
 
     public static func parsePreviewResult(jsonString: String) throws -> BrainPreviewResult {
         guard let data = jsonString.data(using: .utf8) else {
-            throw NSError(domain: "BrainPage", code: 1, userInfo: [NSLocalizedDescriptionKey: "无效 UTF8 字符串"])
+            throw NSError(domain: "BrainPage", code: 1, userInfo: [NSLocalizedDescriptionKey: L10n.t(.brainErrInvalidUtf8)])
         }
         let decoder = JSONDecoder()
         if let resp = try? decoder.decode(BrainControlResponse<BrainPreviewResult>.self, from: data) {
             guard resp.ok, let payload = resp.data else {
-                let msg = resp.error?.message ?? "组装预览失败"
+                let msg = resp.error?.message ?? L10n.t(.brainPreviewFailed)
                 throw NSError(domain: "BrainPage", code: 2, userInfo: [NSLocalizedDescriptionKey: msg])
             }
             return payload
@@ -763,12 +973,184 @@ public struct BrainPageLogic {
         return try decoder.decode(BrainPreviewResult.self, from: data)
     }
 
+    // MARK: - 历史版本（issue-2）
+
+    public static func parseHistoryPayload(jsonString: String) throws -> BrainHistoryPayload {
+        guard let data = jsonString.data(using: .utf8) else {
+            throw NSError(domain: "BrainPage", code: 1, userInfo: [NSLocalizedDescriptionKey: L10n.t(.brainErrInvalidUtf8)])
+        }
+        let decoder = JSONDecoder()
+        if let resp = try? decoder.decode(BrainControlResponse<BrainHistoryPayload>.self, from: data), resp.ok, let payload = resp.data {
+            return payload
+        }
+        return try decoder.decode(BrainHistoryPayload.self, from: data)
+    }
+
+    /// 后端 `at` 是 Unix 秒；0/缺省表示初始代次。
+    public static func historyTimestampText(_ at: UInt64?) -> String {
+        guard let ts = at, ts > 0 else { return L10n.t(.brainGenInitial) }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        return formatter.string(from: Date(timeIntervalSince1970: TimeInterval(ts)))
+    }
+
+    /// 后端 operation 是写入动作名；未知动作原样展示，便于排查，不臆造含义。
+    public static func operationDisplayName(_ operation: String?) -> String {
+        guard let op = operation, !op.isEmpty else { return L10n.t(.uiBrain002) }
+        switch op {
+        case "brain-save-role": return L10n.t(.uiBrain003)
+        case "brain-save-knowledge": return L10n.t(.uiBrain004)
+        case "brain-copy-role": return L10n.t(.brainActionCopyRole)
+        case "brain-archive-role": return L10n.t(.brainBtnDeleteRole)
+        case "brain-save-bindings": return L10n.t(.brainBtnSaveBindingsDraft)
+        case "brain-activate": return L10n.t(.brainActionActivateConfig)
+        case "brain-rollback": return L10n.t(.uiBrain005)
+        default: return op
+        }
+    }
+
+    /// 版本对比：只展示后端实际返回的字段；任一侧没有完整内容时如实说明，不补造。
+    public static func compareVersions(v1: BrainHistoryVersion, v2: BrainHistoryVersion) -> String {
+        var lines: [String] = []
+        let missing = L10n.t(.brainPageMissingFieldIndicator)
+        lines.append(L10n.t(.brainDiffHeaderFmt, v1.revisionId, v2.revisionId))
+        lines.append(String(repeating: "-", count: 50))
+
+        // 旧代次没有完整草稿：如实标注，只展示已保存的内容。
+        if v1.diffContent == nil || v1.isDraft != true {
+            lines.append(L10n.t(.brainDiffLegacyVerAFmt, v1.revisionId))
+        }
+        if v2.diffContent == nil || v2.isDraft != true {
+            lines.append(L10n.t(.brainDiffLegacyVerBFmt, v2.revisionId))
+        }
+
+        let c1 = v1.diffContent
+        let c2 = v2.diffContent
+
+        func desc(_ value: String?) -> String {
+            guard let value = value, !value.isEmpty else { return missing }
+            return value
+        }
+        func listDesc(_ items: [String]?) -> String {
+            guard let items = items else { return missing }
+            return "[" + items.joined(separator: ", ") + "]"
+        }
+
+        // 角色名称
+        let n1 = desc(c1?.name)
+        let n2 = desc(c2?.name)
+        if c1?.name != c2?.name {
+            lines.append(L10n.t(.brainDiffNameChangedFmt, n1, n2))
+        } else {
+            lines.append(L10n.t(.brainDiffNameNoChangeFmt, n1))
+        }
+
+        // 语气
+        let t1 = desc(c1?.tone)
+        let t2 = desc(c2?.tone)
+        if c1?.tone != c2?.tone {
+            lines.append(L10n.t(.brainDiffToneChangedFmt, t1, t2))
+        } else {
+            lines.append(L10n.t(.brainDiffToneNoChangeFmt, t1))
+        }
+
+        // 人设（长文本：缺失时标 [缺失]，两侧都有才对比）
+        let p1 = c1?.persona
+        let p2 = c2?.persona
+        if p1 == nil && p2 == nil {
+            lines.append(L10n.t(.brainDiffPersonaBothMissing))
+        } else if let p1 = p1, let p2 = p2 {
+            if p1 != p2 {
+                lines.append(L10n.t(.brainDiffPersonaTitle))
+                lines.append(L10n.t(.brainDiffLeftFmt, String(p1.prefix(120)) + (p1.count > 120 ? "..." : "")))
+                lines.append(L10n.t(.brainDiffRightFmt, String(p2.prefix(120)) + (p2.count > 120 ? "..." : "")))
+            } else {
+                lines.append(L10n.t(.brainDiffPersonaNoChangeFmt, String(p1.count)))
+            }
+        } else {
+            let left = p1.map { String($0.prefix(120)) } ?? missing
+            let right = p2.map { String($0.prefix(120)) } ?? missing
+            lines.append(L10n.t(.brainDiffPersonaTitle))
+            lines.append(L10n.t(.brainDiffLeftFmt, left))
+            lines.append(L10n.t(.brainDiffRightFmt, right))
+        }
+
+        // 目标
+        if c1?.goals == nil && c2?.goals == nil {
+            lines.append(L10n.t(.brainDiffGoalsBothMissing))
+        } else if c1?.goals != c2?.goals {
+            lines.append(L10n.t(.brainDiffGoalsChangedFmt, listDesc(c1?.goals), listDesc(c2?.goals)))
+        } else {
+            lines.append(L10n.t(.brainDiffGoalsNoChangeFmt, listDesc(c1?.goals)))
+        }
+
+        // 规则
+        if c1?.rules == nil && c2?.rules == nil {
+            lines.append(L10n.t(.brainDiffRulesBothMissing))
+        } else if c1?.rules != c2?.rules {
+            lines.append(L10n.t(.brainDiffRulesChangedFmt, listDesc(c1?.rules), listDesc(c2?.rules)))
+        } else {
+            lines.append(L10n.t(.brainDiffRulesNoChangeFmt, listDesc(c1?.rules)))
+        }
+
+        // 知识库引用
+        if c1?.knowledgeRefs == nil && c2?.knowledgeRefs == nil {
+            lines.append(L10n.t(.brainDiffKnowledgeBothMissing))
+        } else {
+            let k1 = c1?.knowledgeRefs.map { "[" + $0.map { $0.knowledgeId }.joined(separator: ", ") + "]" } ?? missing
+            let k2 = c2?.knowledgeRefs.map { "[" + $0.map { $0.knowledgeId }.joined(separator: ", ") + "]" } ?? missing
+            if c1?.knowledgeRefs != c2?.knowledgeRefs {
+                lines.append(L10n.t(.brainDiffKnowledgeChangedFmt, k1, k2))
+            } else {
+                lines.append(L10n.t(.brainDiffKnowledgeNoChangeFmt, String(c1?.knowledgeRefs?.count ?? 0)))
+            }
+        }
+
+        // 模板
+        if c1?.templates != nil || c2?.templates != nil {
+            let t1 = c1?.templates != nil ? L10n.t(.brainDiffSavedIndicator) : missing
+            let t2 = c2?.templates != nil ? L10n.t(.brainDiffSavedIndicator) : missing
+            if t1 != t2 {
+                lines.append(L10n.t(.brainDiffTemplatesChangedFmt, t1, t2))
+            }
+        }
+
+        // 预算
+        if c1?.budget != nil || c2?.budget != nil {
+            let b1 = c1?.budget.map { "\($0.maxInputBytes)B" } ?? missing
+            let b2 = c2?.budget.map { "\($0.maxInputBytes)B" } ?? missing
+            if b1 != b2 {
+                lines.append(L10n.t(.brainDiffBudgetChangedFmt, b1, b2))
+            }
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    /// 试一试：只有后端真的返回 decision.reply 才展示回复；否则返回 nil，由界面明确提示不可用。
+    public static func previewReplyText(_ result: BrainPreviewResult) -> String? {
+        guard let decision = result.decision else { return nil }
+        guard let raw = decision["reply"]?.value as? String else { return nil }
+        let reply = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return reply.isEmpty ? nil : reply
+    }
+
+    /// 试一试：从组装内容中解析后端固定的系统约束；解析不到就返回 nil（不伪造）。
+    public static func systemContractText(fromCompiled compiled: String?) -> String? {
+        guard let compiled = compiled, !compiled.isEmpty, let data = compiled.data(using: .utf8) else { return nil }
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        guard let contract = object["system_contract"] as? String, !contract.isEmpty else { return nil }
+        return contract
+    }
+
     public static func isMigratedRole(_ entry: BrainRoleEntry) -> Bool {
-        return entry.name.contains("从旧版迁移") || entry.roleId.hasPrefix("migrated_")
+        return entry.name.contains(L10n.t(.brainMigratedFromLegacy)) || entry.roleId.hasPrefix("migrated_")
     }
 
     public static func handleSaveConflict(localDraft: BrainRoleRevision, error: BrainControlError) -> (preservedDraft: BrainRoleRevision, errorMessage: String) {
-        let errDesc = "并发修改冲突: \(error.message)。已保留您当前编辑的草稿，请核对最新版本后再次保存。"
+        let errDesc = L10n.t(.brainCasRoleConflictFmt, String(describing: error.message))
         return (localDraft, errDesc)
     }
 
@@ -871,7 +1253,7 @@ public struct BrainPageLogic {
         localDraft: BrainBindingSet,
         error: BrainControlError
     ) -> (preservedBindings: BrainBindingSet, errorMessage: String) {
-        let msg = "保存绑定冲突 [\(error.code)]：\(error.message)。已保留您当前未提交的绑定草稿与表单，请稍后重试。"
+        let msg = L10n.t(.brainCasBindingsConflictFmt, String(describing: error.code), String(describing: error.message))
         return (preservedBindings: localDraft, errorMessage: msg)
     }
 }
@@ -905,7 +1287,7 @@ public final class BrainClient {
     public func fetchList() throws -> BrainListPayload {
         let run = executeAction("brain-list")
         guard run.status == 0 else {
-            let errStr = String(data: run.output, encoding: .utf8) ?? "未知错误"
+            let errStr = String(data: run.output, encoding: .utf8) ?? L10n.t(.brainErrorUnknown)
             throw NSError(domain: "BrainClient", code: Int(run.status), userInfo: [NSLocalizedDescriptionKey: errStr])
         }
         let outStr = String(data: run.output, encoding: .utf8) ?? "{}"
@@ -929,12 +1311,12 @@ public final class BrainClient {
         if let r = revisionId { req["revision_id"] = r }
         let run = executeAction("brain-get", requestObj: req)
         guard run.status == 0 else {
-            let errStr = String(data: run.output, encoding: .utf8) ?? "未知错误"
+            let errStr = String(data: run.output, encoding: .utf8) ?? L10n.t(.brainErrorUnknown)
             throw NSError(domain: "BrainClient", code: Int(run.status), userInfo: [NSLocalizedDescriptionKey: errStr])
         }
         let resp = try JSONDecoder().decode(BrainControlResponse<BrainRoleRevision>.self, from: run.output)
         guard resp.ok, let role = resp.data else {
-            throw NSError(domain: "BrainClient", code: 2, userInfo: [NSLocalizedDescriptionKey: resp.error?.message ?? "获取角色失败"])
+            throw NSError(domain: "BrainClient", code: 2, userInfo: [NSLocalizedDescriptionKey: resp.error?.message ?? L10n.t(.brainErrFetchRoleFailed)])
         }
         return role
     }
@@ -945,14 +1327,14 @@ public final class BrainClient {
                let err = errResp.error {
                 throw NSError(domain: "BrainClient", code: Int(run.status), userInfo: [NSLocalizedDescriptionKey: err.message, "error_code": err.code])
             }
-            let errStr = String(data: run.output, encoding: .utf8) ?? "\(actionName)失败 (exit \(run.status))"
+            let errStr = String(data: run.output, encoding: .utf8) ?? L10n.t(.brainErrActionFailedFmt, String(describing: actionName), String(describing: run.status))
             throw NSError(domain: "BrainClient", code: Int(run.status), userInfo: [NSLocalizedDescriptionKey: errStr])
         }
         guard let json = try? JSONSerialization.jsonObject(with: run.output) as? [String: Any],
               json["ok"] as? Bool == true,
               let data = json["data"] as? [String: Any],
               let gen = (data["generation"] as? NSNumber)?.uint64Value else {
-            throw NSError(domain: "BrainClient", code: 2, userInfo: [NSLocalizedDescriptionKey: "\(actionName)返回无效数据，无法获取 generation"])
+            throw NSError(domain: "BrainClient", code: 2, userInfo: [NSLocalizedDescriptionKey: L10n.t(.brainActionInvalidGenerationFmt, String(describing: actionName))])
         }
         return gen
     }
@@ -960,7 +1342,23 @@ public final class BrainClient {
     public func initialize(installation: String = "fresh") throws -> UInt64 {
         let req: [String: Any] = ["installation": installation]
         let run = executeAction("brain-initialize", requestObj: req)
-        return try parseGenerationResponse(run, actionName: "初始化大脑")
+        return try parseGenerationResponse(run, actionName: L10n.t(.uiBrain041))
+    }
+
+    /// 只读版本历史（后端 brain-history）。失败时抛出可展示的中文错误。
+    public func fetchHistory(roleId: String? = nil) throws -> BrainHistoryPayload {
+        var req: [String: Any] = [:]
+        if let rid = roleId, !rid.isEmpty {
+            req["role_id"] = rid
+        }
+        let run = executeAction("brain-history", requestObj: req)
+        guard run.status == 0, !run.timedOut else {
+            let fallback = run.timedOut ? L10n.t(.uiBrain042) : L10n.t(.uiBrain043, String(describing: run.status))
+            let errStr = String(data: run.output, encoding: .utf8) ?? fallback
+            throw NSError(domain: "BrainClient", code: Int(run.status), userInfo: [NSLocalizedDescriptionKey: errStr])
+        }
+        let outStr = String(data: run.output, encoding: .utf8) ?? "{}"
+        return try BrainPageLogic.parseHistoryPayload(jsonString: outStr)
     }
 
     public func saveRole(_ role: BrainRoleRevision, expectedGeneration: UInt64, requestId: String = UUID().uuidString.lowercased()) throws -> UInt64 {
@@ -972,7 +1370,7 @@ public final class BrainClient {
             "role": roleDict
         ]
         let run = executeAction("brain-save-role", requestObj: req)
-        return try parseGenerationResponse(run, actionName: "保存角色")
+        return try parseGenerationResponse(run, actionName: L10n.t(.brainActionSaveRole))
     }
 
     public struct SavedKnowledgeResult {
@@ -996,7 +1394,7 @@ public final class BrainClient {
                let err = errResp.error {
                 throw NSError(domain: "BrainClient", code: Int(run.status), userInfo: [NSLocalizedDescriptionKey: err.message, "error_code": err.code])
             }
-            let errStr = String(data: run.output, encoding: .utf8) ?? "保存知识失败"
+            let errStr = String(data: run.output, encoding: .utf8) ?? L10n.t(.brainErrSaveKnowledgeFailed)
             throw NSError(domain: "BrainClient", code: Int(run.status), userInfo: [NSLocalizedDescriptionKey: errStr])
         }
         guard let json = try? JSONSerialization.jsonObject(with: run.output) as? [String: Any],
@@ -1006,7 +1404,7 @@ public final class BrainClient {
               let kid = data["knowledge_id"] as? String,
               let rev = data["revision_id"] as? String,
               let sha = data["content_sha256"] as? String else {
-            throw NSError(domain: "BrainClient", code: 2, userInfo: [NSLocalizedDescriptionKey: "保存知识返回无效响应"])
+            throw NSError(domain: "BrainClient", code: 2, userInfo: [NSLocalizedDescriptionKey: L10n.t(.brainErrSaveKnowledgeInvalidResp)])
         }
         return SavedKnowledgeResult(generation: gen, knowledgeId: kid, revisionId: rev, contentSha256: sha)
     }
@@ -1020,7 +1418,7 @@ public final class BrainClient {
         ]
         if let nid = newRoleId { req["new_role_id"] = nid }
         let run = executeAction("brain-copy-role", requestObj: req)
-        return try parseGenerationResponse(run, actionName: "复制角色")
+        return try parseGenerationResponse(run, actionName: L10n.t(.brainActionCopyRole))
     }
 
     public func archiveRole(roleId: String, expectedGeneration: UInt64, requestId: String = UUID().uuidString.lowercased()) throws -> UInt64 {
@@ -1030,7 +1428,7 @@ public final class BrainClient {
             "role_id": roleId
         ]
         let run = executeAction("brain-archive-role", requestObj: req)
-        return try parseGenerationResponse(run, actionName: "归档角色")
+        return try parseGenerationResponse(run, actionName: L10n.t(.brainActionArchiveRole))
     }
 
     public func saveBindings(draft: BrainBindingSet, expectedGeneration: UInt64, requestId: String = UUID().uuidString.lowercased()) throws -> UInt64 {
@@ -1042,7 +1440,7 @@ public final class BrainClient {
             "draft": draftDict
         ]
         let run = executeAction("brain-save-bindings", requestObj: req)
-        return try parseGenerationResponse(run, actionName: "保存绑定")
+        return try parseGenerationResponse(run, actionName: L10n.t(.brainActionSaveBindings))
     }
 
     public func activate(expectedGeneration: UInt64, requestId: String = UUID().uuidString.lowercased()) throws -> UInt64 {
@@ -1051,7 +1449,7 @@ public final class BrainClient {
             "request_id": requestId.lowercased()
         ]
         let run = executeAction("brain-activate", requestObj: req)
-        return try parseGenerationResponse(run, actionName: "启用配置")
+        return try parseGenerationResponse(run, actionName: L10n.t(.brainActionActivateConfig))
     }
 
     public func rollback(targetGeneration: UInt64, expectedGeneration: UInt64, requestId: String = UUID().uuidString.lowercased()) throws -> UInt64 {
@@ -1061,7 +1459,7 @@ public final class BrainClient {
             "target_generation": targetGeneration
         ]
         let run = executeAction("brain-rollback", requestObj: req)
-        return try parseGenerationResponse(run, actionName: "回退配置")
+        return try parseGenerationResponse(run, actionName: L10n.t(.brainActionRollbackConfig))
     }
 
     public func preview(roleId: String, revisionId: String? = nil, text: String, chatKind: String = "private") throws -> BrainPreviewResult {
@@ -1081,7 +1479,7 @@ public final class BrainClient {
         if let r = revisionId { req["revision_id"] = r }
         let run = executeAction("brain-preview", requestObj: req)
         guard run.status == 0 else {
-            let errStr = String(data: run.output, encoding: .utf8) ?? "组装预览失败"
+            let errStr = String(data: run.output, encoding: .utf8) ?? L10n.t(.brainPreviewFailed)
             throw NSError(domain: "BrainClient", code: Int(run.status), userInfo: [NSLocalizedDescriptionKey: errStr])
         }
         let outStr = String(data: run.output, encoding: .utf8) ?? "{}"
@@ -1092,12 +1490,12 @@ public final class BrainClient {
         let req: [String: Any] = ["turn_id": turnId]
         let run = executeAction("brain-turn-detail", requestObj: req)
         guard run.status == 0 else {
-            let errStr = String(data: run.output, encoding: .utf8) ?? "获取轮次详情失败"
+            let errStr = String(data: run.output, encoding: .utf8) ?? L10n.t(.brainErrFetchTurnFailed)
             throw NSError(domain: "BrainClient", code: Int(run.status), userInfo: [NSLocalizedDescriptionKey: errStr])
         }
         let resp = try JSONDecoder().decode(BrainControlResponse<BrainTurnDetail>.self, from: run.output)
         guard resp.ok, let detail = resp.data else {
-            throw NSError(domain: "BrainClient", code: 2, userInfo: [NSLocalizedDescriptionKey: resp.error?.message ?? "轮次不存在"])
+            throw NSError(domain: "BrainClient", code: 2, userInfo: [NSLocalizedDescriptionKey: resp.error?.message ?? L10n.t(.brainErrTurnNotFound)])
         }
         return detail
     }
@@ -1124,20 +1522,20 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     private let rightContainer = NSView()
 
     // UI - Header Area
-    private let accountLabel = NSTextField(labelWithString: "当前账号: -")
-    private let modeLabel = NSTextField(labelWithString: "回复方式：待加载")
-    private let toMcpButton = NSButton(title: "模型与连接…", target: nil, action: nil)
+    private let accountLabel = NSTextField(labelWithString: L10n.t(.brainCurrentAccountNone))
+    private let modeLabel = NSTextField(labelWithString: L10n.t(.brainReplyModeLoading))
+    private let toMcpButton = NSButton(title: L10n.t(.brainBtnModelAndConn), target: nil, action: nil)
     private let statusMessageLabel = NSTextField(wrappingLabelWithString: "")
     private let loadErrorLabel = NSTextField(wrappingLabelWithString: "")
 
     // UI - Role Management Buttons
-    private let newRoleButton = NSButton(title: "新增角色", target: nil, action: nil)
-    private let useAsDefaultButton = NSButton(title: "设为默认角色…", target: nil, action: nil)
-    private let copyRoleButton = NSButton(title: "复制角色", target: nil, action: nil)
-    private let archiveRoleButton = NSButton(title: "删除角色", target: nil, action: nil)
+    private let newRoleButton = NSButton(title: L10n.t(.brainBtnNewRole), target: nil, action: nil)
+    private let useAsDefaultButton = NSButton(title: L10n.t(.brainBtnSetDefaultRole), target: nil, action: nil)
+    private let copyRoleButton = NSButton(title: L10n.t(.brainActionCopyRole), target: nil, action: nil)
+    private let archiveRoleButton = NSButton(title: L10n.t(.brainBtnDeleteRole), target: nil, action: nil)
 
     // UI - Tab Segment
-    private let sectionSegment = NSSegmentedControl(labels: ["角色设定", "知识", "异常回复", "适用会话", "版本", "预览"], trackingMode: .selectOne, target: nil, action: nil)
+    private let sectionSegment = NSSegmentedControl(labels: [L10n.t(.brainPageTabRoleDefinition), L10n.t(.brainPageTabKnowledge), L10n.t(.brainPageTabTemplates), L10n.t(.brainPageTabBindings), L10n.t(.brainPageTabHistory), L10n.t(.brainPageTabPreview)], trackingMode: .selectOne, target: nil, action: nil)
     private let tabContainer = NSView()
 
     // Tab Views
@@ -1147,6 +1545,24 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     private let bindingsView = NSView()
     private let versionView = NSView()
     private let previewView = NSView()
+
+    // 历史版本（issue-2）状态与控件（文案暂用中文硬编码，后续统一迁入 L10n）
+    private var historyGenerations: [BrainHistoryGeneration] = []
+    private var historyVersions: [BrainHistoryVersion] = []
+    private var historyLoadToken = UUID()
+    private let historyTable = NSTableView()
+    private let historyEmptyLabel = NSTextField(wrappingLabelWithString: "")
+    private let historyStatusLabel = NSTextField(wrappingLabelWithString: L10n.t(.uiBrain044))
+    private let historyDetailNoticeLabel = NSTextField(wrappingLabelWithString: "")
+    private let diffVerAPopup = NSPopUpButton()
+    private let diffVerBPopup = NSPopUpButton()
+    private let runDiffButton = NSButton(title: L10n.t(.brainBtnDiff), target: nil, action: nil)
+    private let diffTextView = NSTextView()
+    private let rollbackPicker = NSPopUpButton()
+    private let rollbackToVersionButton = NSButton(title: L10n.t(.brainBtnRollbackSelected), target: nil, action: nil)
+
+    // 试一试（issue-2）状态与控件
+    private let tryItModelStatusLabel = NSTextField(wrappingLabelWithString: L10n.t(.uiBrain045))
 
     // Form Inputs - Definition
     private let roleNameField = NSTextField()
@@ -1159,8 +1575,8 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     private let knowledgeTitleField = NSTextField()
     private let knowledgeSourceField = NSTextField()
     private let knowledgeContentField = NSTextView()
-    private let importKnowledgeButton = NSButton(title: "导入并关联至角色", target: nil, action: nil)
-    private let knowledgeRefsSummaryLabel = NSTextField(wrappingLabelWithString: "当前角色未引用任何知识")
+    private let importKnowledgeButton = NSButton(title: L10n.t(.brainBtnImportKnowledge), target: nil, action: nil)
+    private let knowledgeRefsSummaryLabel = NSTextField(wrappingLabelWithString: L10n.t(.brainKnowledgeNone))
 
     // Form Inputs - Templates
     private let greetingField = NSTextField()
@@ -1197,26 +1613,26 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     }
 
     private let defaultRolePopup = NSPopUpButton()
-    private let overridesSummaryLabel = NSTextField(wrappingLabelWithString: "暂无特定联系人覆盖")
+    private let overridesSummaryLabel = NSTextField(wrappingLabelWithString: L10n.t(.brainNoOverrides))
     private let overridesTableView = NSTableView()
     private let overrideContactPopup = NSPopUpButton()
     private let overrideRolePopup = NSPopUpButton()
-    private let addOverrideButton = NSButton(title: "添加覆盖", target: nil, action: nil)
-    private let updateOverrideButton = NSButton(title: "更新选定覆盖", target: nil, action: nil)
-    private let deleteOverrideButton = NSButton(title: "删除选定覆盖", target: nil, action: nil)
-    private let saveBindingsDraftButton = NSButton(title: "保存绑定草稿", target: nil, action: nil)
+    private let addOverrideButton = NSButton(title: L10n.t(.brainAddOverride), target: nil, action: nil)
+    private let updateOverrideButton = NSButton(title: L10n.t(.brainBtnUpdateOverride), target: nil, action: nil)
+    private let deleteOverrideButton = NSButton(title: L10n.t(.brainBtnDeleteOverride), target: nil, action: nil)
+    private let saveBindingsDraftButton = NSButton(title: L10n.t(.brainBtnSaveBindingsDraft), target: nil, action: nil)
     private let bindingsStatusLabel = NSTextField(wrappingLabelWithString: "")
 
     // Form Inputs - Version & Action
-    private let saveDraftButton = NSButton(title: "保存草稿", target: nil, action: nil)
-    private let activateButton = NSButton(title: "启用配置", target: nil, action: nil)
-    private let rollbackButton = NSButton(title: "回退版本", target: nil, action: nil)
-    private let revisionStatusLabel = NSTextField(wrappingLabelWithString: "草稿: - · 运行: -")
+    private let saveDraftButton = NSButton(title: L10n.t(.brainBtnSaveDraft), target: nil, action: nil)
+    private let activateButton = NSButton(title: L10n.t(.brainActionActivateConfig), target: nil, action: nil)
+    private let rollbackButton = NSButton(title: L10n.t(.brainBtnRollbackConfig), target: nil, action: nil)
+    private let revisionStatusLabel = NSTextField(wrappingLabelWithString: L10n.t(.brainDraftRunningStatusPlaceholder))
 
     // Form Inputs - Preview
     private let previewInputField = NSTextField()
     private let previewChatKindPopup = NSPopUpButton()
-    private let runPreviewButton = NSButton(title: "组装预览", target: nil, action: nil)
+    private let runPreviewButton = NSButton(title: L10n.t(.brainAssemblePreview), target: nil, action: nil)
     private let previewResultTextView = NSTextView()
 
     public init(context: StatusPanelController, client: BrainClient? = nil) {
@@ -1262,12 +1678,12 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             splitView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             splitView.topAnchor.constraint(equalTo: view.topAnchor),
             splitView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            leftView.widthAnchor.constraint(equalToConstant: 180)
+            leftView.widthAnchor.constraint(equalToConstant: 168)
         ])
     }
 
     private func setupLeftSidebar(inside parent: NSView) {
-        let titleLabel = NSTextField(labelWithString: "角色列表")
+        let titleLabel = NSTextField(labelWithString: L10n.t(.brainRoleListTitle))
         titleLabel.font = NSFont.systemFont(ofSize: 13, weight: .bold)
 
         let scroll = NSScrollView()
@@ -1275,15 +1691,17 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         scroll.translatesAutoresizingMaskIntoConstraints = false
 
         let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("RoleCol"))
-        col.title = "角色"
+        col.title = L10n.t(.brainColRole)
         roleTable.addTableColumn(col)
         roleTable.headerView = nil
         roleTable.dataSource = self
         roleTable.delegate = self
         roleTable.target = self
         roleTable.doubleAction = #selector(handleEditRole)
-        roleTable.toolTip = "双击角色名编辑"
+        roleTable.toolTip = L10n.t(.brainDoubleClickToEdit)
         roleTable.rowHeight = 44
+        roleTable.style = .sourceList
+        roleTable.setAccessibilityLabel(L10n.t(.brainRoleListTitle))
         scroll.documentView = roleTable
 
         newRoleButton.target = self
@@ -1361,7 +1779,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         revisionStatusLabel.preferredMaxLayoutWidth = 500
 
         saveDraftButton.bezelStyle = .rounded
-        saveDraftButton.bezelColor = .controlAccentColor
+        saveDraftButton.bezelColor = .systemGreen
         saveDraftButton.contentTintColor = .white
         saveDraftButton.keyEquivalent = "s"
         saveDraftButton.keyEquivalentModifierMask = [.command]
@@ -1426,9 +1844,9 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         setupTemplatesTab()
         // Tab 3: 绑定
         setupBindingsTab()
-        // Tab 4: 版本
+        // Tab 4: 历史版本
         setupVersionTab()
-        // Tab 5: 合成测试
+        // Tab 5: 试一试
         setupPreviewTab()
     }
 
@@ -1440,15 +1858,15 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let nameRow = NSStackView(views: [NSTextField(labelWithString: "角色名称:"), roleNameField])
+        let nameRow = NSStackView(views: [NSTextField(labelWithString: L10n.t(.brainRoleNameFieldLabel)), roleNameField])
         roleNameField.widthAnchor.constraint(equalToConstant: 240).isActive = true
         stack.addArrangedSubview(nameRow)
 
-        let toneRow = NSStackView(views: [NSTextField(labelWithString: "语气风格:"), toneField])
+        let toneRow = NSStackView(views: [NSTextField(labelWithString: L10n.t(.brainToneFieldLabel)), toneField])
         toneField.widthAnchor.constraint(equalToConstant: 240).isActive = true
         stack.addArrangedSubview(toneRow)
 
-        stack.addArrangedSubview(NSTextField(labelWithString: "身份与业务范围："))
+        stack.addArrangedSubview(NSTextField(labelWithString: L10n.t(.brainPersonaFieldLabel)))
         let personaScroll = NSScrollView()
         personaScroll.hasVerticalScroller = true
         personaField.isRichText = false
@@ -1467,19 +1885,19 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         personaScroll.widthAnchor.constraint(equalToConstant: 460).isActive = true
         stack.addArrangedSubview(personaScroll)
 
-        let goalsRow = NSStackView(views: [NSTextField(labelWithString: "核心目标:"), goalsField])
-        goalsField.placeholderString = "用逗号分隔多个目标"
+        let goalsRow = NSStackView(views: [NSTextField(labelWithString: L10n.t(.brainGoalsFieldLabel)), goalsField])
+        goalsField.placeholderString = L10n.t(.brainGoalsFieldHelper)
         goalsField.widthAnchor.constraint(equalToConstant: 340).isActive = true
         stack.addArrangedSubview(goalsRow)
 
-        let rulesRow = NSStackView(views: [NSTextField(labelWithString: "业务规则:"), rulesField])
-        rulesField.placeholderString = "用逗号分隔业务规则"
+        let rulesRow = NSStackView(views: [NSTextField(labelWithString: L10n.t(.brainRulesFieldLabel)), rulesField])
+        rulesField.placeholderString = L10n.t(.brainRulesFieldHelper)
         rulesField.widthAnchor.constraint(equalToConstant: 340).isActive = true
         stack.addArrangedSubview(rulesRow)
 
         let constraintsBox = NSBox()
-        constraintsBox.title = "系统能力约束 (只读)"
-        let cText = NSTextField(wrappingLabelWithString: "不可虚构事实、语音转写以本轮转写为准、未识别项点名并依提示回复。本约束由代码自动拼接在角色人设之后，不可在界面删改。")
+        constraintsBox.title = L10n.t(.brainConstraintsBoxTitle)
+        let cText = NSTextField(wrappingLabelWithString: L10n.t(.brainConstraintsBoxNotice))
         cText.font = NSFont.systemFont(ofSize: 11)
         cText.textColor = .secondaryLabelColor
         cText.maximumNumberOfLines = 0
@@ -1506,7 +1924,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let intro = NSTextField(wrappingLabelWithString: "业务知识 (Markdown/纯文本)。通过核心 brain-save-knowledge 控制接口保存，自动计算 SHA256 摘要并固定版本。")
+        let intro = NSTextField(wrappingLabelWithString: L10n.t(.brainKnowledgeIntro))
         intro.font = NSFont.systemFont(ofSize: 12)
         intro.textColor = .secondaryLabelColor
         intro.maximumNumberOfLines = 0
@@ -1514,7 +1932,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         intro.preferredMaxLayoutWidth = 480
         stack.addArrangedSubview(intro)
 
-        stack.addArrangedSubview(NSTextField(labelWithString: "当前角色引用的知识列表:"))
+        stack.addArrangedSubview(NSTextField(labelWithString: L10n.t(.brainKnowledgeRefListLabel)))
         knowledgeRefsSummaryLabel.font = NSFont.systemFont(ofSize: 12)
         knowledgeRefsSummaryLabel.maximumNumberOfLines = 0
         knowledgeRefsSummaryLabel.lineBreakMode = .byWordWrapping
@@ -1522,22 +1940,22 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         stack.addArrangedSubview(knowledgeRefsSummaryLabel)
 
         let addBox = NSBox()
-        addBox.title = "导入/新建知识"
+        addBox.title = L10n.t(.brainImportNewKnowledgeBtn)
         let addStack = NSStackView()
         addStack.orientation = .vertical
         addStack.alignment = .leading
         addStack.spacing = 8
 
-        let titleRow = NSStackView(views: [NSTextField(labelWithString: "知识标题:"), knowledgeTitleField])
+        let titleRow = NSStackView(views: [NSTextField(labelWithString: L10n.t(.brainKnowledgeTitleField)), knowledgeTitleField])
         knowledgeTitleField.widthAnchor.constraint(equalToConstant: 240).isActive = true
         addStack.addArrangedSubview(titleRow)
 
-        let srcRow = NSStackView(views: [NSTextField(labelWithString: "来源标识:"), knowledgeSourceField])
-        knowledgeSourceField.placeholderString = "例如 faq.md 或 manual.txt"
+        let srcRow = NSStackView(views: [NSTextField(labelWithString: L10n.t(.brainKnowledgeSourceField)), knowledgeSourceField])
+        knowledgeSourceField.placeholderString = L10n.t(.brainKnowledgeSourcePlaceholder)
         knowledgeSourceField.widthAnchor.constraint(equalToConstant: 240).isActive = true
         addStack.addArrangedSubview(srcRow)
 
-        addStack.addArrangedSubview(NSTextField(labelWithString: "知识正文 (Markdown):"))
+        addStack.addArrangedSubview(NSTextField(labelWithString: L10n.t(.brainKnowledgeContentField)))
         let textScroll = NSScrollView()
         textScroll.hasVerticalScroller = true
         knowledgeContentField.isRichText = false
@@ -1571,26 +1989,26 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let intro = NSTextField(wrappingLabelWithString: "通用话术模板 (留空表示无自定义文案，进入待处理或人工接管):")
+        let intro = NSTextField(wrappingLabelWithString: L10n.t(.brainTemplatesIntro))
         intro.font = NSFont.systemFont(ofSize: 12, weight: .bold)
         intro.maximumNumberOfLines = 0
         intro.lineBreakMode = .byWordWrapping
         intro.preferredMaxLayoutWidth = 480
         stack.addArrangedSubview(intro)
 
-        let gRow = NSStackView(views: [NSTextField(labelWithString: "欢迎语 (greeting):"), greetingField])
+        let gRow = NSStackView(views: [NSTextField(labelWithString: L10n.t(.uiBrain046)), greetingField])
         greetingField.widthAnchor.constraint(equalToConstant: 320).isActive = true
         stack.addArrangedSubview(gRow)
 
-        let iRow = NSStackView(views: [NSTextField(labelWithString: "信息不足 (insufficient_info):"), insufficientInfoField])
+        let iRow = NSStackView(views: [NSTextField(labelWithString: L10n.t(.uiBrain047)), insufficientInfoField])
         insufficientInfoField.widthAnchor.constraint(equalToConstant: 320).isActive = true
         stack.addArrangedSubview(iRow)
 
-        let u1Row = NSStackView(views: [NSTextField(labelWithString: "格式不支持 (unsupported_type):"), unreadableTypeField])
+        let u1Row = NSStackView(views: [NSTextField(labelWithString: L10n.t(.uiBrain048)), unreadableTypeField])
         unreadableTypeField.widthAnchor.constraint(equalToConstant: 320).isActive = true
         stack.addArrangedSubview(u1Row)
 
-        let u2Row = NSStackView(views: [NSTextField(labelWithString: "文件超限 (too_large):"), unreadableLargeField])
+        let u2Row = NSStackView(views: [NSTextField(labelWithString: L10n.t(.uiBrain049)), unreadableLargeField])
         unreadableLargeField.widthAnchor.constraint(equalToConstant: 320).isActive = true
         stack.addArrangedSubview(u2Row)
 
@@ -1611,7 +2029,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let intro = NSTextField(wrappingLabelWithString: "账号与联系人绑定。联系人唯一来源为白名单，本处仅引用不复制联系人清单；修改仅暂存为草稿，点击「保存绑定草稿」通过 CAS 校验后落盘；启用配置后在下一轮对话生效。")
+        let intro = NSTextField(wrappingLabelWithString: L10n.t(.brainBindingsIntro))
         intro.font = NSFont.systemFont(ofSize: 12)
         intro.textColor = .secondaryLabelColor
         intro.maximumNumberOfLines = 0
@@ -1622,14 +2040,14 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         defaultRolePopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
         defaultRolePopup.target = self
         defaultRolePopup.action = #selector(handleDefaultRoleChanged)
-        let defaultRow = NSStackView(views: [NSTextField(labelWithString: "账号默认角色:"), defaultRolePopup])
+        let defaultRow = NSStackView(views: [NSTextField(labelWithString: L10n.t(.brainDefaultRoleLabel)), defaultRolePopup])
         defaultRow.alignment = .centerY
         defaultRow.spacing = 8
         stack.addArrangedSubview(defaultRow)
 
         // 覆盖规则管理框 (包含列表表格、白名单下拉框、角色下拉框、增删改按钮与草稿保存)
         let ovBox = NSBox()
-        ovBox.title = "特定联系人 / 群覆盖规则 (白名单唯一来源)"
+        ovBox.title = L10n.t(.brainOverridesBoxTitle)
         let ovStack = NSStackView()
         ovStack.orientation = .vertical
         ovStack.alignment = .leading
@@ -1642,22 +2060,22 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         overridesTableView.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
 
         let colContact = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("col_contact"))
-        colContact.title = "联系人/群 (白名单)"
+        colContact.title = L10n.t(.brainColContactAllowlist)
         colContact.width = 105
         colContact.minWidth = 70
 
         let colKind = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("col_kind"))
-        colKind.title = "类型"
+        colKind.title = L10n.t(.brainColKind)
         colKind.width = 42
         colKind.minWidth = 35
 
         let colRole = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("col_role"))
-        colRole.title = "绑定角色"
+        colRole.title = L10n.t(.brainColBoundRole)
         colRole.width = 95
         colRole.minWidth = 70
 
         let colRev = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("col_rev"))
-        colRev.title = "版本"
+        colRev.title = L10n.t(.diagVersion)
         colRev.width = 58
         colRev.minWidth = 45
 
@@ -1675,7 +2093,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         ovStack.addArrangedSubview(scroll)
 
         // 表单输入区：垂直流式分行（联系人一行、角色一行，在 680px 宿主宽度下各占整行，从容排布）
-        let contactLbl = NSTextField(labelWithString: "白名单联系人:")
+        let contactLbl = NSTextField(labelWithString: L10n.t(.brainAllowlistContactLabel))
         contactLbl.font = NSFont.systemFont(ofSize: 12)
         contactLbl.widthAnchor.constraint(equalToConstant: 90).isActive = true
         overrideContactPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
@@ -1684,7 +2102,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         rowContact.spacing = 8
         ovStack.addArrangedSubview(rowContact)
 
-        let roleLbl = NSTextField(labelWithString: "绑定大脑角色:")
+        let roleLbl = NSTextField(labelWithString: L10n.t(.uiBrain050))
         roleLbl.font = NSFont.systemFont(ofSize: 12)
         roleLbl.widthAnchor.constraint(equalToConstant: 90).isActive = true
         overrideRolePopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
@@ -1753,7 +2171,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let intro = NSTextField(wrappingLabelWithString: "版本管理：保存草稿不影响运行版本；启用配置仅对新轮次生效。支持并发修改检测 (CAS) 与原子激活/回退。")
+        let intro = NSTextField(wrappingLabelWithString: L10n.t(.uiBrain051))
         intro.font = NSFont.systemFont(ofSize: 12)
         intro.textColor = .secondaryLabelColor
         intro.maximumNumberOfLines = 0
@@ -1761,18 +2179,27 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         intro.preferredMaxLayoutWidth = 480
         stack.addArrangedSubview(intro)
 
+        let historyIntro = NSTextField(wrappingLabelWithString: L10n.t(.uiBrain052))
+        historyIntro.font = NSFont.systemFont(ofSize: 12)
+        historyIntro.textColor = .secondaryLabelColor
+        historyIntro.maximumNumberOfLines = 0
+        historyIntro.lineBreakMode = .byWordWrapping
+        historyIntro.preferredMaxLayoutWidth = 480
+        stack.addArrangedSubview(historyIntro)
+
+        // 版本与代次规则说明（保留设计版原有说明）
         let verBox = NSBox()
-        verBox.title = "版本与代次规则说明"
+        verBox.title = L10n.t(.uiBrain053)
         let verStack = NSStackView()
         verStack.orientation = .vertical
         verStack.alignment = .leading
         verStack.spacing = 6
 
-        let l1 = NSTextField(wrappingLabelWithString: "• 草稿与运行分离：保存草稿仅存入本地草稿区，不影响当前服务对外响应。")
+        let l1 = NSTextField(wrappingLabelWithString: L10n.t(.uiBrain054))
         l1.maximumNumberOfLines = 0; l1.lineBreakMode = .byWordWrapping; l1.preferredMaxLayoutWidth = 460
-        let l2 = NSTextField(wrappingLabelWithString: "• 原子激活：点击「启用配置」时将草稿生成新版本并原子推进激活代次。")
+        let l2 = NSTextField(wrappingLabelWithString: L10n.t(.uiBrain055))
         l2.maximumNumberOfLines = 0; l2.lineBreakMode = .byWordWrapping; l2.preferredMaxLayoutWidth = 460
-        let l3 = NSTextField(wrappingLabelWithString: "• 安全回退：点击「回退版本」将配置无损切换回上一稳定激活代次。")
+        let l3 = NSTextField(wrappingLabelWithString: L10n.t(.uiBrain056))
         l3.maximumNumberOfLines = 0; l3.lineBreakMode = .byWordWrapping; l3.preferredMaxLayoutWidth = 460
 
         verStack.addArrangedSubview(l1)
@@ -1782,7 +2209,140 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         verBox.widthAnchor.constraint(equalToConstant: 480).isActive = true
         stack.addArrangedSubview(verBox)
 
-        stack.addArrangedSubview(rollbackButton)
+        // 1. 代次与版本历史（只读 brain-history）
+        let tableBox = NSBox()
+        tableBox.title = L10n.t(.brainHistoryTableBoxTitle)
+        let tableStack = NSStackView()
+        tableStack.orientation = .vertical
+        tableStack.alignment = .leading
+        tableStack.spacing = 4
+
+        historyStatusLabel.font = NSFont.systemFont(ofSize: 11)
+        historyStatusLabel.textColor = .secondaryLabelColor
+        historyStatusLabel.maximumNumberOfLines = 0
+        historyStatusLabel.lineBreakMode = .byWordWrapping
+        historyStatusLabel.preferredMaxLayoutWidth = 460
+        tableStack.addArrangedSubview(historyStatusLabel)
+
+        historyTable.delegate = self
+        historyTable.dataSource = self
+        historyTable.headerView = NSTableHeaderView()
+        historyTable.rowHeight = 22
+        historyTable.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+        historyTable.setAccessibilityLabel(L10n.t(.brainHistoryTableBoxTitle))
+
+        let colGen = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("col_gen"))
+        colGen.title = L10n.t(.brainColGen)
+        colGen.width = 54
+        let colAt = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("col_at"))
+        colAt.title = L10n.t(.diagTime)
+        colAt.width = 106
+        let colOp = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("col_op"))
+        colOp.title = L10n.t(.uiBrain057)
+        colOp.width = 92
+        let colRev = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("col_rev"))
+        colRev.title = L10n.t(.uiBrain058)
+        colRev.width = 126
+        let colStatus = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("col_status"))
+        colStatus.title = L10n.t(.brainColStatus)
+        colStatus.width = 104
+
+        historyTable.addTableColumn(colGen)
+        historyTable.addTableColumn(colAt)
+        historyTable.addTableColumn(colOp)
+        historyTable.addTableColumn(colRev)
+        historyTable.addTableColumn(colStatus)
+
+        let scroll = NSScrollView()
+        scroll.documentView = historyTable
+        scroll.hasVerticalScroller = true
+        scroll.heightAnchor.constraint(equalToConstant: 110).isActive = true
+        scroll.widthAnchor.constraint(equalToConstant: 470).isActive = true
+
+        historyEmptyLabel.translatesAutoresizingMaskIntoConstraints = false
+        historyEmptyLabel.font = NSFont.systemFont(ofSize: 12)
+        historyEmptyLabel.textColor = .secondaryLabelColor
+        historyEmptyLabel.alignment = .center
+        historyEmptyLabel.stringValue = L10n.t(.uiBrain044)
+        historyEmptyLabel.isHidden = true
+        scroll.addSubview(historyEmptyLabel)
+
+        NSLayoutConstraint.activate([
+            historyEmptyLabel.centerXAnchor.constraint(equalTo: scroll.centerXAnchor),
+            historyEmptyLabel.centerYAnchor.constraint(equalTo: scroll.centerYAnchor),
+            historyEmptyLabel.widthAnchor.constraint(lessThanOrEqualTo: scroll.widthAnchor, constant: -20)
+        ])
+
+        tableStack.addArrangedSubview(scroll)
+
+        historyDetailNoticeLabel.font = NSFont.systemFont(ofSize: 11)
+        historyDetailNoticeLabel.textColor = .secondaryLabelColor
+        historyDetailNoticeLabel.maximumNumberOfLines = 0
+        historyDetailNoticeLabel.lineBreakMode = .byWordWrapping
+        historyDetailNoticeLabel.preferredMaxLayoutWidth = 460
+        tableStack.addArrangedSubview(historyDetailNoticeLabel)
+
+        tableBox.setContent(tableStack, inset: 6)
+        stack.addArrangedSubview(tableBox)
+
+        // 2. 版本差异对比
+        let diffBox = NSBox()
+        diffBox.title = L10n.t(.brainDiffBoxTitle)
+        let diffStack = NSStackView()
+        diffStack.orientation = .vertical
+        diffStack.alignment = .leading
+        diffStack.spacing = 6
+
+        let diffRow = NSStackView(views: [
+            NSTextField(labelWithString: L10n.t(.brainDiffLabelVerA)),
+            diffVerAPopup,
+            NSTextField(labelWithString: L10n.t(.brainDiffLabelVerB)),
+            diffVerBPopup,
+            runDiffButton
+        ])
+        diffRow.alignment = .centerY
+        diffRow.spacing = 6
+        diffVerAPopup.widthAnchor.constraint(equalToConstant: 130).isActive = true
+        diffVerBPopup.widthAnchor.constraint(equalToConstant: 130).isActive = true
+        runDiffButton.target = self
+        runDiffButton.action = #selector(handleRunDiff)
+        diffStack.addArrangedSubview(diffRow)
+
+        let diffScroll = NSScrollView()
+        diffScroll.hasVerticalScroller = true
+        diffTextView.isEditable = false
+        diffTextView.font = NSFont.userFixedPitchFont(ofSize: 10)
+        diffScroll.documentView = diffTextView
+        diffScroll.heightAnchor.constraint(equalToConstant: 90).isActive = true
+        diffScroll.widthAnchor.constraint(equalToConstant: 470).isActive = true
+        diffStack.addArrangedSubview(diffScroll)
+        diffBox.setContent(diffStack, inset: 6)
+        stack.addArrangedSubview(diffBox)
+
+        // 3. 回滚到历史版本（二次确认）
+        let rollbackBox = NSBox()
+        rollbackBox.title = L10n.t(.uiBrain059)
+        let rbStack = NSStackView()
+        rbStack.orientation = .vertical
+        rbStack.alignment = .leading
+        rbStack.spacing = 6
+
+        rollbackPicker.widthAnchor.constraint(equalToConstant: 160).isActive = true
+        rollbackToVersionButton.target = self
+        rollbackToVersionButton.action = #selector(handleRollbackToSelected)
+
+        let rbRow = NSStackView(views: [
+            NSTextField(labelWithString: L10n.t(.brainRollbackTargetGenLabel)),
+            rollbackPicker,
+            rollbackToVersionButton,
+            rollbackButton
+        ])
+        rbRow.alignment = .centerY
+        rbRow.spacing = 8
+        rbStack.addArrangedSubview(rbRow)
+        rollbackBox.setContent(rbStack, inset: 6)
+        stack.addArrangedSubview(rollbackBox)
+
         versionView.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: versionView.topAnchor),
@@ -1800,7 +2360,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let notice = NSTextField(wrappingLabelWithString: "合成测试仅执行确定性组装预览 (assemble_only)，标明【未调用模型】，不产生费用，绝不发送真实微信消息。")
+        let notice = NSTextField(wrappingLabelWithString: L10n.t(.uiBrain060))
         notice.font = NSFont.systemFont(ofSize: 12, weight: .bold)
         notice.textColor = .systemBlue
         notice.maximumNumberOfLines = 0
@@ -1808,19 +2368,28 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         notice.preferredMaxLayoutWidth = 480
         stack.addArrangedSubview(notice)
 
-        previewChatKindPopup.addItems(withTitles: ["私聊 (private)", "群聊 (group)"])
+        tryItModelStatusLabel.font = NSFont.systemFont(ofSize: 11)
+        tryItModelStatusLabel.textColor = .secondaryLabelColor
+        tryItModelStatusLabel.maximumNumberOfLines = 0
+        tryItModelStatusLabel.lineBreakMode = .byWordWrapping
+        tryItModelStatusLabel.preferredMaxLayoutWidth = 480
+        stack.addArrangedSubview(tryItModelStatusLabel)
+
+        previewChatKindPopup.addItems(withTitles: [L10n.t(.brainChatKindPrivateOption), L10n.t(.brainChatKindGroupOption)])
+        previewInputField.placeholderString = L10n.t(.uiBrain061)
         let inputRow = NSStackView(views: [
-            NSTextField(labelWithString: "模拟客户消息:"),
-            previewInputField,
-            previewChatKindPopup,
-            runPreviewButton
+            NSTextField(labelWithString: L10n.t(.uiBrain062)),
+            previewInputField
         ])
         previewInputField.widthAnchor.constraint(equalToConstant: 200).isActive = true
         runPreviewButton.target = self
         runPreviewButton.action = #selector(handleRunPreview)
         stack.addArrangedSubview(inputRow)
+        let previewActions = NSStackView(views: [previewChatKindPopup, runPreviewButton])
+        previewActions.spacing = 10
+        stack.addArrangedSubview(previewActions)
 
-        stack.addArrangedSubview(NSTextField(labelWithString: "组装预览快照与决策:"))
+        stack.addArrangedSubview(NSTextField(labelWithString: L10n.t(.uiBrain063)))
         let resScroll = NSScrollView()
         resScroll.hasVerticalScroller = true
         previewResultTextView.isEditable = false
@@ -1851,12 +2420,28 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         case 5: targetView = previewView
         default: targetView = definitionView
         }
-        tabContainer.addSubview(targetView)
+        let scroll = NSScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.drawsBackground = false
+        let document = FlippedView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(targetView)
+        scroll.documentView = document
+        tabContainer.addSubview(scroll)
         NSLayoutConstraint.activate([
-            targetView.topAnchor.constraint(equalTo: tabContainer.topAnchor),
-            targetView.leadingAnchor.constraint(equalTo: tabContainer.leadingAnchor),
-            targetView.trailingAnchor.constraint(equalTo: tabContainer.trailingAnchor),
-            targetView.bottomAnchor.constraint(equalTo: tabContainer.bottomAnchor)
+            scroll.topAnchor.constraint(equalTo: tabContainer.topAnchor),
+            scroll.leadingAnchor.constraint(equalTo: tabContainer.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: tabContainer.trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: tabContainer.bottomAnchor),
+            document.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            document.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            document.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            targetView.topAnchor.constraint(equalTo: document.topAnchor),
+            targetView.leadingAnchor.constraint(equalTo: document.leadingAnchor),
+            targetView.trailingAnchor.constraint(equalTo: document.trailingAnchor),
+            targetView.bottomAnchor.constraint(equalTo: document.bottomAnchor)
         ])
     }
 
@@ -1885,16 +2470,107 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.loadErrorLabel.stringValue = "加载大脑配置失败: \(error.localizedDescription)"
+                    self.loadErrorLabel.stringValue = L10n.t(.uiBrain064, String(describing: error.localizedDescription))
+                }
+            }
+        }
+        loadHistory()
+    }
+
+    /// 只读加载版本历史；任何失败都落到界面状态，不抛到主线程之外。
+    /// 用令牌丢弃过期响应，避免回滚后旧请求覆盖新状态。
+    private func loadHistory() {
+        let token = UUID()
+        historyLoadToken = token
+        historyStatusLabel.textColor = .secondaryLabelColor
+        historyStatusLabel.stringValue = L10n.t(.uiBrain065)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            do {
+                let payload = try self.client.fetchHistory()
+                DispatchQueue.main.async {
+                    guard self.historyLoadToken == token else { return }
+                    self.updateHistoryUI(payload, error: nil)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard self.historyLoadToken == token else { return }
+                    self.updateHistoryUI(nil, error: error.localizedDescription)
                 }
             }
         }
     }
 
+    private func updateHistoryUI(_ payload: BrainHistoryPayload?, error: String?) {
+        guard let payload = payload else {
+            historyGenerations = []
+            historyVersions = []
+            historyTable.reloadData()
+            historyEmptyLabel.stringValue = L10n.t(.brainPageHistoryUnavailable)
+            historyEmptyLabel.isHidden = false
+            historyDetailNoticeLabel.stringValue = ""
+            diffVerAPopup.removeAllItems()
+            diffVerBPopup.removeAllItems()
+            rollbackPicker.removeAllItems()
+            diffTextView.string = ""
+            historyStatusLabel.textColor = .systemRed
+            historyStatusLabel.stringValue = L10n.t(.uiResidualHistoryUnavailableFmt, String(describing: error ?? L10n.t(.uiResidualUnknownReason)))
+            return
+        }
+
+        historyGenerations = (payload.generations ?? []).sorted { $0.generation > $1.generation }
+        historyVersions = payload.versions ?? []
+        historyTable.reloadData()
+        historyEmptyLabel.isHidden = !historyGenerations.isEmpty
+        if historyGenerations.isEmpty {
+            historyEmptyLabel.stringValue = L10n.t(.uiBrain066)
+        }
+
+        historyStatusLabel.textColor = .secondaryLabelColor
+        let currentGenText = payload.generation.map { L10n.t(.brainGenOrdinalFmt, String(describing: $0)) } ?? L10n.t(.statusUnknown)
+        var status = L10n.t(.uiBrain067, String(describing: currentGenText), String(describing: historyGenerations.count), String(describing: historyVersions.count))
+        if let scope = payload.historyScope, !scope.isEmpty {
+            status += L10n.t(.uiBrain068, String(describing: scope))
+        }
+        historyStatusLabel.stringValue = status
+
+        diffVerAPopup.removeAllItems()
+        diffVerBPopup.removeAllItems()
+        rollbackPicker.removeAllItems()
+
+        for version in historyVersions {
+            var title = version.revisionId
+            if version.isActive == true { title += L10n.t(.brainVerRunningSuffix) }
+            if version.isDraft == true { title += L10n.t(.brainVerDraftSuffix) }
+            diffVerAPopup.addItem(withTitle: title)
+            diffVerAPopup.lastItem?.representedObject = version.revisionId
+            diffVerBPopup.addItem(withTitle: title)
+            diffVerBPopup.lastItem?.representedObject = version.revisionId
+        }
+        if diffVerBPopup.numberOfItems > 1 { diffVerBPopup.selectItem(at: 1) }
+        diffTextView.string = diffVerAPopup.numberOfItems > 0 ? L10n.t(.uiBrain069) : L10n.t(.uiBrain070)
+
+        for generation in historyGenerations {
+            var title = L10n.t(.brainGenOrdinalFmt, String(describing: generation.generation))
+            if let current = payload.generation, current == generation.generation { title += L10n.t(.brainGenCurrentSuffix) }
+            rollbackPicker.addItem(withTitle: title)
+            rollbackPicker.lastItem?.representedObject = generation.generation
+        }
+        if let current = payload.generation, let index = historyGenerations.firstIndex(where: { $0.generation == current }) {
+            rollbackPicker.selectItem(at: index)
+        } else if rollbackPicker.numberOfItems > 0 {
+            rollbackPicker.selectItem(at: 0)
+        }
+        historyDetailNoticeLabel.stringValue = ""
+    }
+
     private func updateUIWithList(_ payload: BrainListPayload) {
-        accountLabel.stringValue = "当前账号: \(payload.accountId ?? "未知")"
+        accountLabel.stringValue = L10n.t(.uiResidualAccountFmt, String(describing: payload.accountId ?? L10n.t(.uiResidualUnknown)))
         if let summary = payload.modelSummary {
-            modeLabel.stringValue = "回复方式：\(summary.mode == "builtin" ? "内置大脑" : summary.mode)"
+            modeLabel.stringValue = L10n.t(.uiResidualReplyModeFmt, summary.mode == "builtin" ? L10n.t(.uiResidualBuiltinBrain) : summary.mode)
+            updateTryItModelStatus(mode: summary.mode)
+        } else {
+            updateTryItModelStatus(mode: nil)
         }
         loadErrorLabel.stringValue = ""
 
@@ -1912,6 +2588,19 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             if currentDraftRole == nil && !hasStoredRoles { handleAddDefaultRole() }
             refreshDraftRoleRow()
         }
+    }
+
+    /// 试一试页顶部的真实模型可用性说明：本构建后端只接受 assemble_only，
+    /// 因此明确标注「不会生成真实回复文本」，不假装成功。
+    private func updateTryItModelStatus(mode: String?) {
+        let modeText: String
+        if let mode = mode, !mode.isEmpty {
+            modeText = mode == "builtin" ? L10n.t(.uiBrain071) : mode
+        } else {
+            modeText = L10n.t(.uiBrain072)
+        }
+        tryItModelStatusLabel.textColor = .secondaryLabelColor
+        tryItModelStatusLabel.stringValue = L10n.t(.uiBrain073, String(describing: modeText))
     }
 
     private func updateBindingsUI() {
@@ -1956,13 +2645,13 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             addOverrideButton.isEnabled = false
             updateOverrideButton.isEnabled = false
             deleteOverrideButton.isEnabled = !currentDraftBindings.overrides.isEmpty
-            let errText = allowlistContactsError ?? "未就绪"
-            bindingsStatusLabel.stringValue = "白名单联系人来源不可用 [\(errText)]，已禁用新增与编辑"
+            let errText = allowlistContactsError ?? L10n.t(.brainNotReady)
+            bindingsStatusLabel.stringValue = L10n.t(.brainAllowlistUnavailableFmt, String(describing: errText))
             bindingsStatusLabel.textColor = .systemRed
         } else {
             // ready 状态
             for c in allowlistContacts {
-                let kindStr = c.chatKind == "group" ? "群聊" : "私聊"
+                let kindStr = c.chatKind == "group" ? L10n.t(.kindGroup) : L10n.t(.kindPrivate)
                 let title = "\(c.displayName) (\(c.contactId), \(kindStr))"
                 overrideContactPopup.addItem(withTitle: title)
                 overrideContactPopup.lastItem?.representedObject = c.contactId
@@ -1974,7 +2663,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
                 updateOverrideButton.isEnabled = false
                 deleteOverrideButton.isEnabled = !currentDraftBindings.overrides.isEmpty
                 if !hasUnsavedBindingsChanges {
-                    bindingsStatusLabel.stringValue = "当前白名单无可用联系人，新增覆盖前请先确认白名单配置与通讯录同步"
+                    bindingsStatusLabel.stringValue = L10n.t(.brainNoAllowlistContactsNotice)
                     bindingsStatusLabel.textColor = .secondaryLabelColor
                 }
             } else {
@@ -1999,12 +2688,12 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             var lines: [String] = []
             for ov in currentDraftBindings.overrides {
                 let roleName = listPayload?.roles.first(where: { $0.roleId == ov.roleId })?.name ?? ov.roleId
-                let kindStr = ov.chatKind == "group" ? "群聊" : "私聊"
-                lines.append("• 联系人: \(ov.contactId) [\(kindStr)] ➔ \(roleName) (\(ov.roleId)) [版本: \(ov.revisionId)]")
+                let kindStr = ov.chatKind == "group" ? L10n.t(.kindGroup) : L10n.t(.kindPrivate)
+                lines.append(L10n.t(.uiBrain074, String(describing: ov.contactId), String(describing: kindStr), String(describing: roleName), String(describing: ov.roleId), String(describing: ov.revisionId)))
             }
             overridesSummaryLabel.stringValue = lines.joined(separator: "\n")
         } else {
-            overridesSummaryLabel.stringValue = "暂无特定联系人覆盖（所有联系人均使用默认角色）"
+            overridesSummaryLabel.stringValue = L10n.t(.brainNoOverridesDetail)
         }
         if allowlistContactsStatus == "unavailable" || allowlistContacts.isEmpty {
             deleteOverrideButton.isEnabled = !currentDraftBindings.overrides.isEmpty
@@ -2072,7 +2761,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         let rev = roleEntry.draftRevisionId
         currentDraftBindings = BrainPageLogic.setDefaultRole(in: currentDraftBindings, roleId: selectedRoleId, revisionId: rev)
         hasUnsavedBindingsChanges = true
-        bindingsStatusLabel.stringValue = "默认角色草稿已选择为「\(roleEntry.name)」，待点击「保存绑定草稿」"
+        bindingsStatusLabel.stringValue = L10n.t(.brainDefaultRoleDraftSelectedFmt, String(describing: roleEntry.name))
         bindingsStatusLabel.textColor = .labelColor
         updateOverridesListUI()
     }
@@ -2095,12 +2784,12 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
 
     @objc private func handleAddOverride() {
         guard let contact = selectedAllowlistContactFromPopup() else {
-            bindingsStatusLabel.stringValue = "添加失败：请先选择合法的白名单联系人"
+            bindingsStatusLabel.stringValue = L10n.t(.brainAddOverrideErrContact)
             bindingsStatusLabel.textColor = .systemRed
             return
         }
         guard let roleRef = selectedRoleRefFromOverridePopup() else {
-            bindingsStatusLabel.stringValue = "添加失败：请选择有效的角色"
+            bindingsStatusLabel.stringValue = L10n.t(.brainAddOverrideErrRole)
             bindingsStatusLabel.textColor = .systemRed
             return
         }
@@ -2115,17 +2804,17 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         case .success(let newBindings):
             currentDraftBindings = newBindings
             hasUnsavedBindingsChanges = true
-            bindingsStatusLabel.stringValue = "已添加针对「\(contact.displayName)」的覆盖规则草稿，待保存"
+            bindingsStatusLabel.stringValue = L10n.t(.brainOverrideDraftAddedFmt, String(describing: contact.displayName))
             bindingsStatusLabel.textColor = .labelColor
             updateOverridesListUI()
         case .failure(let err):
             switch err {
             case .duplicateContact:
-                bindingsStatusLabel.stringValue = "添加失败：联系人「\(contact.displayName)」已存在覆盖规则，可直接编辑"
+                bindingsStatusLabel.stringValue = L10n.t(.brainAddOverrideErrExistsFmt, String(describing: contact.displayName))
             case .notInAllowlist:
-                bindingsStatusLabel.stringValue = "添加失败：联系人必须源自真实白名单，禁止凭姓名构造ID"
+                bindingsStatusLabel.stringValue = L10n.t(.brainAddOverrideErrMustAllowlist)
             default:
-                bindingsStatusLabel.stringValue = "添加覆盖失败"
+                bindingsStatusLabel.stringValue = L10n.t(.brainAddOverrideErrGeneral)
             }
             bindingsStatusLabel.textColor = .systemRed
         }
@@ -2133,12 +2822,12 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
 
     @objc private func handleUpdateOverride() {
         guard let contact = selectedAllowlistContactFromPopup() else {
-            bindingsStatusLabel.stringValue = "更新失败：请选择要更新的白名单联系人"
+            bindingsStatusLabel.stringValue = L10n.t(.brainUpdateOverrideErrContact)
             bindingsStatusLabel.textColor = .systemRed
             return
         }
         guard let roleRef = selectedRoleRefFromOverridePopup() else {
-            bindingsStatusLabel.stringValue = "更新失败：请选择有效的角色"
+            bindingsStatusLabel.stringValue = L10n.t(.brainUpdateOverrideErrRole)
             bindingsStatusLabel.textColor = .systemRed
             return
         }
@@ -2152,11 +2841,11 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         case .success(let newBindings):
             currentDraftBindings = newBindings
             hasUnsavedBindingsChanges = true
-            bindingsStatusLabel.stringValue = "已更新针对「\(contact.displayName)」的覆盖规则草稿，待保存"
+            bindingsStatusLabel.stringValue = L10n.t(.brainOverrideDraftUpdatedFmt, String(describing: contact.displayName))
             bindingsStatusLabel.textColor = .labelColor
             updateOverridesListUI()
         case .failure:
-            bindingsStatusLabel.stringValue = "更新失败：未找到对应的覆盖规则，请先点击「添加覆盖」"
+            bindingsStatusLabel.stringValue = L10n.t(.brainOverrideNotFoundForUpdate)
             bindingsStatusLabel.textColor = .systemRed
         }
     }
@@ -2174,13 +2863,13 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             }
         }
         guard let cid = contactIdToDelete else {
-            bindingsStatusLabel.stringValue = "删除失败：请在表格中或下拉框中选择要删除的覆盖规则"
+            bindingsStatusLabel.stringValue = L10n.t(.brainDeleteOverrideErrSelect)
             bindingsStatusLabel.textColor = .systemRed
             return
         }
         currentDraftBindings = BrainPageLogic.deleteOverride(from: currentDraftBindings, contactId: cid)
         hasUnsavedBindingsChanges = true
-        bindingsStatusLabel.stringValue = "已从草稿中删除覆盖规则 [\(cid)]，待点击「保存绑定草稿」"
+        bindingsStatusLabel.stringValue = L10n.t(.brainOverrideDeletedDraftFmt, String(describing: cid))
         bindingsStatusLabel.textColor = .labelColor
         updateOverridesListUI()
     }
@@ -2195,7 +2884,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         updateOverrideButton.isEnabled = false
         deleteOverrideButton.isEnabled = false
 
-        bindingsStatusLabel.stringValue = "正在保存绑定草稿至核心..."
+        bindingsStatusLabel.stringValue = L10n.t(.brainSavingBindingsDraft)
         bindingsStatusLabel.textColor = .labelColor
         let gen = payload.generation
         let draft = currentDraftBindings
@@ -2211,7 +2900,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
                     self.updateOverrideButton.isEnabled = (self.allowlistContactsStatus == "ready" && !self.allowlistContacts.isEmpty)
                     self.deleteOverrideButton.isEnabled = true
                     self.hasUnsavedBindingsChanges = false
-                    self.bindingsStatusLabel.stringValue = "绑定草稿保存成功！新配置将在启用后作用于新轮次。"
+                    self.bindingsStatusLabel.stringValue = L10n.t(.brainBindingsDraftSavedSuccess)
                     self.bindingsStatusLabel.textColor = .systemGreen
                     self.reloadBrainData()
                 }
@@ -2297,7 +2986,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             } catch {
                 DispatchQueue.main.async {
                     guard self.roleLoadToken == loadToken else { return }
-                    self.loadErrorLabel.stringValue = "读取角色草稿失败: \(error.localizedDescription)"
+                    self.loadErrorLabel.stringValue = L10n.t(.brainLoadRoleDraftFailedFmt, String(describing: error.localizedDescription))
                 }
             }
         }
@@ -2316,11 +3005,14 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     public func applyFixtureState(payload: BrainListPayload, role: BrainRoleRevision, accountId: String = "wx_fixture_account") {
         self.listPayload = payload
         self.currentDraftRole = role
-        self.accountLabel.stringValue = "当前账号: \(accountId)"
+        self.accountLabel.stringValue = L10n.t(.brainCurrentAccountFmt, String(describing: accountId))
         if let summary = payload.modelSummary {
-            self.modeLabel.stringValue = "回复方式：\(summary.mode == "builtin" ? "内置大脑" : summary.mode)"
+            self.modeLabel.stringValue = L10n.t(.uiResidualReplyModeFmt, summary.mode == "builtin" ? L10n.t(.uiResidualBuiltinBrain) : summary.mode)
+            self.updateTryItModelStatus(mode: summary.mode)
+        } else {
+            self.updateTryItModelStatus(mode: nil)
         }
-        self.statusMessageLabel.stringValue = "草稿已加载，可编辑后保存或合成预览"
+        self.statusMessageLabel.stringValue = L10n.t(.brainDraftLoadedNotice)
         self.loadErrorLabel.stringValue = ""
         self.roleTable.reloadData()
         self.updateBindingsUI()
@@ -2346,12 +3038,12 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         unreadableTypeField.stringValue = (role.templates.unreadable["unsupported_type"] ?? nil) ?? ""
         unreadableLargeField.stringValue = (role.templates.unreadable["too_large"] ?? nil) ?? ""
 
-        let activeRev = entry.activeRevisionId ?? "未启用"
-        revisionStatusLabel.stringValue = "角色: \(role.name) · 草稿: \(role.revisionId) · 运行: \(activeRev)"
+        let activeRev = entry.activeRevisionId ?? L10n.t(.tagOff)
+        revisionStatusLabel.stringValue = L10n.t(.uiBrain075, String(describing: role.name), String(describing: role.revisionId), String(describing: activeRev))
         archiveRoleButton.isEnabled = BrainPageLogic.canArchiveRole(entry)
 
         if role.knowledgeRefs.isEmpty {
-            knowledgeRefsSummaryLabel.stringValue = "当前角色未引用任何知识"
+            knowledgeRefsSummaryLabel.stringValue = L10n.t(.brainKnowledgeNone)
         } else {
             let refTexts = role.knowledgeRefs.map { "\($0.knowledgeId) (\($0.revisionId), sha:\($0.contentSha256.prefix(8))...)" }
             knowledgeRefsSummaryLabel.stringValue = refTexts.joined(separator: "\n")
@@ -2360,12 +3052,12 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
 
     public func controlTextDidChange(_ notification: Notification) {
         localUnsavedChanges = true
-        statusMessageLabel.stringValue = "角色有未保存的修改 · ⌘S 保存草稿"
+        statusMessageLabel.stringValue = L10n.t(.brainRoleUnsavedModifiedNotice)
     }
 
     public func textDidChange(_ notification: Notification) {
         localUnsavedChanges = true
-        statusMessageLabel.stringValue = "角色有未保存的修改 · ⌘S 保存草稿"
+        statusMessageLabel.stringValue = L10n.t(.brainRoleUnsavedModifiedNotice)
     }
 
     @objc private func handleImportKnowledge() {
@@ -2374,7 +3066,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         let text = knowledgeContentField.string.trimmingCharacters(in: .whitespacesAndNewlines)
         let src = knowledgeSourceField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty, !text.isEmpty else {
-            statusMessageLabel.stringValue = "导入知识失败：标题与正文不能为空"
+            statusMessageLabel.stringValue = L10n.t(.brainImportKnowledgeEmptyErr)
             return
         }
 
@@ -2386,7 +3078,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             sourceLabel: src.isEmpty ? "manual" : src
         )
 
-        statusMessageLabel.stringValue = "正在通过核心接口保存知识..."
+        statusMessageLabel.stringValue = L10n.t(.brainSavingKnowledge)
         let gen = payload.generation
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
@@ -2404,11 +3096,11 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
                     self.knowledgeTitleField.stringValue = ""
                     self.knowledgeContentField.string = ""
                     self.knowledgeSourceField.stringValue = ""
-                    self.statusMessageLabel.stringValue = "知识已成功保存至核心并关联到当前草稿！"
+                    self.statusMessageLabel.stringValue = L10n.t(.brainKnowledgeSavedSuccess)
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.statusMessageLabel.stringValue = "保存知识失败: \(error.localizedDescription)"
+                    self.statusMessageLabel.stringValue = L10n.t(.brainSaveKnowledgeFailedFmt, String(describing: error.localizedDescription))
                 }
             }
         }
@@ -2416,11 +3108,11 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
 
     @objc private func handleAddDefaultRole() {
         guard !localUnsavedChanges else {
-            statusMessageLabel.stringValue = "请先保存当前角色，再添加默认角色。"
+            statusMessageLabel.stringValue = L10n.t(.brainSaveCurrentBeforeDefault)
             return
         }
         guard let url = Bundle.main.url(forResource: "brain-default-role", withExtension: "json") else {
-            statusMessageLabel.stringValue = "默认角色模板缺失，请重新安装完整应用。"
+            statusMessageLabel.stringValue = L10n.t(.brainDefaultTemplateMissing)
             return
         }
         do {
@@ -2431,37 +3123,37 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             sectionSegment.selectedSegment = 0
             switchTab(index: 0)
             refreshDraftRoleRow()
-            statusMessageLabel.stringValue = "默认角色草稿已准备好，可直接编辑并保存。"
+            statusMessageLabel.stringValue = L10n.t(.brainDefaultDraftReady)
         } catch {
-            statusMessageLabel.stringValue = "读取默认角色模板失败：\(error.localizedDescription)"
+            statusMessageLabel.stringValue = L10n.t(.brainReadDefaultTemplateFailedFmt, String(describing: error.localizedDescription))
         }
     }
 
     @objc private func handleUseAsDefault() {
         guard let role = currentDraftRole, !localUnsavedChanges,
               listPayload?.roles.contains(where: { $0.roleId == role.roleId }) == true else {
-            statusMessageLabel.stringValue = "请先保存角色草稿，再设为默认角色。"
+            statusMessageLabel.stringValue = L10n.t(.brainSaveDraftBeforeSetDefault)
             return
         }
         selectDefaultRoleDraft(roleId: role.roleId)
         sectionSegment.selectedSegment = 3
         switchTab(index: 3)
-        bindingsStatusLabel.stringValue = "已选择「\(role.name)」为默认角色。请保存绑定草稿，再启用配置。"
-        statusMessageLabel.stringValue = "默认角色用于白名单内未指定专属角色的会话；专属角色保持优先。"
+        bindingsStatusLabel.stringValue = L10n.t(.brainDefaultRoleSelectedFmt, String(describing: role.name))
+        statusMessageLabel.stringValue = L10n.t(.brainDefaultRolePriorityNotice)
     }
 
     @objc private func handleNewRole() {
         guard !localUnsavedChanges else {
-            statusMessageLabel.stringValue = "请先保存当前角色，再新建角色。"
+            statusMessageLabel.stringValue = L10n.t(.brainSaveCurrentBeforeNew)
             return
         }
         let newRole = BrainRoleRevision(
             roleId: "role_\(UUID().uuidString.prefix(8))",
             revisionId: "rev_1",
-            name: "新助手",
-            persona: "您是一位专业友善的客服助手。",
-            goals: ["解答用户咨询"],
-            tone: "温和自然",
+            name: L10n.t(.brainNewAssistantDefaultName),
+            persona: L10n.t(.brainNewAssistantDefaultPersona),
+            goals: [L10n.t(.brainNewAssistantDefaultGoal)],
+            tone: L10n.t(.brainNewAssistantDefaultTone),
             businessRules: []
         )
         currentDraftRole = newRole
@@ -2471,17 +3163,17 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         switchTab(index: 0)
         refreshDraftRoleRow()
         view.window?.makeFirstResponder(roleNameField)
-        statusMessageLabel.stringValue = "尚未保存：填写角色设定后按 ⌘S 保存，再设置适用会话"
+        statusMessageLabel.stringValue = L10n.t(.brainUnsavedPromptSaveFirst)
     }
 
     @objc private func handleCopyRole() {
         guard let current = currentDraftRole else { return }
-        let copy = BrainPageLogic.prepareRoleCopy(from: current, newRoleId: "role_\(UUID().uuidString.prefix(8))", newName: "\(current.name) (副本)")
+        let copy = BrainPageLogic.prepareRoleCopy(from: current, newRoleId: "role_\(UUID().uuidString.prefix(8))", newName: L10n.t(.brainRoleCopyNameFmt, String(describing: current.name)))
         currentDraftRole = copy
         populateRoleForm(copy, entry: BrainRoleEntry(roleId: copy.roleId, draftRevisionId: copy.revisionId, name: copy.name))
         localUnsavedChanges = true
         refreshDraftRoleRow()
-        statusMessageLabel.stringValue = "已复制角色，编辑后点击「保存草稿」"
+        statusMessageLabel.stringValue = L10n.t(.brainRoleCopiedNotice)
     }
 
     @objc private func handleArchiveRole() {
@@ -2493,21 +3185,21 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             $0.defaultRef?.roleId == entry.roleId || $0.overrides.contains { $0.roleId == entry.roleId }
         }
         guard !inUse else {
-            statusMessageLabel.stringValue = "无法删除：该角色仍被会话配置引用，请先解除默认或专属角色绑定。"
+            statusMessageLabel.stringValue = L10n.t(.brainRoleCannotDeleteBound)
             return
         }
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "删除角色「\(entry.name)」？"
+        alert.messageText = L10n.t(.brainDeleteRoleConfirmTitleFmt, String(describing: entry.name))
         alert.informativeText = isSaved
-            ? "删除后将从角色列表移除，历史对话和版本记录会保留。"
-            : "该角色尚未保存，删除后将丢弃这份草稿。"
-        alert.addButton(withTitle: "取消")
-        alert.addButton(withTitle: "删除角色")
+            ? L10n.t(.brainDeleteRoleActivePrompt)
+            : L10n.t(.brainDeleteRoleDialogInfoUnsaved)
+        alert.addButton(withTitle: L10n.t(.cancel))
+        alert.addButton(withTitle: L10n.t(.brainBtnDeleteRole))
         guard alert.runModal() == .alertSecondButtonReturn else { return }
         if !isSaved {
             clearDeletedRole()
-            statusMessageLabel.stringValue = "未保存角色已删除"
+            statusMessageLabel.stringValue = L10n.t(.brainDeleteDraftSuccess)
             return
         }
         archiveRoleButton.isEnabled = false
@@ -2517,13 +3209,13 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
                 _ = try self.client.archiveRole(roleId: entry.roleId, expectedGeneration: payload.generation)
                 DispatchQueue.main.async {
                     self.clearDeletedRole()
-                    self.statusMessageLabel.stringValue = "角色已删除"
+                    self.statusMessageLabel.stringValue = L10n.t(.brainDeleteRoleSuccess)
                     self.reloadBrainData()
                 }
             } catch {
                 DispatchQueue.main.async {
                     self.archiveRoleButton.isEnabled = true
-                    self.statusMessageLabel.stringValue = "删除失败：\(error.localizedDescription)"
+                    self.statusMessageLabel.stringValue = L10n.t(.uiBrain076, String(describing: error.localizedDescription))
                 }
             }
         }
@@ -2538,7 +3230,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             field.stringValue = ""
         }
         personaField.string = ""
-        revisionStatusLabel.stringValue = "请选择角色，或点击「新增角色」"
+        revisionStatusLabel.stringValue = L10n.t(.brainPleaseSelectRolePrompt)
         archiveRoleButton.isEnabled = false
         roleTable.deselectAll(nil)
         roleTable.reloadData()
@@ -2569,7 +3261,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
             draft.createdAt = UInt64(Date().timeIntervalSince1970)
             draft.contentSha256 = ""
         }
-        statusMessageLabel.stringValue = "正在保存草稿..."
+        statusMessageLabel.stringValue = L10n.t(.brainSavingDraft)
         let gen = payload.generation
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
@@ -2578,7 +3270,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
                 DispatchQueue.main.async {
                     self.localUnsavedChanges = false
                     self.preferredRoleId = draft.roleId
-                    self.statusMessageLabel.stringValue = "草稿已保存。请在「适用会话」设置回复范围，再启用配置。"
+                    self.statusMessageLabel.stringValue = L10n.t(.brainDraftSavedNotice)
                     self.reloadBrainData()
                 }
             } catch {
@@ -2594,23 +3286,23 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         guard !activationInFlight, let payload = listPayload, let role = currentDraftRole else { return }
         guard !localUnsavedChanges, !hasUnsavedBindingsChanges,
               payload.roles.contains(where: { $0.roleId == role.roleId && $0.draftRevisionId == role.revisionId }) else {
-            statusMessageLabel.stringValue = "尚有未保存的修改，请先保存角色草稿及会话绑定，再启用。"
+            statusMessageLabel.stringValue = L10n.t(.brainUnsavedBeforeActivatePrompt)
             return
         }
         let savedBindings = payload.draft ?? BrainBindingSet(defaultRef: nil, overrides: [])
         let bindings = BrainPageLogic.activationBindings(role: role, bindings: savedBindings)
         let wasReferenced = savedBindings.defaultRef?.roleId == role.roleId || savedBindings.overrides.contains { $0.roleId == role.roleId }
         let alert = NSAlert()
-        alert.messageText = "启用角色「\(role.name)」？"
+        alert.messageText = L10n.t(.brainActivateRoleConfirmTitleFmt, String(describing: role.name))
         alert.informativeText = wasReferenced
-            ? "将更新该角色已有的默认或专属绑定到当前已保存版本，并启用整份会话配置。其他角色绑定保持原样。仅影响新轮次。"
-            : "将把该角色设为账号默认角色，并启用整份会话配置。白名单内没有专属角色的会话将使用它；已有专属角色保持不变。仅影响新轮次。"
-        alert.addButton(withTitle: "确认启用")
-        alert.addButton(withTitle: "取消")
+            ? L10n.t(.brainActivateRoleDialogBodyExisting)
+            : L10n.t(.brainActivateRoleDialogBodyDefault)
+        alert.addButton(withTitle: L10n.t(.brainBtnConfirmActivate))
+        alert.addButton(withTitle: L10n.t(.cancel))
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         activationInFlight = true
         activateButton.isEnabled = false
-        statusMessageLabel.stringValue = "正在保存适用范围并启用角色..."
+        statusMessageLabel.stringValue = L10n.t(.brainActivatingRole)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             do {
@@ -2621,7 +3313,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
                 _ = try self.client.activate(expectedGeneration: generation)
                 var verified = try self.client.fetchList()
                 guard verified.active == bindings else {
-                    throw NSError(domain: "BrainClient", code: 3, userInfo: [NSLocalizedDescriptionKey: "启用结果与预期范围不一致，请重新读取配置确认。"])
+                    throw NSError(domain: "BrainClient", code: 3, userInfo: [NSLocalizedDescriptionKey: L10n.t(.brainActivationScopeMismatch)])
                 }
                 let hasStoredRoles = !verified.roles.isEmpty
                 verified.roles.removeAll { $0.archived }
@@ -2632,13 +3324,13 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
                     self.preferredRoleId = role.roleId
                     self.listPayload = verified
                     self.updateUIWithList(verified)
-                    self.statusMessageLabel.stringValue = "角色「\(role.name)」已启用（\(role.revisionId)），适用范围已核对。"
+                    self.statusMessageLabel.stringValue = L10n.t(.uiBrain077, String(describing: role.name), String(describing: role.revisionId))
                 }
             } catch {
                 DispatchQueue.main.async {
                     self.activationInFlight = false
                     self.activateButton.isEnabled = true
-                    self.statusMessageLabel.stringValue = "启用未确认：\(error.localizedDescription)。请重新读取配置核对；已保存的绑定草稿会保留。"
+                    self.statusMessageLabel.stringValue = L10n.t(.uiBrain078, String(describing: error.localizedDescription))
                     self.reloadBrainData()
                 }
             }
@@ -2646,59 +3338,169 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     }
 
     @objc private func handleRollback() {
-        guard let payload = listPayload else { return }
+        guard let payload = listPayload else {
+            statusMessageLabel.stringValue = L10n.t(.uiBrain079)
+            statusMessageLabel.textColor = .systemRed
+            return
+        }
         let targetGen = payload.generation > 1 ? payload.generation - 1 : 1
-        statusMessageLabel.stringValue = "正在执行版本回退..."
+        let target = historyGenerations.first(where: { $0.generation == targetGen })
+        confirmAndRollback(targetGeneration: targetGen, currentGeneration: payload.generation, historyTarget: target)
+    }
+
+    @objc private func handleRollbackToSelected() {
+        guard let payload = listPayload else {
+            statusMessageLabel.stringValue = L10n.t(.uiBrain079)
+            statusMessageLabel.textColor = .systemRed
+            return
+        }
+        guard let selected = rollbackPicker.selectedItem?.representedObject as? UInt64 else {
+            statusMessageLabel.stringValue = L10n.t(.brainRollbackSelectGenPrompt)
+            statusMessageLabel.textColor = .systemRed
+            return
+        }
+        if selected == payload.generation {
+            statusMessageLabel.stringValue = L10n.t(.brainRollbackAlreadyCurrent)
+            statusMessageLabel.textColor = .systemOrange
+            return
+        }
+        let target = historyGenerations.first(where: { $0.generation == selected })
+        confirmAndRollback(targetGeneration: selected, currentGeneration: payload.generation, historyTarget: target)
+    }
+
+    /// 回滚统一走二次确认：弹窗列出目标代次后端实际记录的内容与草稿完整性，
+    /// 勾选确认后才执行；缺失内容如实标注，不补全。
+    private func confirmAndRollback(targetGeneration: UInt64, currentGeneration: UInt64, historyTarget: BrainHistoryGeneration?) {
+        let missing = L10n.t(.brainPageMissingFieldIndicator)
+        let alert = NSAlert()
+        alert.messageText = L10n.t(.uiBrain080, String(describing: targetGeneration))
+        alert.alertStyle = .warning
+
+        var info = L10n.t(.uiBrain081, String(describing: targetGeneration))
+        if let target = historyTarget {
+            let draftText = target.hasCompleteDraft ? L10n.t(.brainRollbackDraftSavedFull) : L10n.t(.uiBrain082)
+            let activeText = target.active == nil ? L10n.t(.uiBrain083) : L10n.t(.uiBrain084)
+            info += L10n.t(.uiBrain085, String(describing: target.generation), String(describing: BrainPageLogic.historyTimestampText(target.at)), String(describing: BrainPageLogic.operationDisplayName(target.operation)))
+            info += L10n.t(.uiBrain086, String(describing: target.runDefaultRoleId ?? missing), String(describing: target.runDefaultRevisionId ?? missing), String(describing: target.overrideCount), String(describing: activeText))
+            info += L10n.t(.uiBrain087, String(describing: draftText))
+        } else {
+            info += L10n.t(.uiBrain088)
+        }
+        alert.informativeText = info
+
+        let checkbox = NSButton(checkboxWithTitle: L10n.t(.brainPageRollbackCheckboxPrompt), target: nil, action: nil)
+        checkbox.font = NSFont.systemFont(ofSize: 12)
+        alert.accessoryView = checkbox
+        alert.addButton(withTitle: L10n.t(.brainPageRollbackConfirmButton))
+        alert.addButton(withTitle: L10n.t(.cancel))
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            statusMessageLabel.stringValue = L10n.t(.uiBrain089)
+            statusMessageLabel.textColor = .secondaryLabelColor
+            return
+        }
+        guard checkbox.state == .on else {
+            statusMessageLabel.stringValue = L10n.t(.brainRollbackCancelledCheckbox)
+            statusMessageLabel.textColor = .systemRed
+            return
+        }
+
+        statusMessageLabel.textColor = .labelColor
+        statusMessageLabel.stringValue = L10n.t(.brainRollingBackToGenFmt, String(describing: targetGeneration))
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             do {
-                _ = try self.client.rollback(targetGeneration: targetGen, expectedGeneration: payload.generation)
+                _ = try self.client.rollback(targetGeneration: targetGeneration, expectedGeneration: currentGeneration)
                 DispatchQueue.main.async {
-                    self.statusMessageLabel.stringValue = "已回退至代次 \(targetGen)"
+                    var msg = L10n.t(.uiBrain090, String(describing: targetGeneration))
+                    if let target = historyTarget, !target.hasCompleteDraft {
+                        msg += L10n.t(.uiBrain091)
+                    }
+                    self.statusMessageLabel.stringValue = msg
+                    self.statusMessageLabel.textColor = .systemGreen
                     self.reloadBrainData()
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.statusMessageLabel.stringValue = "回退失败: \(error.localizedDescription)"
+                    self.statusMessageLabel.stringValue = L10n.t(.brainRestoreFailedFmt, String(describing: error.localizedDescription))
+                    self.statusMessageLabel.textColor = .systemRed
                 }
             }
         }
     }
 
-    @objc private func handleRunPreview() {
-        guard !localUnsavedChanges else {
-            previewResultTextView.string = "请先保存角色草稿，再预览已保存的版本。"
+    @objc private func handleRunDiff() {
+        guard let revA = diffVerAPopup.selectedItem?.representedObject as? String,
+              let revB = diffVerBPopup.selectedItem?.representedObject as? String,
+              let versionA = historyVersions.first(where: { $0.revisionId == revA }),
+              let versionB = historyVersions.first(where: { $0.revisionId == revB }) else {
+            diffTextView.string = L10n.t(.brainPageDiffSelectHint)
             return
         }
-        guard let role = currentDraftRole else { return }
+        diffTextView.string = BrainPageLogic.compareVersions(v1: versionA, v2: versionB)
+    }
+
+    @objc private func handleRunPreview() {
+        // 草稿没保存时不拿旧版本去预览：明确要求先保存。
+        guard !localUnsavedChanges else {
+            previewResultTextView.string = L10n.t(.brainPageSaveDraftFirstNotice)
+            return
+        }
+        guard let role = currentDraftRole else {
+            previewResultTextView.string = L10n.t(.uiBrain093)
+            return
+        }
         let text = previewInputField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
-            previewResultTextView.string = "请输入模拟消息正文"
+            previewResultTextView.string = L10n.t(.uiBrain094)
             return
         }
         let kind = (previewChatKindPopup.indexOfSelectedItem == 1) ? "group" : "private"
-        previewResultTextView.string = "正在执行组装预览 (assemble_only)..."
+        previewResultTextView.string = L10n.t(.brainPreviewAssembling)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             do {
                 let res = try self.client.preview(roleId: role.roleId, revisionId: role.revisionId, text: text, chatKind: kind)
                 DispatchQueue.main.async {
-                    var out = "【组装预览结果】\n"
-                    out += "状态: \(res.costNote)\n"
-                    out += "实际费用产生: \(res.costIncurred ? "是" : "否")\n"
-                    out += "快照摘要: \(res.snapshot?.assemblySha256 ?? "-")\n"
-                    if let b = res.snapshot?.budget {
-                        out += "字节预算: 原始=\(b.originalBytes ?? 0), 纳入=\(b.includedBytes ?? 0), 是否截断=\(b.truncated == true ? "是" : "否")\n"
-                    }
-                    out += "系统约束:\n\(res.snapshot?.systemConstraints ?? "-")\n"
-                    self.previewResultTextView.string = out
+                    self.previewResultTextView.string = self.renderTryItResult(res, customerText: text)
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.previewResultTextView.string = "组装预览失败: \(error.localizedDescription)"
+                    var msg = L10n.t(.uiBrain095, String(describing: error.localizedDescription))
+                    msg += L10n.t(.uiBrain096)
+                    self.previewResultTextView.string = msg
                 }
             }
         }
+    }
+
+    /// 试一试结果：只有后端真的返回 decision.reply 才展示回复，否则明确标注不可用。
+    private func renderTryItResult(_ result: BrainPreviewResult, customerText: String) -> String {
+        var out = L10n.t(.uiBrain097)
+        out += L10n.t(.uiBrain098, String(describing: customerText))
+        out += L10n.t(.uiResidualModelCalledFmt, result.costIncurred ? L10n.t(.uiResidualYes) : L10n.t(.uiResidualNo))
+        out += L10n.t(.uiBrain099, String(describing: result.costNote))
+        out += L10n.t(.brainTryItSnapshotShaFmt, String(describing: result.snapshot?.assemblySha256 ?? "-"))
+        if let budget = result.snapshot?.budget {
+            out += L10n.t(.uiResidualBudgetFmt, String(describing: budget.originalBytes ?? 0), String(describing: budget.includedBytes ?? 0), budget.truncated == true ? L10n.t(.uiResidualYes) : L10n.t(.uiResidualNo))
+        }
+        out += L10n.t(.uiBrain100)
+        if let reply = BrainPageLogic.previewReplyText(result) {
+            out += "\(reply)\n"
+        } else if result.decision != nil {
+            out += L10n.t(.uiBrain101)
+        } else {
+            out += L10n.t(.uiBrain102)
+        }
+        out += L10n.t(.uiBrain103)
+        if let contract = BrainPageLogic.systemContractText(fromCompiled: result.snapshot?.compiled) {
+            out += "\(contract)\n"
+        } else {
+            out += L10n.t(.uiBrain104)
+        }
+        out += L10n.t(.uiBrain105)
+        out += (result.snapshot?.compiled ?? L10n.t(.uiResidualNoCompiled)) + "\n"
+        return out
     }
 
     // MARK: - NSTableViewDataSource & Delegate
@@ -2707,10 +3509,48 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
         if tableView == overridesTableView {
             return currentDraftBindings.overrides.count
         }
+        if tableView == historyTable {
+            return historyGenerations.count
+        }
         return displayedRoles.count
     }
 
     public func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        if tableView == historyTable {
+            guard row >= 0, row < historyGenerations.count else { return nil }
+            let generation = historyGenerations[row]
+            let colId = tableColumn?.identifier.rawValue ?? ""
+            let text: String
+            switch colId {
+            case "col_gen":
+                text = L10n.t(.brainGenOrdinalFmt, String(describing: generation.generation))
+            case "col_at":
+                text = BrainPageLogic.historyTimestampText(generation.at)
+            case "col_op":
+                text = BrainPageLogic.operationDisplayName(generation.operation)
+            case "col_rev":
+                text = generation.runDefaultRevisionId ?? "-"
+            case "col_status":
+                if let current = listPayload?.generation, current == generation.generation {
+                    text = generation.hasCompleteDraft ? L10n.t(.brainGenActiveWithDraft) : L10n.t(.brainGenActiveNoDraft)
+                } else if generation.hasCompleteDraft {
+                    text = L10n.t(.brainGenSavedDraft)
+                } else {
+                    text = L10n.t(.uiBrain106)
+                }
+            default:
+                text = "-"
+            }
+            let field = NSTextField(labelWithString: text)
+            field.font = NSFont.systemFont(ofSize: 11)
+            field.lineBreakMode = .byTruncatingTail
+            field.toolTip = text
+            if colId == "col_status" {
+                field.textColor = generation.hasCompleteDraft ? .secondaryLabelColor : .systemOrange
+            }
+            return field
+        }
+
         if tableView == overridesTableView {
             guard row < currentDraftBindings.overrides.count else { return nil }
             let ov = currentDraftBindings.overrides[row]
@@ -2721,7 +3561,7 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
                 let match = allowlistContacts.first(where: { $0.contactId == ov.contactId })
                 text = match != nil ? "\(match!.displayName) (\(ov.contactId))" : ov.contactId
             case "col_kind":
-                text = ov.chatKind == "group" ? "群聊" : "私聊"
+                text = ov.chatKind == "group" ? L10n.t(.kindGroup) : L10n.t(.kindPrivate)
             case "col_role":
                 let role = listPayload?.roles.first(where: { $0.roleId == ov.roleId })
                 text = role != nil ? "\(role!.name) (\(ov.roleId))" : ov.roleId
@@ -2749,8 +3589,8 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
 
         let isLocal = !(listPayload?.roles.contains(where: { $0.roleId == entry.roleId }) ?? false)
         let isDefault = listPayload?.draft?.defaultRef?.roleId == entry.roleId || listPayload?.active?.defaultRef?.roleId == entry.roleId
-        let state = entry.activeRevisionId == nil ? "已保存 · 未启用" : entry.hasDraftChanges ? "有新草稿 · 运行: \(entry.activeRevisionId!)" : "已启用: \(entry.activeRevisionId!)"
-        let statusText = isLocal ? "未保存草稿" : (isDefault ? "默认 · " : "") + state
+        let state = entry.activeRevisionId == nil ? L10n.t(.brainRoleStateSavedNotActive) : entry.hasDraftChanges ? L10n.t(.brainRoleStateNewDraftRunningFmt, String(describing: entry.activeRevisionId!)) : L10n.t(.brainRoleStateActiveFmt, String(describing: entry.activeRevisionId!))
+        let statusText = isLocal ? L10n.t(.brainRoleStateUnsavedDraft) : (isDefault ? L10n.t(.brainRoleStateDefaultPrefix) : "") + state
         let statusLbl = NSTextField(labelWithString: statusText)
         statusLbl.font = NSFont.systemFont(ofSize: 10)
         statusLbl.textColor = entry.hasDraftChanges ? .systemOrange : .secondaryLabelColor
@@ -2761,6 +3601,35 @@ public final class BrainPageController: NSViewController, NSTableViewDataSource,
     }
 
     public func tableViewSelectionDidChange(_ notification: Notification) {
+        if let tbl = notification.object as? NSTableView, tbl == historyTable {
+            let row = historyTable.selectedRow
+            if row >= 0, row < historyGenerations.count {
+                let generation = historyGenerations[row]
+                let missing = L10n.t(.brainPageMissingFieldIndicator)
+                var lines: [String] = []
+                lines.append(L10n.t(.uiBrain107, String(describing: generation.generation), String(describing: BrainPageLogic.historyTimestampText(generation.at)), String(describing: BrainPageLogic.operationDisplayName(generation.operation))))
+                if let roleId = generation.roleId, !roleId.isEmpty {
+                    lines.append(L10n.t(.uiBrain108, String(describing: roleId), String(describing: generation.revisionId ?? missing)))
+                }
+                if generation.active == nil && generation.draft == nil {
+                    lines.append(L10n.t(.uiBrain109))
+                } else {
+                    lines.append(L10n.t(.uiBrain110, String(describing: generation.runDefaultRoleId ?? missing), String(describing: generation.runDefaultRevisionId ?? missing), String(describing: generation.overrideCount)))
+                }
+                if generation.hasCompleteDraft {
+                    lines.append(L10n.t(.uiBrain111))
+                    historyDetailNoticeLabel.textColor = .secondaryLabelColor
+                } else {
+                    lines.append(L10n.t(.uiBrain112))
+                    historyDetailNoticeLabel.textColor = .systemOrange
+                }
+                historyDetailNoticeLabel.stringValue = lines.joined(separator: "\n")
+            } else {
+                historyDetailNoticeLabel.stringValue = ""
+            }
+            return
+        }
+
         if let tbl = notification.object as? NSTableView, tbl == overridesTableView {
             let row = overridesTableView.selectedRow
             if row >= 0 && row < currentDraftBindings.overrides.count {

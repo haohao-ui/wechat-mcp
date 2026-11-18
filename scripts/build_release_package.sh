@@ -30,27 +30,32 @@ esac
 
 ARCH="$(uname -m)"
 case "$ARCH" in
-  arm64|aarch64) CANON_ARCH="arm64" ;;
-  x86_64|amd64) CANON_ARCH="x86_64" ;;
-  *) CANON_ARCH="$ARCH" ;;
+  arm64|aarch64) CANON_ARCH="arm64"; RUST_TARGET="aarch64-apple-darwin" ;;
+  x86_64|amd64) CANON_ARCH="x86_64"; RUST_TARGET="x86_64-apple-darwin" ;;
+  *) echo "ERROR: unsupported architecture: $ARCH" >&2; exit 2 ;;
 esac
 
 echo "==> 启动新鲜构建 (Fresh Build)..."
 export MACOSX_DEPLOYMENT_TARGET=12.0
 
 # 真实 fresh 构建 Rust 二进制（Cargo 内部处理正确增量缓存，绝不通过外部仅判断文件存在而跳过）
-cargo build --release --locked --bin wechat-mcp --bin wechat-updater --bin wechat-test-signer
+cargo build --release --locked --target "$RUST_TARGET" --bin wechat-mcp --bin wechat-updater --bin wechat-test-signer
+
+# Respect Cargo configuration and CARGO_TARGET_DIR for both languages.
+CARGO_OUTPUT_ROOT="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+BUILD_DIR="$CARGO_OUTPUT_ROOT/$RUST_TARGET/release"
+mkdir -p "$BUILD_DIR"
 
 # 编译全套 Swift 辅助组件与宿主外壳二进制
-swiftc native/wechat_ocr.swift -o target/release/wechat_ocr
-swiftc native/click/*.swift native/common/*.swift native/action/*.swift -o target/release/wechat_click
-swiftc -O -target "${ARCH}-apple-macos12" native/interaction/*.swift native/common/Geometry.swift native/action/*.swift -o target/release/desktop_helper
-swiftc native/wechat_window.swift -o target/release/wechat_window
-swiftc -O -parse-as-library native/wechat_bubbles.swift native/common/*.swift native/eyes/*.swift -o target/release/wechat_bubbles
-swiftc -parse-as-library native/macos/*.swift -o target/release/wechat_runtime
-swiftc native/overlay/main.swift -o target/release/wechat_overlay
-swiftc -O -target "${ARCH}-apple-macos12" -parse-as-library -D BOT_WORKER native/wechat_bubbles.swift native/common/*.swift native/eyes/*.swift native/action/*.swift native/bot/*.swift -o target/release/wechat_bot_worker
-swiftc -O -target "${ARCH}-apple-macos12" native/bootstrap/*.swift native/eyes/Screens.swift -o target/release/wechat-cs-host
+swiftc native/wechat_ocr.swift -o "$BUILD_DIR/wechat_ocr"
+swiftc native/click/*.swift native/common/*.swift native/action/*.swift -o "$BUILD_DIR/wechat_click"
+swiftc -O -target "${ARCH}-apple-macos12" native/interaction/*.swift native/common/Geometry.swift native/action/*.swift -o "$BUILD_DIR/desktop_helper"
+swiftc native/wechat_window.swift -o "$BUILD_DIR/wechat_window"
+swiftc -O -parse-as-library native/wechat_bubbles.swift native/common/*.swift native/eyes/*.swift -o "$BUILD_DIR/wechat_bubbles"
+swiftc -parse-as-library native/macos/*.swift -o "$BUILD_DIR/wechat_runtime"
+swiftc native/overlay/main.swift -o "$BUILD_DIR/wechat_overlay"
+swiftc -O -target "${ARCH}-apple-macos12" -parse-as-library -D BOT_WORKER native/wechat_bubbles.swift native/common/*.swift native/eyes/*.swift native/action/*.swift native/bot/*.swift -o "$BUILD_DIR/wechat_bot_worker"
+swiftc -O -target "${ARCH}-apple-macos12" native/bootstrap/*.swift native/eyes/Screens.swift -o "$BUILD_DIR/wechat-cs-host"
 
 echo "==> 组装产物目录: $OUT_DIR"
 rm -rf "$OUT_DIR"
@@ -71,17 +76,19 @@ BINARIES=(
 )
 
 for b in "${BINARIES[@]}"; do
-  cp "target/release/$b" "$OUT_DIR/bin/"
+  cp "$BUILD_DIR/$b" "$OUT_DIR/bin/"
   chmod 0755 "$OUT_DIR/bin/$b"
 done
 
 # 组装 微信客服助手.app
-cp target/release/wechat-cs-host "$OUT_DIR/Apps/微信客服助手.app/Contents/MacOS/wechat-cs-host"
+cp "$BUILD_DIR/wechat-cs-host" "$OUT_DIR/Apps/微信客服助手.app/Contents/MacOS/wechat-cs-host"
 chmod 0755 "$OUT_DIR/Apps/微信客服助手.app/Contents/MacOS/wechat-cs-host"
 
 cp native/bootstrap/brain-default-role.json "$OUT_DIR/Apps/微信客服助手.app/Contents/Resources/brain-default-role.json"
 
 cp native/bootstrap/Info.plist "$OUT_DIR/Apps/微信客服助手.app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$OUT_DIR/Apps/微信客服助手.app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $SEQUENCE" "$OUT_DIR/Apps/微信客服助手.app/Contents/Info.plist"
 chmod 0644 "$OUT_DIR/Apps/微信客服助手.app/Contents/Info.plist"
 
 if [ -f native/bootstrap/gateway.test.json ]; then
@@ -103,7 +110,7 @@ fi
 echo "==> 归档打包 tar.gz..."
 TAR_NAME="wechat-mcp-${VERSION}-macos-${CANON_ARCH}.tar.gz"
 TAR_PATH="$OUT_DIR/$TAR_NAME"
-tar -czf "$TAR_PATH" -C "$OUT_DIR" bin Apps resources
+COPYFILE_DISABLE=1 tar -czf "$TAR_PATH" -C "$OUT_DIR" bin Apps resources
 
 TAR_SIZE=$(stat -f %z "$TAR_PATH" 2>/dev/null || stat -c %s "$TAR_PATH")
 TAR_SHA=$(shasum -a 256 "$TAR_PATH" | awk '{print $1}')
@@ -193,7 +200,7 @@ $COMPONENTS_JSON
     "profile_schema_min": 1,
     "profile_schema_max": 2,
     "history_schema_min": 1,
-    "history_schema_max": 3,
+    "history_schema_max": 7,
     "min_updater_version": 1,
     "in_place_rollback_supported": true
   },
@@ -203,7 +210,7 @@ EOF
 
 if [ "$GENERATE_TEST_SIGN" = "true" ] || [ "$GENERATE_TEST_SIGN" = "1" ]; then
   echo "==> 使用隔离测试密钥生成真实可核验的测试签名封套..."
-  target/release/wechat-test-signer \
+  "$BUILD_DIR/wechat-test-signer" \
     --manifest "$OUT_DIR/manifest.json" \
     --out "$OUT_DIR/envelope.json" \
     --key-id "test-root-v1" \

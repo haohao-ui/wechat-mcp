@@ -796,6 +796,14 @@ impl<'a> SandboxUpdateExecutor<'a> {
             bail!("injected_fault_after_backup_verified");
         }
 
+        super::manual_rollback::preserve_previous(
+            &self.sandbox.root_dir,
+            &state_dir,
+            &tx_id,
+            &backup_proof,
+            manifest.compatibility.in_place_rollback_supported,
+        )?;
+
         // 阶段 6: Switching (原子切换 current 指针)
         journal.stage = TransactionStage::Switching;
         journal.persist_atomic(&state_dir)?;
@@ -831,6 +839,7 @@ impl<'a> SandboxUpdateExecutor<'a> {
                 // 准备单一权威提交记录
                 let commit_record = CurrentReleaseCommitRecord {
                     record_schema: 1,
+                    highest_accepted_sequence: None,
                     tx_id: tx_id.clone(),
                     release_id: manifest.release_id.clone(),
                     sequence: manifest.sequence,

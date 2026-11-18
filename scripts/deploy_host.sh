@@ -100,14 +100,34 @@ fi
 
 if [ $MCP -eq 1 ]; then
   local_step "cross-build wechat-mcp for x86_64 macOS 12" env MACOSX_DEPLOYMENT_TARGET=12.0 cargo build --release --locked --target x86_64-apple-darwin
+  # cargo 的 target 目录可能被 ~/.cargo/config.toml 的 build.target-dir 或 CARGO_TARGET_DIR
+  # 改到仓库之外（本机就是 ~/.cache/cargo-target），不能写死 ./target。
+  TARGET_DIR=$(cargo metadata --format-version 1 --no-deps 2>/dev/null | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+  [ -n "$TARGET_DIR" ] || TARGET_DIR="$(pwd)/target"
+  MCP_BIN="$TARGET_DIR/x86_64-apple-darwin/release/wechat-mcp"
+  UPDATER_BIN="$TARGET_DIR/x86_64-apple-darwin/release/wechat-updater"
+  if [ $YES -eq 1 ] && { [ ! -x "$MCP_BIN" ] || [ ! -x "$UPDATER_BIN" ]; }; then
+    echo "ERROR: cross-built binaries missing: $MCP_BIN / $UPDATER_BIN" >&2
+    exit 1
+  fi
   remote "back up wechat-mcp" '
     dst="$HOME/.wechat-rpa/bin/wechat-mcp"; [ -f "$dst" ] && cp -p "$dst" "$dst.before-$TS"; true'
-  echo "--- upload wechat-mcp"
+  echo "--- upload wechat-mcp ($MCP_BIN)"
   if [ $YES -eq 1 ]; then
-    ssh -o BatchMode=yes -o LogLevel=ERROR "$HOST" 'mkdir -p "$HOME/.wechat-rpa/bin" && cat > "$HOME/.wechat-rpa/bin/wechat-mcp.new" && chmod 0755 "$HOME/.wechat-rpa/bin/wechat-mcp.new" && mv "$HOME/.wechat-rpa/bin/wechat-mcp.new" "$HOME/.wechat-rpa/bin/wechat-mcp"' < target/x86_64-apple-darwin/release/wechat-mcp
-  else echo "[dry-run] ssh $HOST 'cat > ~/.wechat-rpa/bin/wechat-mcp' < target/x86_64-apple-darwin/release/wechat-mcp"; fi
+    ssh -o BatchMode=yes -o LogLevel=ERROR "$HOST" 'mkdir -p "$HOME/.wechat-rpa/bin" && cat > "$HOME/.wechat-rpa/bin/wechat-mcp.new" && chmod 0755 "$HOME/.wechat-rpa/bin/wechat-mcp.new" && mv "$HOME/.wechat-rpa/bin/wechat-mcp.new" "$HOME/.wechat-rpa/bin/wechat-mcp"' < "$MCP_BIN"
+  else echo "[dry-run] ssh $HOST 'cat > ~/.wechat-rpa/bin/wechat-mcp' < $MCP_BIN"; fi
   remote "sign wechat-mcp" '
     sign_file "$HOME/.wechat-rpa/bin/wechat-mcp"'
+  # 应用更新页的回滚依赖 wechat-updater；它一直在 bin 目录里但以前没被部署，
+  # 结果机器上留着旧版（没有 rollback-status），回滚卡片只能显示「暂不可用」。
+  remote "back up wechat-updater" '
+    dst="$HOME/.wechat-rpa/bin/wechat-updater"; [ -f "$dst" ] && cp -p "$dst" "$dst.before-$TS"; true'
+  echo "--- upload wechat-updater ($UPDATER_BIN)"
+  if [ $YES -eq 1 ]; then
+    ssh -o BatchMode=yes -o LogLevel=ERROR "$HOST" 'mkdir -p "$HOME/.wechat-rpa/bin" && cat > "$HOME/.wechat-rpa/bin/wechat-updater.new" && chmod 0755 "$HOME/.wechat-rpa/bin/wechat-updater.new" && mv "$HOME/.wechat-rpa/bin/wechat-updater.new" "$HOME/.wechat-rpa/bin/wechat-updater"' < "$UPDATER_BIN"
+  else echo "[dry-run] ssh $HOST 'cat > ~/.wechat-rpa/bin/wechat-updater' < $UPDATER_BIN"; fi
+  remote "sign wechat-updater" '
+    sign_file "$HOME/.wechat-rpa/bin/wechat-updater"'
   # 正在运行的 serve-core 仍是旧二进制：优雅停止，由宿主 CoreSupervisor 用新二进制拉起。
   remote "restart serve-core on the new binary" '
     old=$(pgrep -f "wechat-rpa/bin/wechat-mcp serve-core" || true)
@@ -163,6 +183,32 @@ if [ $APP -eq 1 ]; then
     fi
     launchctl bootstrap "gui/$UID" "$PLIST"
     echo "now grant Screen Recording and Accessibility to 微信客服助手 in System Settings, then press 刷新检查"'
+  # 启动后自检：宿主如果立刻死掉（例如在没有 GUI 会话的上下文里启动，AppKit 会在
+  # NSApplication.shared 处 SIGABRT 134），必须当场看到日志和崩溃报告，而不是事后猜。
+  remote "verify the host stays up after bootstrap" '
+    for i in $(seq 1 30); do
+      pgrep -f "微信客服助手.app/Contents/MacOS/wechat-cs-host" >/dev/null && break
+      sleep 2
+    done
+    if ! pgrep -f "微信客服助手.app/Contents/MacOS/wechat-cs-host" >/dev/null; then
+      echo "ERROR: host is not running after bootstrap" >&2
+      echo "--- host.log (tail)" >&2; tail -20 "$HOME/.wechat-rpa/logs/host.log" >&2 2>/dev/null || true
+      echo "--- host.stderr.log (tail)" >&2; tail -40 "$HOME/.wechat-rpa/logs/host.stderr.log" >&2 2>/dev/null || true
+      crash=$(ls -t "$HOME/Library/Logs/DiagnosticReports"/wechat-cs-host*.ips 2>/dev/null | head -1)
+      [ -n "$crash" ] && { echo "--- newest crash report: $crash" >&2; head -40 "$crash" >&2; }
+      echo "--- launchd" >&2; launchctl print "gui/$UID/local.wechat-mcp.host" 2>&1 | head -20 >&2
+      exit 1
+    fi
+    sleep 5
+    if ! pgrep -f "微信客服助手.app/Contents/MacOS/wechat-cs-host" >/dev/null; then
+      echo "ERROR: host exited within 5s of appearing (likely a startup crash)" >&2
+      tail -40 "$HOME/.wechat-rpa/logs/host.stderr.log" >&2 2>/dev/null || true
+      exit 1
+    fi
+    echo "host running: pid $(pgrep -f "微信客服助手.app/Contents/MacOS/wechat-cs-host" | tr "\n" " ")"
+    sleep 5
+    pgrep -f "微信客服助手.app/Contents/MacOS/wechat-cs-host" >/dev/null || { echo "ERROR: host died after 10s" >&2; exit 1; }
+    ls -l "$HOME/.wechat-rpa/core.sock" 2>/dev/null || echo "(core.sock not created yet; check 核心服务 in the app)"'
 fi
 
 if [ "$YES" -eq 1 ]; then

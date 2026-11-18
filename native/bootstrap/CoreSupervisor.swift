@@ -1,6 +1,13 @@
 import Foundation
 import Darwin
 
+/// JSON numbers must be exact UInt64 integers, never Bool or floating values.
+private func updaterUnsignedInteger(_ value: Any?) -> UInt64? {
+    guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+          !["f", "d"].contains(String(cString: number.objCType)) else { return nil }
+    return UInt64(number.stringValue)
+}
+
 /// 日志轮换管理器：单个文件最大 10MB，超过 10MB 就改名为 .1 到 .5，最多保留 5 份历史
 public enum LogRotator {
     public static let defaultMaxBytes: UInt64 = 10 * 1024 * 1024 // 10MB
@@ -549,15 +556,11 @@ public final class CoreSupervisor {
 
         if let jBytes = jData {
             guard let jObj = (try? JSONSerialization.jsonObject(with: jBytes, options: [])) as? [String: Any],
-                  let schemaNum = jObj["journal_schema"] as? NSNumber,
-                  CFGetTypeID(schemaNum) != CFBooleanGetTypeID(),
-                  schemaNum.intValue == 1,
+                  updaterUnsignedInteger(jObj["journal_schema"]) == 1,
                   let stage = jObj["stage"] as? String,
                   let jTxID = jObj["transaction_id"] as? String,
                   let jTargetRel = jObj["target_release_id"] as? String,
-                  let jTargetSeqNum = jObj["target_sequence"] as? NSNumber,
-                  CFGetTypeID(jTargetSeqNum) != CFBooleanGetTypeID(),
-                  jTargetSeqNum.int64Value >= 0 else {
+                  let jTargetSequence = updaterUnsignedInteger(jObj["target_sequence"]) else {
                 return .recoveryRequired
             }
 
@@ -585,20 +588,35 @@ public final class CoreSupervisor {
                 let (rData, rErr) = readLimitedPrivateFile(url: recordURL, maxBytes: 64 * 1024)
                 guard rErr == nil, let rBytes = rData,
                       let rObj = (try? JSONSerialization.jsonObject(with: rBytes, options: [])) as? [String: Any],
-                      let rSchema = rObj["record_schema"] as? NSNumber,
-                      CFGetTypeID(rSchema) != CFBooleanGetTypeID(),
-                      rSchema.intValue == 1,
+                      let rSchema = updaterUnsignedInteger(rObj["record_schema"]),
+                      rSchema == 1 || rSchema == 2,
                       let rTxID = rObj["tx_id"] as? String,
                       let rReleaseID = rObj["release_id"] as? String,
-                      let rSeqNum = rObj["sequence"] as? NSNumber,
-                      CFGetTypeID(rSeqNum) != CFBooleanGetTypeID(),
-                      rSeqNum.int64Value >= 0 else {
+                      let rSequence = updaterUnsignedInteger(rObj["sequence"]),
+                      rObj["channel"] is String,
+                      updaterUnsignedInteger(rObj["installed_at"]) != nil else {
                     return .recoveryRequired
+                }
+                var allowedRecordKeys: Set<String> = ["record_schema", "tx_id", "release_id", "sequence", "channel", "manifest_digest", "installed_at"]
+                let highest: UInt64
+                if rSchema == 2 {
+                    allowedRecordKeys.insert("highest_accepted_sequence")
+                    guard let accepted = updaterUnsignedInteger(rObj["highest_accepted_sequence"]), accepted >= rSequence else { return .recoveryRequired }
+                    highest = accepted
+                } else { highest = rSequence }
+                guard Set(rObj.keys) == allowedRecordKeys else { return .recoveryRequired }
+                let legacySequenceURL = recordURL.deletingLastPathComponent().appendingPathComponent("highest_accepted_sequence")
+                let (legacyBytes, legacyError) = readLimitedPrivateFile(url: legacySequenceURL, maxBytes: 64)
+                guard legacyError == nil else { return .recoveryRequired }
+                if let bytes = legacyBytes {
+                    guard let text = String(data: bytes, encoding: .utf8),
+                          let legacy = UInt64(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+                          legacy <= highest, rSchema == 2 || legacy == highest else { return .recoveryRequired }
                 }
 
                 guard rTxID == jTxID,
                       rReleaseID == jTargetRel,
-                      rSeqNum.uint64Value == jTargetSeqNum.uint64Value else {
+                      rSequence == jTargetSequence else {
                     return .recoveryRequired
                 }
 

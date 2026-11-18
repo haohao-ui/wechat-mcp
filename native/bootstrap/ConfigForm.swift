@@ -1,5 +1,6 @@
 // ConfigForm.swift: Logic and UI model for bot configuration form and atomic save workflow.
 import Foundation
+import Darwin
 
 public struct ConfigMaskResult: Codable {
     public let accountId: String?
@@ -39,27 +40,27 @@ public struct ConfigFormLogic {
         var masked: [String: Any] = [:]
         masked["account_id"] = raw["account_id"] as? String ?? ""
 
-        var modelBackend = ""
-        var modelName = ""
-        var hasKey = false
-
-        if let mc = raw["model_config"] as? [String: Any] {
-            modelBackend = mc["backend"] as? String ?? ""
-            modelName = mc["model"] as? String ?? ""
-            if let key = mc["api_key"] as? String, !key.isEmpty {
-                hasKey = true
-            }
-            if let keyEnv = mc["api_key_env"] as? String, !keyEnv.isEmpty {
-                hasKey = true
-            }
-            if let keyFile = mc["api_key_file"] as? String, !keyFile.isEmpty {
-                hasKey = true
-            }
-        }
-
-        masked["model_backend"] = modelBackend
-        masked["model_name"] = modelName
-        masked["api_key_status"] = hasKey ? "已配置" : "未配置"
+        let mc = raw["model_config"] as? [String: Any] ?? [:]
+        let backend = mc["backend"] as? String ?? "codex-exec"
+        let name = mc["model"] as? String ?? ""
+        let base = mc["base_url"] as? String ?? ""
+        let file = mc["api_key_file"] as? String ?? ""
+        let explicitEnv = mc["api_key_env"] as? String ?? ""
+        let defaultEnv = URLComponents(string: base)?.host == "api.deepseek.com" ? "DEEPSEEK_API_KEY" : "OPENAI_API_KEY"
+        let env = explicitEnv.isEmpty ? defaultEnv : explicitEnv
+        let source = backend == "codex-exec" ? "none" : (!file.isEmpty ? "file" : (!explicitEnv.isEmpty ? "env" : "default_env"))
+        let hasKey = source == "file" ? !file.isEmpty : (source != "none" && validKey(ProcessInfo.processInfo.environment[env] ?? ""))
+        masked["model_backend"] = backend
+        masked["model_name"] = backend == "codex-exec" ? "" : name
+        masked["base_url"] = backend == "codex-exec" || !validModelURL(base) ? "" : base
+        masked["key_source"] = source
+        masked["key_env_name"] = source == "env" || source == "default_env" ? env : ""
+        masked["model_state"] = backend == "codex-exec" ? "default_codex" : (hasKey && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && validModelURL(base) ? "configured" : "unconfigured")
+        masked["api_key_status"] = hasKey ? L10n.t(.modelConfigured) : L10n.t(.modelUnconfigured)
+        masked["timeout_seconds"] = mc["timeout_seconds"] as? Int ?? 60
+        masked["supports_images"] = mc["supports_images"] as? Bool ?? false
+        masked["json_output"] = mc["json_output"] as? Bool ?? true
+        masked["images_per_model_call"] = raw["images_per_model_call"] as? Int ?? 4
 
         var editable: [String: Any] = [:]
         if let allowlist = raw["allowlist"] { editable["allowlist"] = allowlist }
@@ -77,18 +78,77 @@ public struct ConfigFormLogic {
         return masked
     }
 
+    private static func validKey(_ value: String) -> Bool {
+        let key = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !key.isEmpty && key.utf8.count <= 4096 && !key.contains(where: { $0.isWhitespace })
+    }
+
+    private static func validKeyFile(_ path: String) -> Bool {
+        guard path.hasPrefix("/") else { return false }
+        let fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        guard fd >= 0 else { return false }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        defer { try? handle.close() }
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
+              info.st_mode & 0o777 == 0o600, info.st_uid == getuid(),
+              let data = try? handle.read(upToCount: 4097),
+              let key = String(data: data, encoding: .utf8) else { return false }
+        return validKey(key)
+    }
+
+    private static func validModelURL(_ value: String) -> Bool {
+        guard let url = URLComponents(string: value), let host = url.host, !host.isEmpty,
+              url.user == nil, url.password == nil, url.query == nil, url.fragment == nil else { return false }
+        return url.scheme == "https" || (url.scheme == "http" && ["localhost", "127.0.0.1", "::1", "[::1]"].contains(host))
+    }
+
+    private static func modelForm(_ form: [String: Any], original: [String: Any]) throws -> (model: [String: Any], images: Int) {
+        func fail(_ code: String, _ message: String) -> ConfigFormError { .validationFailed("\(code): \(message)") }
+        func integer(_ key: String, _ fallback: Int, _ range: ClosedRange<Int>) throws -> Int {
+            let text = form[key].map { String(describing: $0) } ?? String(fallback)
+            guard text.range(of: "^[0-9]+$", options: .regularExpression) != nil, let n = Int(text), range.contains(n) else {
+                throw fail(key == "timeout_seconds" ? "MODEL_TIMEOUT_INVALID" : "MODEL_IMAGES_INVALID", key == "timeout_seconds" ? L10n.t(.uiConfigForm098) : L10n.t(.uiConfigForm099))
+            }
+            return n
+        }
+        let supports = form["supports_images"] as? Bool ?? false
+        let images = supports ? try integer("images_per_model_call", original["images_per_model_call"] as? Int ?? 4, 1...16) : original["images_per_model_call"] as? Int ?? 4
+        let backend = form["backend"] as? String ?? "codex-exec"
+        if backend == "codex-exec" { return (["backend": backend], images) }
+        guard backend == "openai-compatible" else { throw fail("MODEL_BACKEND_INVALID", L10n.t(.uiConfigForm100)) }
+        let base = (form["base_url"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard validModelURL(base) else { throw fail("MODEL_URL_INVALID", L10n.t(.uiConfigForm101)) }
+        let model = (form["model"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !model.isEmpty else { throw fail("MODEL_NAME_REQUIRED", L10n.t(.modelPageErrorModelRequired)) }
+        var result: [String: Any] = ["backend": backend, "base_url": base, "model": model,
+            "timeout_seconds": try integer("timeout_seconds", 60, 1...180), "supports_images": supports,
+            "json_output": form["json_output"] as? Bool ?? true]
+        let source = form["key_source"] as? String ?? "env"
+        if source == "env" {
+            let env = form["key_env_name"] as? String ?? form["api_key_env"] as? String ?? ""
+            guard env.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) != nil else { throw fail("MODEL_KEY_ENV_INVALID", L10n.t(.uiConfigForm102)) }
+            result["api_key_env"] = env
+        } else if source == "file" {
+            let path = form["key_file_path"] as? String ?? form["api_key_file"] as? String ?? ""
+            guard validKeyFile(path) else { throw fail("MODEL_KEY_FILE_INVALID", L10n.t(.uiConfigForm103)) }
+            result["api_key_file"] = path
+        } else if source != "default_env" { throw fail("MODEL_KEY_SOURCE_INVALID", L10n.t(.uiConfigForm104)) }
+        return (result, images)
+    }
+
     /// 严格解析整数字段：不允许包含小数点、非数字字符，必须是有效 Int
     public static func parseIntStrict(field: String, value: String) throws -> Int {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            throw ConfigFormError.validationFailed("\(field) 不能为空，必须为整数")
+            throw ConfigFormError.validationFailed(L10n.t(.uiConfigForm105, String(describing: field)))
         }
         // 只能包含可选的前导负号及连续纯数字
         let regex = try! NSRegularExpression(pattern: "^-?[0-9]+$")
         let range = NSRange(location: 0, length: trimmed.utf16.count)
         guard regex.firstMatch(in: trimmed, options: [], range: range) != nil,
               let intVal = Int(trimmed) else {
-            throw ConfigFormError.validationFailed("\(field) 必须为整数，不能包含小数或非数字字符")
+            throw ConfigFormError.validationFailed(L10n.t(.uiConfigForm106, String(describing: field)))
         }
         return intVal
     }
@@ -209,7 +269,7 @@ public struct ConfigFormLogic {
                 } else if let intVal = val as? Int {
                     updated[field] = intVal
                 } else {
-                    throw ConfigFormError.validationFailed("\(field) 必须为整数")
+                    throw ConfigFormError.validationFailed(L10n.t(.uiConfigForm107, String(describing: field)))
                 }
             }
         }
@@ -238,11 +298,11 @@ public struct ConfigFormLogic {
                     } else if let tInt = tVal as? Int {
                         timeoutSec = tInt
                     } else {
-                        throw ConfigFormError.validationFailed("brain_timeout_seconds 必须为整数")
+                        throw ConfigFormError.validationFailed(L10n.t(.uiConfigForm108))
                     }
                 }
                 guard timeoutSec >= 1 && timeoutSec <= 3600 else {
-                    throw ConfigFormError.validationFailed("brain.external.timeout_seconds 必须在 1 到 3600 秒之间")
+                    throw ConfigFormError.validationFailed(L10n.t(.uiConfigForm109))
                 }
                 extDict["timeout_seconds"] = timeoutSec
 
@@ -255,7 +315,7 @@ public struct ConfigFormLogic {
                     }
                 }
                 guard ["skip", "builtin", "handoff"].contains(timeoutAct) else {
-                    throw ConfigFormError.validationFailed("brain.external.timeout_action 必须是 skip、builtin 或 handoff")
+                    throw ConfigFormError.validationFailed(L10n.t(.uiConfigForm110))
                 }
                 extDict["timeout_action"] = timeoutAct
 
@@ -270,11 +330,11 @@ public struct ConfigFormLogic {
                     } else if let qInt = qVal as? Int {
                         queueMin = qInt
                     } else {
-                        throw ConfigFormError.validationFailed("brain_queue_minutes 必须为整数")
+                        throw ConfigFormError.validationFailed(L10n.t(.uiConfigForm111))
                     }
                 }
                 guard queueMin >= 1 && queueMin <= 1440 else {
-                    throw ConfigFormError.validationFailed("brain.external.queue_minutes 必须在 1 到 1440 分钟之间")
+                    throw ConfigFormError.validationFailed(L10n.t(.uiConfigForm112))
                 }
                 extDict["queue_minutes"] = queueMin
 
@@ -283,45 +343,45 @@ public struct ConfigFormLogic {
                     "external": extDict
                 ]
             } else {
-                throw ConfigFormError.validationFailed("brain.mode 必须是 builtin 或 external")
+                throw ConfigFormError.validationFailed(L10n.t(.uiConfigForm113))
             }
         } else if let brainObj = formInputs["brain"] as? [String: Any] {
             guard let mode = brainObj["mode"] as? String else {
-                throw ConfigFormError.validationFailed("brain.mode 缺失")
+                throw ConfigFormError.validationFailed(L10n.t(.uiConfigForm114))
             }
             if mode == "builtin" {
                 guard brainObj.count == 1 else {
-                    throw ConfigFormError.validationFailed("brain.mode=builtin 时不允许包含其他字段")
+                    throw ConfigFormError.validationFailed(L10n.t(.uiConfigForm115))
                 }
                 updated["brain"] = ["mode": "builtin"]
             } else if mode == "external" {
                 for (k, _) in brainObj {
                     if !["mode", "external"].contains(k) {
-                        throw ConfigFormError.validationFailed("brain 包含未知字段: \(k)")
+                        throw ConfigFormError.validationFailed(L10n.t(.uiConfigForm116, String(describing: k)))
                     }
                 }
                 var extDict: [String: Any] = [:]
                 if let ext = brainObj["external"] as? [String: Any] {
                     for (k, _) in ext {
                         if !["timeout_seconds", "timeout_action", "queue_minutes"].contains(k) {
-                            throw ConfigFormError.validationFailed("brain.external 包含未知字段: \(k)")
+                            throw ConfigFormError.validationFailed(L10n.t(.uiConfigForm117, String(describing: k)))
                         }
                     }
                     let t = ext["timeout_seconds"] as? Int ?? 120
                     guard t >= 1 && t <= 3600 else {
-                        throw ConfigFormError.validationFailed("brain.external.timeout_seconds 必须在 1 到 3600 秒之间")
+                        throw ConfigFormError.validationFailed(L10n.t(.uiConfigForm109))
                     }
                     extDict["timeout_seconds"] = t
 
                     let a = ext["timeout_action"] as? String ?? "skip"
                     guard ["skip", "builtin", "handoff"].contains(a) else {
-                        throw ConfigFormError.validationFailed("brain.external.timeout_action 必须是 skip、builtin 或 handoff")
+                        throw ConfigFormError.validationFailed(L10n.t(.uiConfigForm110))
                     }
                     extDict["timeout_action"] = a
 
                     let q = ext["queue_minutes"] as? Int ?? 30
                     guard q >= 1 && q <= 1440 else {
-                        throw ConfigFormError.validationFailed("brain.external.queue_minutes 必须在 1 到 1440 分钟之间")
+                        throw ConfigFormError.validationFailed(L10n.t(.uiConfigForm112))
                     }
                     extDict["queue_minutes"] = q
                 } else {
@@ -329,10 +389,16 @@ public struct ConfigFormLogic {
                 }
                 updated["brain"] = ["mode": "external", "external": extDict]
             } else {
-                throw ConfigFormError.validationFailed("brain.mode 必须是 builtin 或 external")
+                throw ConfigFormError.validationFailed(L10n.t(.uiConfigForm113))
             }
         }
 
+        if let input = formInputs["model_config_form"] {
+            guard let form = input as? [String: Any] else { throw ConfigFormError.validationFailed(L10n.t(.uiConfigForm118)) }
+            let model = try modelForm(form, original: original)
+            updated["model_config"] = model.model
+            updated["images_per_model_call"] = model.images
+        }
         return updated
     }
 
@@ -374,7 +440,7 @@ public struct ConfigFormLogic {
         // 2. 校验
         let checkRes = try checker(tempFile)
         guard checkRes.ok else {
-            let errMsg = checkRes.error ?? "配置校验失败"
+            let errMsg = checkRes.error ?? L10n.t(.uiConfigForm119)
             throw ConfigFormError.validationFailed(errMsg)
         }
 
@@ -396,7 +462,7 @@ public struct ConfigFormLogic {
                     try FileManager.default.copyItem(at: targetPath, to: bakPath)
                 }
             } catch {
-                throw ConfigFormError.backupFailed("配置文件备份失败: \(error.localizedDescription)，已中止保存")
+                throw ConfigFormError.backupFailed(L10n.t(.uiConfigForm120, String(describing: error.localizedDescription)))
             }
         }
 
@@ -415,18 +481,21 @@ public struct ConfigFormLogic {
         let result = runControlCommand(executable: controlBinaryPath(), arguments: [
             "control", "config-check", "--config", fileURL.path, "--json"
         ], timeout: 20)
-        return configCheckResult(result)
+        if result.timedOut { return (false, L10n.t(.uiConfigForm121)) }
+        if result.status == 0,
+           let json = try? JSONSerialization.jsonObject(with: result.output) as? [String: Any], json["ok"] as? Bool == true { return (true, nil) }
+        return (false, L10n.t(.uiConfigForm122))
     }
 
     static func configCheckResult(_ result: ControlRun) -> (ok: Bool, error: String?) {
-        if result.timedOut { return (false, "config-check 超时") }
+        if result.timedOut { return (false, L10n.t(.uiConfigForm123)) }
         if let json = try? JSONSerialization.jsonObject(with: result.output) as? [String: Any] {
             if result.status == 0 && json["ok"] as? Bool == true { return (true, nil) }
-            return (false, json["error"] as? String ?? "config-check 校验失败 (exit \(result.status))")
+            return (false, json["error"] as? String ?? L10n.t(.uiConfigForm124, String(describing: result.status)))
         }
         let diagnostic = String(data: result.output, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return (false, diagnostic.isEmpty ? "无法执行 config-check (exit \(result.status))" : diagnostic)
+        return (false, diagnostic.isEmpty ? L10n.t(.uiConfigForm125, String(describing: result.status)) : diagnostic)
     }
 
     /// 默认机器人重载调用

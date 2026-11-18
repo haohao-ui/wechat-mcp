@@ -13,12 +13,12 @@ public enum SettingsValidationError: LocalizedError, Equatable {
 
 public struct SettingsFormLogic {
     public static let ranges: [String: (ClosedRange<Int>, String, String)] = [
-        "cooldown_seconds": (0...300, "冷却时间", "秒"),
-        "max_replies_per_hour": (1...100, "每小时回复上限", "条"),
-        "turn_quiet_seconds": (0...120, "静默等待时间", "秒"),
-        "turn_max_seconds": (10...600, "一轮最长耗时", "秒"),
-        "context_messages": (0...100, "上下文消息数", "条"),
-        "max_attachment_mb": (1...200, "附件大小上限", "MB")
+        "cooldown_seconds": (0...300, L10n.t(.fieldCooldown), L10n.t(.unitSeconds)),
+        "max_replies_per_hour": (1...100, L10n.t(.fieldMaxReplies), L10n.t(.unitMessages)),
+        "turn_quiet_seconds": (0...120, L10n.t(.fieldQuiet), L10n.t(.unitSeconds)),
+        "turn_max_seconds": (10...600, L10n.t(.fieldTurnMax), L10n.t(.unitSeconds)),
+        "context_messages": (0...100, L10n.t(.fieldContext), L10n.t(.unitMessages)),
+        "max_attachment_mb": (1...200, L10n.t(.fieldAttachment), "MB")
     ]
 
     public static func validateAndSave(
@@ -33,17 +33,17 @@ public struct SettingsFormLogic {
                     let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
                     if trimmed.isEmpty { continue }
                     guard let parsed = Int(trimmed) else {
-                        return .failure(.message("\(label) (\(field)) 必须为有效整数"))
+                        return .failure(.message(L10n.t(.uiSettings021, String(describing: label), String(describing: field))))
                     }
                     intVal = parsed
                 } else if let num = val as? Int {
                     intVal = num
                 } else {
-                    return .failure(.message("\(label) (\(field)) 类型不正确"))
+                    return .failure(.message(L10n.t(.uiSettings022, String(describing: label), String(describing: field))))
                 }
 
                 if !range.contains(intVal) {
-                    return .failure(.message("\(label) (\(field)) 超出范围 (\(range.lowerBound)-\(range.upperBound) \(unit))"))
+                    return .failure(.message(L10n.t(.uiSettings023, String(describing: label), String(describing: field), String(describing: range.lowerBound), String(describing: range.upperBound), String(describing: unit))))
                 }
             }
         }
@@ -72,10 +72,10 @@ public final class SettingsPageController: NSViewController {
     private let maxSecField = NSTextField()
     private let contextMsgField = NSTextField()
     private let maxAttachmentField = NSTextField()
-    private let manageWindowCheck = NSButton(checkboxWithTitle: "自动管理微信主窗口 (调整至 880x640)", target: nil, action: nil)
+    private let manageWindowCheck = NSButton(checkboxWithTitle: L10n.t(.manageWindow), target: nil, action: nil)
 
-    private let saveButton = NSButton(title: "保存配置", target: nil, action: nil)
-    private let restoreDefaultsButton = NSButton(title: "恢复默认值", target: nil, action: nil)
+    private let saveButton = NSButton(title: L10n.t(.actionSaveConfig), target: nil, action: nil)
+    private let restoreDefaultsButton = NSButton(title: L10n.t(.actionRestoreDefaults), target: nil, action: nil)
     private let statusMessageLabel = NSTextField(wrappingLabelWithString: "")
 
     // Permission rows
@@ -83,7 +83,7 @@ public final class SettingsPageController: NSViewController {
 
     // Update navigation
     public var onNavigateToUpdate: (() -> Void)?
-    private let jumpToUpdateButton = NSButton(title: "前往应用更新页...", target: nil, action: nil)
+    private let jumpToUpdateButton = NSButton(title: L10n.t(.actionGotoUpdate), target: nil, action: nil)
 
     public init(context: StatusPanelController) {
         self.context = context
@@ -104,6 +104,8 @@ public final class SettingsPageController: NSViewController {
         populateCurrentValues()
         updatePermissionStatuses()
     }
+
+    private let languagePopup = NSPopUpButton()
 
     private func setupUI() {
         let scrollView = NSScrollView(frame: view.bounds)
@@ -126,11 +128,11 @@ public final class SettingsPageController: NSViewController {
         permStack.translatesAutoresizingMaskIntoConstraints = false
 
         let perms: [(PermissionKind, String)] = [
-            (.screen, "屏幕录制权限（微信窗口识别）"),
-            (.accessibility, "辅助功能权限（窗口控制与点击）"),
-            (.desktop, "桌面文件夹（附件与临时文件）"),
-            (.documents, "文稿文件夹（附件读写）"),
-            (.downloads, "下载文件夹（附件读写）")
+            (.screen, L10n.t(.uiSettings024)),
+            (.accessibility, L10n.t(.uiSettings025)),
+            (.desktop, L10n.t(.uiSettings026)),
+            (.documents, L10n.t(.uiSettings027)),
+            (.downloads, L10n.t(.uiSettings028))
         ]
 
         for (kind, title) in perms {
@@ -143,14 +145,14 @@ public final class SettingsPageController: NSViewController {
             nameLbl.font = NSFont.systemFont(ofSize: 12)
             nameLbl.widthAnchor.constraint(equalToConstant: 260).isActive = true
 
-            let stLbl = NSTextField(labelWithString: "检查中...")
+            let stLbl = NSTextField(labelWithString: L10n.t(.statusChecking))
             stLbl.font = NSFont.systemFont(ofSize: 12, weight: .medium)
             stLbl.widthAnchor.constraint(equalToConstant: 70).isActive = true
 
-            let reqBtn = NSButton(title: "请求权限", target: self, action: #selector(handleRequestPermission(_:)))
+            let reqBtn = NSButton(title: L10n.t(.uiSettings029), target: self, action: #selector(handleRequestPermission(_:)))
             reqBtn.identifier = NSUserInterfaceItemIdentifier(kind.rawValue)
 
-            let setBtn = NSButton(title: "打开系统设置", target: self, action: #selector(handleOpenSettings(_:)))
+            let setBtn = NSButton(title: L10n.t(.actionOpenSystemSettings), target: self, action: #selector(handleOpenSettings(_:)))
             setBtn.identifier = NSUserInterfaceItemIdentifier(kind.rawValue)
 
             row.addArrangedSubview(nameLbl)
@@ -162,38 +164,56 @@ public final class SettingsPageController: NSViewController {
             permissionViews[kind] = (stLbl, reqBtn, setBtn)
         }
 
-        let recheckBtn = NSButton(title: "重新检查权限", target: self, action: #selector(handleRecheckPermissions))
+        let recheckBtn = NSButton(title: L10n.t(.uiSettings030), target: self, action: #selector(handleRecheckPermissions))
         permStack.addArrangedSubview(recheckBtn)
 
         permBox.setContent(permStack)
         contentStack.addArrangedSubview(permBox)
 
+        // 2. 界面语言（五语）：切换后由宿主重建侧栏，导航与页面文案一起更新。
+        let langBox = createSectionBox(title: L10n.t(.settingsLanguageBox))
+        let langStack = NSStackView()
+        langStack.orientation = .horizontal
+        langStack.alignment = .centerY
+        langStack.spacing = 10
+        langStack.translatesAutoresizingMaskIntoConstraints = false
+        langStack.addArrangedSubview(NSTextField(labelWithString: L10n.t(.languageLabel)))
+        languagePopup.addItems(withTitles: AppLanguage.allCases.map { $0.displayName })
+        if let idx = AppLanguage.allCases.firstIndex(of: L10n.language) {
+            languagePopup.selectItem(at: idx)
+        }
+        languagePopup.target = self
+        languagePopup.action = #selector(handleLanguageChange)
+        langStack.addArrangedSubview(languagePopup)
+        langBox.setContent(langStack)
+        contentStack.addArrangedSubview(langBox)
+
         // 2. 账号与模型
-        let accountBox = createSectionBox(title: "账号与模型")
+        let accountBox = createSectionBox(title: L10n.t(.settingsAccountBox))
         let accGrid = NSGridView(views: [
-            [NSTextField(labelWithString: "微信账号:"), accountLabel],
-            [NSTextField(labelWithString: "模型接口:"), backendLabel],
-            [NSTextField(labelWithString: "模型名称:"), modelLabel],
-            [NSTextField(labelWithString: "API 密钥:"), keyStatusLabel]
+            [NSTextField(labelWithString: L10n.t(.labelAccount)), accountLabel],
+            [NSTextField(labelWithString: L10n.t(.labelBackend)), backendLabel],
+            [NSTextField(labelWithString: L10n.t(.labelModelName)), modelLabel],
+            [NSTextField(labelWithString: L10n.t(.labelApiKey)), keyStatusLabel]
         ])
         accGrid.translatesAutoresizingMaskIntoConstraints = false
-        accGrid.rowSpacing = 6
+        accGrid.rowSpacing = 10
         accGrid.columnSpacing = 12
         accountBox.setContent(accGrid)
         contentStack.addArrangedSubview(accountBox)
 
         // 3. 回复节奏与附件配置
-        let paceBox = createSectionBox(title: "回复节奏与运行参数")
+        let paceBox = createSectionBox(title: L10n.t(.paceBox))
         let paceGrid = NSGridView(views: [
-            [NSTextField(labelWithString: "冷却时间 (cooldown_seconds):"), cooldownField, NSTextField(labelWithString: "0–300 秒 (默认 15)")],
-            [NSTextField(labelWithString: "每小时上限 (max_replies_per_hour):"), maxRepliesField, NSTextField(labelWithString: "1–100 条 (默认 20)")],
-            [NSTextField(labelWithString: "静默等待 (turn_quiet_seconds):"), quietSecField, NSTextField(labelWithString: "0–120 秒 (默认 10)")],
-            [NSTextField(labelWithString: "单轮最长 (turn_max_seconds):"), maxSecField, NSTextField(labelWithString: "10–600 秒 (默认 60)")],
-            [NSTextField(labelWithString: "上下文条数 (context_messages):"), contextMsgField, NSTextField(labelWithString: "0–100 条 (默认 5)")],
-            [NSTextField(labelWithString: "附件上限 (max_attachment_mb):"), maxAttachmentField, NSTextField(labelWithString: "1–200 MB (默认 50)")]
+            [NSTextField(labelWithString: L10n.t(.uiSettings031)), cooldownField, NSTextField(labelWithString: L10n.t(.uiSettings032))],
+            [NSTextField(labelWithString: L10n.t(.uiSettings033)), maxRepliesField, NSTextField(labelWithString: L10n.t(.uiSettings034))],
+            [NSTextField(labelWithString: L10n.t(.uiSettings035)), quietSecField, NSTextField(labelWithString: L10n.t(.uiSettings036))],
+            [NSTextField(labelWithString: L10n.t(.uiSettings037)), maxSecField, NSTextField(labelWithString: L10n.t(.uiSettings038))],
+            [NSTextField(labelWithString: L10n.t(.uiSettings039)), contextMsgField, NSTextField(labelWithString: L10n.t(.uiSettings040))],
+            [NSTextField(labelWithString: L10n.t(.uiSettings041)), maxAttachmentField, NSTextField(labelWithString: L10n.t(.uiSettings042))]
         ])
         paceGrid.translatesAutoresizingMaskIntoConstraints = false
-        paceGrid.rowSpacing = 6
+        paceGrid.rowSpacing = 12
         paceGrid.columnSpacing = 12
 
         for f in [cooldownField, maxRepliesField, quietSecField, maxSecField, contextMsgField, maxAttachmentField] {
@@ -207,7 +227,7 @@ public final class SettingsPageController: NSViewController {
         paceStack.addArrangedSubview(paceGrid)
         paceStack.addArrangedSubview(manageWindowCheck)
 
-        let noteLbl = NSTextField(wrappingLabelWithString: "注：允许名单与忽略名单已移至「联系人」页；外部大脑配置已移至「MCP」页。")
+        let noteLbl = NSTextField(wrappingLabelWithString: L10n.t(.uiSettings043))
         noteLbl.font = NSFont.systemFont(ofSize: 11)
         noteLbl.textColor = .secondaryLabelColor
         paceStack.addArrangedSubview(noteLbl)
@@ -216,7 +236,7 @@ public final class SettingsPageController: NSViewController {
         contentStack.addArrangedSubview(paceBox)
 
         // 4. 应用版本与更新导航
-        let updateBox = createSectionBox(title: "应用版本与更新")
+        let updateBox = createSectionBox(title: L10n.t(.updateBox))
         let updateStack = NSStackView()
         updateStack.orientation = .vertical
         updateStack.alignment = .leading
@@ -225,7 +245,7 @@ public final class SettingsPageController: NSViewController {
         let verRow = NSStackView()
         verRow.orientation = .horizontal
         verRow.spacing = 8
-        let verTitle = NSTextField(labelWithString: "当前宿主版本:")
+        let verTitle = NSTextField(labelWithString: L10n.t(.hostVersion))
         verTitle.font = NSFont.systemFont(ofSize: 12)
         let verVal = NSTextField(labelWithString: hostAppVersion())
         verVal.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
@@ -233,7 +253,7 @@ public final class SettingsPageController: NSViewController {
         verRow.addArrangedSubview(verVal)
         updateStack.addArrangedSubview(verRow)
 
-        let updateIntro = NSTextField(wrappingLabelWithString: "应用版本更新（含微信 Bot 核心与辅助服务）已集中在「应用更新」页面管理，支持发布者验签、排空延期与本机重签名。")
+        let updateIntro = NSTextField(wrappingLabelWithString: L10n.t(.updateIntro))
         updateIntro.font = NSFont.systemFont(ofSize: 11)
         updateIntro.textColor = .secondaryLabelColor
         updateStack.addArrangedSubview(updateIntro)
@@ -269,8 +289,8 @@ public final class SettingsPageController: NSViewController {
             document.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
             document.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
             document.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
-            contentStack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 20),
-            contentStack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -20),
+            contentStack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 24),
+            contentStack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -24),
             contentStack.topAnchor.constraint(equalTo: document.topAnchor, constant: 16),
             contentStack.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -16),
             permBox.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
@@ -278,6 +298,12 @@ public final class SettingsPageController: NSViewController {
             paceBox.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
             updateBox.widthAnchor.constraint(equalTo: contentStack.widthAnchor)
         ])
+    }
+
+    @objc private func handleLanguageChange() {
+        let idx = languagePopup.indexOfSelectedItem
+        guard idx >= 0, idx < AppLanguage.allCases.count else { return }
+        L10n.setLanguage(AppLanguage.allCases[idx])
     }
 
     private func createSectionBox(title: String) -> NSBox {
@@ -313,7 +339,7 @@ public final class SettingsPageController: NSViewController {
             let st = permissionStatus(kind)
             switch st {
             case .some(true):
-                views.status.stringValue = "已授权"
+                views.status.stringValue = L10n.t(.uiSettings044)
                 views.status.textColor = .systemGreen
                 views.reqBtn.isEnabled = false
             case .some(false):
@@ -321,7 +347,7 @@ public final class SettingsPageController: NSViewController {
                 views.status.textColor = .systemRed
                 views.reqBtn.isEnabled = true
             case .none:
-                views.status.stringValue = "未知"
+                views.status.stringValue = L10n.t(.uiResidualUnknown)
                 views.status.textColor = .secondaryLabelColor
                 views.reqBtn.isEnabled = true
             }
@@ -360,14 +386,14 @@ public final class SettingsPageController: NSViewController {
         case .success(let updated):
             do {
                 try context.persistConfig(updated)
-                statusMessageLabel.stringValue = "配置保存成功"
+                statusMessageLabel.stringValue = L10n.t(.uiSettings045)
                 statusMessageLabel.textColor = .systemGreen
             } catch {
-                statusMessageLabel.stringValue = "保存失败: \(error.localizedDescription)"
+                statusMessageLabel.stringValue = L10n.t(.saveFailed, String(describing: error.localizedDescription))
                 statusMessageLabel.textColor = .systemRed
             }
         case .failure(let err):
-            statusMessageLabel.stringValue = "校验错误: \(err)"
+            statusMessageLabel.stringValue = L10n.t(.validationError, String(describing: err))
             statusMessageLabel.textColor = .systemRed
         }
     }
@@ -380,7 +406,7 @@ public final class SettingsPageController: NSViewController {
         contextMsgField.stringValue = "5"
         maxAttachmentField.stringValue = "50"
         manageWindowCheck.state = .on
-        statusMessageLabel.stringValue = "已载入默认值，点击「保存配置」后生效"
+        statusMessageLabel.stringValue = L10n.t(.uiSettings046)
         statusMessageLabel.textColor = .systemBlue
     }
 

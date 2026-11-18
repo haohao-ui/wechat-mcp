@@ -2,22 +2,18 @@
 import Foundation
 import AppKit
 
-/// 获取宿主程序当前版本号：优先读取 ~/.wechat-rpa/VERSION，其次读取 Info.plist 中的版本信息
+let hostStatusDidRefreshNotification = Notification.Name("WeChatHostStatusDidRefresh")
+
+/// 显示当前运行 App 的构建信息；安装记录由更新读模型单独提供。
 public func hostAppVersion() -> String {
-    let home = FileManager.default.homeDirectoryForCurrentUser
-    let versionFile = home.appendingPathComponent(".wechat-rpa/VERSION")
-    if let data = try? Data(contentsOf: versionFile),
-       let str = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-       !str.isEmpty {
-        return str
-    }
-    if let info = Bundle.main.infoDictionary,
-       let build = info["CFBundleVersion"] as? String,
+    guard let info = Bundle.main.infoDictionary,
+          let short = info["CFBundleShortVersionString"] as? String,
+          !short.isEmpty else { return L10n.t(.uiStatusPanel049) }
+    if let build = info["CFBundleVersion"] as? String,
        !build.isEmpty, build != "1" {
-        let short = info["CFBundleShortVersionString"] as? String ?? "0.1.0"
         return "\(short) (\(build))"
     }
-    return Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
+    return short
 }
 
 public final class StatusPanelController: NSViewController {
@@ -47,11 +43,11 @@ public final class StatusPanelController: NSViewController {
     private let quietSecField = NSTextField()
     private let maxSecField = NSTextField()
     private let contextMsgField = NSTextField()
-    private let manageWindowCheck = NSButton(checkboxWithTitle: "自动管理微信主窗口 (调整至 880x640)", target: nil, action: nil)
+    private let manageWindowCheck = NSButton(checkboxWithTitle: L10n.t(.manageWindow), target: nil, action: nil)
     private let brainModePopup = NSPopUpButton()
     private let brainTimeoutField = NSTextField()
     private let brainTimeoutActionPopup = NSPopUpButton()
-    private let resumeHandoffButton = NSButton(title: "恢复自动回复", target: nil, action: nil)
+    private let resumeHandoffButton = NSButton(title: L10n.t(.actionResumeAutoReply), target: nil, action: nil)
     /// Sessions the core marked as handed to a person (health.json sessions[*].state == "handoff").
     private var handoffSessionNames: [String] = []
 
@@ -64,6 +60,11 @@ public final class StatusPanelController: NSViewController {
     private var latestBotState: String?
 
     public var currentRawConfig: [String: Any] { rawConfigDict }
+    /// 模型页（issue #2 AC10）保存时用来判断是否需要二次确认「重启后生效」。
+    public var isBotRunning: Bool {
+        if case .running = coreSupervisor.currentStatus { return true }
+        return coreSupervisor.pythonLoadedChecker()
+    }
     public var logDirectoryURL: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".wechat-rpa/logs", isDirectory: true)
     }
@@ -112,17 +113,17 @@ public final class StatusPanelController: NSViewController {
 
         // 1. Title & Header
         let currentVersion = hostAppVersion()
-        let headerBox = createSectionBox(title: "微信客服助手 — 系统状态 (版本: \(currentVersion))")
+        let headerBox = createSectionBox(title: L10n.t(.uiStatusPanel050, String(describing: currentVersion)))
         setupStatusSection(inside: headerBox)
         mainStack.addArrangedSubview(headerBox)
 
         // 2. One-click Actions
-        let actionBox = createSectionBox(title: "一键操作")
+        let actionBox = createSectionBox(title: L10n.t(.legacyActions))
         setupActionSection(inside: actionBox)
         mainStack.addArrangedSubview(actionBox)
 
         // 3. Configuration Form
-        let configBox = createSectionBox(title: "常用配置")
+        let configBox = createSectionBox(title: L10n.t(.legacyConfig))
         setupConfigSection(inside: configBox)
         mainStack.addArrangedSubview(configBox)
 
@@ -198,14 +199,14 @@ public final class StatusPanelController: NSViewController {
 
         let keys = ["permissions", "desktop_service", "bot", "brain", "sessions", "wechat", "layout", "disk"]
         let titles = [
-            "permissions": "权限状态",
-            "desktop_service": "桌面服务",
-            "bot": "机器人核心",
-            "sessions": "各会话状态",
-            "wechat": "微信客户端",
-            "layout": "布局地图",
-            "disk": "磁盘空间",
-            "brain": "大脑状态"
+            "permissions": L10n.t(.uiStatusPanel051),
+            "desktop_service": L10n.t(.itemDesktopService),
+            "bot": L10n.t(.uiStatusPanel052),
+            "sessions": L10n.t(.uiStatusPanel053),
+            "wechat": L10n.t(.uiStatusPanel054),
+            "layout": L10n.t(.uiStatusPanel055),
+            "disk": L10n.t(.uiStatusPanel056),
+            "brain": L10n.t(.uiStatusPanel057)
         ]
 
         for k in keys {
@@ -222,7 +223,7 @@ public final class StatusPanelController: NSViewController {
             tLabel.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
             tLabel.setContentHuggingPriority(.required, for: .horizontal)
 
-            let dLabel = NSTextField(wrappingLabelWithString: "正在检查...")
+            let dLabel = NSTextField(wrappingLabelWithString: L10n.t(.uiStatusPanel058))
             dLabel.font = NSFont.systemFont(ofSize: 12)
             dLabel.textColor = .secondaryLabelColor
             dLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -238,7 +239,7 @@ public final class StatusPanelController: NSViewController {
         }
 
         let buttons = NSStackView(views: [
-            NSButton(title: "立即刷新", target: self, action: #selector(refreshClicked)),
+            NSButton(title: L10n.t(.uiStatusPanel059), target: self, action: #selector(refreshClicked)),
             NSButton(title: "请求屏幕录制权限", target: self, action: #selector(requestScreen)),
             NSButton(title: "请求辅助功能权限", target: self, action: #selector(requestAccessibility))
         ])
@@ -257,22 +258,22 @@ public final class StatusPanelController: NSViewController {
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         let row1 = NSStackView(views: [
-            NSButton(title: "重启桌面服务", target: self, action: #selector(handleRestartDesktopService)),
-            NSButton(title: "重启机器人", target: self, action: #selector(handleRestartBot)),
+            NSButton(title: L10n.t(.actionRestartDesktopService), target: self, action: #selector(handleRestartDesktopService)),
+            NSButton(title: L10n.t(.actionRestartBot), target: self, action: #selector(handleRestartBot)),
             pauseResumeButton,
-            NSButton(title: "放回标准位置", target: self, action: #selector(handleRestoreWechatWindow))
+            NSButton(title: L10n.t(.actionRepositionWechat), target: self, action: #selector(handleRestoreWechatWindow))
         ])
         row1.orientation = .horizontal
         row1.spacing = 8
 
-        pauseResumeButton.title = "暂停机器人"
+        pauseResumeButton.title = L10n.t(.uiStatusPanel060)
         pauseResumeButton.target = self
         pauseResumeButton.action = #selector(handleTogglePause)
 
         let row2 = NSStackView(views: [
-            NSButton(title: "打开附件文件夹", target: self, action: #selector(handleOpenAttachments)),
-            NSButton(title: "打开日志文件夹", target: self, action: #selector(handleOpenLogs)),
-            NSButton(title: "复制诊断信息", target: self, action: #selector(handleCopyDiagnostics)),
+            NSButton(title: L10n.t(.openAttachments), target: self, action: #selector(handleOpenAttachments)),
+            NSButton(title: L10n.t(.openLogs), target: self, action: #selector(handleOpenLogs)),
+            NSButton(title: L10n.t(.copyDiagnostics), target: self, action: #selector(handleCopyDiagnostics)),
             resumeHandoffButton
         ])
         resumeHandoffButton.target = self
@@ -300,9 +301,9 @@ public final class StatusPanelController: NSViewController {
 
         // Read-only info row
         let roRow = NSStackView(views: [
-            NSTextField(labelWithString: "账号:"), accountLabel,
-            NSTextField(labelWithString: "模型:"), backendLabel, modelLabel,
-            NSTextField(labelWithString: "密钥:"), keyStatusLabel
+            NSTextField(labelWithString: L10n.t(.uiStatusPanel061)), accountLabel,
+            NSTextField(labelWithString: L10n.t(.uiStatusPanel062)), backendLabel, modelLabel,
+            NSTextField(labelWithString: L10n.t(.uiStatusPanel063)), keyStatusLabel
         ])
         roRow.orientation = .horizontal
         roRow.spacing = 8
@@ -310,30 +311,30 @@ public final class StatusPanelController: NSViewController {
 
         // Editable form grid
         let grid = NSGridView(views: [
-            [NSTextField(labelWithString: "允许名单 (allowlist):"), allowlistField],
-            [NSTextField(labelWithString: "忽略名单 (ignorelist):"), ignorelistField],
-            [NSTextField(labelWithString: "附件上限 MB (1~200):"), maxAttachmentField],
-            [NSTextField(labelWithString: "每小时回复上限:"), maxRepliesField],
-            [NSTextField(labelWithString: "冷却时间 (秒):"), cooldownField],
-            [NSTextField(labelWithString: "静默等待 (秒):"), quietSecField],
-            [NSTextField(labelWithString: "轮次最长时间 (秒):"), maxSecField],
-            [NSTextField(labelWithString: "上下文消息条数:"), contextMsgField],
-            [NSTextField(labelWithString: "回复由:"), brainModePopup],
-            [NSTextField(labelWithString: "外部大脑超时 (秒):"), brainTimeoutField],
-            [NSTextField(labelWithString: "超时后:"), brainTimeoutActionPopup]
+            [NSTextField(labelWithString: L10n.t(.allowlist)), allowlistField],
+            [NSTextField(labelWithString: L10n.t(.ignorelist)), ignorelistField],
+            [NSTextField(labelWithString: L10n.t(.uiStatusPanel064)), maxAttachmentField],
+            [NSTextField(labelWithString: L10n.t(.uiStatusPanel065)), maxRepliesField],
+            [NSTextField(labelWithString: L10n.t(.uiStatusPanel066)), cooldownField],
+            [NSTextField(labelWithString: L10n.t(.uiStatusPanel067)), quietSecField],
+            [NSTextField(labelWithString: L10n.t(.uiStatusPanel068)), maxSecField],
+            [NSTextField(labelWithString: L10n.t(.uiStatusPanel069)), contextMsgField],
+            [NSTextField(labelWithString: L10n.t(.uiStatusPanel070)), brainModePopup],
+            [NSTextField(labelWithString: L10n.t(.uiStatusPanel071)), brainTimeoutField],
+            [NSTextField(labelWithString: L10n.t(.timeoutAction)), brainTimeoutActionPopup]
         ])
         grid.rowSpacing = 6
         grid.columnSpacing = 10
         stack.addArrangedSubview(grid)
         stack.addArrangedSubview(manageWindowCheck)
-        brainModePopup.addItems(withTitles: ["内置大脑", "外部大脑 (MCP next_turn / reply)"])
-        brainTimeoutActionPopup.addItems(withTitles: ["这一轮不回复", "改用内置大脑", "转人工"])
-        brainTimeoutField.placeholderString = "留空使用默认值 120"
+        brainModePopup.addItems(withTitles: [L10n.t(.uiBrain071), L10n.t(.uiStatusPanel072)])
+        brainTimeoutActionPopup.addItems(withTitles: [L10n.t(.skipTurn), L10n.t(.uiStatusPanel073), L10n.t(.actionHandoff)])
+        brainTimeoutField.placeholderString = L10n.t(.uiStatusPanel074)
 
         configErrorLabel.font = NSFont.systemFont(ofSize: 11)
         configErrorLabel.textColor = .systemRed
 
-        configSaveButton.title = "保存配置"
+        configSaveButton.title = L10n.t(.actionSaveConfig)
         configSaveButton.target = self
         configSaveButton.action = #selector(handleSaveConfig)
 
@@ -347,8 +348,8 @@ public final class StatusPanelController: NSViewController {
             (maxAttachmentField, "50"), (maxRepliesField, "20"), (cooldownField, "15"),
             (quietSecField, "10"), (maxSecField, "60"), (contextMsgField, "5")
         ]
-        for (field, value) in defaults { field.placeholderString = "留空使用默认值 \(value)" }
-        ignorelistField.placeholderString = "每行一个：名称, private 或 group"
+        for (field, value) in defaults { field.placeholderString = L10n.t(.defaultPlaceholder, String(describing: value)) }
+        ignorelistField.placeholderString = L10n.t(.ignorePlaceholder)
         setConfigFormEnabled(false)
 
         embed(stack, in: box)
@@ -386,16 +387,18 @@ public final class StatusPanelController: NSViewController {
 
             var text = item.reason
             if let fix = item.fix, !fix.isEmpty {
-                text += " (建议: \(fix))"
+                text += L10n.t(.uiStatusPanel075, String(describing: fix))
             }
             viewGroup.detail.stringValue = text
         }
 
         if input.bot.healthState == "paused" {
-            pauseResumeButton.title = "恢复机器人"
+            pauseResumeButton.title = L10n.t(.uiStatusPanel076)
         } else {
-            pauseResumeButton.title = "暂停机器人"
+            pauseResumeButton.title = L10n.t(.uiStatusPanel060)
         }
+        NotificationCenter.default.post(name: hostStatusDidRefreshNotification, object: self,
+                                        userInfo: ["items": items, "input": input])
     }
 
     private func collectStatusInput() -> StatusInput {
@@ -426,7 +429,7 @@ public final class StatusPanelController: NSViewController {
             svcPid = pid
         case .restarting(let at):
             svcStatus = "restarting"
-            stoppedReason = "退避重试中 (预计 \(Int(at.timeIntervalSince1970)) 重试)"
+            stoppedReason = L10n.t(.uiStatusPanel077, String(describing: Int(at.timeIntervalSince1970)))
         case .stopped(let reason):
             svcStatus = "stopped"
             stoppedReason = reason
@@ -456,6 +459,7 @@ public final class StatusPanelController: NSViewController {
 
         let healthFile = stateDir.appendingPathComponent("health.json")
         var healthState: String? = nil
+        var healthReason: String? = nil
         var healthUpdated: Double? = nil
         var sessionsInput: [String: SessionHealthInput] = [:]
 
@@ -463,6 +467,7 @@ public final class StatusPanelController: NSViewController {
            let hData = try? Data(contentsOf: healthFile),
            let hObj = try? JSONSerialization.jsonObject(with: hData, options: []) as? [String: Any] {
             healthState = hObj["state"] as? String
+            healthReason = hObj["reason"] as? String
             healthUpdated = hObj["updated_at"] as? Double
             if let sessObj = hObj["sessions"] as? [String: [String: Any]] {
                 for (name, sDict) in sessObj {
@@ -497,12 +502,13 @@ public final class StatusPanelController: NSViewController {
         if case .running(let pid) = coreSt {
             corePid = pid
         } else if case .restarting(let at) = coreSt {
-            coreReason = "退避重试中 (预计 \(Int(at.timeIntervalSince1970)) 重试)"
+            coreReason = L10n.t(.uiStatusPanel077, String(describing: Int(at.timeIntervalSince1970)))
         }
 
         let botInput = BotInput(
             launchdLoaded: pyLoaded,
             healthState: healthState,
+            healthReason: healthReason,
             healthUpdatedAt: healthUpdated,
             now: Date().timeIntervalSince1970,
             coreEnabled: coreEnabled,
@@ -589,7 +595,7 @@ public final class StatusPanelController: NSViewController {
               let data = try? Data(contentsOf: url),
               let json = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
             setConfigFormEnabled(false)
-            configErrorLabel.stringValue = "未找到机器人配置文件（\(url.path)），无法保存"
+            configErrorLabel.stringValue = L10n.t(.uiStatusPanel078, String(describing: url.path))
             return
         }
         self.rawConfigDict = json
@@ -615,7 +621,7 @@ public final class StatusPanelController: NSViewController {
         accountLabel.stringValue = masked["account_id"] as? String ?? "-"
         backendLabel.stringValue = masked["model_backend"] as? String ?? "-"
         modelLabel.stringValue = masked["model_name"] as? String ?? "-"
-        keyStatusLabel.stringValue = masked["api_key_status"] as? String ?? "未配置"
+        keyStatusLabel.stringValue = masked["api_key_status"] as? String ?? L10n.t(.modelUnconfigured)
 
         let editable = masked["editable"] as? [String: Any] ?? [:]
         if let allow = editable["allowlist"] as? [[String: Any]] {
@@ -675,49 +681,65 @@ public final class StatusPanelController: NSViewController {
     private func confirmIfSending(actionName: String) -> Bool {
         if latestBotState == "sending" {
             let alert = NSAlert()
-            alert.messageText = "机器人正在发送回复"
-            alert.informativeText = "机器人当前正在处理并发送消息，执行「\(actionName)」可能会打断发送。确定要继续吗？"
-            alert.addButton(withTitle: "继续\(actionName)")
-            alert.addButton(withTitle: "取消")
+            alert.messageText = L10n.t(.uiStatusPanel079)
+            alert.informativeText = L10n.t(.uiStatusPanel080, String(describing: actionName))
+            alert.addButton(withTitle: L10n.t(.continueAction, String(describing: actionName)))
+            alert.addButton(withTitle: L10n.t(.cancel))
             return alert.runModal() == .alertFirstButtonReturn
         }
         return true
     }
 
     @objc private func handleRestartDesktopService() {
-        actionMessageLabel.stringValue = "正在重启桌面服务..."
+        actionMessageLabel.stringValue = L10n.t(.uiStatusPanel081)
         let ok = HostActions.restartDesktopService(worker: worker, healthState: latestBotState) { [weak self] in
-            return self?.confirmIfSending(actionName: "重启桌面服务") ?? false
+            return self?.confirmIfSending(actionName: L10n.t(.actionRestartDesktopService)) ?? false
         }
         if ok {
-            actionMessageLabel.stringValue = "桌面服务已触发重启"
+            actionMessageLabel.stringValue = L10n.t(.uiStatusPanel082)
         } else {
-            actionMessageLabel.stringValue = "操作已取消"
+            actionMessageLabel.stringValue = L10n.t(.actionCancelled)
         }
         refresh()
     }
 
+    /// The Rust core is supervised in-process: restart it the same way as 「重启机器人」 (a planned
+    /// stop, not counted as a crash). The legacy launchd label `local.wechat-rpa.bot` no longer
+    /// exists, so kickstarting it left saved settings without effect.
+    fileprivate func restartCoreForConfig() throws {
+        guard FileManager.default.fileExists(atPath: coreSupervisor.coreEnabledURL.path) else {
+            try ConfigFormLogic.defaultReloadBot()
+            return
+        }
+        let supervisor = coreSupervisor
+        DispatchQueue.global(qos: .userInitiated).async {
+            supervisor.reset()
+            supervisor.stopProcess()
+            supervisor.checkAndReconcile()
+        }
+    }
+
     @objc private func handleRestartBot() {
-        actionMessageLabel.stringValue = "正在重启机器人..."
+        actionMessageLabel.stringValue = L10n.t(.uiStatusPanel083)
         if FileManager.default.fileExists(atPath: coreSupervisor.coreEnabledURL.path) {
             coreSupervisor.reset()
             coreSupervisor.stopProcess()
             coreSupervisor.checkAndReconcile()
-            actionMessageLabel.stringValue = "已触发 Rust 核心重启"
+            actionMessageLabel.stringValue = L10n.t(.uiStatusPanel084)
             refresh()
             return
         }
         do {
             let ok = try HostActions.restartBot(healthState: latestBotState, confirmHandler: { [weak self] in
-                return self?.confirmIfSending(actionName: "重启机器人") ?? false
+                return self?.confirmIfSending(actionName: L10n.t(.actionRestartBot)) ?? false
             })
             if ok {
-                actionMessageLabel.stringValue = "已触发机器人重启"
+                actionMessageLabel.stringValue = L10n.t(.uiStatusPanel085)
             } else {
-                actionMessageLabel.stringValue = "操作已取消"
+                actionMessageLabel.stringValue = L10n.t(.actionCancelled)
             }
         } catch {
-            actionMessageLabel.stringValue = "重启机器人失败: \(error.localizedDescription)"
+            actionMessageLabel.stringValue = L10n.t(.uiStatusPanel086, String(describing: error.localizedDescription))
         }
         refresh()
     }
@@ -727,13 +749,13 @@ public final class StatusPanelController: NSViewController {
         do {
             if latestBotState == "paused" {
                 try HostActions.resumeBot(stateDir: stateDir)
-                actionMessageLabel.stringValue = "机器人已恢复运行"
+                actionMessageLabel.stringValue = L10n.t(.uiStatusPanel087)
             } else {
                 try HostActions.pauseBot(stateDir: stateDir)
-                actionMessageLabel.stringValue = "机器人已暂停"
+                actionMessageLabel.stringValue = L10n.t(.uiStatusPanel088)
             }
         } catch {
-            actionMessageLabel.stringValue = "操作失败: \(error.localizedDescription)"
+            actionMessageLabel.stringValue = L10n.t(.uiStatusPanel089, String(describing: error.localizedDescription))
         }
         refresh()
     }
@@ -745,7 +767,7 @@ public final class StatusPanelController: NSViewController {
         guard !names.isEmpty else { return }
         let bin = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".wechat-rpa/bin/wechat-mcp")
         let config = getConfigURL().path
-        actionMessageLabel.stringValue = "正在恢复自动回复：\(names.joined(separator: "、"))"
+        actionMessageLabel.stringValue = L10n.t(.uiStatusPanel090, String(describing: names.joined(separator: "、")))
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             var failed: [String] = []
             for name in names {
@@ -759,7 +781,7 @@ public final class StatusPanelController: NSViewController {
                 if process.terminationStatus != 0 { failed.append(name) }
             }
             DispatchQueue.main.async {
-                self?.actionMessageLabel.stringValue = failed.isEmpty ? "已恢复自动回复" : "恢复失败：\(failed.joined(separator: "、"))"
+                self?.actionMessageLabel.stringValue = failed.isEmpty ? L10n.t(.uiStatusPanel091) : L10n.t(.uiStatusPanel092, String(describing: failed.joined(separator: "、")))
                 self?.refresh()
             }
         }
@@ -768,7 +790,7 @@ public final class StatusPanelController: NSViewController {
     @objc private func handleRestoreWechatWindow() {
         do {
             try HostActions.restoreWechatWindow(wechatPID: nil)
-            actionMessageLabel.stringValue = "微信窗口已放回标准位置 (880x640)"
+            actionMessageLabel.stringValue = L10n.t(.uiStatusPanel093)
         } catch {
             actionMessageLabel.stringValue = error.localizedDescription
         }
@@ -790,15 +812,15 @@ public final class StatusPanelController: NSViewController {
     @objc private func handleCopyDiagnostics() {
         let text = generateDiagnostics(items: latestItems, appVersion: hostAppVersion())
         HostActions.copyDiagnostics(text)
-        actionMessageLabel.stringValue = "诊断信息已复制到剪贴板"
+        actionMessageLabel.stringValue = L10n.t(.copiedDiagnostics)
     }
 
     @objc private func handleSaveConfig() {
         configErrorLabel.stringValue = ""
-        actionMessageLabel.stringValue = "正在保存并校验配置..."
+        actionMessageLabel.stringValue = L10n.t(.uiStatusPanel094)
 
         guard let targetURL = currentConfigURL else {
-            configErrorLabel.stringValue = "配置路径无效"
+            configErrorLabel.stringValue = L10n.t(.uiStatusPanel095)
             return
         }
 
@@ -822,8 +844,8 @@ public final class StatusPanelController: NSViewController {
         do {
             newConfig = try ConfigFormLogic.buildUpdatedConfig(original: rawConfigDict, formInputs: formInputs)
         } catch {
-            configErrorLabel.stringValue = "表单格式错误: \(error.localizedDescription)"
-            actionMessageLabel.stringValue = "配置保存被拒绝"
+            configErrorLabel.stringValue = L10n.t(.uiStatusPanel096, String(describing: error.localizedDescription))
+            actionMessageLabel.stringValue = L10n.t(.saveRejected)
             return
         }
 
@@ -833,15 +855,15 @@ public final class StatusPanelController: NSViewController {
                 targetPath: targetURL,
                 newConfigData: data,
                 checker: ConfigFormLogic.defaultCheckConfig,
-                reloader: ConfigFormLogic.defaultReloadBot
+                reloader: { [weak self] in try self?.restartCoreForConfig() }
             )
             rawConfigDict = newConfig
-            actionMessageLabel.stringValue = "配置保存成功，机器人已重启生效"
+            actionMessageLabel.stringValue = L10n.t(.uiStatusPanel097)
             configErrorLabel.stringValue = ""
             refresh()
         } catch {
-            configErrorLabel.stringValue = "保存失败: \(error.localizedDescription)"
-            actionMessageLabel.stringValue = "配置保存被拒绝"
+            configErrorLabel.stringValue = L10n.t(.saveFailed, String(describing: error.localizedDescription))
+            actionMessageLabel.stringValue = L10n.t(.saveRejected)
         }
     }
 
@@ -888,16 +910,18 @@ public final class StatusPanelController: NSViewController {
         handleCopyDiagnostics()
     }
 
-    public func persistConfig(_ newConfig: [String: Any]) throws {
+    /// Saves the config; `restartCore` restarts serve-core so settings read only at start (brain,
+    /// open_api, pacing) take effect. Allowlist edits are re-read live and need no restart.
+    public func persistConfig(_ newConfig: [String: Any], restartCore: Bool = true) throws {
         guard let targetURL = currentConfigURL else {
-            throw ConfigFormError.writeFailed("配置路径无效")
+            throw ConfigFormError.writeFailed(L10n.t(.uiStatusPanel095))
         }
         let data = try JSONSerialization.data(withJSONObject: newConfig, options: [.prettyPrinted])
         try ConfigFormLogic.saveConfig(
             targetPath: targetURL,
             newConfigData: data,
             checker: ConfigFormLogic.defaultCheckConfig,
-            reloader: ConfigFormLogic.defaultReloadBot
+            reloader: restartCore ? { [weak self] in try self?.restartCoreForConfig() } : nil
         )
         rawConfigDict = newConfig
         refresh()

@@ -232,6 +232,16 @@ func runTests() -> Int32 {
         check("check_unverified_install_blocked", UpdatePageLogic.canInstall(checkResult: checkRes, transaction: .idle) == false)
     }
 
+    // Backend timestamps are numeric; older responses used ISO strings.
+    do {
+        let numeric = """
+        {"status":"available","candidate":{"release_id":"1.0.0","sequence":2,"published_at":0,"compatible":true,"requires_local_signing":true},"verification":{"publisher_verified":true}}
+        """
+        let parsed = try UpdatePageLogic.parseCheckPayload(jsonString: numeric)
+        check("numeric_published_at_decodes", parsed.candidate?.publishedAt == "1970-01-01 00:00 UTC")
+        check("verified_manifest_does_not_enable_install", UpdatePageLogic.canInstall(checkResult: parsed, transaction: .idle) == false)
+    } catch { check("numeric_published_at_decodes", false, "\(error)") }
+
     // 4. 检查更新 - 已是最新版本（Already Installed）
     do {
         let alreadyJson = """
@@ -379,6 +389,7 @@ func runTests() -> Int32 {
         if let sDir = stateDirPath {
             let seqFile = URL(fileURLWithPath: sDir).appendingPathComponent("highest_accepted_sequence")
             try? "1001\n".write(to: seqFile, atomically: true, encoding: .utf8)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: seqFile.path)
 
             do {
                 let status1001 = try realClient.fetchStatus()
@@ -456,6 +467,118 @@ func runTests() -> Int32 {
         }
     }
 
+    // Real process bounds plus fixture-only download client/UI state tests.
+    do {
+        let started = ProcessInfo.processInfo.systemUptime
+        let hung = runUpdatePageCommand(executable: "/bin/sh", arguments: ["-c", "trap '' TERM; while :; do sleep 1; done"], timeout: 0.1)
+        check("updater_process_ignoring_term_is_bounded", hung.timedOut && ProcessInfo.processInfo.systemUptime - started < 3.5)
+        let flood = runUpdatePageCommand(executable: "/usr/bin/yes", arguments: ["bounded-test-output"], timeout: 2)
+        check("updater_process_output_is_bounded", flood.status != 0 && flood.output.count <= 4 * 1024 * 1024)
+        let good = runUpdatePageCommand(executable: "/bin/sh", arguments: ["-c", "printf result; printf diagnostics >&2"], timeout: 1)
+        check("updater_process_drains_both_streams", good.status == 0 && String(data: good.output, encoding: .utf8) == "resultdiagnostics")
+    }
+    do {
+        let digest = String(repeating: "a", count: 64)
+        let expected = UpdateCheckResult(status: .available, candidate: UpdateCandidateDetail(releaseId: "fixture-release", sequence: 2), verification: UpdateVerificationInfo(publisherVerified: true), manifestSha256: digest)
+        let statusJSON = """
+        {"current_release":{"architecture":"fixture","status":"unknown","source":"unknown"},"candidate_release":null,"transaction":{"status":"idle","recovery_required":false},"guard":{"highest_accepted_sequence":0,"maintenance_active":false}}
+        """
+        let checkJSON = """
+        {"status":"available","candidate":{"release_id":"fixture-release","sequence":2,"compatible":true,"requires_local_signing":true},"verification":{"publisher_verified":true},"manifest_sha256":"\(digest)"}
+        """
+        let lock = NSLock()
+        var mode = "good"
+        var calls = 0
+        let responder: UpdateClient.CommandExecutor = { executable, arguments, _ in
+            if arguments.first == "control" {
+                let body = arguments.contains("update-check") ? checkJSON : statusJSON
+                return ControlRun(status: 0, output: Data(body.utf8), timedOut: false)
+            }
+            if arguments.first == "status" {
+                return ControlRun(status: 0, output: Data("{\"status\":\"idle\",\"maintenance_active\":false,\"capabilities\":{\"schema\":1,\"download\":true}}".utf8), timedOut: false)
+            }
+            // 应用更新页会查询整包回滚状态；它不属于「下载」调用，不能被计入下载次数。
+            if arguments.first == "rollback-status" {
+                return ControlRun(status: 0, output: Data("{\"version\":null,\"installed_at\":null,\"can_rollback\":false,\"reason\":\"no_backup\"}".utf8), timedOut: false)
+            }
+            lock.lock(); calls += 1; let currentMode = mode; lock.unlock()
+            let returnedDigest = currentMode == "changed" ? String(repeating: "b", count: 64) : digest
+            let body = """
+            {"status":"downloaded","candidate_id":"11111111-1111-4111-8111-111111111111","release_id":"fixture-release","sequence":2,"manifest_sha256":"\(returnedDigest)"}
+            """
+            return ControlRun(status: 0, output: Data(body.utf8), timedOut: false)
+        }
+        let client = UpdateClient(configPath: "/fixture/config.json", executor: responder)
+        do { let receipt = try client.downloadUpdate(expected: expected); check("download_receipt_pins_manifest", receipt.manifestSha256 == digest) }
+        catch { check("download_receipt_pins_manifest", false, "\(error)") }
+        lock.lock(); mode = "changed"; lock.unlock()
+        do { _ = try client.downloadUpdate(expected: expected); check("changed_source_is_not_download_success", false) }
+        catch { check("changed_source_is_not_download_success", true) }
+        let timedOut = UpdateClient(configPath: "/fixture/config.json", executor: { _,_,_ in ControlRun(status: 0, output: Data(checkJSON.utf8), timedOut: true) })
+        do { _ = try timedOut.checkUpdate(); check("timed_out_check_cannot_enable_download", false) }
+        catch { check("timed_out_check_cannot_enable_download", true) }
+        let legacy = UpdateClient(configPath: "/fixture/config.json", executor: { _,_,_ in ControlRun(status: 0, output: Data("{\"status\":\"idle\",\"maintenance_active\":false}".utf8), timedOut: false) })
+        check("old_updater_without_capabilities_stays_disabled", (try? legacy.supportsDownload()) == false)
+        lock.lock(); mode = "good"; calls = 0; lock.unlock()
+        let context = StatusPanelController(worker: SocketWorker())
+        let page = UpdatePageController(context: context, client: client)
+        _ = page.view
+        func descendants(_ root: NSView) -> [NSView] { [root] + root.subviews.flatMap { descendants($0) } }
+        let checkButton = descendants(page.view).compactMap { $0 as? NSButton }.first { $0.title == "检查更新" }!
+        let download = descendants(page.view).compactMap { $0 as? NSButton }.first { $0.title == "下载更新" }!
+        func waitFor(_ condition: () -> Bool) {
+            let deadline = ProcessInfo.processInfo.systemUptime + 5
+            while !condition() && ProcessInfo.processInfo.systemUptime < deadline { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01)) }
+        }
+        checkButton.performClick(nil)
+        waitFor { checkButton.isEnabled && download.isEnabled }
+        check("download_enabled_only_after_verified_check_and_capability", download.isEnabled)
+        download.performClick(nil)
+        download.performClick(nil)
+        waitFor { download.title == "已下载" }
+        lock.lock(); let downloads = calls; lock.unlock()
+        check("one_download_click_is_not_replayed", downloads == 1)
+        check("successful_download_never_claims_installation", descendants(page.view).compactMap { $0 as? NSTextField }.contains { $0.stringValue == "更新包已下载并校验，尚未安装。" })
+        check("download_validation_scope_is_clear", descendants(page.view).compactMap { $0 as? NSTextField }.contains { $0.stringValue == "更新包已下载，安装前将继续验证" })
+        check("downloaded_candidate_cannot_be_downloaded_twice", download.title == "已下载" && !download.isEnabled)
+        for title in ["安装并重启", "延期更新"] {
+            check("install_actions_stay_disabled_after_download_\(title)", descendants(page.view).compactMap { $0 as? NSButton }.first { $0.title == title }?.isEnabled == false)
+        }
+    }
+
+    // Restarted page discovers cache metadata, but must explicitly revalidate it.
+    do {
+        let digest = String(repeating: "c", count: 64)
+        let status = """
+        {"current_release":{"architecture":"fixture","status":"unknown","source":"unknown"},"transaction":{"status":"idle","recovery_required":false},"guard":{"highest_accepted_sequence":0,"maintenance_active":false},"download_cache":{"status":"cached_not_revalidated","candidates":[{"candidate_id":"22222222-2222-4222-8222-222222222222","release_id":"cached-fixture","sequence":3,"manifest_sha256":"\(digest)"}]}}
+        """
+        let checkResponse = """
+        {"status":"available","candidate":{"release_id":"cached-fixture","sequence":3},"verification":{"publisher_verified":true},"manifest_sha256":"\(digest)"}
+        """
+        let receipt = """
+        {"status":"downloaded","candidate_id":"22222222-2222-4222-8222-222222222222","release_id":"cached-fixture","sequence":3,"manifest_sha256":"\(digest)"}
+        """
+        let client = UpdateClient(configPath: "/fixture/config.json", executor: { _,args,_ in
+            let body: String
+            if args.first == "control" { body = args.contains("update-check") ? checkResponse : status }
+            else if args.first == "status" { body = "{\"status\":\"idle\",\"maintenance_active\":false,\"capabilities\":{\"schema\":1,\"download\":true}}" }
+            else { body = receipt }
+            return ControlRun(status: 0, output: Data(body.utf8), timedOut: false)
+        })
+        let context = StatusPanelController(worker: SocketWorker())
+        let page = UpdatePageController(context: context, client: client)
+        _ = page.view
+        func views(_ root: NSView) -> [NSView] { [root] + root.subviews.flatMap { views($0) } }
+        let checkButton = views(page.view).compactMap { $0 as? NSButton }.first { $0.title == "检查更新" }!
+        let download = views(page.view).compactMap { $0 as? NSButton }.first { $0.title == "下载更新" }!
+        check("restart_cache_does_not_imply_verified_download", !download.isEnabled && download.title != "已下载")
+        checkButton.performClick(nil)
+        let end = ProcessInfo.processInfo.systemUptime + 5
+        while !download.isEnabled && ProcessInfo.processInfo.systemUptime < end { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01)) }
+        check("restart_offers_explicit_cached_package_revalidation", download.isEnabled && download.title == "校验本地更新包")
+        check("restart_labels_cache_as_unverified_bytes", views(page.view).compactMap { $0 as? NSTextField }.contains { $0.stringValue == "本机有候选缓存，需重新校验更新包" })
+    }
+
     // 11. 离屏 UI 完整高度渲染夹具（不透明 Aqua，包含完整卡片流与底部按钮，验证720宽及宿主最小680宽）
     do {
         let dummyWorker = SocketWorker()
@@ -471,7 +594,39 @@ func runTests() -> Int32 {
             candidate: nil,
             verification: nil
         ))
-        
+
+        func collectViews(_ root: NSView) -> [NSView] {
+            [root] + root.subviews.flatMap { collectViews($0) }
+        }
+        func visibleText(_ root: NSView, _ text: String) -> Bool {
+            collectViews(root).contains { view in
+                guard let field = view as? NSTextField else { return false }
+                return field.stringValue == text && !field.isHiddenOrHasHiddenAncestor
+            }
+        }
+        for status in [UpdateCheckStatus.available, .alreadyInstalled] {
+            updateVC.applyCheckResult(UpdateCheckResult(status: status,
+                candidate: UpdateCandidateDetail(releaseId: "unverified", sequence: 2)))
+            check("missing_verification_never_shows_verified_\(status.rawValue)",
+                visibleText(updateVC.view, "已发现候选版本（来源尚未验证）"))
+        }
+        updateVC.applyCheckResult(UpdateCheckResult(status: .available,
+            candidate: UpdateCandidateDetail(releaseId: "verified", sequence: 3),
+            verification: UpdateVerificationInfo(publisherVerified: true)))
+        check("verified_manifest_is_not_full_package_validation", visibleText(updateVC.view, "发现新版本，清单签名已验证") && visibleText(updateVC.view, "清单与当前系统兼容，安装包待校验"))
+        updateVC.applyCheckResult(UpdateCheckResult(status: .unconfigured))
+        let unconfiguredButtons = collectViews(updateVC.view).compactMap { $0 as? NSButton }
+        for title in ["下载更新", "安装并重启", "延期更新"] {
+            check(
+                "write_button_disabled_unconfigured_\(title)",
+                unconfiguredButtons.first(where: { $0.title == title })?.isEnabled == false
+            )
+        }
+        check(
+            "candidate_details_hidden_when_unconfigured",
+            !visibleText(updateVC.view, "目标版本:")
+        )
+
         // 隔离固定 1x Viewport 渲染器（解耦宿主显示器 Retina/非 Retina 分辨率依赖）
         func makeIsolatedViewportRep(size: NSSize) -> NSBitmapImageRep? {
             let rep = NSBitmapImageRep(
@@ -524,6 +679,41 @@ func runTests() -> Int32 {
             try? pngData680_1.write(to: URL(fileURLWithPath: outPath680_1))
             check("offscreen_unconfigured_680w_saved", FileManager.default.fileExists(atPath: outPath680_1))
         }
+
+        // 11.1b 可用候选状态：即使显示“可用”，只读阶段写按钮仍必须禁用
+        updateVC.applyCheckResult(UpdateCheckResult(
+            status: .available,
+            reason: nil,
+            candidate: UpdateCandidateDetail(
+                releaseId: "0.2.0-aarch64",
+                sequence: 2,
+                publishedAt: "2026-11-10T12:00:00Z",
+                sizeBytes: 10485760,
+                releaseNotes: "1. 增加大脑界面管理\n2. 优化会话追溯",
+                compatible: true,
+                requiresLocalSigning: true
+            ),
+            verification: UpdateVerificationInfo(publisherVerified: true, keyId: "release-v1")
+        ))
+        let availableButtons = collectViews(updateVC.view).compactMap { $0 as? NSButton }
+        for title in ["下载更新", "安装并重启", "延期更新"] {
+            check(
+                "write_button_disabled_available_\(title)",
+                availableButtons.first(where: { $0.title == title })?.isEnabled == false
+            )
+        }
+        check(
+            "candidate_details_visible_when_available",
+            visibleText(updateVC.view, "目标版本:")
+        )
+
+        let detailToggle = collectViews(updateVC.view).compactMap { $0 as? NSButton }.first { $0.title == "显示技术详情" }
+        check("technical_disclosure_available", detailToggle != nil)
+        check("technical_details_collapsed_initially", !visibleText(updateVC.view, "防降级高水位"))
+        detailToggle?.performClick(nil)
+        check("technical_details_expand_without_losing_diagnostics", visibleText(updateVC.view, "防降级高水位"))
+        detailToggle?.performClick(nil)
+        check("technical_details_collapse_again", !visibleText(updateVC.view, "防降级高水位"))
 
         // 11.2 故障恢复状态渲染（720宽与680宽分别展开恢复卡、受控说明、事务 ID、两行禁用按钮）
         updateVC.applyStatusPayload(UpdateStatusPayload(
@@ -633,6 +823,49 @@ func runTests() -> Int32 {
         }
         settingsVC.triggerUpdateNavigation()
         check("settings_page_jump_to_update", jumped == true)
+    }
+
+    // 13. 应用更新页：整包换回上一个 .app、CLI 契约与状态联动
+    do {
+        // 13.1 CLI 契约解码：can_rollback = false 包含 reason
+        let rollbackBlockedJson = """
+        {
+            "version": "0.1.0",
+            "installed_at": 1700000000.0,
+            "can_rollback": false,
+            "reason": "stop_core_first"
+        }
+        """
+        guard let blockedInfo = try? JSONDecoder().decode(RollbackStatusInfo.self, from: rollbackBlockedJson.data(using: .utf8)!) else {
+            check("rollback_status_decode_blocked", false, "Failed to decode blocked rollback status")
+            return 1
+        }
+        check("rollback_status_version", blockedInfo.version == "0.1.0")
+        check("rollback_status_can_rollback_false", blockedInfo.canRollback == false)
+        check("rollback_status_reason_stop_core", blockedInfo.reason == "stop_core_first")
+        check("rollback_status_localized_reason", blockedInfo.localizedReason.contains("核心服务运行中"))
+
+        // 13.2 当命令不存在或查询失败时，降级显示「回滚功能暂不可用」
+        let dummyWorker = SocketWorker()
+        let dummySupervisor = CoreSupervisor()
+        let statusPanel = StatusPanelController(worker: dummyWorker, coreSupervisor: dummySupervisor)
+        let updateVC = UpdatePageController(context: statusPanel)
+        
+        // 验证失败注入时按钮禁用且原因显示为「回滚功能暂不可用」
+        updateVC.applyRollbackStatusResultForTesting(.failure(UpdateError("回滚功能暂不可用")))
+        check("rollback_unavailable_button_disabled", updateVC.isRollbackButtonEnabledForTesting == false)
+        check("rollback_unavailable_reason_text", updateVC.rollbackReasonTextForTesting == "回滚功能暂不可用")
+
+        // 13.3 验证 can_rollback = false 时按钮禁用并在按钮旁显示 reason
+        updateVC.applyRollbackStatusResultForTesting(.success(blockedInfo))
+        check("rollback_blocked_button_disabled", updateVC.isRollbackButtonEnabledForTesting == false)
+        check("rollback_blocked_reason_text", updateVC.rollbackReasonTextForTesting.contains("核心服务运行中"))
+
+        // 13.4 验证文案说明是「换回上一个已安装的版本」，执行成功后提示需要重启，不说「已生效」
+        let successNotice = updateVC.rollbackSuccessMessageForTesting
+        check("rollback_success_notice_restart", successNotice.contains("需要重启"))
+        check("rollback_success_notice_not_contain_shengxiao", !successNotice.contains("生效"))
+        check("rollback_success_notice_replace_app", successNotice.contains("换回上一个已安装的版本"))
     }
 
     print("=== Update UI Selftests Completed: \(passed) PASS, \(failed) FAIL ===")
