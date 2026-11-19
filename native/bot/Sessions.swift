@@ -120,11 +120,42 @@ func openSessionRow(_ targets: [String], probe: SessionProbe, capture: () throws
     let (window, image) = try capture()
     if isTarget(try titleNames(image)) { return ["opened":true, "clicked":false, "seconds":0.0] }
     _ = try probe.probe(image, names:targets)
-    let matches = probe.cachedRows.filter { accepted.contains(cleanTitle($0.name)) }
-    guard matches.count == 1, let row = matches.first else { throw Failure.invalid("session_row_not_unique_or_missing") }
     let layout = try currentLayout()
     let sessionListRect = try layoutRegion(layout, "session_list")
     let x = window["x"] as! Double, y = window["y"] as! Double
+    var matches = probe.cachedRows.filter { accepted.contains(cleanTitle($0.name)) }
+
+    // 会话行可能不在当前可见范围内（列表很长或停在别的位置）：先回到顶部，再逐页向下找。
+    // 只有「找不到」时才滚动，避免影响正常一行可见的快速路径。
+    if matches.count != 1 {
+        let listRect = CGRect(x: x + sessionListRect.minX, y: y + sessionListRect.minY,
+                              width: sessionListRect.width, height: sessionListRect.height)
+        func refind() throws -> Bool {
+            Thread.sleep(forTimeInterval: 0.25)
+            let (_, shot) = try capture()
+            _ = try probe.probe(shot, names: targets)
+            matches = probe.cachedRows.filter { accepted.contains(cleanTitle($0.name)) }
+            return matches.count == 1
+        }
+        // 1) 回到列表顶部（向上滚，最多 12 页）
+        var toTop = 0
+        while toTop < 12 {
+            if try refind() { break }
+            let before = probe.cachedRows.count
+            try act { try botActions.scroll(in: listRect, lines: Int32(layout.scroll.linesPerTick), ticks: 3) }
+            if probe.cachedRows.count == before && toTop > 2 { break }
+            toTop += 1
+        }
+        // 2) 从顶部逐页向下找（最多 12 页）
+        var scanned = 0
+        while matches.count != 1 && scanned < 12 {
+            try act { try botActions.scroll(in: listRect, lines: -Int32(layout.scroll.linesPerTick), ticks: 3) }
+            _ = try refind()
+            scanned += 1
+        }
+    }
+
+    guard matches.count == 1, let row = matches.first else { throw Failure.invalid("session_row_not_unique_or_missing") }
     let local = CGPoint(x:sessionListRect.midX, y:sessionListRect.minY + row.y + layout.sessionRow.nameOffset)
     // The press lands up to 12pt from this point (effective region of the 40pt row target): keep it in the list.
     guard sessionListRect.insetBy(dx:0, dy:12).contains(local) else { throw Failure.invalid("session_row_out_of_bounds") }
