@@ -62,6 +62,12 @@ public enum L10nKey: String, CaseIterable {
     case uiOverview001, uiOverview002, uiOverview003, uiOverview004, uiOverview005, uiOverview006, uiOverview007, uiOverview008, uiSessions009, uiSessions010, uiSessions011, uiSessions012, uiSessions013, uiSessions014, uiSessions015, uiSessions016, uiSessions017, uiSessions018, uiSessions019, uiSessions020, uiSettings021, uiSettings022, uiSettings023, uiSettings024, uiSettings025, uiSettings026, uiSettings027, uiSettings028, uiSettings029, uiSettings030, uiSettings031, uiSettings032, uiSettings033, uiSettings034, uiSettings035, uiSettings036, uiSettings037, uiSettings038, uiSettings039, uiSettings040, uiSettings041, uiSettings042, uiSettings043, uiSettings044, uiSettings045, uiSettings046, uiShell047, uiShell048, uiStatusPanel049, uiStatusPanel050, uiStatusPanel051, uiStatusPanel052, uiStatusPanel053, uiStatusPanel054, uiStatusPanel055, uiStatusPanel056, uiStatusPanel057, uiStatusPanel058, uiStatusPanel059, uiStatusPanel060, uiStatusPanel061, uiStatusPanel062, uiStatusPanel063, uiStatusPanel064, uiStatusPanel065, uiStatusPanel066, uiStatusPanel067, uiStatusPanel068, uiStatusPanel069, uiStatusPanel070, uiStatusPanel071, uiStatusPanel072, uiStatusPanel073, uiStatusPanel074, uiStatusPanel075, uiStatusPanel076, uiStatusPanel077, uiStatusPanel078, uiStatusPanel079, uiStatusPanel080, uiStatusPanel081, uiStatusPanel082, uiStatusPanel083, uiStatusPanel084, uiStatusPanel085, uiStatusPanel086, uiStatusPanel087, uiStatusPanel088, uiStatusPanel089, uiStatusPanel090, uiStatusPanel091, uiStatusPanel092, uiStatusPanel093, uiStatusPanel094, uiStatusPanel095, uiStatusPanel096, uiStatusPanel097, uiConfigForm098, uiConfigForm099, uiConfigForm100, uiConfigForm101, uiConfigForm102, uiConfigForm103, uiConfigForm104, uiConfigForm105, uiConfigForm106, uiConfigForm107, uiConfigForm108, uiConfigForm109, uiConfigForm110, uiConfigForm111, uiConfigForm112, uiConfigForm113, uiConfigForm114, uiConfigForm115, uiConfigForm116, uiConfigForm117, uiConfigForm118, uiConfigForm119, uiConfigForm120, uiConfigForm121, uiConfigForm122, uiConfigForm123, uiConfigForm124, uiConfigForm125
     // 机器人暂停原因
     case evBotWechatNotLoggedIn, evBotWechatNotLoggedInFix
+    // UI 对齐：总览指标与会话表格表头
+    case overviewMetricRepliesToday, overviewSuggestionPrefix, overviewSuggestionNoAction, overviewRequestScreenPermission, overviewRequestAccessibilityPermission, sessionsTableSessionColumn, sessionsTableStatusColumn, sessionsTableOperationColumn, sessionsTagReasonFormat
+    // UI 对齐：设置页分组标题
+    case uiSettings047, uiSettings048, uiSettings049, uiSettings050, uiSettings051, uiSettings052
+    // UI 对齐：联系人来源与同步原因、MCP 分组
+    case contactsSourcePresetTag, contactsPresetBannerMessageFmt, contactsSyncStatusIncomplete, contactsSyncStatusFailed, contactsSyncReasonUserInput, contactsSyncReasonDesktopBusy, contactsSyncReasonLayoutMismatch, contactsSyncReasonTargetNotReached, contactsSyncReasonImageChanged, contactsSyncReasonStopped, contactsSyncReasonUnreadableFmt, contactsSyncReasonReviewFmt, contactsSyncReasonCategoriesFmt, contactsSyncReasonGeneric, mcpSectionTimeoutPolicy, mcpSectionDeveloperTools, mcpLabelStatus, mcpColEntry, mcpColEndpoint, mcpStatusEnabled, mcpStatusDisabled, mcpTechDetailsTitle, mcpTechDetailsHint, mcpCopyTechDetails, mcpTechDetailsCopied
     // 通用
     case loadMore, unreadCount, recordedOnlyNote
     case appName, quitApp, cancel, loading, valueUnavailable
@@ -1677,7 +1683,7 @@ public enum L10n {
         case .uiResidualConnectFailed:
             return e("连接失败", "Connection failed", "Échec de la connexion", "Connessione non riuscita", "Połączenie nie powiodło się")
         case .uiResidualMcpConfigExample:
-            return e("1. 运维 SSH 入口 (终端 / SSH 转发):\\nssh <用户>@<本机地址> nc -U ~/.wechat-rpa/worker.sock\\n\\n2. 对外接口配置 (Claude Desktop / Cursor 等 HTTP MCP 客户端):\\n{\\n  \"mcpServers\": {\\n    \"wechat-brain\": {\\n      \"url\": \"http://<bind>:<port>/mcp\",\\n      \"headers\": {\\n        \"Authorization\": \"Bearer <token>\"\\n      }\\n    }\\n  }\\n}", "1. Ops SSH entry (terminal / SSH forwarding):\\nssh <user>@<host> nc -U ~/.wechat-rpa/worker.sock\\n\\n2. External API config (HTTP MCP clients such as Claude Desktop / Cursor):\\n{\\n  \"mcpServers\": {\\n    \"wechat-brain\": {\\n      \"url\": \"http://<bind>:<port>/mcp\",\\n      \"headers\": {\\n        \"Authorization\": \"Bearer <token>\"\\n      }\\n    }\\n  }\\n}", "1. Accès SSH d'exploitation (terminal / redirection SSH) :\\nssh <utilisateur>@<hôte> nc -U ~/.wechat-rpa/worker.sock\\n\\n2. Configuration de l'API externe (clients HTTP MCP comme Claude Desktop / Cursor) :\\n{\\n  \"mcpServers\": {\\n    \"wechat-brain\": {\\n      \"url\": \"http://<bind>:<port>/mcp\",\\n      \"headers\": {\\n        \"Authorization\": \"Bearer <token>\"\\n      }\\n    }\\n  }\\n}", "1. Accesso SSH operativo (terminale / inoltro SSH):\\nssh <utente>@<host> nc -U ~/.wechat-rpa/worker.sock\\n\\n2. Configurazione API esterna (client HTTP MCP come Claude Desktop / Cursor):\\n{\\n  \"mcpServers\": {\\n    \"wechat-brain\": {\\n      \"url\": \"http://<bind>:<port>/mcp\",\\n      \"headers\": {\\n        \"Authorization\": \"Bearer <token>\"\\n      }\\n    }\\n  }\\n}", "1. Dostęp SSH operacyjny (terminal / przekierowanie SSH):\\nssh <użytkownik>@<host> nc -U ~/.wechat-rpa/worker.sock\\n\\n2. Konfiguracja zewnętrznego API (klienci HTTP MCP, np. Claude Desktop / Cursor):\\n{\\n  \"mcpServers\": {\\n    \"wechat-brain\": {\\n      \"url\": \"http://<bind>:<port>/mcp\",\\n      \"headers\": {\\n        \"Authorization\": \"Bearer <token>\"\\n      }\\n    }\\n  }\\n}")
+            return e("1. 运维 SSH 入口 (终端 / SSH 转发):\nssh <用户>@<本机地址> nc -U ~/.wechat-rpa/worker.sock\n\n2. 对外接口配置 (Claude Desktop / Cursor 等 HTTP MCP 客户端):\n{\n  \"mcpServers\": {\n    \"wechat-brain\": {\n      \"url\": \"http://<bind>:<port>/mcp\",\n      \"headers\": {\n        \"Authorization\": \"Bearer <token>\"\n      }\n    }\n  }\n}", "1. Ops SSH entry (terminal / SSH forwarding):\nssh <user>@<host> nc -U ~/.wechat-rpa/worker.sock\n\n2. External API config (HTTP MCP clients such as Claude Desktop / Cursor):\n{\n  \"mcpServers\": {\n    \"wechat-brain\": {\n      \"url\": \"http://<bind>:<port>/mcp\",\n      \"headers\": {\n        \"Authorization\": \"Bearer <token>\"\n      }\n    }\n  }\n}", "1. Accès SSH d'exploitation (terminal / redirection SSH) :\nssh <utilisateur>@<hôte> nc -U ~/.wechat-rpa/worker.sock\n\n2. Configuration de l'API externe (clients HTTP MCP comme Claude Desktop / Cursor) :\n{\n  \"mcpServers\": {\n    \"wechat-brain\": {\n      \"url\": \"http://<bind>:<port>/mcp\",\n      \"headers\": {\n        \"Authorization\": \"Bearer <token>\"\n      }\n    }\n  }\n}", "1. Accesso SSH operativo (terminale / inoltro SSH):\nssh <utente>@<host> nc -U ~/.wechat-rpa/worker.sock\n\n2. Configurazione API esterna (client HTTP MCP come Claude Desktop / Cursor):\n{\n  \"mcpServers\": {\n    \"wechat-brain\": {\n      \"url\": \"http://<bind>:<port>/mcp\",\n      \"headers\": {\n        \"Authorization\": \"Bearer <token>\"\n      }\n    }\n  }\n}", "1. Dostęp SSH operacyjny (terminal / przekierowanie SSH):\nssh <użytkownik>@<host> nc -U ~/.wechat-rpa/worker.sock\n\n2. Konfiguracja zewnętrznego API (klienci HTTP MCP, np. Claude Desktop / Cursor):\n{\n  \"mcpServers\": {\n    \"wechat-brain\": {\n      \"url\": \"http://<bind>:<port>/mcp\",\n      \"headers\": {\n        \"Authorization\": \"Bearer <token>\"\n      }\n    }\n  }\n}")
         case .uiResidualUpdateRecoveryGuide:
             return e("【更新异常中断，需要人工恢复】\\n- 事务 ID: %@\\n- 中断阶段: %@\\n- 错误原因: %@\\n\\n只读说明与受控恢复指引:\\n1. 维护标志文件已记录；实际核心进程存活状态与业务数据完整性未知。\\n2. 当前界面处于严格只读受控阶段，禁止通过界面清除维护标志或进行破坏性写入。\\n3. 真实版本回退能力当前处于 unsupported 禁用状态，不可直接回退；需要专门受控恢复。\\n4. 请核对 ~/.wechat-rpa/logs/core.log 与 host.log 获取详细故障上下文并联系管理员。", "[Update interrupted abnormally; manual recovery is required]\\n- Transaction ID: %@\\n- Interrupted stage: %@\\n- Error: %@\\n\\nRead-only notes and controlled recovery steps:\\n1. A maintenance flag file has been recorded; the actual core process liveness and business-data integrity are unknown.\\n2. This screen is strictly read-only; clearing the maintenance flag or performing destructive writes here is not allowed.\\n3. Real version rollback is currently unsupported and disabled; a controlled recovery is required.\\n4. Check ~/.wechat-rpa/logs/core.log and host.log for details and contact an administrator.", "«\\n[Mise à jour interrompue anormalement, une récupération manuelle est nécessaire]\\n- ID de transaction : %@\\n- Étape interrompue : %@\\n- Erreur : %@\\n\\nNotes en lecture seule et étapes de récupération contrôlée :\\n1. Un fichier indicateur de maintenance a été enregistré ; l'état réel du processus cœur et l'intégrité des données métier sont inconnus.\\n2. Cette interface est strictement en lecture seule ; effacer l'indicateur ou effectuer des écritures destructrices ici est interdit.\\n3. Le retour à une version réelle est actuellement désactivé (unsupported) ; une récupération contrôlée est nécessaire.\\n4. Consultez ~/.wechat-rpa/logs/core.log et host.log pour le contexte et contactez un administrateur.\\n»", "[Aggiornamento interrotto in modo anomalo, è necessaria una ripristino manuale]\\n- ID transazione: %@\\n- Fase interrotta: %@\\n- Errore: %@\\n\\nNote in sola lettura e passi di ripristino controllato:\\n1. È stato registrato un file di flag di manutenzione; lo stato reale del processo core e l’integrità dei dati aziendali sono sconosciuti.\\n2. Questa schermata è strettamente in sola lettura; cancellare il flag o eseguire scritture distruttive qui non è consentito.\\n3. Il ripristino reale della versione è attualmente disabilitato (unsupported); è necessario un ripristino controllato.\\n4. Controlla ~/.wechat-rpa/logs/core.log e host.log per i dettagli e contatta un amministratore.", "[Aktualizacja przerwana nieprawidłowo, wymagane jest ręczne przywrócenie]\\n- ID transakcji: %@\\n- Przerwany etap: %@\\n- Błąd: %@\\n\\nUwagi tylko do odczytu i kroki kontrolowanego przywracania:\\n1. Zapisano plik znacznika konserwacji; rzeczywisty stan procesu rdzenia i integralność danych biznesowych są nieznane.\\n2. Ten ekran jest ściśle tylko do odczytu; czyszczenie znacznika lub destrukcyjne zapisy nie są tu dozwolone.\\n3. Rzeczywiste przywracanie wersji jest obecnie wyłączone (unsupported); wymagane jest kontrolowane przywrócenie.\\n4. Sprawdź ~/.wechat-rpa/logs/core.log i host.log, aby uzyskać szczegóły, i skontaktuj się z administratorem.")
 
@@ -1938,6 +1944,92 @@ public enum L10n {
             return e("机器人已暂停：微信未登录或未运行 %@", "Bot paused: WeChat is not signed in or not running %@", "Bot en pause : WeChat n’est pas connecté ou n’est pas lancé %@", "Bot in pausa: WeChat non ha effettuato l’accesso o non è in esecuzione %@", "Bot wstrzymany: WeChat nie jest zalogowany lub nie działa %@")
         case .evBotWechatNotLoggedInFix:
             return e("先启动并登录微信，再点「恢复自动回复」", "Start and sign in to WeChat first, then click “Resume auto-reply”", "Lancez WeChat et connectez-vous, puis cliquez sur « Reprendre la réponse automatique »", "Avvia WeChat e accedi, poi fai clic su «Riprendi risposta automatica»", "Najpierw uruchom i zaloguj się do WeChat, potem kliknij „Wznów automatyczne odpowiedzi”")
+
+        // MARK: UI 对齐：总览指标与会话表格表头
+        case .overviewMetricRepliesToday:
+            return e("今日回复", "Replies today", "Réponses aujourd’hui", "Risposte oggi", "Odpowiedzi dziś")
+        case .overviewSuggestionPrefix:
+            return e("建议：", "Suggestion: ", "Conseil : ", "Suggerimento: ", "Sugestia: ")
+        case .overviewSuggestionNoAction:
+            return e("建议：无需操作，一切正常。", "Suggestion: no action needed.", "Conseil : aucune action requise.", "Suggerimento: nessuna azione necessaria.", "Sugestia: nie trzeba nic robić.")
+        case .overviewRequestScreenPermission:
+            return e("请求屏幕录制权限", "Request Screen Recording permission", "Demander l’autorisation d’enregistrement d’écran", "Richiedi autorizzazione Registrazione schermo", "Poproś o uprawnienie nagrywania ekranu")
+        case .overviewRequestAccessibilityPermission:
+            return e("请求辅助功能权限", "Request Accessibility permission", "Demander l’autorisation d’accessibilité", "Richiedi autorizzazione Accessibilità", "Poproś o uprawnienie ułatwień dostępu")
+        case .sessionsTableSessionColumn:
+            return e("会话", "Conversation", "Conversation", "Conversazione", "Rozmowa")
+        case .sessionsTableStatusColumn:
+            return e("状态", "Status", "État", "Stato", "Status")
+        case .sessionsTableOperationColumn:
+            return e("操作", "Operation", "Opération", "Operazione", "Operacja")
+        case .sessionsTagReasonFormat:
+            return e("%@：%@", "%@: %@", "%@ : %@", "%@: %@", "%@: %@")
+
+        // MARK: UI 对齐：设置页分组标题
+        case .uiSettings047:
+            return e("系统权限", "System permissions", "Autorisations système", "Autorizzazioni di sistema", "Uprawnienia systemowe")
+        case .uiSettings048:
+            return e("未授权", "Not authorized", "Non autorisé", "Non autorizzato", "Brak autoryzacji")
+        case .uiSettings049:
+            return e("运行规则", "Runtime rules", "Règles d’exécution", "Regole di esecuzione", "Zasady działania")
+        case .uiSettings050:
+            return e("界面语言", "Interface language", "Langue de l’interface", "Lingua dell’interfaccia", "Język interfejsu")
+        case .uiSettings051:
+            return e("账号", "Account", "Compte", "Account", "Konto")
+        case .uiSettings052:
+            return e("应用与更新", "App & updates", "Application et mises à jour", "App e aggiornamenti", "Aplikacja i aktualizacje")
+
+        // MARK: UI 对齐：联系人来源与同步原因、MCP 分组
+        case .contactsSourcePresetTag:
+            return e("来自授权名单·未同步", "From allowlist · not synced", "Depuis la liste autorisée · non synchronisé", "Dall’elenco autorizzato · non sincronizzato", "Z listy dozwolonych · niezsynchronizowany")
+        case .contactsPresetBannerMessageFmt:
+            return e("有 %@ 个联系人来自配置的授权名单，尚未从微信通讯录同步（微信号显示为 —）；同步完成后会自动补全资料。", "%@ contacts come from the configured allowlist and are not synced from WeChat yet (WeChat ID shows —); their profiles will be filled in after the next sync.", "%@ contacts proviennent de la liste autorisée configurée et ne sont pas encore synchronisés depuis WeChat (l’ID WeChat affiche —) ; leurs profils seront complétés après la prochaine synchronisation.", "%@ contatti provengono dall’elenco autorizzato configurato e non sono ancora sincronizzati da WeChat (l’ID WeChat mostra —); i profili saranno completati dopo la prossima sincronizzazione.", "%@ kontaktów pochodzi ze skonfigurowanej listy dozwolonych i nie zostało jeszcze zsynchronizowanych z WeChat (ID WeChat to —); profile zostaną uzupełnione po następnej synchronizacji.")
+        case .contactsSyncStatusIncomplete:
+            return e("同步未完成", "Sync incomplete", "Synchronisation incomplète", "Sincronizzazione incompleta", "Synchronizacja niekompletna")
+        case .contactsSyncStatusFailed:
+            return e("同步失败", "Sync failed", "Échec de la synchronisation", "Sincronizzazione non riuscita", "Synchronizacja nieudana")
+        case .contactsSyncReasonUserInput:
+            return e("检测到你正在操作电脑，本次同步已跳过，稍后自动重试", "We detected you were using the computer, so this sync was skipped; it will retry automatically.", "Nous avons détecté que vous utilisiez l’ordinateur ; cette synchronisation a été ignorée et sera relancée automatiquement.", "Abbiamo rilevato che stavi usando il computer; questa sincronizzazione è stata saltata e verrà ritentata automaticamente.", "Wykryto, że korzystasz z komputera; ta synchronizacja została pominięta i zostanie automatycznie ponowiona.")
+        case .contactsSyncReasonDesktopBusy:
+            return e("微信正被其他操作占用，本次同步已跳过，稍后自动重试", "WeChat is busy with another operation, so this sync was skipped; it will retry automatically.", "WeChat est occupé par une autre opération ; cette synchronisation a été ignorée et sera relancée automatiquement.", "WeChat è occupato da un’altra operazione; questa sincronizzazione è stata saltata e verrà ritentata automaticamente.", "WeChat jest zajęty inną operacją; ta synchronizacja została pominięta i zostanie automatycznie ponowiona.")
+        case .contactsSyncReasonLayoutMismatch:
+            return e("微信界面布局与预期不一致，请检查微信窗口位置后重试", "The WeChat window layout doesn’t match expectations; check the WeChat window position and retry.", "La disposition de la fenêtre WeChat ne correspond pas à celle attendue ; vérifiez la position de la fenêtre WeChat et réessayez.", "Il layout della finestra di WeChat non corrisponde a quello previsto; controlla la posizione della finestra di WeChat e riprova.", "Układ okna WeChat nie odpowiada oczekiwanemu; sprawdź położenie okna WeChat i spróbuj ponownie.")
+        case .contactsSyncReasonTargetNotReached:
+            return e("未能打开微信通讯录页面，请确认微信已登录后重试", "Couldn’t open the WeChat contacts page; make sure WeChat is signed in and retry.", "Impossible d’ouvrir la page des contacts WeChat ; vérifiez que WeChat est connecté et réessayez.", "Impossibile aprire la pagina dei contatti di WeChat; verifica che WeChat sia connesso e riprova.", "Nie udało się otworzyć strony kontaktów WeChat; sprawdź, czy WeChat jest zalogowany, i spróbuj ponownie.")
+        case .contactsSyncReasonImageChanged:
+            return e("同步过程中微信界面发生变化，本次同步已中止，稍后自动重试", "The WeChat window changed during the sync, so it was aborted; it will retry automatically.", "La fenêtre WeChat a changé pendant la synchronisation ; elle a été interrompue et sera relancée automatiquement.", "La finestra di WeChat è cambiata durante la sincronizzazione; è stata interrotta e verrà ritentata automaticamente.", "Okno WeChat zmieniło się podczas synchronizacji; została przerwana i zostanie automatycznie ponowiona.")
+        case .contactsSyncReasonStopped:
+            return e("同步已暂停，稍后自动重试", "Sync paused; it will retry automatically.", "Synchronisation suspendue ; elle sera relancée automatiquement.", "Sincronizzazione sospesa; verrà ritentata automaticamente.", "Synchronizacja wstrzymana; zostanie automatycznie ponowiona.")
+        case .contactsSyncReasonUnreadableFmt:
+            return e("有 %@ 行通讯录无法读取，已保留原有联系人", "%@ address-book rows couldn’t be read; existing contacts were kept.", "%@ lignes du carnet n’ont pas pu être lues ; les contacts existants ont été conservés.", "%@ righe della rubrica non sono state lette; i contatti esistenti sono stati mantenuti.", "Nie udało się odczytać %@ wierszy kontaktów; istniejące kontakty zostały zachowane.")
+        case .contactsSyncReasonReviewFmt:
+            return e("有 %@ 条重名联系人待确认", "%@ duplicate contacts await review.", "%@ doublons de contacts sont à vérifier.", "%@ contatti duplicati da verificare.", "%@ zduplikowanych kontaktów czeka na weryfikację.")
+        case .contactsSyncReasonCategoriesFmt:
+            return e("部分分组未同步完整：%@", "Some groups didn’t finish syncing: %@", "Certains groupes n’ont pas été entièrement synchronisés : %@", "Alcuni gruppi non sono stati sincronizzati completamente: %@", "Niektóre grupy nie zostały w pełni zsynchronizowane: %@")
+        case .contactsSyncReasonGeneric:
+            return e("本次同步未完成，稍后自动重试", "This sync didn’t finish; it will retry automatically.", "Cette synchronisation ne s’est pas terminée ; elle sera relancée automatiquement.", "Questa sincronizzazione non è terminata; verrà ritentata automaticamente.", "Ta synchronizacja nie została ukończona; zostanie automatycznie ponowiona.")
+        case .mcpSectionTimeoutPolicy:
+            return e("超时策略", "Timeout policy", "Politique de délai", "Politica di timeout", "Polityka limitów czasu")
+        case .mcpSectionDeveloperTools:
+            return e("开发者工具", "Developer tools", "Outils de développement", "Strumenti per sviluppatori", "Narzędzia programistyczne")
+        case .mcpLabelStatus:
+            return e("状态", "Status", "État", "Stato", "Stan")
+        case .mcpColEntry:
+            return e("入口", "Entry", "Entrée", "Voce", "Wejście")
+        case .mcpColEndpoint:
+            return e("Endpoint", "Endpoint", "Point de terminaison", "Endpoint", "Punkt końcowy")
+        case .mcpStatusEnabled:
+            return e("已启用", "Enabled", "Activé", "Attivo", "Włączone")
+        case .mcpStatusDisabled:
+            return e("未启用", "Disabled", "Désactivé", "Disattivato", "Wyłączone")
+        case .mcpTechDetailsTitle:
+            return e("技术详情", "Technical details", "Détails techniques", "Dettagli tecnici", "Szczegóły techniczne")
+        case .mcpTechDetailsHint:
+            return e("原始参数名、socket 路径与错误码，可直接选中复制。", "Raw parameter names, socket paths and error codes; selectable and copyable.", "Noms de paramètres bruts, chemins de socket et codes d’erreur, sélectionnables et copiables.", "Nomi dei parametri grezzi, percorsi socket e codici di errore, selezionabili e copiabili.", "Surowe nazwy parametrów, ścieżki gniazd i kody błędów — można zaznaczyć i skopiować.")
+        case .mcpCopyTechDetails:
+            return e("复制技术详情", "Copy technical details", "Copier les détails techniques", "Copia dettagli tecnici", "Kopiuj szczegóły techniczne")
+        case .mcpTechDetailsCopied:
+            return e("技术详情已复制到剪贴板", "Technical details copied to clipboard", "Détails techniques copiés dans le presse-papiers", "Dettagli tecnici copiati negli appunti", "Szczegóły techniczne skopiowane do schowka")
 
         // MARK: 通用
         case .appName:

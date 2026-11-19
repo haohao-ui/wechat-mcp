@@ -3751,13 +3751,13 @@ func testTokens() -> Int32 {
     }
 
     // 5. 校验主按钮与输入框以及品牌色常量
-    if Theme.Colors.primaryButtonDefaultHex != "#0A5B6B" ||
-       Theme.Colors.primaryButtonHoverHex != "#084B58" ||
+    if Theme.Colors.primaryButtonDefaultHex != "#1E7A4D" ||
+       Theme.Colors.primaryButtonHoverHex != "#176540" ||
        Theme.Colors.primaryButtonTextHex != "#FFFFFF" ||
        Theme.Colors.primaryButtonDisabledBgHex != "#F4F5F7" ||
        Theme.Colors.primaryButtonDisabledTextHex != "#6B7280" ||
-       Theme.Colors.brandHex != "#12A37A" ||
-       Theme.Colors.brandLightHex != "#E2F5EE" ||
+       Theme.Colors.brandHex != "#1E7A4D" ||
+       Theme.Colors.brandLightHex != "#E6F4EC" ||
        Theme.Colors.inputBorderHex != "#C9CDD4" ||
        Theme.Colors.inputErrorBorderHex != "#E5484D" ||
        Theme.Colors.inputErrorTextHex != "#B73A3E" ||

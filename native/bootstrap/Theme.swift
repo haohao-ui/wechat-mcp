@@ -37,8 +37,8 @@ extension NSColor {
 public enum Theme {
     public struct Colors {
         // 主按钮 (Primary Button)
-        public static let primaryButtonDefaultHex       = "#0A5B6B"
-        public static let primaryButtonHoverHex         = "#084B58"
+        public static let primaryButtonDefaultHex       = "#1E7A4D"
+        public static let primaryButtonHoverHex         = "#176540"
         public static let primaryButtonTextHex          = "#FFFFFF"
         public static let primaryButtonDisabledBgHex    = "#F4F5F7"
         public static let primaryButtonDisabledTextHex  = "#6B7280"
@@ -50,8 +50,8 @@ public enum Theme {
         public static let primaryButtonDisabledText = NSColor(hex: primaryButtonDisabledTextHex)
 
         // 品牌色 (Brand Colors)
-        public static let brandHex      = "#12A37A"
-        public static let brandLightHex = "#E2F5EE"
+        public static let brandHex      = "#1E7A4D"
+        public static let brandLightHex = "#E6F4EC"
 
         public static let brand      = NSColor(hex: brandHex)
         public static let brandLight = NSColor(hex: brandLightHex)
@@ -105,6 +105,23 @@ public enum Theme {
         public static let statusInactiveDot     = NSColor(hex: statusInactiveDotHex)
         public static let statusInactiveText    = NSColor(hex: statusInactiveTextHex)
         public static let statusInactiveBg      = NSColor(hex: statusInactiveBgHex)
+
+        // 页面骨架（对齐 11-14 效果图：浅色 + 白卡片）
+        public static let pageBackgroundHex   = "#F2F3F5"
+        public static let cardBackgroundHex   = "#FFFFFF"
+        public static let cardBorderHex       = "#E3E5E8"
+        public static let textPrimaryHex      = "#1F2329"
+        public static let textSecondaryHex    = "#646A73"
+        public static let selectedRowBackgroundHex = "#E6F4EC"
+        public static let sidebarBackgroundHex = "#F2F3F5"
+
+        public static let pageBackground   = NSColor(hex: pageBackgroundHex)
+        public static let cardBackground   = NSColor(hex: cardBackgroundHex)
+        public static let cardBorder       = NSColor(hex: cardBorderHex)
+        public static let textPrimary      = NSColor(hex: textPrimaryHex)
+        public static let textSecondary    = NSColor(hex: textSecondaryHex)
+        public static let selectedRowBackground = NSColor(hex: selectedRowBackgroundHex)
+        public static let sidebarBackground = NSColor(hex: sidebarBackgroundHex)
     }
 }
 
@@ -215,7 +232,7 @@ public final class ThemePrimaryButton: NSButton {
     private func setup() {
         wantsLayer = true
         isBordered = false
-        layer?.cornerRadius = 6
+        layer?.cornerRadius = 8
         layer?.masksToBounds = true
         focusRingType = .none
         bezelStyle = .regularSquare
@@ -277,7 +294,7 @@ public final class ThemePrimaryButton: NSButton {
 
     public override var intrinsicContentSize: NSSize {
         let base = super.intrinsicContentSize
-        return NSSize(width: max(base.width + 24, 76), height: max(base.height + 10, 32))
+        return NSSize(width: max(base.width + 24, 76), height: max(base.height + 14, 36))
     }
 }
 

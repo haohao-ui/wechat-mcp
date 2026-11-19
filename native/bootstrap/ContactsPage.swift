@@ -4,26 +4,30 @@ import AppKit
 
 // MARK: - Shared Theme tokens
 private enum ContactsPageTokens {
-    static let brand = Theme.Colors.brand
-    static let brandDeep = Theme.Colors.primaryButtonDefault
-    static let statusOkText = Theme.Colors.statusNormalText
-    static let statusOkBg = Theme.Colors.statusNormalBg
-    static let statusWarnText = Theme.Colors.statusWarningText
-    static let statusWarnBg = Theme.Colors.statusWarningBg
-    static let statusErrText = Theme.Colors.statusErrorText
-    static let statusErrBg = Theme.Colors.statusErrorBg
-    static let statusOffText = Theme.Colors.statusInactiveText
-    static let statusOffBg = Theme.Colors.statusInactiveBg
-    static let fieldBorder = Theme.Colors.inputBorder
+    static let pageBackground = Theme.Colors.pageBackground
+    static let cardBackground = Theme.Colors.cardBackground
+    static let cardBorder = Theme.Colors.cardBorder
+    static let textPrimary = Theme.Colors.textPrimary
+    static let textSecondary = Theme.Colors.textSecondary
+    static let primary = Theme.Colors.primaryButtonDefault
+    static let primaryText = Theme.Colors.primaryButtonText
+    static let warningText = Theme.Colors.statusWarningText
+    static let warningBg = Theme.Colors.statusWarningBg
+    static let warningDot = Theme.Colors.statusWarningDot
+    static let errorText = Theme.Colors.statusErrorText
+    static let errorDot = Theme.Colors.statusErrorDot
+    static let normalText = Theme.Colors.statusNormalText
+    static let normalDot = Theme.Colors.statusNormalDot
+    static let inactiveText = Theme.Colors.statusInactiveText
+    static let inactiveBg = Theme.Colors.statusInactiveBg
 }
 
 // MARK: - Localized strings
 private enum ContactsPageStrings {
     static var emptyAll: String { L10n.t(.contactsPageEmptyAll) }
     static var emptyCategory: String { L10n.t(.contactsPageEmptyCategory) }
-    static var selectDetailPrompt: String { L10n.t(.contactsPageSelectDetailPrompt) }
     static var syncStarted: String { L10n.t(.contactsPageSyncStarted) }
-    static var personaBinding: String { L10n.t(.contactsPagePersonaBinding) }
+    static var presetTag: String { L10n.t(.contactsSourcePresetTag) }
 }
 
 /// 页面逻辑的校验错误（不要让 String 直接实现 Error：设备上的 Swift 5.7 不支持 @retroactive）
@@ -124,6 +128,12 @@ public struct ContactsSyncInfo: Codable {
     public let perCategory: [SyncPerCategory]?
     public let unreadableRows: Int?
     public let needsReview: Int?
+    /// 同步失败时后端写入的人话/机器原因（例如 "private visual operation failed: invalid(\"user_input_detected\")"）。
+    public let error: String?
+    /// 同步被中途暂停（检测到用户操作电脑或服务关闭）。
+    public let stopped: Bool?
+    /// 后端给出的可读未完成原因（例如「企业微信联系人(work) 16/17，1 行读不到」）。
+    public let incompleteReasons: [String]?
 
     enum CodingKeys: String, CodingKey {
         case finishedAtMs = "finished_at_ms"
@@ -131,6 +141,9 @@ public struct ContactsSyncInfo: Codable {
         case perCategory = "per_category"
         case unreadableRows = "unreadable_rows"
         case needsReview = "needs_review"
+        case error
+        case stopped
+        case incompleteReasons = "incomplete_reasons"
     }
 }
 
@@ -230,11 +243,84 @@ public struct ContactsPageLogic {
     /// 详情里的微信号：没有时说明原因
     public static func detailWechatText(_ item: ContactProfileItem) -> String {
         if let w = item.wechatId, !w.isEmpty { return w }
-        switch item.category {
-        case "work": return L10n.t(.contactsWechatWorkNone)
-        case "personal" where item.identity != nil: return L10n.t(.contactsWechatUnread)
-        default: return "—"
+        if item.category == "work" { return L10n.t(.contactsWechatWorkNone) }
+        if isUnsyncedPreset(item) { return "—" }
+        if item.category == "personal" && item.identity != nil {
+            return L10n.t(.contactsWechatUnread)
         }
+        return "—"
+    }
+
+    /// 该行是否只是配置（授权名单）预置、从未由微信通讯录同步过。
+    ///
+    /// contacts-list 用 `contacts LEFT JOIN contact_profiles`：预置行只有 contacts 记录，没有
+    /// contact_profiles 资料行，因此 wechat_id 及各资料字段全空（identity 回退为 weak、
+    /// category 回退为 personal）。真实同步过的联系人至少有一行 profile（nickname NOT NULL），
+    /// 所以用「微信号为空 且 所有资料字段为空」判定，避免把合法没有微信号的企业微信联系人误标。
+    public static func isUnsyncedPreset(_ item: ContactProfileItem) -> Bool {
+        let wechat = (item.wechatId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !wechat.isEmpty { return false }
+        let hasProfile = item.nickname != nil
+            || item.remark != nil
+            || item.region != nil
+            || item.source != nil
+            || item.addedOn != nil
+            || (item.tags?.isEmpty == false)
+            || item.enterprise != nil
+            || item.realName != nil
+        return !hasProfile
+    }
+
+    /// 把后端同步错误翻成人话。未知错误退回通用文案，原始错误串放到悬停提示里。
+    public static func humanizedSyncError(_ raw: String) -> String {
+        let lower = raw.lowercased()
+        if lower.contains("user_input_detected") {
+            return L10n.t(.contactsSyncReasonUserInput)
+        }
+        if lower.contains("desktop_busy") || lower.contains("busy") {
+            return L10n.t(.contactsSyncReasonDesktopBusy)
+        }
+        if lower.contains("layout_mismatch") || lower.contains("layout_missing") || lower.contains("input_divider") {
+            return L10n.t(.contactsSyncReasonLayoutMismatch)
+        }
+        if lower.contains("target_not_reached") || lower.contains("window_not_found") || lower.contains("contacts_entry") {
+            return L10n.t(.contactsSyncReasonTargetNotReached)
+        }
+        if lower.contains("image_snapshot_changed") {
+            return L10n.t(.contactsSyncReasonImageChanged)
+        }
+        return L10n.t(.contactsSyncReasonGeneric)
+    }
+
+    /// 同步未完成时列出人能看懂的原因（不再只写"同步未完整"）。
+    public static func incompleteSyncReasons(_ sync: ContactsSyncInfo) -> String {
+        var parts: [String] = []
+        // 后端已给可读原因时优先用它（含分类与计数，最贴近实情）。
+        if let readable = sync.incompleteReasons, !readable.isEmpty {
+            return readable.joined(separator: " ")
+        }
+        if sync.stopped == true {
+            parts.append(L10n.t(.contactsSyncReasonStopped))
+        }
+        if let unreadable = sync.unreadableRows, unreadable > 0 {
+            parts.append(L10n.t(.contactsSyncReasonUnreadableFmt, String(describing: unreadable)))
+        }
+        if let review = sync.needsReview, review > 0 {
+            parts.append(L10n.t(.contactsSyncReasonReviewFmt, String(describing: review)))
+        }
+        if let per = sync.perCategory {
+            let mismatched = per.filter { $0.expected != $0.synced }
+            if !mismatched.isEmpty {
+                let detail = mismatched
+                    .map { "\(categoryTitle($0.category)) \($0.synced)/\($0.expected)" }
+                    .joined(separator: ", ")
+                parts.append(L10n.t(.contactsSyncReasonCategoriesFmt, detail))
+            }
+        }
+        if parts.isEmpty {
+            parts.append(L10n.t(.contactsSyncReasonGeneric))
+        }
+        return parts.joined(separator: " ")
     }
 
     public static func applyHandling(
@@ -292,8 +378,227 @@ public struct ContactsPageLogic {
     }
 }
 
+// MARK: - Page-local controls (all colors come from Theme tokens)
 
-public final class ContactsPageController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+/// 次要按钮：白底、1px 描边、深色字（设计稿的「刷新 / 忽略 / 复制」类按钮）。
+private final class ContactsSecondaryButton: NSButton {
+    public init(title: String, target: AnyObject? = nil, action: Selector? = nil) {
+        super.init(frame: .zero)
+        self.target = target
+        self.action = action
+        self.title = title
+        setup()
+    }
+
+    public required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    public override var title: String {
+        didSet { updateTitle() }
+    }
+
+    private func setup() {
+        isBordered = false
+        bezelStyle = .regularSquare
+        setButtonType(.momentaryPushIn)
+        focusRingType = .none
+        wantsLayer = true
+        layer?.cornerRadius = 6
+        layer?.borderWidth = 1
+        layer?.masksToBounds = true
+        updateTitle()
+    }
+
+    private func updateTitle() {
+        layer?.backgroundColor = ContactsPageTokens.cardBackground.cgColor
+        layer?.borderColor = Theme.Colors.inputBorder.cgColor
+        attributedTitle = NSAttributedString(string: title, attributes: [
+            .foregroundColor: ContactsPageTokens.textPrimary,
+            .font: NSFont.systemFont(ofSize: 13)
+        ])
+    }
+
+    public override var intrinsicContentSize: NSSize {
+        let base = super.intrinsicContentSize
+        return NSSize(width: max(base.width + 28, 64), height: 32)
+    }
+}
+
+/// 小圆角来源标签（预置行的「来自授权名单·未同步」、已忽略标签）。
+private final class ContactsTagView: NSView {
+    private let label = NSTextField(labelWithString: "")
+
+    public init(text: String, textColor: NSColor, background: NSColor) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 4
+        layer?.masksToBounds = true
+        label.stringValue = text
+        label.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        label.textColor = textColor
+        label.alignment = .center
+        label.lineBreakMode = .byTruncatingTail
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        layer?.backgroundColor = background.cgColor
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            label.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2)
+        ])
+        setContentHuggingPriority(.required, for: .horizontal)
+        label.setContentHuggingPriority(.required, for: .horizontal)
+    }
+
+    public required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+}
+
+/// 分段标签按钮：选中绿底白字，未选中白底深色字。
+private final class ContactsSegmentButton: NSButton {
+    public var isSelectedTab: Bool = false {
+        didSet { updateAppearance() }
+    }
+
+    public init(title: String, tag: Int, target: AnyObject?, action: Selector?) {
+        super.init(frame: .zero)
+        self.title = title
+        self.tag = tag
+        self.target = target
+        self.action = action
+        isBordered = false
+        bezelStyle = .regularSquare
+        setButtonType(.momentaryChange)
+        focusRingType = .none
+        wantsLayer = true
+        layer?.cornerRadius = 0
+        layer?.masksToBounds = true
+        updateAppearance()
+    }
+
+    public required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    public override var title: String {
+        didSet { updateAppearance() }
+    }
+
+    private func updateAppearance() {
+        layer?.backgroundColor = (isSelectedTab ? ContactsPageTokens.primary : ContactsPageTokens.cardBackground).cgColor
+        attributedTitle = NSAttributedString(string: title, attributes: [
+            .foregroundColor: isSelectedTab ? ContactsPageTokens.primaryText : ContactsPageTokens.textPrimary,
+            .font: NSFont.systemFont(ofSize: 13, weight: .medium)
+        ])
+    }
+
+    public override var intrinsicContentSize: NSSize {
+        return NSSize(width: super.intrinsicContentSize.width, height: 32)
+    }
+}
+
+/// 分段标签容器：外圈 1px 描边 + 8 圆角，内部选中项绿底。
+private final class ContactsSegmentBar: NSView {
+    private var buttons: [ContactsSegmentButton] = []
+    private let stack = NSStackView()
+
+    public var selectedIndex: Int {
+        get { buttons.firstIndex(where: { $0.isSelectedTab }) ?? 0 }
+        set {
+            for (index, button) in buttons.enumerated() {
+                button.isSelectedTab = (index == newValue)
+            }
+        }
+    }
+
+    public init(titles: [String], target: AnyObject?, action: Selector?) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        layer?.masksToBounds = true
+        layer?.backgroundColor = ContactsPageTokens.cardBorder.cgColor
+
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.distribution = .fillEqually
+        stack.spacing = 1
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+
+        for (index, title) in titles.enumerated() {
+            let button = ContactsSegmentButton(title: title, tag: index, target: target, action: action)
+            button.translatesAutoresizingMaskIntoConstraints = false
+            buttons.append(button)
+            stack.addArrangedSubview(button)
+        }
+        buttons.first?.isSelectedTab = true
+
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 1),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -1),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 1),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -1),
+            heightAnchor.constraint(equalToConstant: 34)
+        ])
+    }
+
+    public required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    public func setTitles(_ titles: [String]) {
+        for (index, title) in titles.enumerated() where index < buttons.count {
+            buttons[index].title = title
+        }
+    }
+}
+
+/// 表格行：选中 #E6F4EC，底部 1px 分隔线，无斑马纹。
+private final class ContactsTableRowView: NSTableRowView {
+    public override func drawSelection(in dirtyRect: NSRect) {
+        guard selectionHighlightStyle != .none else { return }
+        Theme.Colors.selectedRowBackground.setFill()
+        bounds.fill()
+    }
+
+    public override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        Theme.Colors.cardBorder.setFill()
+        NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
+    }
+}
+
+/// 表头：白底 + 底部 1px 分隔线，文字用 12pt 次要色自绘（原生表头会画灰底和分隔线）。
+private final class ContactsTableHeaderView: NSTableHeaderView {
+    public override func draw(_ dirtyRect: NSRect) {
+        ContactsPageTokens.cardBackground.setFill()
+        bounds.fill()
+        ContactsPageTokens.cardBorder.setFill()
+        NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
+
+        guard let table = tableView else { return }
+        for index in 0..<table.numberOfColumns {
+            let column = table.tableColumns[index]
+            let attr = column.headerCell.attributedStringValue
+            let size = attr.size()
+            let cellRect = headerRect(ofColumn: index)
+            let textRect = NSRect(
+                x: cellRect.minX + 10,
+                y: cellRect.midY - size.height / 2,
+                width: max(cellRect.width - 20, 0),
+                height: size.height
+            )
+            attr.draw(in: textRect)
+        }
+    }
+}
+
+// MARK: - Page Controller
+
+public final class ContactsPageController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, ShellPageActionProviding {
     private let context: StatusPanelController
 
     // Data state
@@ -304,27 +609,45 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
 
     // UI elements
     private let syncInfoLabel = NSTextField(labelWithString: L10n.t(.contactsSyncLoading))
-    private let reviewNoticeBox = NSBox()
-    private let reviewNoticeLabel = NSTextField(wrappingLabelWithString: "")
-    private let categorySegment = NSSegmentedControl()
+    private let syncInfoIcon = NSImageView()
+    private var contentRow: NSStackView!
+    private var detailWidthConstraint: NSLayoutConstraint!
+    private var detailHeightConstraint: NSLayoutConstraint!
+    private var stackedDetailWidthConstraint: NSLayoutConstraint!
+    private var stackedDetailHeightConstraint: NSLayoutConstraint!
+    private var tableHeightConstraint: NSLayoutConstraint!
+    private var stackedTableHeightConstraint: NSLayoutConstraint!
+    private var contentRowMinHeightConstraint: NSLayoutConstraint!
+    private var lastLayoutWidth: CGFloat = 0
+    private var reviewBanner: ThemeStatusBanner!
+    private var syncBanner: ThemeStatusBanner!
+    private var presetBanner: ThemeStatusBanner!
+    private var segmentBar: ContactsSegmentBar!
+    /// 顶部操作行：无 Shell 时右对齐显示；接入 Shell 时按钮与同步状态被移到页标题行。
+    private var actionRow: NSStackView!
+    private var initSyncButton: ThemePrimaryButton!
+    private var quickSyncButton: ThemePrimaryButton!
+    private var refreshButton: ContactsSecondaryButton!
     private let contactsTable = NSTableView()
     private let emptyLabel = NSTextField(wrappingLabelWithString: "")
 
     // Detail Panel
-    private let detailBox = NSBox()
+    private var detailBox: NSBox!
     private let detailNameLabel = NSTextField(labelWithString: L10n.t(.contactsNoSelected))
-    private let detailWechatLabel = NSTextField(labelWithString: "-")
-    private let detailRemarkLabel = NSTextField(labelWithString: "-")
-    private let detailRegionLabel = NSTextField(labelWithString: "-")
-    private let detailSourceLabel = NSTextField(labelWithString: "-")
-    private let detailAddedOnLabel = NSTextField(labelWithString: "-")
-    private let detailTagsLabel = NSTextField(labelWithString: "-")
-    private let detailEnterpriseLabel = NSTextField(labelWithString: "-")
-    private let detailHandlingLabel = NSTextField(labelWithString: "-")
-    private let detailActionBtn = NSButton(title: L10n.t(.contactsChangeHandling), target: nil, action: nil)
+    private let detailSourceTag = NSView()
+    private let detailWechatLabel = NSTextField(labelWithString: "—")
+    private let detailRemarkLabel = NSTextField(labelWithString: "—")
+    private let detailRegionLabel = NSTextField(labelWithString: "—")
+    private let detailSourceLabel = NSTextField(labelWithString: "—")
+    private let detailAddedOnLabel = NSTextField(labelWithString: "—")
+    private let detailTagsLabel = NSTextField(labelWithString: "—")
+    private let detailEnterpriseLabel = NSTextField(labelWithString: "—")
+    private let detailHandlingLabel = NSTextField(labelWithString: "—")
+    private let detailActionBtn: ThemePrimaryButton
 
     public init(context: StatusPanelController) {
         self.context = context
+        self.detailActionBtn = ThemePrimaryButton(title: L10n.t(.contactsChangeHandling))
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -342,191 +665,402 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         loadContactsData()
     }
 
+    public override func viewDidLayout() {
+        super.viewDidLayout()
+        guard let contentRow = contentRow else { return }
+        let width = view.bounds.width
+        guard abs(width - lastLayoutWidth) > 1 else { return }
+        lastLayoutWidth = width
+        let stacked = width < 780
+        let isStacked = (contentRow.orientation == .vertical)
+        guard stacked != isStacked else { return }
+
+        // 窄窗口：表格与详情上下排列，表格占满宽度；宽窗口：恢复左表右详情。
+        contentRow.orientation = stacked ? .vertical : .horizontal
+        contentRow.alignment = stacked ? .leading : .top
+        if stacked {
+            detailWidthConstraint.isActive = false
+            detailHeightConstraint.isActive = false
+            tableHeightConstraint.isActive = false
+            contentRowMinHeightConstraint.isActive = false
+            stackedDetailWidthConstraint.isActive = true
+            stackedDetailHeightConstraint.isActive = true
+            stackedTableHeightConstraint.isActive = true
+        } else {
+            stackedDetailWidthConstraint.isActive = false
+            stackedDetailHeightConstraint.isActive = false
+            stackedTableHeightConstraint.isActive = false
+            contentRowMinHeightConstraint.isActive = true
+            detailWidthConstraint.isActive = true
+            detailHeightConstraint.isActive = true
+            tableHeightConstraint.isActive = true
+        }
+    }
+
+
+    // MARK: - Layout
+
     private func setupUI() {
+        view.wantsLayer = true
+        view.layer?.backgroundColor = ContactsPageTokens.pageBackground.cgColor
+
+        // 整页可纵向滚动：窗口很小时（三条横幅 + 表格最小高度）不会撑破视口；
+        // 空间足够时 document 高度等于视口，表格仍然占满剩余高度。
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.drawsBackground = false
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(scrollView)
+
+        let document = FlippedView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.documentView = document
+
         let mainStack = NSStackView()
         mainStack.orientation = .vertical
         mainStack.alignment = .leading
-        mainStack.spacing = 12
-        // 剩余高度全部给下方列表（默认按"重力区"排列不拉伸，列表只剩内容初始高度、后面的行被截掉）
+        mainStack.spacing = 16
         mainStack.distribution = .fill
         mainStack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(mainStack)
+        document.addSubview(mainStack)
 
-        // 1. 顶部操作栏与同步状态
-        let topBar = NSStackView()
-        topBar.orientation = .horizontal
-        topBar.spacing = 12
-        topBar.alignment = .centerY
+        NSLayoutConstraint.activate([
+            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: view.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            document.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
+            document.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
+            document.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            document.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
+            mainStack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 24),
+            mainStack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -24),
+            mainStack.topAnchor.constraint(equalTo: document.topAnchor, constant: 8),
+            mainStack.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -24)
+        ])
+        let fillViewport = document.heightAnchor.constraint(equalTo: scrollView.contentView.heightAnchor)
+        fillViewport.priority = .defaultLow
+        fillViewport.isActive = true
 
-        let initSyncBtn = NSButton(title: L10n.t(.contactsInitSync), target: self, action: #selector(handleInitSync))
-        initSyncBtn.bezelStyle = .rounded
-        let quickSyncBtn = NSButton(title: L10n.t(.contactsQuickSync), target: self, action: #selector(handleQuickSync))
-        let refreshBtn = NSButton(title: L10n.t(.actionRefresh), target: self, action: #selector(handleRefresh))
+        // 1. 顶部操作行：无 Shell 时右上角显示；接入 Shell 时按钮与同步状态移到页标题行。
+        actionRow = makeActionRow()
+        mainStack.addArrangedSubview(actionRow)
+        actionRow.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
 
-        syncInfoLabel.font = NSFont.systemFont(ofSize: 12)
-        syncInfoLabel.textColor = .secondaryLabelColor
+        // 2. 横幅区：待确认项 / 同步失败原因 / 授权名单预置联系人
+        reviewBanner = ThemeStatusBanner(status: .warning, title: L10n.t(.contactsReviewNoticeTitle), message: "")
+        reviewBanner.isHidden = true
+        mainStack.addArrangedSubview(reviewBanner)
+        reviewBanner.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
 
-        topBar.addArrangedSubview(initSyncBtn)
-        topBar.addArrangedSubview(quickSyncBtn)
-        topBar.addArrangedSubview(refreshBtn)
-        topBar.addArrangedSubview(syncInfoLabel)
-        mainStack.addArrangedSubview(topBar)
+        syncBanner = ThemeStatusBanner(status: .warning, title: L10n.t(.contactsSyncStatusIncomplete), message: "")
+        syncBanner.isHidden = true
+        mainStack.addArrangedSubview(syncBanner)
+        syncBanner.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
 
-        // 2. 待确认项提示栏（默认隐藏）
-        reviewNoticeBox.title = L10n.t(.contactsReviewNoticeTitle)
-        reviewNoticeBox.boxType = .custom
-        reviewNoticeBox.fillColor = NSColor.systemYellow.withAlphaComponent(0.15)
-        reviewNoticeBox.borderColor = NSColor.systemOrange
-        reviewNoticeBox.borderWidth = 1
-        reviewNoticeBox.cornerRadius = 4
-        reviewNoticeBox.translatesAutoresizingMaskIntoConstraints = false
-        reviewNoticeLabel.font = NSFont.systemFont(ofSize: 12)
-        reviewNoticeBox.setContent(reviewNoticeLabel)
-        reviewNoticeBox.isHidden = true
-        mainStack.addArrangedSubview(reviewNoticeBox)
+        presetBanner = ThemeStatusBanner(status: .inactive, title: ContactsPageStrings.presetTag, message: "")
+        presetBanner.isHidden = true
+        mainStack.addArrangedSubview(presetBanner)
+        presetBanner.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
 
-        // 3. 分类标签栏
-        categorySegment.segmentCount = 5
-        categorySegment.setLabel(L10n.t(.contactsCategoryPersonal), forSegment: 0)
-        categorySegment.setLabel(L10n.t(.contactsCategoryWork), forSegment: 1)
-        categorySegment.setLabel(L10n.t(.contactsCategoryGroup), forSegment: 2)
-        categorySegment.setLabel(L10n.t(.contactsCategoryOfficial), forSegment: 3)
-        categorySegment.setLabel(L10n.t(.contactsCategoryIgnored), forSegment: 4)
-        categorySegment.selectedSegment = 0
-        categorySegment.target = self
-        categorySegment.action = #selector(handleCategoryChanged)
-        mainStack.addArrangedSubview(categorySegment)
+        // 3. 分类分段标签（选中绿底白字）
+        let initialTitles = [
+            L10n.t(.contactsTabPersonalCount, 0),
+            L10n.t(.contactsTabWorkCount, 0),
+            L10n.t(.contactsTabGroupCount, 0),
+            L10n.t(.contactsTabOfficialCount, 0),
+            L10n.t(.contactsTabIgnoredCount, 0)
+        ]
+        segmentBar = ContactsSegmentBar(titles: initialTitles, target: self, action: #selector(handleCategoryChanged(_:)))
+        segmentBar.translatesAutoresizingMaskIntoConstraints = false
+        mainStack.addArrangedSubview(segmentBar)
+        segmentBar.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
 
-        // 4. 下方：左侧表格占剩余宽度，右侧详情面板固定宽度（选中联系人才显示；隐藏时表格占满整行）。
-        //    不用 NSSplitView：面板隐藏后再显示，分栏会把它留成 0 宽（实测被挤成一条）。
-        let contentRow = NSStackView()
+        // 4. 下方：左侧表格卡片 + 右侧详情卡片。窗口太窄时改为上下排列（页内可滚动）。
+        contentRow = NSStackView()
         contentRow.orientation = .horizontal
         contentRow.alignment = .top
         contentRow.distribution = .fill
-        contentRow.spacing = 12
+        contentRow.spacing = 20
         contentRow.translatesAutoresizingMaskIntoConstraints = false
 
-        // 左侧表格
+        let tableCard = makeTableCard()
+        setupDetailBox()
+        contentRow.addArrangedSubview(tableCard)
+        contentRow.addArrangedSubview(detailBox)
+        contentRow.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
+        mainStack.addArrangedSubview(contentRow)
+        contentRow.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
+
+        contentRowMinHeightConstraint = contentRow.heightAnchor.constraint(greaterThanOrEqualToConstant: 320)
+        contentRowMinHeightConstraint.isActive = true
+        tableHeightConstraint = tableCard.heightAnchor.constraint(equalTo: contentRow.heightAnchor)
+        tableHeightConstraint.isActive = true
+        stackedTableHeightConstraint = tableCard.heightAnchor.constraint(greaterThanOrEqualToConstant: 320)
+        detailHeightConstraint = detailBox.heightAnchor.constraint(equalTo: contentRow.heightAnchor)
+        detailHeightConstraint.isActive = true
+        detailWidthConstraint = detailBox.widthAnchor.constraint(equalToConstant: 300)
+        detailWidthConstraint.isActive = true
+
+        stackedDetailWidthConstraint = detailBox.widthAnchor.constraint(equalTo: contentRow.widthAnchor)
+        stackedDetailHeightConstraint = detailBox.heightAnchor.constraint(greaterThanOrEqualToConstant: 380)
+
+        detailBox.isHidden = true
+
+        // 顶部行、横幅、标签栏保持自身高度，剩余高度全部给列表
+        for view in [mainStack.arrangedSubviews[0], reviewBanner!, syncBanner!, presetBanner!, segmentBar!] {
+            view.setContentHuggingPriority(.required, for: .vertical)
+        }
+        tableCard.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
+        tableCard.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        detailBox.setContentHuggingPriority(.required, for: .horizontal)
+    }
+
+    private func makeActionRow() -> NSStackView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let spacer = NSView()
+        spacer.translatesAutoresizingMaskIntoConstraints = false
+        spacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        spacer.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+
+        initSyncButton = ThemePrimaryButton(title: L10n.t(.contactsInitSync), target: self, action: #selector(handleInitSync))
+        initSyncButton.heightAnchor.constraint(equalToConstant: 36).isActive = true
+        quickSyncButton = ThemePrimaryButton(title: L10n.t(.contactsQuickSync), target: self, action: #selector(handleQuickSync))
+        quickSyncButton.heightAnchor.constraint(equalToConstant: 36).isActive = true
+        refreshButton = ContactsSecondaryButton(title: L10n.t(.actionRefresh), target: self, action: #selector(handleRefresh))
+
+        syncInfoIcon.translatesAutoresizingMaskIntoConstraints = false
+        syncInfoIcon.imageScaling = .scaleProportionallyDown
+        syncInfoIcon.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        syncInfoIcon.heightAnchor.constraint(equalToConstant: 16).isActive = true
+        syncInfoIcon.isHidden = true
+
+        syncInfoLabel.font = NSFont.systemFont(ofSize: 12)
+        syncInfoLabel.textColor = ContactsPageTokens.textSecondary
+        syncInfoLabel.lineBreakMode = .byTruncatingTail
+        syncInfoLabel.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        syncInfoLabel.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+
+        row.addArrangedSubview(spacer)
+        row.addArrangedSubview(initSyncButton)
+        row.addArrangedSubview(quickSyncButton)
+        row.addArrangedSubview(refreshButton)
+        row.addArrangedSubview(syncInfoIcon)
+        row.addArrangedSubview(syncInfoLabel)
+        return row
+    }
+
+    private func makeTableCard() -> NSBox {
+        let tableCard = NSBox()
+        tableCard.boxType = .custom
+        tableCard.fillColor = ContactsPageTokens.cardBackground
+        tableCard.borderColor = ContactsPageTokens.cardBorder
+        tableCard.borderWidth = 1
+        tableCard.cornerRadius = 12
+        tableCard.titlePosition = .noTitle
+        tableCard.translatesAutoresizingMaskIntoConstraints = false
+        tableCard.wantsLayer = true
+        tableCard.layer?.cornerRadius = 12
+        tableCard.layer?.masksToBounds = true
+
         let tableScroll = NSScrollView()
         tableScroll.hasVerticalScroller = true
+        tableScroll.hasHorizontalScroller = false
+        tableScroll.drawsBackground = false
         tableScroll.translatesAutoresizingMaskIntoConstraints = false
 
         let colName = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("NameCol"))
         colName.title = L10n.t(.contactsColName)
-        colName.width = 160
-        colName.minWidth = 150  // 详情面板打开时名字列最窄也要放下约 10 个字，再长显示"…"，悬停看全名
+        colName.width = 200
+        colName.minWidth = 160
         contactsTable.addTableColumn(colName)
 
         let colWx = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("WxCol"))
         colWx.title = L10n.t(.contactsColWechat)
         colWx.width = 110
-        colWx.minWidth = 40
+        colWx.minWidth = 60
         contactsTable.addTableColumn(colWx)
 
         let colMsgs = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("MsgsCol"))
         colMsgs.title = L10n.t(.contactsColMsgs)
-        colMsgs.width = 60
-        colMsgs.minWidth = 32
+        colMsgs.width = 70
+        colMsgs.minWidth = 50
         contactsTable.addTableColumn(colMsgs)
 
         let colHandling = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("HandlingCol"))
         colHandling.title = L10n.t(.contactsColHandling)
-        colHandling.width = 140
-        colHandling.minWidth = 130  // 放"自动回复"勾选框和"忽略"按钮，不能被压窄
+        colHandling.width = 170
+        colHandling.minWidth = 160
         contactsTable.addTableColumn(colHandling)
 
-        contactsTable.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
-        // 详情面板出现时表格变窄：列间距收紧，四列在最小宽度下仍能放下、不用横向滚动
-        contactsTable.intercellSpacing = NSSize(width: 6, height: contactsTable.intercellSpacing.height)
+        for column in contactsTable.tableColumns {
+            let header = NSTableHeaderCell(textCell: column.title)
+            header.attributedStringValue = NSAttributedString(string: column.title, attributes: [
+                .font: NSFont.systemFont(ofSize: 12),
+                .foregroundColor: ContactsPageTokens.textSecondary
+            ])
+            header.drawsBackground = false
+            column.headerCell = header
+        }
+
+        contactsTable.headerView = ContactsTableHeaderView(frame: NSRect(x: 0, y: 0, width: 0, height: 26))
+        contactsTable.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        contactsTable.intercellSpacing = NSSize(width: 10, height: 0)
         contactsTable.dataSource = self
         contactsTable.delegate = self
-        contactsTable.rowHeight = 38
+        contactsTable.rowHeight = 40
+        contactsTable.backgroundColor = ContactsPageTokens.cardBackground
+        contactsTable.gridStyleMask = []
+        contactsTable.selectionHighlightStyle = .regular
+        contactsTable.allowsEmptySelection = true
+        contactsTable.focusRingType = .none
         tableScroll.documentView = contactsTable
 
-        // 空态提示
-        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
         emptyLabel.alignment = .center
-        emptyLabel.textColor = .secondaryLabelColor
+        emptyLabel.textColor = ContactsPageTokens.textSecondary
         emptyLabel.font = NSFont.systemFont(ofSize: 13)
         emptyLabel.isHidden = true
+        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
         tableScroll.addSubview(emptyLabel)
-
-        // 右侧详情
-        setupDetailBox()
-
-        contentRow.addArrangedSubview(tableScroll)
-        contentRow.addArrangedSubview(detailBox)
-        // 详情面板：点了名字才出现，取消选择就收起
-        detailBox.isHidden = true
-        topBar.setContentHuggingPriority(.required, for: .vertical)
-        categorySegment.setContentHuggingPriority(.required, for: .vertical)
-        reviewNoticeBox.setContentHuggingPriority(.required, for: .vertical)
-        contentRow.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
-        tableScroll.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
-        tableScroll.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
-        detailBox.setContentHuggingPriority(.required, for: .horizontal)
-        mainStack.addArrangedSubview(contentRow)
-
         NSLayoutConstraint.activate([
-            mainStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            mainStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            mainStack.topAnchor.constraint(equalTo: view.topAnchor, constant: 16),
-            mainStack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16),
-            reviewNoticeBox.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
-            contentRow.widthAnchor.constraint(equalTo: mainStack.widthAnchor),
-            contentRow.heightAnchor.constraint(greaterThanOrEqualToConstant: 240),
-            tableScroll.heightAnchor.constraint(equalTo: contentRow.heightAnchor),
-            tableScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 380),
-            detailBox.widthAnchor.constraint(equalToConstant: 230),
             emptyLabel.centerXAnchor.constraint(equalTo: tableScroll.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: tableScroll.centerYAnchor),
-            emptyLabel.widthAnchor.constraint(lessThanOrEqualTo: tableScroll.widthAnchor, constant: -32)
+            emptyLabel.widthAnchor.constraint(lessThanOrEqualTo: tableScroll.widthAnchor, constant: -48)
         ])
+
+        tableCard.setContent(tableScroll, inset: 1)
+        return tableCard
     }
 
     private func setupDetailBox() {
-        detailBox.title = L10n.t(.contactsDetailBoxTitle)
-        detailBox.boxType = .primary
+        detailBox = NSBox()
+        detailBox.boxType = .custom
+        detailBox.fillColor = ContactsPageTokens.cardBackground
+        detailBox.borderColor = ContactsPageTokens.cardBorder
+        detailBox.borderWidth = 1
+        detailBox.cornerRadius = 12
+        detailBox.titlePosition = .noTitle
         detailBox.translatesAutoresizingMaskIntoConstraints = false
+        detailBox.wantsLayer = true
+        detailBox.layer?.cornerRadius = 12
+        detailBox.layer?.masksToBounds = true
 
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 8
+        stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        detailNameLabel.font = NSFont.boldSystemFont(ofSize: 14)
+        let title = NSTextField(labelWithString: L10n.t(.contactsDetailBoxTitle))
+        title.font = NSFont.systemFont(ofSize: 17, weight: .semibold)
+        title.textColor = ContactsPageTokens.textPrimary
+        stack.addArrangedSubview(title)
+
+        detailNameLabel.font = NSFont.systemFont(ofSize: 20, weight: .semibold)
+        detailNameLabel.textColor = ContactsPageTokens.textPrimary
+        detailNameLabel.lineBreakMode = .byTruncatingTail
         stack.addArrangedSubview(detailNameLabel)
 
-        let grid = NSGridView(views: [
-            [NSTextField(labelWithString: L10n.t(.contactsDetailWechat)), detailWechatLabel],
-            [NSTextField(labelWithString: L10n.t(.contactsDetailRemark)), detailRemarkLabel],
-            [NSTextField(labelWithString: L10n.t(.contactsDetailRegion)), detailRegionLabel],
-            [NSTextField(labelWithString: L10n.t(.contactsDetailAddedOn)), detailAddedOnLabel],
-            [NSTextField(labelWithString: L10n.t(.contactsDetailSource)), detailSourceLabel],
-            [NSTextField(labelWithString: L10n.t(.contactsDetailEnterprise)), detailEnterpriseLabel],
-            [NSTextField(labelWithString: L10n.t(.contactsDetailTags)), detailTagsLabel],
-            [NSTextField(labelWithString: L10n.t(.contactsDetailHandling)), detailHandlingLabel]
+        // 预置行来源标记（仅预置行显示）
+        let tag = ContactsTagView(
+            text: ContactsPageStrings.presetTag,
+            textColor: ContactsPageTokens.warningText,
+            background: ContactsPageTokens.warningBg
+        )
+        tag.translatesAutoresizingMaskIntoConstraints = false
+        detailSourceTag.addSubview(tag)
+        detailSourceTag.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            tag.leadingAnchor.constraint(equalTo: detailSourceTag.leadingAnchor),
+            tag.trailingAnchor.constraint(equalTo: detailSourceTag.trailingAnchor),
+            tag.topAnchor.constraint(equalTo: detailSourceTag.topAnchor),
+            tag.bottomAnchor.constraint(equalTo: detailSourceTag.bottomAnchor)
         ])
-        grid.rowSpacing = 6
-        grid.columnSpacing = 10
-        stack.addArrangedSubview(grid)
+        detailSourceTag.isHidden = true
+        stack.addArrangedSubview(detailSourceTag)
+
+        let fieldRows: [(String, NSTextField)] = [
+            (L10n.t(.contactsDetailWechat), detailWechatLabel),
+            (L10n.t(.contactsDetailRemark), detailRemarkLabel),
+            (L10n.t(.contactsDetailRegion), detailRegionLabel),
+            (L10n.t(.contactsDetailAddedOn), detailAddedOnLabel),
+            (L10n.t(.contactsDetailSource), detailSourceLabel),
+            (L10n.t(.contactsDetailEnterprise), detailEnterpriseLabel),
+            (L10n.t(.contactsDetailTags), detailTagsLabel),
+            (L10n.t(.contactsDetailHandling), detailHandlingLabel)
+        ]
+        let fieldsStack = NSStackView()
+        fieldsStack.orientation = .vertical
+        fieldsStack.alignment = .leading
+        fieldsStack.spacing = 10
+        fieldsStack.translatesAutoresizingMaskIntoConstraints = false
+        for (title, valueLabel) in fieldRows {
+            let row = NSStackView()
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 12
+            row.translatesAutoresizingMaskIntoConstraints = false
+
+            let titleLabel = makeDetailFieldLabel(title)
+            titleLabel.widthAnchor.constraint(equalToConstant: 84).isActive = true
+
+            valueLabel.font = NSFont.systemFont(ofSize: 13)
+            valueLabel.textColor = ContactsPageTokens.textPrimary
+            valueLabel.alignment = .left
+            valueLabel.lineBreakMode = .byTruncatingTail
+            valueLabel.toolTip = valueLabel.stringValue
+            valueLabel.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+
+            row.addArrangedSubview(titleLabel)
+            row.addArrangedSubview(valueLabel)
+            fieldsStack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: fieldsStack.widthAnchor).isActive = true
+        }
+        stack.addArrangedSubview(fieldsStack)
+        fieldsStack.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+        let spacer = NSView()
+        spacer.translatesAutoresizingMaskIntoConstraints = false
+        spacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
+        spacer.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .vertical)
+        stack.addArrangedSubview(spacer)
 
         detailActionBtn.target = self
         detailActionBtn.action = #selector(handleDetailAction)
         detailActionBtn.isEnabled = false
+        detailActionBtn.translatesAutoresizingMaskIntoConstraints = false
+        detailActionBtn.heightAnchor.constraint(equalToConstant: 36).isActive = true
         stack.addArrangedSubview(detailActionBtn)
+        detailActionBtn.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
 
-        detailBox.setContent(stack)
+        detailBox.setContent(stack, inset: 20)
+    }
+
+    private func makeDetailFieldLabel(_ text: String) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = NSFont.systemFont(ofSize: 13)
+        label.textColor = ContactsPageTokens.textSecondary
+        label.alignment = .left
+        return label
     }
 
     private func updateTabs(counts: ContactsCategoryCounts) {
-        categorySegment.setLabel(L10n.t(.contactsTabPersonalCount, counts.personal), forSegment: 0)
-        categorySegment.setLabel(L10n.t(.contactsTabWorkCount, counts.work), forSegment: 1)
-        categorySegment.setLabel(L10n.t(.contactsTabGroupCount, counts.group), forSegment: 2)
-        categorySegment.setLabel(L10n.t(.contactsTabOfficialCount, counts.official), forSegment: 3)
-        categorySegment.setLabel(L10n.t(.contactsTabIgnoredCount, counts.ignored), forSegment: 4)
+        segmentBar.setTitles([
+            L10n.t(.contactsTabPersonalCount, counts.personal),
+            L10n.t(.contactsTabWorkCount, counts.work),
+            L10n.t(.contactsTabGroupCount, counts.group),
+            L10n.t(.contactsTabOfficialCount, counts.official),
+            L10n.t(.contactsTabIgnoredCount, counts.ignored)
+        ])
     }
+
+    // MARK: - Data loading
 
     public func loadContactsData() {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -553,38 +1087,94 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         self.allContacts = payload.contacts
         self.reviews = payload.reviews ?? []
         updateTabs(counts: counts)
-
-        if let sync = payload.sync {
-            var syncDesc = sync.complete ? L10n.t(.contactsSyncCompleted) : L10n.t(.contactsSyncIncomplete)
-            if let per = sync.perCategory, !per.isEmpty {
-                let parts = per.map { "\(ContactsPageLogic.categoryTitle($0.category)) \($0.synced)/\($0.expected)" }
-                syncDesc += " (" + parts.joined(separator: ", ") + ")"
-            }
-            syncInfoLabel.stringValue = syncDesc
-            syncInfoLabel.textColor = sync.complete ? .systemGreen : .systemOrange
-        } else {
-            syncInfoLabel.stringValue = L10n.t(.contactsSyncNever)
-            syncInfoLabel.textColor = .secondaryLabelColor
-        }
-
-        if !reviews.isEmpty {
-            reviewNoticeBox.isHidden = false
-            let names = reviews.map { $0.name }.joined(separator: "、")
-            reviewNoticeLabel.stringValue = L10n.t(.contactsReviewPrompt, reviews.count, names)
-        } else {
-            reviewNoticeBox.isHidden = true
-        }
-
+        renderSyncStatus(payload.sync)
+        renderReviewBanner()
+        renderPresetBanner()
         filterDisplayedContacts()
+    }
+
+    private func renderSyncStatus(_ sync: ContactsSyncInfo?) {
+        guard let sync = sync else {
+            syncInfoLabel.stringValue = L10n.t(.contactsSyncNever)
+            syncInfoLabel.textColor = ContactsPageTokens.textSecondary
+            syncInfoIcon.isHidden = true
+            syncBanner.isHidden = true
+            return
+        }
+
+        if let raw = sync.error, !raw.isEmpty {
+            syncInfoLabel.stringValue = L10n.t(.contactsSyncStatusFailed)
+            syncInfoLabel.textColor = ContactsPageTokens.errorText
+            syncInfoIcon.isHidden = false
+            syncInfoIcon.image = symbolImage("xmark.octagon.fill", tint: ContactsPageTokens.errorDot)
+            syncInfoLabel.toolTip = raw
+            syncBanner.status = .error
+            syncBanner.titleText = L10n.t(.contactsSyncStatusFailed)
+            syncBanner.messageText = ContactsPageLogic.humanizedSyncError(raw)
+            syncBanner.isHidden = false
+            return
+        }
+
+        syncInfoLabel.toolTip = nil
+        if sync.complete {
+            syncInfoLabel.stringValue = L10n.t(.contactsSyncCompleted)
+            syncInfoLabel.textColor = ContactsPageTokens.normalText
+            syncInfoIcon.isHidden = false
+            syncInfoIcon.image = symbolImage("checkmark.circle.fill", tint: ContactsPageTokens.normalDot)
+            syncBanner.isHidden = true
+        } else {
+            syncInfoLabel.stringValue = L10n.t(.contactsSyncStatusIncomplete)
+            syncInfoLabel.textColor = ContactsPageTokens.warningText
+            syncInfoIcon.isHidden = false
+            syncInfoIcon.image = symbolImage("exclamationmark.triangle.fill", tint: ContactsPageTokens.warningDot)
+            syncBanner.status = .warning
+            syncBanner.titleText = L10n.t(.contactsSyncStatusIncomplete)
+            syncBanner.messageText = ContactsPageLogic.incompleteSyncReasons(sync)
+            syncBanner.isHidden = false
+        }
+    }
+
+    private func renderReviewBanner() {
+        guard !reviews.isEmpty else {
+            reviewBanner.isHidden = true
+            return
+        }
+        let names = reviews.map { $0.name }.joined(separator: ", ")
+        reviewBanner.titleText = L10n.t(.contactsReviewNoticeTitle)
+        reviewBanner.messageText = L10n.t(.contactsReviewPrompt, reviews.count, names)
+        reviewBanner.isHidden = false
+    }
+
+    private func renderPresetBanner() {
+        let presetCount = allContacts.filter { ContactsPageLogic.isUnsyncedPreset($0) }.count
+        guard presetCount > 0 else {
+            presetBanner.isHidden = true
+            return
+        }
+        presetBanner.titleText = ContactsPageStrings.presetTag
+        presetBanner.messageText = L10n.t(.contactsPresetBannerMessageFmt, String(describing: presetCount))
+        presetBanner.isHidden = false
+    }
+
+    private func symbolImage(_ name: String, tint: NSColor) -> NSImage? {
+        let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(config)
+        image?.isTemplate = true
+        syncInfoIcon.contentTintColor = tint
+        return image
     }
 
     private func handleLoadFallback() {
         syncInfoLabel.stringValue = L10n.t(.contactsOffline)
-        syncInfoLabel.textColor = .secondaryLabelColor
-        // 占位数据展示
+        syncInfoLabel.textColor = ContactsPageTokens.textSecondary
+        syncInfoIcon.isHidden = true
+        syncBanner.isHidden = true
+        reviewBanner.isHidden = true
+        presetBanner.isHidden = true
         let counts = ContactsCategoryCounts(personal: 0, work: 0, group: 0, official: 0, ignored: 0)
         updateTabs(counts: counts)
         self.allContacts = []
+        self.reviews = []
         filterDisplayedContacts()
     }
 
@@ -605,37 +1195,53 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         if displayedContacts.isEmpty {
             emptyLabel.stringValue = allContacts.isEmpty ? ContactsPageStrings.emptyAll : ContactsPageStrings.emptyCategory
             emptyLabel.isHidden = false
+            clearDetail()
         } else {
             emptyLabel.isHidden = true
+            // 和效果图一致：进入页面即选中第一行并在右侧显示详情
+            contactsTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+            showDetail(for: displayedContacts[0])
         }
-        clearDetail()
     }
 
     private func clearDetail() {
         detailBox.isHidden = true
+        detailSourceTag.isHidden = true
         detailNameLabel.stringValue = L10n.t(.contactsNoSelected)
-        detailWechatLabel.stringValue = "-"
-        detailRemarkLabel.stringValue = "-"
-        detailRegionLabel.stringValue = "-"
-        detailSourceLabel.stringValue = "-"
-        detailAddedOnLabel.stringValue = "-"
-        detailTagsLabel.stringValue = "-"
-        detailEnterpriseLabel.stringValue = "-"
-        detailHandlingLabel.stringValue = "-"
+        detailWechatLabel.stringValue = "—"
+        detailRemarkLabel.stringValue = "—"
+        detailRegionLabel.stringValue = "—"
+        detailSourceLabel.stringValue = "—"
+        detailAddedOnLabel.stringValue = "—"
+        detailTagsLabel.stringValue = "—"
+        detailEnterpriseLabel.stringValue = "—"
+        detailHandlingLabel.stringValue = "—"
         detailActionBtn.isEnabled = false
     }
 
     private func showDetail(for item: ContactProfileItem) {
+        let isPreset = ContactsPageLogic.isUnsyncedPreset(item)
         detailBox.isHidden = false
+        detailSourceTag.isHidden = !isPreset
         detailNameLabel.stringValue = item.displayName
+        detailNameLabel.toolTip = item.displayName
         detailWechatLabel.stringValue = ContactsPageLogic.detailWechatText(item)
-        detailRemarkLabel.stringValue = item.remark ?? "-"
-        detailRegionLabel.stringValue = item.region ?? "-"
-        detailSourceLabel.stringValue = item.source ?? "-"
-        detailAddedOnLabel.stringValue = item.addedOn ?? "-"
-        detailTagsLabel.stringValue = (item.tags?.isEmpty ?? true) ? "-" : item.tags!.joined(separator: ", ")
+        detailRemarkLabel.stringValue = item.remark ?? "—"
+        detailRegionLabel.stringValue = item.region ?? "—"
+        if isPreset {
+            detailSourceLabel.stringValue = ContactsPageStrings.presetTag
+        } else {
+            detailSourceLabel.stringValue = item.source ?? "—"
+        }
+        detailAddedOnLabel.stringValue = item.addedOn ?? "—"
+        detailTagsLabel.stringValue = (item.tags?.isEmpty ?? true) ? "—" : item.tags!.joined(separator: ", ")
         let ent = [item.enterprise, item.realName].compactMap { $0 }.joined(separator: " / ")
-        detailEnterpriseLabel.stringValue = ent.isEmpty ? "-" : ent
+        detailEnterpriseLabel.stringValue = ent.isEmpty ? "—" : ent
+
+        for label in [detailWechatLabel, detailRemarkLabel, detailRegionLabel, detailSourceLabel,
+                      detailAddedOnLabel, detailEnterpriseLabel, detailTagsLabel, detailHandlingLabel] {
+            label.toolTip = label.stringValue
+        }
 
         switch item.handling {
         case "auto_reply":
@@ -661,14 +1267,15 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
 
     // MARK: - Actions
 
-    @objc private func handleCategoryChanged(_ sender: NSSegmentedControl) {
-        switch sender.selectedSegment {
+    @objc private func handleCategoryChanged(_ sender: NSButton) {
+        switch sender.tag {
         case 1: selectedCategory = "work"
         case 2: selectedCategory = "group"
         case 3: selectedCategory = "official"
         case 4: selectedCategory = "ignored"
         default: selectedCategory = "personal"
         }
+        segmentBar.selectedIndex = sender.tag
         filterDisplayedContacts()
     }
 
@@ -692,8 +1299,9 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
     }
 
     private func triggerSync(full: Bool) {
-        syncInfoLabel.stringValue = L10n.t(.contactsPageSyncStarted)
-        syncInfoLabel.textColor = .systemBlue
+        syncInfoLabel.stringValue = ContactsPageStrings.syncStarted
+        syncInfoLabel.textColor = ContactsPageTokens.textSecondary
+        syncInfoIcon.isHidden = true
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             // 只提交同步请求（由核心在后台执行），不等待同步完成；同步结果由 contacts-list 的 sync 字段反映
@@ -752,6 +1360,10 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         return displayedContacts.count
     }
 
+    public func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        return ContactsTableRowView()
+    }
+
     public func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard row < displayedContacts.count, let colId = tableColumn?.identifier.rawValue else { return nil }
         let item = displayedContacts[row]
@@ -759,55 +1371,73 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         switch colId {
         case "NameCol":
             // 名字放不下时末尾显示"…"并可悬停看全名（不能直接裁掉：用户会以为名字只有这么长）
-            let cell = NSTextField(labelWithString: item.displayName)
-            cell.font = NSFont.systemFont(ofSize: 12)
-            cell.lineBreakMode = .byTruncatingTail
-            cell.toolTip = item.displayName
+            let nameLabel = NSTextField(labelWithString: item.displayName)
+            nameLabel.font = NSFont.systemFont(ofSize: 13)
+            nameLabel.textColor = ContactsPageTokens.textPrimary
+            nameLabel.lineBreakMode = .byTruncatingTail
+            nameLabel.toolTip = item.displayName
+
+            let cell = NSStackView()
+            cell.orientation = .vertical
+            cell.alignment = .leading
+            cell.spacing = 2
+            cell.addArrangedSubview(nameLabel)
+
+            // 需求修复：把「授权名单预置」的行和微信通讯录同步来的联系人区分开
+            if ContactsPageLogic.isUnsyncedPreset(item) {
+                let tag = ContactsTagView(
+                    text: ContactsPageStrings.presetTag,
+                    textColor: ContactsPageTokens.warningText,
+                    background: ContactsPageTokens.warningBg
+                )
+                cell.addArrangedSubview(tag)
+            }
             return cell
         case "WxCol":
             let wx = ContactsPageLogic.listWechatText(item)
             let cell = NSTextField(labelWithString: wx)
             cell.lineBreakMode = .byTruncatingTail
             cell.toolTip = wx
-            cell.font = NSFont.systemFont(ofSize: 11)
-            cell.textColor = .secondaryLabelColor
+            cell.font = NSFont.systemFont(ofSize: 13)
+            cell.textColor = ContactsPageTokens.textSecondary
             return cell
         case "MsgsCol":
             let count = item.messageCount ?? 0
             let cell = NSTextField(labelWithString: "\(count)")
-            cell.font = NSFont.systemFont(ofSize: 11)
+            cell.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+            cell.textColor = ContactsPageTokens.textPrimary
             return cell
         case "HandlingCol":
             let container = NSStackView()
             container.orientation = .horizontal
-            container.spacing = 8
+            container.spacing = 10
             container.alignment = .centerY
 
             if item.category == "official" {
                 let lbl = NSTextField(labelWithString: L10n.t(.contactsHandlingNeverReply))
-                lbl.font = NSFont.systemFont(ofSize: 11)
-                lbl.textColor = .secondaryLabelColor
+                lbl.font = NSFont.systemFont(ofSize: 13)
+                lbl.textColor = ContactsPageTokens.textSecondary
                 container.addArrangedSubview(lbl)
             } else if item.handling == "ignored" {
-                let lbl = NSTextField(labelWithString: L10n.t(.contactsHandlingIgnored))
-                lbl.font = NSFont.systemFont(ofSize: 11)
-                lbl.textColor = .systemRed
-
-                let unignoreBtn = NSButton(title: L10n.t(.contactsActionUnignore), target: self, action: #selector(handleTableAction(_:)))
-                unignoreBtn.bezelStyle = .inline
+                let tag = ContactsTagView(
+                    text: L10n.t(.contactsHandlingIgnored),
+                    textColor: ContactsPageTokens.textSecondary,
+                    background: ContactsPageTokens.inactiveBg
+                )
+                let unignoreBtn = ContactsSecondaryButton(title: L10n.t(.contactsActionUnignore), target: self, action: #selector(handleTableAction(_:)))
                 unignoreBtn.tag = row
                 unignoreBtn.identifier = NSUserInterfaceItemIdentifier("unignore")
-
-                container.addArrangedSubview(lbl)
+                container.addArrangedSubview(tag)
                 container.addArrangedSubview(unignoreBtn)
             } else {
                 let chk = NSButton(checkboxWithTitle: L10n.t(.termAutoReply), target: self, action: #selector(handleTableAction(_:)))
                 chk.state = (item.handling == "auto_reply") ? .on : .off
+                chk.font = NSFont.systemFont(ofSize: 13)
+                chk.contentTintColor = ContactsPageTokens.primary
                 chk.tag = row
                 chk.identifier = NSUserInterfaceItemIdentifier("toggle_auto_reply")
 
-                let ignoreBtn = NSButton(title: L10n.t(.contactsActionIgnore), target: self, action: #selector(handleTableAction(_:)))
-                ignoreBtn.bezelStyle = .inline
+                let ignoreBtn = ContactsSecondaryButton(title: L10n.t(.contactsActionIgnore), target: self, action: #selector(handleTableAction(_:)))
                 ignoreBtn.tag = row
                 ignoreBtn.identifier = NSUserInterfaceItemIdentifier("ignore")
 
@@ -847,5 +1477,24 @@ public final class ContactsPageController: NSViewController, NSTableViewDataSour
         } else {
             clearDetail()
         }
+    }
+
+    // MARK: - ShellPageActionProviding
+
+    /// 「初始化通讯录 / 立即同步 / 刷新 + 同步状态」交给 Shell 标题行右侧；
+    /// 页面内动作行保留空容器（无 Shell 的单页测试仍能遍历到这些控件）。
+    public func shellPageActionViews() -> [NSView] {
+        guard actionRow != nil else { return [] }
+        let actionViews: [NSView] = [initSyncButton, quickSyncButton, refreshButton, syncInfoIcon, syncInfoLabel]
+        for actionView in actionViews {
+            if actionRow.arrangedSubviews.contains(actionView) {
+                actionRow.removeArrangedSubview(actionView)
+            }
+            actionView.removeFromSuperview()
+        }
+        if let mainStack = actionRow.superview as? NSStackView {
+            mainStack.setCustomSpacing(0, after: actionRow)
+        }
+        return actionViews
     }
 }

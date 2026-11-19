@@ -787,7 +787,7 @@ public final class UpdateClient {
 
 // MARK: - Update Page View Controller
 
-public final class UpdatePageController: NSViewController {
+public final class UpdatePageController: NSViewController, ShellPageActionProviding {
     private let context: StatusPanelController
     private var client: UpdateClient
 
@@ -803,7 +803,7 @@ public final class UpdatePageController: NSViewController {
     private var currentRollbackStatus: RollbackStatusInfo?
     private var isRollingBack = false
 
-    // UI - 当前版本卡片 (全部使用 wrappingLabelWithString 并设受限宽度)
+    // UI - 当前版本卡片
     private let currentReleaseLabel = NSTextField(wrappingLabelWithString: L10n.t(.uiUpdate155))
     private let coreVersionLabel = NSTextField(wrappingLabelWithString: L10n.t(.statusUnknown))
     private let currentSeqLabel = NSTextField(wrappingLabelWithString: L10n.t(.updateSeqUnknown))
@@ -812,9 +812,11 @@ public final class UpdatePageController: NSViewController {
     private let architectureLabel = NSTextField(wrappingLabelWithString: L10n.t(.statusUnknown))
     private let consistencyBadge = NSTextField(wrappingLabelWithString: L10n.t(.uiUpdate156))
     private let supervisorStatusLabel = NSTextField(wrappingLabelWithString: L10n.t(.statusChecking))
+    private let trustStatusTag = ThemeStatusTag(status: .inactive, customText: L10n.t(.statusUnknown))
 
     // UI - 候选更新卡片
     private let candidateStatusLabel = NSTextField(wrappingLabelWithString: L10n.t(.updateCandidateNotCheckedYet))
+    private let candidateStatusTag = ThemeStatusTag(status: .inactive, customText: L10n.t(.statusUnknown))
     private let candidateVersionLabel = NSTextField(wrappingLabelWithString: "-")
     private let candidatePublishedLabel = NSTextField(wrappingLabelWithString: "-")
     private let candidateSizeLabel = NSTextField(wrappingLabelWithString: "-")
@@ -824,20 +826,24 @@ public final class UpdatePageController: NSViewController {
     private let releaseNotesView = NSTextView()
     private let candidateEmptyLabel = NSTextField(wrappingLabelWithString: L10n.t(.uiUpdate157))
     private let candidateDetailsContainer = NSStackView()
-    private let readOnlyBadge = NSTextField(labelWithString: L10n.t(.uiUpdate158))
+    private let downloadStatusTag = ThemeStatusTag(status: .inactive, customText: L10n.t(.uiUpdate205))
 
     // UI - 流程流水线与进度
     private let pipelineStepsLabel = NSTextField(wrappingLabelWithString: L10n.t(.updatePipelineSteps))
     private let currentStageLabel = NSTextField(wrappingLabelWithString: L10n.t(.uiUpdate159))
+    private let stageStatusTag = ThemeStatusTag(status: .inactive, customText: L10n.t(.statusUnknown))
     private let progressBar = NSProgressIndicator()
     private let progressDetailLabel = NSTextField(wrappingLabelWithString: "")
     private let drainWarningLabel = NSTextField(wrappingLabelWithString: "")
     private let permissionsNoteLabel = NSTextField(wrappingLabelWithString: L10n.t(.updatePermissionsNotice))
+    private var progressCard: NSBox?
 
     // UI - 操作按钮 (只读阶段全部禁用写操作，分行排布)
     private let checkButton = NSButton(title: L10n.t(.uiUpdate160), target: nil, action: nil)
     private let refreshStatusButton = NSButton(title: L10n.t(.uiUpdate161), target: nil, action: nil)
-    private let downloadButton = NSButton(title: L10n.t(.uiUpdate162), target: nil, action: nil)
+    /// 顶部操作行：无 Shell 时右对齐显示；接入 Shell 时两个按钮移到页标题行。
+    private var topActionRow: NSStackView?
+    private let downloadButton = ThemePrimaryButton(title: L10n.t(.uiUpdate162), target: nil, action: nil)
     private let installButton = NSButton(title: L10n.t(.uiUpdate163), target: nil, action: nil)
     private let deferButton = NSButton(title: L10n.t(.uiUpdate164), target: nil, action: nil)
     private let writeControlsNote = NSTextField(wrappingLabelWithString: L10n.t(.uiUpdate165))
@@ -848,6 +854,7 @@ public final class UpdatePageController: NSViewController {
     private let previousVersionLabel = NSTextField(wrappingLabelWithString: RollbackStrings.querying)
     private let rollbackEligibilityLabel = NSTextField(wrappingLabelWithString: RollbackStrings.querying)
     private let rollbackButton = NSButton(title: RollbackStrings.buttonTitle, target: nil, action: nil)
+    private let rollbackStatusTag = ThemeStatusTag(status: .inactive, customText: L10n.t(.updateReasonCannot))
     private let rollbackReasonSideLabel = NSTextField(wrappingLabelWithString: "")
 
     // UI - 恢复卡片 (当出现 recovery_required 时高亮)
@@ -881,7 +888,89 @@ public final class UpdatePageController: NSViewController {
         loadRollbackStatus()
     }
 
+    // MARK: - Shared visual helpers (令牌全部来自 Theme.Colors)
+
+    private func styleSecondaryButton(_ button: NSButton) {
+        button.bezelStyle = .rounded
+        button.controlSize = .regular
+        button.font = NSFont.systemFont(ofSize: 13)
+        button.setContentHuggingPriority(.required, for: .horizontal)
+    }
+
+    private func makeFieldLabel(_ text: String) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        label.textColor = Theme.Colors.textPrimary
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        label.widthAnchor.constraint(equalToConstant: 180).isActive = true
+        return label
+    }
+
+    private func styleValueLabel(_ label: NSTextField) {
+        label.font = NSFont.systemFont(ofSize: 13)
+        label.textColor = Theme.Colors.textPrimary
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    }
+
+    private func styleHintLabel(_ label: NSTextField) {
+        label.font = NSFont.systemFont(ofSize: 12)
+        label.textColor = Theme.Colors.textSecondary
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    }
+
+    private func makeSpacer() -> NSView {
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return spacer
+    }
+
+    private func makeRow(_ views: [NSView], spacing: CGFloat = 12) -> NSStackView {
+        let row = NSStackView(views: views)
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = spacing
+        row.translatesAutoresizingMaskIntoConstraints = false
+        return row
+    }
+
+    private func makeVerticalStack(spacing: CGFloat = 12) -> NSStackView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = spacing
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        return stack
+    }
+
+    private func addFullWidthRow(_ row: NSView, to stack: NSStackView) {
+        stack.addArrangedSubview(row)
+        row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+    }
+
+    private func addFieldRow(title: String, value: NSTextField, to stack: NSStackView) {
+        styleValueLabel(value)
+        addFullWidthRow(makeRow([makeFieldLabel(title), value]), to: stack)
+    }
+
+    private func makeDivider() -> NSView {
+        let divider = NSView()
+        divider.wantsLayer = true
+        divider.layer?.backgroundColor = Theme.Colors.cardBorder.cgColor
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        divider.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        return divider
+    }
+
+    // MARK: - Layout
+
     private func setupUI() {
+        view.wantsLayer = true
+        view.layer?.backgroundColor = Theme.Colors.pageBackground.cgColor
+
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.hasVerticalScroller = true
@@ -896,158 +985,187 @@ public final class UpdatePageController: NSViewController {
         scroll.documentView = document
         view.addSubview(scroll)
 
+        // 顶部操作行：右对齐（页标题由 Shell 统一渲染）
         checkButton.target = self
         checkButton.action = #selector(handleCheckUpdate)
         refreshStatusButton.target = self
         refreshStatusButton.action = #selector(handleRefreshStatus)
-        let queries = NSStackView(views: [checkButton, refreshStatusButton])
-        queries.spacing = 12
-        contentStack.addArrangedSubview(queries)
+        styleSecondaryButton(checkButton)
+        styleSecondaryButton(refreshStatusButton)
+        let actionRow = makeRow([makeSpacer(), refreshStatusButton, checkButton])
+        topActionRow = actionRow
+        addFullWidthRow(actionRow, to: contentStack)
 
-        let card = createSectionBox(title: L10n.t(.uiUpdate168))
-        let body = NSStackView()
-        body.orientation = .vertical
-        body.alignment = .leading
-        body.spacing = 16
+        // 1. 当前版本
+        let currentCard = createSectionBox(title: L10n.t(.uiUpdate168))
+        let currentBody = makeVerticalStack(spacing: 14)
         currentReleaseLabel.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
-        body.addArrangedSubview(currentReleaseLabel)
-        candidateStatusLabel.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
-        body.addArrangedSubview(candidateStatusLabel)
-        candidateEmptyLabel.textColor = .secondaryLabelColor
-        body.addArrangedSubview(candidateEmptyLabel)
+        currentReleaseLabel.textColor = Theme.Colors.textPrimary
+        currentReleaseLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        addFullWidthRow(makeRow([currentReleaseLabel, trustStatusTag, makeSpacer()]), to: currentBody)
+        let currentRows: [(String, NSTextField)] = [
+            (L10n.t(.uiUpdate173), coreVersionLabel),
+            (L10n.t(.uiUpdate174), currentSeqLabel),
+            (L10n.t(.uiUpdate176), releaseTrustLabel),
+            (L10n.t(.uiUpdate177), architectureLabel),
+            (L10n.t(.uiUpdate178), consistencyBadge),
+            (L10n.t(.uiUpdate179), supervisorStatusLabel)
+        ]
+        for (title, value) in currentRows {
+            addFieldRow(title: title, value: value, to: currentBody)
+        }
+        currentCard.setContent(currentBody, inset: 20)
+        contentStack.addArrangedSubview(currentCard)
+
+        // 2. 候选版本与发布说明
+        let candidateCard = createSectionBox(title: L10n.t(.updateSectionCandidate))
+        let candidateBody = makeVerticalStack(spacing: 14)
+        candidateStatusLabel.font = NSFont.systemFont(ofSize: 17, weight: .semibold)
+        candidateStatusLabel.textColor = Theme.Colors.textPrimary
+        candidateStatusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        addFullWidthRow(makeRow([candidateStatusTag, candidateStatusLabel, makeSpacer()]), to: candidateBody)
+        styleHintLabel(candidateEmptyLabel)
+        addFullWidthRow(candidateEmptyLabel, to: candidateBody)
 
         candidateDetailsContainer.orientation = .vertical
         candidateDetailsContainer.alignment = .leading
         candidateDetailsContainer.spacing = 10
-        let summary = NSGridView(views: [
-            [NSTextField(labelWithString: L10n.t(.updateLabelTargetVersion)), candidateVersionLabel],
-            [NSTextField(labelWithString: L10n.t(.uiUpdate169)), candidatePublishedLabel],
-            [NSTextField(labelWithString: L10n.t(.uiUpdate170)), compatibilityLabel]
-        ])
-        summary.rowSpacing = 8
-        summary.columnSpacing = 16
-        candidateDetailsContainer.addArrangedSubview(summary)
-        let notes = NSScrollView()
-        notes.translatesAutoresizingMaskIntoConstraints = false
-        notes.hasVerticalScroller = true
-        notes.drawsBackground = false
+        addFieldRow(title: L10n.t(.updateLabelTargetVersion), value: candidateVersionLabel, to: candidateDetailsContainer)
+        addFieldRow(title: L10n.t(.uiUpdate169), value: candidatePublishedLabel, to: candidateDetailsContainer)
+        addFieldRow(title: L10n.t(.uiUpdate170), value: compatibilityLabel, to: candidateDetailsContainer)
+
+        let notesScroll = NSScrollView()
+        notesScroll.translatesAutoresizingMaskIntoConstraints = false
+        notesScroll.hasVerticalScroller = true
+        notesScroll.drawsBackground = false
+        notesScroll.borderType = .noBorder
         releaseNotesView.isEditable = false
         releaseNotesView.font = NSFont.systemFont(ofSize: 13)
+        releaseNotesView.textColor = Theme.Colors.textPrimary
+        releaseNotesView.drawsBackground = false
         releaseNotesView.string = L10n.t(.updateReleaseNotesEmpty)
         releaseNotesView.isVerticallyResizable = true
         releaseNotesView.autoresizingMask = [.width]
         releaseNotesView.textContainer?.widthTracksTextView = true
-        notes.documentView = releaseNotesView
-        candidateDetailsContainer.addArrangedSubview(notes)
-        notes.heightAnchor.constraint(equalToConstant: 110).isActive = true
-        notes.widthAnchor.constraint(equalTo: candidateDetailsContainer.widthAnchor).isActive = true
-        candidateDetailsContainer.isHidden = true
-        body.addArrangedSubview(candidateDetailsContainer)
+        notesScroll.documentView = releaseNotesView
+        let notesTitle = NSTextField(labelWithString: L10n.t(.updateLabelReleaseNotes))
+        notesTitle.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        notesTitle.textColor = Theme.Colors.textSecondary
+        candidateDetailsContainer.addArrangedSubview(notesTitle)
+        candidateDetailsContainer.addArrangedSubview(notesScroll)
+        notesScroll.heightAnchor.constraint(equalToConstant: 92).isActive = true
+        notesScroll.widthAnchor.constraint(equalTo: candidateDetailsContainer.widthAnchor).isActive = true
 
-        // Keep the existing read-only capability boundary; never simulate an update.
-        downloadButton.target = self
-        installButton.target = self
-        deferButton.target = self
-        for button in [downloadButton, installButton, deferButton] {
+        candidateDetailsContainer.isHidden = true
+        candidateBody.addArrangedSubview(candidateDetailsContainer)
+        candidateDetailsContainer.widthAnchor.constraint(equalTo: candidateBody.widthAnchor).isActive = true
+
+        styleSecondaryButton(installButton)
+        styleSecondaryButton(deferButton)
+        for button in [installButton, deferButton] {
             button.action = #selector(handleDisabledWriteAction)
             button.isEnabled = false
             button.toolTip = L10n.t(.uiUpdate171)
         }
+        downloadButton.target = self
         downloadButton.action = #selector(handleDownloadUpdate)
-        let writes = NSStackView(views: [downloadButton])
-        writes.spacing = 12
-        body.addArrangedSubview(writes)
-        actionFeedbackLabel.font = NSFont.systemFont(ofSize: 12)
-        actionFeedbackLabel.textColor = .secondaryLabelColor
-        body.addArrangedSubview(actionFeedbackLabel)
+        downloadStatusTag.setContentHuggingPriority(.required, for: .horizontal)
+        addFullWidthRow(makeRow([downloadButton, installButton, deferButton, downloadStatusTag, makeSpacer()]), to: candidateBody)
 
-        // 回滚入口：整包换回上一个已安装的 .app；没有可用备份时按钮禁用并写明原因
+        styleHintLabel(actionFeedbackLabel)
+        addFullWidthRow(actionFeedbackLabel, to: candidateBody)
+
+        detailsButton.target = self
+        detailsButton.action = #selector(toggleTechnicalDetails)
+        addFullWidthRow(makeRow([detailsButton, makeSpacer()]), to: candidateBody)
+
+        technicalDetails.orientation = .vertical
+        technicalDetails.alignment = .leading
+        technicalDetails.spacing = 12
+        addFieldRow(title: L10n.t(.uiUpdate175), value: guardSeqLabel, to: technicalDetails)
+        addFieldRow(title: L10n.t(.uiUpdate180), value: candidateSizeLabel, to: technicalDetails)
+        addFieldRow(title: L10n.t(.uiUpdate181), value: publisherVerificationBadge, to: technicalDetails)
+        addFieldRow(title: L10n.t(.uiUpdate182), value: localSigningLabel, to: technicalDetails)
+        styleHintLabel(pipelineStepsLabel)
+        addFullWidthRow(pipelineStepsLabel, to: technicalDetails)
+        styleHintLabel(permissionsNoteLabel)
+        addFullWidthRow(permissionsNoteLabel, to: technicalDetails)
+        styleHintLabel(writeControlsNote)
+        addFullWidthRow(writeControlsNote, to: technicalDetails)
+        technicalDetails.isHidden = true
+        candidateBody.addArrangedSubview(technicalDetails)
+        technicalDetails.widthAnchor.constraint(equalTo: candidateBody.widthAnchor).isActive = true
+
+        candidateCard.setContent(candidateBody, inset: 20)
+        contentStack.addArrangedSubview(candidateCard)
+
+        // 3. 更新阶段与进度（空闲时整卡隐藏）
+        let progressBox = createSectionBox(title: L10n.t(.updateSectionProgress))
+        progressCard = progressBox
+        let progressBody = makeVerticalStack(spacing: 12)
+        currentStageLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        currentStageLabel.textColor = Theme.Colors.textSecondary
+        currentStageLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        addFullWidthRow(makeRow([stageStatusTag, currentStageLabel, makeSpacer()]), to: progressBody)
+
+        progressBar.minValue = 0
+        progressBar.maxValue = 100
+        progressBar.widthAnchor.constraint(equalToConstant: 280).isActive = true
+        transactionDetails.orientation = .vertical
+        transactionDetails.alignment = .leading
+        transactionDetails.spacing = 8
+        transactionDetails.addArrangedSubview(progressBar)
+        styleHintLabel(progressDetailLabel)
+        transactionDetails.addArrangedSubview(progressDetailLabel)
+        drainWarningLabel.font = NSFont.systemFont(ofSize: 12)
+        drainWarningLabel.textColor = Theme.Colors.statusWarningText
+        transactionDetails.addArrangedSubview(drainWarningLabel)
+        transactionDetails.isHidden = true
+        progressBody.addArrangedSubview(transactionDetails)
+        transactionDetails.widthAnchor.constraint(equalTo: progressBody.widthAnchor).isActive = true
+
+        recoveryBox.title = L10n.t(.uiUpdate172)
+        recoveryBox.boxType = .primary
+        recoveryDetailsLabel.font = NSFont.systemFont(ofSize: 12)
+        recoveryDetailsLabel.textColor = Theme.Colors.statusErrorText
+        recoveryBox.setContent(recoveryDetailsLabel, inset: 12)
+        recoveryBox.fillColor = Theme.Colors.statusErrorBg
+        recoveryBox.borderColor = Theme.Colors.statusErrorDot.withAlphaComponent(0.4)
+        recoveryBox.borderWidth = 1
+        recoveryBox.cornerRadius = 8
+        recoveryBox.isHidden = true
+        progressBody.addArrangedSubview(recoveryBox)
+        recoveryBox.widthAnchor.constraint(equalTo: progressBody.widthAnchor).isActive = true
+
+        progressBox.setContent(progressBody, inset: 20)
+        progressBox.isHidden = true
+        contentStack.addArrangedSubview(progressBox)
+
+        // 4. 回滚到上一版本：只展示上一版本与不可用原因（不展示安装时间）
+        let rollbackCard = createSectionBox(title: RollbackStrings.sectionTitle)
         rollbackSection.orientation = .vertical
         rollbackSection.alignment = .leading
-        rollbackSection.spacing = 10
-        let rollbackTitleLabel = NSTextField(labelWithString: RollbackStrings.sectionTitle)
-        rollbackTitleLabel.font = NSFont.systemFont(ofSize: 13, weight: .bold)
-        rollbackSection.addArrangedSubview(rollbackTitleLabel)
+        rollbackSection.spacing = 12
         let rollbackNoticeLabel = NSTextField(wrappingLabelWithString: RollbackStrings.notice)
-        rollbackNoticeLabel.font = NSFont.systemFont(ofSize: 11)
-        rollbackNoticeLabel.textColor = .secondaryLabelColor
+        styleHintLabel(rollbackNoticeLabel)
         rollbackSection.addArrangedSubview(rollbackNoticeLabel)
-
-        previousVersionLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 440).isActive = true
-        rollbackEligibilityLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 440).isActive = true
-        let rollbackGrid = NSGridView(views: [
-            [NSTextField(labelWithString: RollbackStrings.labelVersion), previousVersionLabel],
-            [NSTextField(labelWithString: RollbackStrings.labelEligibility), rollbackEligibilityLabel]
-        ])
-        rollbackGrid.rowSpacing = 8
-        rollbackGrid.columnSpacing = 16
-        rollbackSection.addArrangedSubview(rollbackGrid)
-
+        rollbackNoticeLabel.widthAnchor.constraint(equalTo: rollbackSection.widthAnchor).isActive = true
+        addFieldRow(title: RollbackStrings.labelVersion, value: previousVersionLabel, to: rollbackSection)
+        addFieldRow(title: RollbackStrings.labelEligibility, value: rollbackEligibilityLabel, to: rollbackSection)
         rollbackButton.target = self
         rollbackButton.action = #selector(handleRollback)
         rollbackButton.isEnabled = false
         rollbackButton.toolTip = RollbackStrings.buttonTooltip
-        rollbackReasonSideLabel.font = NSFont.systemFont(ofSize: 11)
-        rollbackReasonSideLabel.textColor = .systemOrange
+        styleSecondaryButton(rollbackButton)
+        styleHintLabel(rollbackReasonSideLabel)
+        rollbackReasonSideLabel.textColor = Theme.Colors.statusWarningText
         rollbackReasonSideLabel.lineBreakMode = .byTruncatingTail
         rollbackReasonSideLabel.maximumNumberOfLines = 1
-        let rollbackRow = NSStackView(views: [rollbackButton, rollbackReasonSideLabel])
-        rollbackRow.orientation = .horizontal
-        rollbackRow.spacing = 12
-        rollbackRow.alignment = .centerY
-        rollbackSection.addArrangedSubview(rollbackRow)
-        body.addArrangedSubview(rollbackSection)
+        rollbackStatusTag.setContentHuggingPriority(.required, for: .horizontal)
+        addFullWidthRow(makeRow([rollbackStatusTag, rollbackButton, rollbackReasonSideLabel, makeSpacer()]), to: rollbackSection)
+        rollbackCard.setContent(rollbackSection, inset: 20)
+        contentStack.addArrangedSubview(rollbackCard)
 
-        transactionDetails.orientation = .vertical
-        transactionDetails.alignment = .leading
-        transactionDetails.spacing = 8
-        transactionDetails.addArrangedSubview(currentStageLabel)
-        progressBar.minValue = 0
-        progressBar.maxValue = 100
-        progressBar.widthAnchor.constraint(equalToConstant: 280).isActive = true
-        transactionDetails.addArrangedSubview(progressBar)
-        transactionDetails.addArrangedSubview(progressDetailLabel)
-        transactionDetails.addArrangedSubview(drainWarningLabel)
-        transactionDetails.isHidden = true
-        body.addArrangedSubview(transactionDetails)
-
-        recoveryBox.title = L10n.t(.uiUpdate172)
-        recoveryDetailsLabel.textColor = .systemRed
-        recoveryBox.setContent(recoveryDetailsLabel)
-        recoveryBox.isHidden = true
-        body.addArrangedSubview(recoveryBox)
-
-        detailsButton.target = self
-        detailsButton.action = #selector(toggleTechnicalDetails)
-        body.addArrangedSubview(detailsButton)
-        technicalDetails.orientation = .vertical
-        technicalDetails.alignment = .leading
-        technicalDetails.spacing = 10
-        let grid = NSGridView(views: [
-            [NSTextField(labelWithString: L10n.t(.uiUpdate173)), coreVersionLabel],
-            [NSTextField(labelWithString: L10n.t(.uiUpdate174)), currentSeqLabel],
-            [NSTextField(labelWithString: L10n.t(.uiUpdate175)), guardSeqLabel],
-            [NSTextField(labelWithString: L10n.t(.uiUpdate176)), releaseTrustLabel],
-            [NSTextField(labelWithString: L10n.t(.uiUpdate177)), architectureLabel],
-            [NSTextField(labelWithString: L10n.t(.uiUpdate178)), consistencyBadge],
-            [NSTextField(labelWithString: L10n.t(.uiUpdate179)), supervisorStatusLabel],
-            [NSTextField(labelWithString: L10n.t(.uiUpdate180)), candidateSizeLabel],
-            [NSTextField(labelWithString: L10n.t(.uiUpdate181)), publisherVerificationBadge],
-            [NSTextField(labelWithString: L10n.t(.uiUpdate182)), localSigningLabel]
-        ])
-        grid.rowSpacing = 8
-        grid.columnSpacing = 16
-        technicalDetails.addArrangedSubview(grid)
-        let unavailableActions = NSStackView(views: [installButton, deferButton])
-        unavailableActions.spacing = 12
-        technicalDetails.addArrangedSubview(unavailableActions)
-        technicalDetails.addArrangedSubview(pipelineStepsLabel)
-        technicalDetails.addArrangedSubview(permissionsNoteLabel)
-        technicalDetails.addArrangedSubview(writeControlsNote)
-        technicalDetails.isHidden = true
-        body.addArrangedSubview(technicalDetails)
-        card.setContent(body, inset: 16)
-        contentStack.addArrangedSubview(card)
         NSLayoutConstraint.activate([
             scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -1060,10 +1178,10 @@ public final class UpdatePageController: NSViewController {
             contentStack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -24),
             contentStack.topAnchor.constraint(equalTo: document.topAnchor, constant: 8),
             contentStack.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -24),
-            card.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
-            candidateDetailsContainer.widthAnchor.constraint(equalTo: body.widthAnchor),
-            technicalDetails.widthAnchor.constraint(equalTo: body.widthAnchor),
-            rollbackSection.widthAnchor.constraint(equalTo: body.widthAnchor)
+            currentCard.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
+            candidateCard.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
+            progressBox.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
+            rollbackCard.widthAnchor.constraint(equalTo: contentStack.widthAnchor)
         ])
     }
 
@@ -1074,9 +1192,7 @@ public final class UpdatePageController: NSViewController {
     private func createSectionBox(title: String) -> NSBox {
         let box = NSBox()
         box.title = title
-        box.titleFont = NSFont.systemFont(ofSize: 13, weight: .bold)
         box.boxType = .primary
-        box.contentViewMargins = NSSize(width: 12, height: 10)
         box.translatesAutoresizingMaskIntoConstraints = false
         return box
     }
@@ -1089,7 +1205,7 @@ public final class UpdatePageController: NSViewController {
             applyStatusPayload(payload)
         } catch {
             actionFeedbackLabel.stringValue = L10n.t(.updateStatusFetchNoticeFmt, String(describing: error.localizedDescription))
-            actionFeedbackLabel.textColor = .secondaryLabelColor
+            actionFeedbackLabel.textColor = Theme.Colors.textSecondary
         }
     }
 
@@ -1099,9 +1215,9 @@ public final class UpdatePageController: NSViewController {
         // 当前版本信息：严格展示实际读模型，不臆造，不用 core_version 或 guard 高水位填补 installed 字段
         currentReleaseLabel.stringValue = payload.currentRelease.userFacingReleaseDescription
         if payload.currentRelease.releaseId == nil || payload.currentRelease.releaseId?.isEmpty == true {
-            currentReleaseLabel.textColor = .systemOrange
+            currentReleaseLabel.textColor = Theme.Colors.statusWarningText
         } else {
-            currentReleaseLabel.textColor = .labelColor
+            currentReleaseLabel.textColor = Theme.Colors.textPrimary
         }
 
         coreVersionLabel.stringValue = payload.currentRelease.userFacingCoreVersionDescription
@@ -1110,9 +1226,13 @@ public final class UpdatePageController: NSViewController {
 
         releaseTrustLabel.stringValue = payload.currentRelease.userFacingTrustDescription
         if payload.currentRelease.isTrustedInstalledRelease {
-            releaseTrustLabel.textColor = .systemGreen
+            releaseTrustLabel.textColor = Theme.Colors.statusNormalText
+            trustStatusTag.status = .normal
+            trustStatusTag.customText = L10n.t(.statusOK)
         } else {
-            releaseTrustLabel.textColor = .secondaryLabelColor
+            releaseTrustLabel.textColor = Theme.Colors.textSecondary
+            trustStatusTag.status = .warning
+            trustStatusTag.customText = L10n.t(.statusUnverified)
         }
 
         architectureLabel.stringValue = payload.currentRelease.architecture.isEmpty ? L10n.t(.statusUnknown) : payload.currentRelease.architecture
@@ -1120,23 +1240,23 @@ public final class UpdatePageController: NSViewController {
         if let c = payload.currentRelease.componentsConsistent {
             if c {
                 consistencyBadge.stringValue = L10n.t(.updateConsistencyConsistent)
-                consistencyBadge.textColor = .systemGreen
+                consistencyBadge.textColor = Theme.Colors.statusNormalText
             } else {
                 consistencyBadge.stringValue = L10n.t(.uiUpdate183)
-                consistencyBadge.textColor = .systemRed
+                consistencyBadge.textColor = Theme.Colors.statusErrorText
             }
         } else {
             consistencyBadge.stringValue = L10n.t(.uiUpdate156)
-            consistencyBadge.textColor = .secondaryLabelColor
+            consistencyBadge.textColor = Theme.Colors.textSecondary
         }
 
         if payload.guardInfo.maintenanceActive {
             supervisorStatusLabel.stringValue = L10n.t(.updateSupervisorSuppressed)
-            supervisorStatusLabel.textColor = .systemOrange
+            supervisorStatusLabel.textColor = Theme.Colors.statusWarningText
         } else {
             // 真实求实：不处于维护抑制态不等于运行正常
             supervisorStatusLabel.stringValue = L10n.t(.updateSupervisorUnsuppressed)
-            supervisorStatusLabel.textColor = .secondaryLabelColor
+            supervisorStatusLabel.textColor = Theme.Colors.textSecondary
         }
 
         // 事务与阶段
@@ -1165,19 +1285,23 @@ public final class UpdatePageController: NSViewController {
         switch result.status {
         case .unconfigured:
             candidateStatusLabel.stringValue = L10n.t(.updateCandidateSourceUnconfigured)
-            candidateStatusLabel.textColor = .systemOrange
+            candidateStatusLabel.textColor = Theme.Colors.statusWarningText
+            candidateStatusTag.status = .inactive
+            candidateStatusTag.customText = L10n.t(.statusUnknown)
             candidateVersionLabel.stringValue = L10n.t(.updateCandidateNoVersion)
             candidatePublishedLabel.stringValue = "-"
             candidateSizeLabel.stringValue = "-"
             publisherVerificationBadge.stringValue = L10n.t(.updatePublisherNoRootKey)
-            publisherVerificationBadge.textColor = .secondaryLabelColor
+            publisherVerificationBadge.textColor = Theme.Colors.textSecondary
             localSigningLabel.stringValue = L10n.t(.updateSigningForbiddenNoSource)
             compatibilityLabel.stringValue = friendlyReason
             releaseNotesView.string = L10n.t(.updateReleaseNotesUnconfigured)
 
         case .unverifiedTrustRoot:
             candidateStatusLabel.stringValue = L10n.t(.updateCandidateFoundUnverified)
-            candidateStatusLabel.textColor = .systemOrange
+            candidateStatusLabel.textColor = Theme.Colors.statusWarningText
+            candidateStatusTag.status = .warning
+            candidateStatusTag.customText = L10n.t(.statusUnverified)
             if let cand = result.candidate {
                 candidateVersionLabel.stringValue = "\(cand.releaseId) (seq: \(cand.sequence))"
                 candidatePublishedLabel.stringValue = cand.publishedAt ?? L10n.t(.statusUnknown)
@@ -1190,38 +1314,44 @@ public final class UpdatePageController: NSViewController {
                 releaseNotesView.string = cand.releaseNotes ?? L10n.t(.updateNoDetailedNotes)
             }
             publisherVerificationBadge.stringValue = L10n.t(.updatePublisherUnverifiedNoKey)
-            publisherVerificationBadge.textColor = .systemRed
+            publisherVerificationBadge.textColor = Theme.Colors.statusErrorText
             localSigningLabel.stringValue = L10n.t(.updateSigningNeedVerify)
 
         case .alreadyInstalled:
             candidateStatusLabel.stringValue = L10n.t(.uiUpdate185)
-            candidateStatusLabel.textColor = .systemGreen
+            candidateStatusLabel.textColor = Theme.Colors.statusNormalText
+            candidateStatusTag.status = .normal
+            candidateStatusTag.customText = L10n.t(.statusOK)
             if let cand = result.candidate {
                 candidateVersionLabel.stringValue = "\(cand.releaseId) (seq: \(cand.sequence))"
             }
             candidatePublishedLabel.stringValue = "-"
             candidateSizeLabel.stringValue = "-"
             publisherVerificationBadge.stringValue = L10n.t(.uiUpdate186)
-            publisherVerificationBadge.textColor = .systemGreen
+            publisherVerificationBadge.textColor = Theme.Colors.statusNormalText
             localSigningLabel.stringValue = L10n.t(.uiUpdate187)
             compatibilityLabel.stringValue = L10n.t(.uiUpdate188)
             releaseNotesView.string = L10n.t(.updateNoCandidateNotes)
 
         case .incompatible:
             candidateStatusLabel.stringValue = L10n.t(.uiUpdate189)
-            candidateStatusLabel.textColor = .systemRed
+            candidateStatusLabel.textColor = Theme.Colors.statusErrorText
+            candidateStatusTag.status = .error
+            candidateStatusTag.customText = L10n.t(.tagError)
             candidateVersionLabel.stringValue = "-"
             candidatePublishedLabel.stringValue = "-"
             candidateSizeLabel.stringValue = "-"
             publisherVerificationBadge.stringValue = L10n.t(.uiUpdate190)
-            publisherVerificationBadge.textColor = .systemRed
+            publisherVerificationBadge.textColor = Theme.Colors.statusErrorText
             localSigningLabel.stringValue = L10n.t(.updateSigningForbidden)
             compatibilityLabel.stringValue = result.reason ?? L10n.t(.updateCompatRequirementsNotMet)
             releaseNotesView.string = L10n.t(.updateCannotInstallOnHost)
 
         case .available:
             candidateStatusLabel.stringValue = L10n.t(.uiUpdate191)
-            candidateStatusLabel.textColor = .systemGreen
+            candidateStatusLabel.textColor = Theme.Colors.statusNormalText
+            candidateStatusTag.status = .normal
+            candidateStatusTag.customText = L10n.t(.statusOK)
             if let cand = result.candidate {
                 candidateVersionLabel.stringValue = "\(cand.releaseId) (seq: \(cand.sequence))"
                 candidatePublishedLabel.stringValue = cand.publishedAt ?? "-"
@@ -1232,7 +1362,7 @@ public final class UpdatePageController: NSViewController {
                 releaseNotesView.string = cand.releaseNotes ?? L10n.t(.updateNotesNone)
             }
             publisherVerificationBadge.stringValue = L10n.t(.updatePublisherSignatureVerified)
-            publisherVerificationBadge.textColor = .systemGreen
+            publisherVerificationBadge.textColor = Theme.Colors.statusNormalText
             localSigningLabel.stringValue = L10n.t(.uiUpdate193)
         }
 
@@ -1261,10 +1391,12 @@ public final class UpdatePageController: NSViewController {
         checkButton.isEnabled = !isChecking && !isDownloading
         refreshStatusButton.isEnabled = !isDownloading
         if downloadSupported {
-            readOnlyBadge.stringValue = L10n.t(.uiUpdate203)
+            downloadStatusTag.status = .normal
+            downloadStatusTag.customText = L10n.t(.uiUpdate203)
             writeControlsNote.stringValue = L10n.t(.uiUpdate204)
         } else {
-            readOnlyBadge.stringValue = L10n.t(.uiUpdate205)
+            downloadStatusTag.status = .inactive
+            downloadStatusTag.customText = L10n.t(.uiUpdate205)
             writeControlsNote.stringValue = L10n.t(.uiUpdate206)
         }
     }
@@ -1281,11 +1413,14 @@ public final class UpdatePageController: NSViewController {
 
     private func updateTransactionUI(_ transaction: UpdateTransactionInfo) {
         transactionDetails.isHidden = transaction.status == .idle && !transaction.recoveryRequired
+        progressCard?.isHidden = transaction.status == .idle && !transaction.recoveryRequired
         progressBar.isIndeterminate = transaction.status == .inProgress
         if progressBar.isIndeterminate { progressBar.startAnimation(nil) } else { progressBar.stopAnimation(nil) }
         if transaction.recoveryRequired {
             currentStageLabel.stringValue = L10n.t(.updateRecoveryNeededFmt, String(describing: transaction.stage ?? "Unknown"))
-            currentStageLabel.textColor = .systemRed
+            currentStageLabel.textColor = Theme.Colors.statusErrorText
+            stageStatusTag.status = .error
+            stageStatusTag.customText = L10n.t(.tagError)
             recoveryBox.isHidden = false
             recoveryDetailsLabel.stringValue = UpdatePageLogic.recoveryGuide(for: transaction)
             downloadButton.isEnabled = false
@@ -1298,7 +1433,9 @@ public final class UpdatePageController: NSViewController {
         switch transaction.status {
         case .idle:
             currentStageLabel.stringValue = L10n.t(.uiUpdate209)
-            currentStageLabel.textColor = .secondaryLabelColor
+            currentStageLabel.textColor = Theme.Colors.textSecondary
+            stageStatusTag.status = .inactive
+            stageStatusTag.customText = L10n.t(.statusUnknown)
             progressBar.doubleValue = 0.0
             progressDetailLabel.stringValue = ""
             drainWarningLabel.stringValue = ""
@@ -1306,7 +1443,9 @@ public final class UpdatePageController: NSViewController {
         case .inProgress:
             let stageName = transaction.stage ?? L10n.t(.updateStageExecuting)
             currentStageLabel.stringValue = L10n.t(.uiUpdate210, String(describing: stageName))
-            currentStageLabel.textColor = .systemBlue
+            currentStageLabel.textColor = Theme.Colors.brand
+            stageStatusTag.status = .warning
+            stageStatusTag.customText = L10n.t(.updateStageExecuting)
             if stageName == "Draining" {
                 drainWarningLabel.stringValue = L10n.t(.uiUpdate211)
             } else {
@@ -1315,14 +1454,18 @@ public final class UpdatePageController: NSViewController {
 
         case .committed:
             currentStageLabel.stringValue = L10n.t(.updateRecentCommitted)
-            currentStageLabel.textColor = .systemGreen
+            currentStageLabel.textColor = Theme.Colors.statusNormalText
+            stageStatusTag.status = .normal
+            stageStatusTag.customText = L10n.t(.statusOK)
             progressBar.doubleValue = 100.0
             progressDetailLabel.stringValue = L10n.t(.updateRecordApplied)
             drainWarningLabel.stringValue = ""
 
         case .rolledBack:
             currentStageLabel.stringValue = L10n.t(.updateRollbackRecordedSafe)
-            currentStageLabel.textColor = .systemOrange
+            currentStageLabel.textColor = Theme.Colors.statusWarningText
+            stageStatusTag.status = .warning
+            stageStatusTag.customText = L10n.t(.tagAttention)
             progressBar.doubleValue = 0.0
             progressDetailLabel.stringValue = L10n.t(.updateKeepOldRecord)
             drainWarningLabel.stringValue = ""
@@ -1344,6 +1487,7 @@ public final class UpdatePageController: NSViewController {
         drainWarning: String? = nil,
         recoveryInfo: UpdateTransactionInfo? = nil
     ) {
+        progressCard?.isHidden = false
         currentStageLabel.stringValue = stage
         progressBar.doubleValue = progress
         progressDetailLabel.stringValue = progressDetail
@@ -1380,37 +1524,43 @@ public final class UpdatePageController: NSViewController {
             currentRollbackStatus = info
             if let version = info.version?.trimmingCharacters(in: .whitespacesAndNewlines), !version.isEmpty {
                 previousVersionLabel.stringValue = version
-                previousVersionLabel.textColor = .labelColor
+                previousVersionLabel.textColor = Theme.Colors.textPrimary
                 // 安装时间不可信（整包备份没有可靠的安装回执），界面上不展示，也不放进 tooltip。
                 previousVersionLabel.toolTip = nil
             } else {
                 previousVersionLabel.stringValue = RollbackStrings.noPreviousVersion
-                previousVersionLabel.textColor = .secondaryLabelColor
+                previousVersionLabel.textColor = Theme.Colors.textSecondary
                 previousVersionLabel.toolTip = nil
             }
             let reasonText = info.localizedReason
             rollbackEligibilityLabel.stringValue = reasonText
             if info.canRollback && !isRollingBack {
-                rollbackEligibilityLabel.textColor = .systemGreen
+                rollbackEligibilityLabel.textColor = Theme.Colors.statusNormalText
+                rollbackStatusTag.status = .normal
+                rollbackStatusTag.customText = L10n.t(.updateReasonSafe)
                 rollbackReasonSideLabel.stringValue = ""
                 rollbackReasonSideLabel.toolTip = nil
                 rollbackButton.isEnabled = true
             } else {
-                rollbackEligibilityLabel.textColor = .systemOrange
+                rollbackEligibilityLabel.textColor = Theme.Colors.statusWarningText
+                rollbackStatusTag.status = .warning
+                rollbackStatusTag.customText = L10n.t(.updateReasonCannot)
                 rollbackReasonSideLabel.stringValue = reasonText
-                rollbackReasonSideLabel.textColor = .systemOrange
+                rollbackReasonSideLabel.textColor = Theme.Colors.statusWarningText
                 rollbackReasonSideLabel.toolTip = reasonText
                 rollbackButton.isEnabled = false
             }
         case .failure(let error):
             currentRollbackStatus = nil
             previousVersionLabel.stringValue = RollbackStrings.unknown
-            previousVersionLabel.textColor = .secondaryLabelColor
+            previousVersionLabel.textColor = Theme.Colors.textSecondary
             previousVersionLabel.toolTip = nil
             rollbackEligibilityLabel.stringValue = error.message
-            rollbackEligibilityLabel.textColor = .secondaryLabelColor
+            rollbackEligibilityLabel.textColor = Theme.Colors.textSecondary
+            rollbackStatusTag.status = .inactive
+            rollbackStatusTag.customText = L10n.t(.updatePageRollbackUnavailable)
             rollbackReasonSideLabel.stringValue = error.message
-            rollbackReasonSideLabel.textColor = .secondaryLabelColor
+            rollbackReasonSideLabel.textColor = Theme.Colors.textSecondary
             rollbackReasonSideLabel.toolTip = error.message
             rollbackButton.isEnabled = false
         }
@@ -1423,10 +1573,10 @@ public final class UpdatePageController: NSViewController {
               !version.isEmpty else {
             let reasonText = currentRollbackStatus?.localizedReason ?? RollbackStrings.noDetectedVersion
             rollbackReasonSideLabel.stringValue = reasonText
-            rollbackReasonSideLabel.textColor = .systemOrange
+            rollbackReasonSideLabel.textColor = Theme.Colors.statusWarningText
             rollbackButton.isEnabled = false
             actionFeedbackLabel.stringValue = RollbackStrings.cannotRollback(reasonText)
-            actionFeedbackLabel.textColor = .systemRed
+            actionFeedbackLabel.textColor = Theme.Colors.statusErrorText
             return
         }
 
@@ -1443,14 +1593,14 @@ public final class UpdatePageController: NSViewController {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         guard checkbox.state == .on else {
             actionFeedbackLabel.stringValue = RollbackStrings.cancelled
-            actionFeedbackLabel.textColor = .systemRed
+            actionFeedbackLabel.textColor = Theme.Colors.statusErrorText
             return
         }
 
         isRollingBack = true
         rollbackButton.isEnabled = false
         actionFeedbackLabel.stringValue = RollbackStrings.inProgress(version)
-        actionFeedbackLabel.textColor = .systemBlue
+        actionFeedbackLabel.textColor = Theme.Colors.brand
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
@@ -1460,16 +1610,16 @@ public final class UpdatePageController: NSViewController {
                 switch result {
                 case .success(let message):
                     self.actionFeedbackLabel.stringValue = message
-                    self.actionFeedbackLabel.textColor = .systemGreen
+                    self.actionFeedbackLabel.textColor = Theme.Colors.statusNormalText
                     self.rollbackReasonSideLabel.stringValue = ""
                     self.rollbackReasonSideLabel.toolTip = nil
                     // 回滚后重新查询：替换完成后备份状态会随之变化
                     self.loadRollbackStatus()
                 case .failure(let error):
                     self.actionFeedbackLabel.stringValue = RollbackStrings.failed(error.message)
-                    self.actionFeedbackLabel.textColor = .systemRed
+                    self.actionFeedbackLabel.textColor = Theme.Colors.statusErrorText
                     self.rollbackReasonSideLabel.stringValue = error.message
-                    self.rollbackReasonSideLabel.textColor = .systemRed
+                    self.rollbackReasonSideLabel.textColor = Theme.Colors.statusErrorText
                     self.rollbackReasonSideLabel.toolTip = error.message
                     self.rollbackButton.isEnabled = self.currentRollbackStatus?.canRollback == true
                 }
@@ -1503,7 +1653,7 @@ public final class UpdatePageController: NSViewController {
         downloadSupported = false
         refreshDownloadState()
         actionFeedbackLabel.stringValue = L10n.t(.uiUpdate212)
-        actionFeedbackLabel.textColor = .systemBlue
+        actionFeedbackLabel.textColor = Theme.Colors.brand
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
@@ -1516,7 +1666,7 @@ public final class UpdatePageController: NSViewController {
                     self.checkButton.isEnabled = true
                     self.applyCheckResult(res)
                     self.actionFeedbackLabel.stringValue = res.status == .incompatible ? L10n.t(.uiUpdate213) : L10n.t(.uiUpdate214)
-                    self.actionFeedbackLabel.textColor = res.status == .incompatible ? .systemRed : .secondaryLabelColor
+                    self.actionFeedbackLabel.textColor = res.status == .incompatible ? Theme.Colors.statusErrorText : Theme.Colors.textSecondary
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -1524,7 +1674,7 @@ public final class UpdatePageController: NSViewController {
                     self.downloadSupported = false
                     self.refreshDownloadState()
                     self.actionFeedbackLabel.stringValue = L10n.t(.updateCheckFailedFmt, String(describing: error.localizedDescription))
-                    self.actionFeedbackLabel.textColor = .systemRed
+                    self.actionFeedbackLabel.textColor = Theme.Colors.statusErrorText
                 }
             }
         }
@@ -1535,7 +1685,7 @@ public final class UpdatePageController: NSViewController {
         isDownloading = true
         refreshDownloadState()
         actionFeedbackLabel.stringValue = L10n.t(.uiUpdate215)
-        actionFeedbackLabel.textColor = .systemBlue
+        actionFeedbackLabel.textColor = Theme.Colors.brand
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             do {
@@ -1545,10 +1695,10 @@ public final class UpdatePageController: NSViewController {
                     if self.currentCheckResult?.manifestSha256 == receipt.manifestSha256 {
                         self.downloadedReceipt = receipt
                         self.actionFeedbackLabel.stringValue = L10n.t(.uiUpdate216)
-                        self.actionFeedbackLabel.textColor = .systemGreen
+                        self.actionFeedbackLabel.textColor = Theme.Colors.statusNormalText
                     } else {
                         self.actionFeedbackLabel.stringValue = L10n.t(.uiUpdate217)
-                        self.actionFeedbackLabel.textColor = .systemOrange
+                        self.actionFeedbackLabel.textColor = Theme.Colors.statusWarningText
                     }
                     self.refreshDownloadState()
                 }
@@ -1556,7 +1706,7 @@ public final class UpdatePageController: NSViewController {
                 DispatchQueue.main.async {
                     self.isDownloading = false
                     self.actionFeedbackLabel.stringValue = L10n.t(.uiUpdate218, String(describing: error.localizedDescription))
-                    self.actionFeedbackLabel.textColor = .systemRed
+                    self.actionFeedbackLabel.textColor = Theme.Colors.statusErrorText
                     self.refreshDownloadState()
                 }
             }
@@ -1566,12 +1716,29 @@ public final class UpdatePageController: NSViewController {
     /// 关键安全防线：尚未接入生产事务的安装/延期操作保持禁用，不模拟安装成功
     @objc public func handleDisabledWriteAction() {
         actionFeedbackLabel.stringValue = L10n.t(.uiUpdate219)
-        actionFeedbackLabel.textColor = .systemOrange
+        actionFeedbackLabel.textColor = Theme.Colors.statusWarningText
+    }
+
+    // MARK: - ShellPageActionProviding
+
+    /// 「刷新状态 / 检查更新」交给 Shell 标题行右侧；页面内动作行保留空容器，
+    /// 无 Shell 的单页测试仍能遍历到这两个按钮（内容区不再有空白行）。
+    public func shellPageActionViews() -> [NSView] {
+        guard let topActionRow else { return [] }
+        let actionViews: [NSView] = [refreshStatusButton, checkButton]
+        for actionView in actionViews {
+            if topActionRow.arrangedSubviews.contains(actionView) {
+                topActionRow.removeArrangedSubview(actionView)
+            }
+            actionView.removeFromSuperview()
+        }
+        contentStack.setCustomSpacing(0, after: topActionRow)
+        return actionViews
     }
 
     @objc private func handleRefreshStatus() {
         actionFeedbackLabel.stringValue = L10n.t(.updateRefreshingStatus)
-        actionFeedbackLabel.textColor = .systemBlue
+        actionFeedbackLabel.textColor = Theme.Colors.brand
         refreshStatusButton.isEnabled = false
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -1582,14 +1749,14 @@ public final class UpdatePageController: NSViewController {
                     self.applyStatusPayload(payload)
                     self.refreshStatusButton.isEnabled = true
                     self.actionFeedbackLabel.stringValue = L10n.t(.uiUpdate220)
-                    self.actionFeedbackLabel.textColor = .secondaryLabelColor
+                    self.actionFeedbackLabel.textColor = Theme.Colors.textSecondary
                     self.loadRollbackStatus()
                 }
             } catch {
                 DispatchQueue.main.async {
                     self.refreshStatusButton.isEnabled = true
                     self.actionFeedbackLabel.stringValue = L10n.t(.updateStatusRefreshFailedFmt, String(describing: error.localizedDescription))
-                    self.actionFeedbackLabel.textColor = .systemRed
+                    self.actionFeedbackLabel.textColor = Theme.Colors.statusErrorText
                     self.loadRollbackStatus()
                 }
             }

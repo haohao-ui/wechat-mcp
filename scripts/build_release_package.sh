@@ -28,7 +28,8 @@ case "$CHANNEL" in
     ;;
 esac
 
-ARCH="$(uname -m)"
+# 允许在 arm64 机器上为 Intel 专用机交叉构建发布包：TARGET_ARCH=x86_64
+ARCH="${TARGET_ARCH:-$(uname -m)}"
 case "$ARCH" in
   arm64|aarch64) CANON_ARCH="arm64"; RUST_TARGET="aarch64-apple-darwin" ;;
   x86_64|amd64) CANON_ARCH="x86_64"; RUST_TARGET="x86_64-apple-darwin" ;;
@@ -47,13 +48,13 @@ BUILD_DIR="$CARGO_OUTPUT_ROOT/$RUST_TARGET/release"
 mkdir -p "$BUILD_DIR"
 
 # 编译全套 Swift 辅助组件与宿主外壳二进制
-swiftc native/wechat_ocr.swift -o "$BUILD_DIR/wechat_ocr"
-swiftc native/click/*.swift native/common/*.swift native/action/*.swift -o "$BUILD_DIR/wechat_click"
+swiftc -O -target "${ARCH}-apple-macos12" native/wechat_ocr.swift -o "$BUILD_DIR/wechat_ocr"
+swiftc -O -target "${ARCH}-apple-macos12" native/click/*.swift native/common/*.swift native/action/*.swift -o "$BUILD_DIR/wechat_click"
 swiftc -O -target "${ARCH}-apple-macos12" native/interaction/*.swift native/common/Geometry.swift native/action/*.swift -o "$BUILD_DIR/desktop_helper"
-swiftc native/wechat_window.swift -o "$BUILD_DIR/wechat_window"
-swiftc -O -parse-as-library native/wechat_bubbles.swift native/common/*.swift native/eyes/*.swift -o "$BUILD_DIR/wechat_bubbles"
-swiftc -parse-as-library native/macos/*.swift -o "$BUILD_DIR/wechat_runtime"
-swiftc native/overlay/main.swift -o "$BUILD_DIR/wechat_overlay"
+swiftc -O -target "${ARCH}-apple-macos12" native/wechat_window.swift -o "$BUILD_DIR/wechat_window"
+swiftc -O -target "${ARCH}-apple-macos12" -parse-as-library native/wechat_bubbles.swift native/common/*.swift native/eyes/*.swift -o "$BUILD_DIR/wechat_bubbles"
+swiftc -O -target "${ARCH}-apple-macos12" -parse-as-library native/macos/*.swift -o "$BUILD_DIR/wechat_runtime"
+swiftc -O -target "${ARCH}-apple-macos12" native/overlay/main.swift -o "$BUILD_DIR/wechat_overlay"
 swiftc -O -target "${ARCH}-apple-macos12" -parse-as-library -D BOT_WORKER native/wechat_bubbles.swift native/common/*.swift native/eyes/*.swift native/action/*.swift native/bot/*.swift -o "$BUILD_DIR/wechat_bot_worker"
 swiftc -O -target "${ARCH}-apple-macos12" native/bootstrap/*.swift native/eyes/Screens.swift -o "$BUILD_DIR/wechat-cs-host"
 

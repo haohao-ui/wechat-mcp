@@ -14,6 +14,13 @@ public struct ShellPageEntry {
     }
 }
 
+/// 页面把「页标题行右侧」的操作视图（按钮、状态标签等）交给 Shell 统一摆放。
+/// Shell 负责标题行布局；页面不再在内容区自绘这一行（无 Shell 的单页测试仍保留页面内动作行）。
+public protocol ShellPageActionProviding: AnyObject {
+    /// 页标题行右侧要展示的操作视图（按钮等）；Shell 负责布局与悬停区域。
+    func shellPageActionViews() -> [NSView]
+}
+
 public final class ShellViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     private var pages: [ShellPageEntry] = []
     private let splitView = NSSplitView()
@@ -21,6 +28,9 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
     private let contentContainer = NSView()
     private let pageHost = NSView()
     private let pageTitle = NSTextField(labelWithString: "")
+    private let titleRow = NSStackView()
+    private let titleSpacer = NSView()
+    private let actionsStack = NSStackView()
     private var activePageController: NSViewController?
     /// 当前选中页面的 id：切换语言重建侧栏时用来保持原页面。
     public private(set) var selectedPageID: String = ""
@@ -51,25 +61,47 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
         sidebarTable.headerView = nil
         sidebarTable.dataSource = self
         sidebarTable.delegate = self
-        sidebarTable.rowHeight = 44
+        sidebarTable.rowHeight = 40
         sidebarTable.style = .sourceList
-        sidebarTable.backgroundColor = .windowBackgroundColor
+        sidebarTable.backgroundColor = Theme.Colors.sidebarBackground
         sidebarTable.setAccessibilityLabel(L10n.t(.uiShell047))
-        sidebarTable.intercellSpacing = NSSize(width: 0, height: 4)
+        sidebarTable.intercellSpacing = NSSize(width: 0, height: 2)
         sidebarScroll.documentView = sidebarTable
 
         // 右侧内容区
         contentContainer.translatesAutoresizingMaskIntoConstraints = false
-        pageTitle.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
-        pageTitle.translatesAutoresizingMaskIntoConstraints = false
+        contentContainer.wantsLayer = true
+        contentContainer.layer?.backgroundColor = Theme.Colors.pageBackground.cgColor
+        pageTitle.font = NSFont.systemFont(ofSize: 28, weight: .semibold)
+        pageTitle.textColor = Theme.Colors.textPrimary
         pageTitle.setAccessibilityLabel(L10n.t(.uiShell048))
+        pageTitle.setContentHuggingPriority(.required, for: .horizontal)
+        pageTitle.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        titleSpacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        titleSpacer.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+
+        actionsStack.orientation = .horizontal
+        actionsStack.alignment = .centerY
+        actionsStack.spacing = 8
+
+        titleRow.orientation = .horizontal
+        titleRow.alignment = .centerY
+        titleRow.spacing = 12
+        titleRow.translatesAutoresizingMaskIntoConstraints = false
+        titleRow.addArrangedSubview(pageTitle)
+        titleRow.addArrangedSubview(titleSpacer)
+        titleRow.addArrangedSubview(actionsStack)
+
         pageHost.translatesAutoresizingMaskIntoConstraints = false
-        contentContainer.addSubview(pageTitle)
+        contentContainer.addSubview(titleRow)
         contentContainer.addSubview(pageHost)
         NSLayoutConstraint.activate([
-            pageTitle.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor, constant: 24),
-            pageTitle.topAnchor.constraint(equalTo: contentContainer.topAnchor, constant: 20),
-            pageHost.topAnchor.constraint(equalTo: pageTitle.bottomAnchor, constant: 16),
+            titleRow.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor, constant: 24),
+            titleRow.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor, constant: -24),
+            titleRow.topAnchor.constraint(equalTo: contentContainer.topAnchor, constant: 20),
+            titleRow.heightAnchor.constraint(greaterThanOrEqualToConstant: 36),
+            pageHost.topAnchor.constraint(equalTo: titleRow.bottomAnchor, constant: 16),
             pageHost.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
             pageHost.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
             pageHost.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor)
@@ -83,8 +115,8 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
             splitView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             splitView.topAnchor.constraint(equalTo: view.topAnchor),
             splitView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            sidebarScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 196),
-            sidebarScroll.widthAnchor.constraint(lessThanOrEqualToConstant: 196)
+            sidebarScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 220),
+            sidebarScroll.widthAnchor.constraint(lessThanOrEqualToConstant: 220)
         ])
     }
 
@@ -125,6 +157,22 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
             target.view.topAnchor.constraint(equalTo: pageHost.topAnchor),
             target.view.bottomAnchor.constraint(equalTo: pageHost.bottomAnchor)
         ])
+
+        // 页面视图加载完成后再取它在标题行右侧要展示的操作视图（按钮由页面持有，Shell 只负责摆放）。
+        refreshPageActions(for: target)
+    }
+
+    /// 清空上一页的动作视图，换成新页面提供的按钮/状态标签；未实现协议的页面标题行右侧留空。
+    private func refreshPageActions(for controller: NSViewController) {
+        for actionView in actionsStack.arrangedSubviews {
+            actionsStack.removeArrangedSubview(actionView)
+            actionView.removeFromSuperview()
+        }
+        guard let provider = controller as? ShellPageActionProviding else { return }
+        for actionView in provider.shellPageActionViews() {
+            actionView.translatesAutoresizingMaskIntoConstraints = false
+            actionsStack.addArrangedSubview(actionView)
+        }
     }
 
     public func selectPage(id: String) {
@@ -146,12 +194,13 @@ public final class ShellViewController: NSViewController, NSTableViewDataSource,
                        "settings": "gearshape", "logs": "doc.text", "update": "arrow.down.circle"]
         let icon = NSImageView(image: NSImage(systemSymbolName: symbols[entry.id] ?? "square", accessibilityDescription: nil) ?? NSImage())
         icon.contentTintColor = .secondaryLabelColor
-        icon.widthAnchor.constraint(equalToConstant: 18).isActive = true
-        icon.heightAnchor.constraint(equalToConstant: 18).isActive = true
+        icon.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 16).isActive = true
         let label = NSTextField(labelWithString: entry.title)
-        label.font = NSFont.systemFont(ofSize: 14, weight: .medium)
+        label.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        label.textColor = Theme.Colors.textPrimary
         let row = NSStackView(views: [icon, label])
-        row.spacing = 12
+        row.spacing = 10
         row.alignment = .centerY
         row.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 0, right: 8)
         return row
@@ -178,7 +227,8 @@ extension NSBox {
             let stack = NSStackView()
             if titlePosition != .noTitle && !title.isEmpty {
                 let heading = NSTextField(labelWithString: title)
-                heading.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
+                heading.font = NSFont.systemFont(ofSize: 17, weight: .semibold)
+                heading.textColor = Theme.Colors.textPrimary
                 stack.addArrangedSubview(heading)
             }
             stack.addArrangedSubview(content)
@@ -189,10 +239,10 @@ extension NSBox {
             embedded = stack
             boxType = .custom
             titlePosition = .noTitle
-            fillColor = .controlBackgroundColor
-            borderColor = .separatorColor
+            fillColor = Theme.Colors.cardBackground
+            borderColor = Theme.Colors.cardBorder
             borderWidth = 1
-            cornerRadius = 8
+            cornerRadius = 12
         } else {
             embedded = content
         }
@@ -215,7 +265,7 @@ extension NSBox {
 private final class NavigationRowView: NSTableRowView {
     override func drawSelection(in dirtyRect: NSRect) {
         guard selectionHighlightStyle != .none else { return }
-        NSColor.systemGreen.withAlphaComponent(0.14).setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 6, dy: 3), xRadius: 8, yRadius: 8).fill()
+        Theme.Colors.selectedRowBackground.setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 2), xRadius: 8, yRadius: 8).fill()
     }
 }
