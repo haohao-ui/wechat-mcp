@@ -109,7 +109,8 @@ final class HostAppDelegate: NSObject, NSApplicationDelegate {
         shell.register(page: ModelPageController(context: controller), id: "model", title: L10n.t(.navModel))
         shell.register(page: McpPageController(context: controller), id: "mcp", title: L10n.t(.navMcp))
         shell.register(page: settingsPage, id: "settings", title: L10n.t(.navSettings))
-        shell.register(page: ComponentsPageController(), id: "components", title: L10n.t(.navComponents))
+        // 「组件与配色」是设计交付物（给开发对照用的设计规范页），不是产品页面，
+        // 不上导航。ComponentsPage.swift 保留在仓库里供开发核对组件与色值。
         shell.register(page: UpdatePageController(context: controller), id: "update", title: L10n.t(.navUpdate))
         shell.register(page: LogsPageController(context: controller), id: "logs", title: L10n.t(.navLogs))
 
