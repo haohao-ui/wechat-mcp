@@ -499,11 +499,23 @@ pub fn acquire_update_lock(state_dir: &Path) -> Result<UpdateLockGuard> {
         .mode(0o600)
         .open(&lock_path)?;
 
-    file.try_lock_exclusive().map_err(|_| {
-        anyhow::anyhow!(
-            "concurrent_update_in_progress: another update transaction holds update.lock"
-        )
-    })?;
+    // 同一进程刚释放锁后立刻再取时，flock 的释放有极短的可见性窗口（实机上表现为
+    // 事务结束立刻开始下一次更新被误报 concurrent_update_in_progress）。给一个很短的
+    // 有界重试；确实有别的进程持锁时，仍会在 deadline 后如实报错。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(_) => {
+                return Err(anyhow::anyhow!(
+                    "concurrent_update_in_progress: another update transaction holds update.lock"
+                ));
+            }
+        }
+    }
 
     Ok(UpdateLockGuard {
         _file: file,
